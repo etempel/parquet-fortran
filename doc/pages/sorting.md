@@ -279,6 +279,11 @@ The table has three read-only counterparts that answer the same questions withou
 detach the table from its file, which `%sort_by` does. See
 [Ordering rows without reordering them](table.html#ordering-rows-without-reordering-them).
 
+`%top_n` is the mutating counterpart of `%argsort_partial`, and stands in the same relation to
+`%sort_by` as `pf_partial_argsort` does to `pf_argsort`: it keeps only the `n` rows the keys put
+first, selecting rather than ordering everything. See
+[Keeping only the best rows](table.html#keeping-only-the-best-rows).
+
 > **Do not `pf_permute` a pointer obtained from `%col`.** `%col` hands back a *writable pointer
 > into a table's live storage*, so permuting through it reorders that one column and leaves every
 > other column exactly where it was — silently breaking the row correspondence that makes the table
@@ -309,6 +314,9 @@ needs no `min(n, size(v))` of your own. A *negative* `n` is still an error.
 ```fortran
 call pf_partial_sort(flux, brightest, n=10, descending=.true.)
 ```
+
+On a whole table the same operation is `parquet_table%top_n`, which keeps the `n` best rows of every
+column together — see [Keeping only the best rows](table.html#keeping-only-the-best-rows).
 
 **The complexity claim, with its caveat.** `pf_partial_sort` is `O(n log k)` for `k` results and
 `pf_nth_element` is `O(n)`, against `O(n log n)` for a full sort — but `pf_partial_sort` stops

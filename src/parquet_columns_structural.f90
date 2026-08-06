@@ -350,6 +350,49 @@ contains
         call apply_row_permutation(self, perm, trusted=.true.)
     end procedure reindex_trusted
     !
+    !> int32 form of `gather`; converts and delegates.
+    module procedure gather_i32
+        call self%gather_i64(int(idx, int64))
+    end procedure gather_i32
+    !
+    !> Keeps the rows `idx` lists, in the order it lists them, changing the row count to match.
+    !!
+    !! Everything this needs already existed for `reindex` and `delete_by_mask`: `gather_storage`
+    !! and `gather_validity` are both written against an index list of arbitrary length (that is how
+    !! `delete_by_mask` uses them), and `expand_row_perm` turns a row-level list into the
+    !! element-level one the string store takes without caring about its length either. So the only
+    !! genuinely new thing here is the range check and setting `nrows`.
+    !!
+    !! **Repeats are permitted** -- see the interface's doc-comment for why the duplicate scan is
+    !! deliberately absent rather than merely omitted.
+    module procedure gather_i64
+        integer(int64) :: m, k
+        integer(int64), allocatable :: elem_idx(:)
+        character(len=32) :: got, want
+        m = size(idx, kind=int64)
+        do k = 1_int64, m
+            if (idx(k) < 1_int64 .or. idx(k) > self%nrows) then
+                write(got, "(I0)") idx(k)
+                write(want, "(I0)") self%nrows
+                error stop EP//"gather: row index "//trim(got)//" is outside this column's 1.."// &
+                    trim(want)//" rows"
+            end if
+        end do
+        if (is_string_kind(self%kind)) then
+            call expand_row_perm(idx, int(self%width, int64), elem_idx)
+            ! Sliced, not passed whole: expand_row_perm allocates max(m*width, 1) -- the padded
+            ! shape delete_by_mask also uses -- so for an EMPTY selection it hands back one
+            ! uninitialized entry. reindex never sees that (a zero-row column returns before the
+            ! call), but a gather legitimately can: %top_n(keys, 0) empties a table that has rows.
+            call self%str%gather(elem_idx(1:m*int(self%width, int64)))
+        else
+            call gather_storage(self, idx)
+        end if
+        call gather_validity(self, idx)
+        self%nrows = m
+        if (is_temporal_kind(self%kind)) self%nulls_dirty = .true.
+    end procedure gather_i64
+    !
     !> The full length/range/duplicate check `reindex` runs before touching any storage, so that a
     !! bad permutation aborts with the column still intact rather than half rebuilt.
     subroutine check_row_permutation(self, perm)

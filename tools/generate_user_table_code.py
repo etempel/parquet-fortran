@@ -129,7 +129,7 @@ RESERVED = {
     "table_argsort_partial_i32", "table_argsort_partial_i64",
     "table_assign_guard", "table_delete_rows_i32", "table_delete_rows_i64",
     "table_get_valid_mask", "table_get_valid_mask_elem", "table_truncate_i32",
-    "table_truncate_i64", "truncate", "unit", "validate_qc", "width",
+    "table_truncate_i64", "top_n", "truncate", "unit", "validate_qc", "width",
 }
 
 # The names THIS generator adds to the type on top of the inherited ones.
@@ -967,7 +967,7 @@ def emit_accessors(schema, f):
     o = []
     summary = field_summary(f)
     ptr_note = ("Points into the live storage: zero copy, writable, and invalidated by any "
-                "row-structural mutation (%filter_rows, %sort_by, %delete_rows, %truncate, "
+                "row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, "
                 "%append).")
 
     if f.family == "str":

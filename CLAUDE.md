@@ -1214,11 +1214,11 @@ Rules a change here must not break:
 
 ### A `parquet_table` pointer does not survive a ROW-structural mutation
 
-`%col` hands back a live pointer into a column's storage, and `%filter_rows`, `%sort_by`,
+`%col` hands back a live pointer into a column's storage, and `%filter_rows`, `%sort_by`, `%top_n`,
 `%delete_rows`, `%truncate`, `%append` and `%append_null_rows` all reallocate that storage
-(`delete_by_mask`, `reindex` and `append` each grow or shrink exact-fit). A pointer taken before
-one of them therefore points at freed memory afterwards, and **Fortran offers no way to detect
-this** — the code compiles, and usually appears to work.
+(`delete_by_mask`, `reindex`, `gather` and `append` each grow or shrink exact-fit). A pointer taken
+before one of them therefore points at freed memory afterwards, and **Fortran offers no way to
+detect this** — the code compiles, and usually appears to work.
 
 Two consequences for future work here:
 

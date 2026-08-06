@@ -1186,7 +1186,7 @@ individual procedure:
 |---|---|---|
 | **cell** — `%set_element`, `%set_null`, `%clear_null` | changes values in place | no |
 | **column** — `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast` | changes which columns exist, or a column's kind | no |
-| **row** — `%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` | changes which rows exist | **yes, when it changes one** |
+| **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` | changes which rows exist | **yes, when it changes one** |
 
 ```fortran
 call t%materialize_all()                 ! read everything you want to keep, first
@@ -1309,6 +1309,9 @@ table. A `%truncate` asking to keep more rows than there are, a `%filter_rows` w
 everything and a `%delete_rows` with no indices all return without touching anything and without
 detaching — see [What "detaching" means](#what-detaching-means).
 
+To keep rows by *rank* rather than by position or by mask — the best hundred by some column — use
+[`%top_n`](#keeping-only-the-best-rows), which is cheaper than sorting and cutting.
+
 ### Sorting
 
 `%sort_by` takes one or more key columns, primary first, with optional per-key `descending=` and
@@ -1333,6 +1336,49 @@ nothing and leaves the table attached (see [What "detaching" means](#what-detach
 
 This is the same sort engine `parquet_open_reader(..., sort_by=...)` uses, so sorting a table in
 memory and reading the same file sorted give the identical row order.
+
+### Keeping only the best rows
+
+When you want the brightest hundred rows and not the other hundred million, `%sort_by` is the wrong
+tool: it orders every row and reallocates every column, to keep 100 of them. `%top_n` selects
+instead. Optional arguments are shown in square brackets; they are not part of the call syntax:
+
+```fortran
+call t%top_n(["flux"], 100, descending=[.true.])   ! the 100 brightest, brightest first
+```
+
+`call t%top_n(keys, n, [descending], [nulls_first])` takes the same keys, the same engine and the
+same refusals as `%sort_by`, including reading a key column that has not been read yet. Afterwards
+the table holds exactly those `n` rows, in key order — it is `%sort_by` followed by `%truncate(n)`,
+at O(rows) instead of O(rows log rows), and gathering each column straight to `n` rows instead of
+reindexing it in full and then cutting it down.
+
+**"The last `n`" is `descending=`**, not a separate call — with the default ascending order,
+`t%top_n(["flux"], 100)` keeps the hundred *faintest* rows.
+
+**`n` is clamped, not checked.** Asking for more rows than the table has keeps all of them, so an
+`n` derived from a fraction or a config value needs no `min()` of its own; a negative `n` is still
+an error. At or above the row count this *is* a whole sort, and behaves as one — including leaving a
+table whose rows are already in that order completely alone.
+
+Like every row-changing operation it **detaches** the table (see
+[What "detaching" means](#what-detaching-means)), so a column you still want must be read before the
+call, not after:
+
+```fortran
+call t%prefetch("name")                  ! or %materialize_all()
+call t%top_n(["flux"], 100, descending=[.true.])
+```
+
+That includes [`parquet_row_index`](#which-row-of-the-file-is-this), which is how to find out *which*
+file rows survived — ask for it before the call and it is gathered along with everything else.
+
+There is deliberately no `%take(indices)` taking a permutation you built yourself. Applying an
+arbitrary row order to a table is the one thing this type refuses: applied to some columns and not
+others, or applied from an array that has since gone stale, it breaks the row correspondence that
+makes a table a table, and nothing detects it. `%top_n` is safe because it builds the indices itself,
+from this table's own columns, and applies them to every column together. If you want to *read* rows
+in an order without changing anything, that is `%argsort_by` and `%get_slice`, next.
 
 ### Ordering rows without reordering them
 
@@ -1360,6 +1406,7 @@ call syntax:
 |---|---|
 | `call t%argsort_by(keys, perm, [descending], [nulls_first], [group_offsets], [group_nkeys])` | the row order the keys imply |
 | `call t%argsort_partial(keys, perm, n, [descending], [nulls_first])` | just the `n` best rows, by selection |
+| `call t%top_n(keys, n, [descending], [nulls_first])` | *(mutating)* keeps only those `n` rows — see [above](#keeping-only-the-best-rows) |
 | `ok = t%is_sorted_by(keys, [descending], [nulls_first])` | whether the rows are already in that order |
 
 `perm` may be declared `integer(int32)` or `integer(int64)`; `group_offsets` follows whichever you
@@ -1406,7 +1453,7 @@ call t%argsort_by(["field_id", "mag     "], perm, group_offsets=go, group_nkeys=
 It counts key *names*, must be between 1 and the number of keys, and requires `group_offsets`.
 
 > **A permutation goes stale silently.** It describes the table *as it was*. Any row-structural
-> change — `%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append` — invalidates it, and
+> change — `%sort_by`, `%top_n`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append` — invalidates it, and
 > nothing reports that: against a table that has since shrunk, the indices stay in range and name
 > the wrong rows. This is the same hazard as a saved `%col` pointer, except that a stale pointer
 > usually crashes while a stale permutation just answers wrongly. `%generation()` is bumped by every

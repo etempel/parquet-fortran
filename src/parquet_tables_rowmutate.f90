@@ -2,7 +2,7 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Mutation that changes a `parquet_table`'s ROW SET: `%filter_rows`, `%sort_by`,
+!> Mutation that changes a `parquet_table`'s ROW SET: `%filter_rows`, `%sort_by`, `%top_n`,
 !! `%delete_rows`, `%truncate`, `%append` and `%append_null_rows`.
 !!
 !! **Everything in this file detaches the table when it actually changes the row set** (F-mut-7),
@@ -18,7 +18,9 @@
 !! `%filter_rows` with an all-`.true.` mask, `%delete_rows` with no indices, `%append` of a
 !! zero-row table, `%append_null_rows(0)`), plus one decided by the data (`%sort_by` whose
 !! permutation moves no row, which includes every table of fewer than two rows). Each returns
-!! early, AFTER its own validation -- a no-op still rejects a bad argument.
+!! early, AFTER its own validation -- a no-op still rejects a bad argument. `%top_n` with
+!! `n >= %nrows()` reaches the same place by delegating to `%sort_by`, which is where its own
+!! data-decided no-op comes from.
 !!
 !! **Two rules hold this together, and a new operation added here must follow both:**
 !!
@@ -214,6 +216,86 @@ contains
         self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
     end procedure table_sort_by
+    !
+    module procedure table_top_n
+        integer(int64), allocatable :: sel(:)
+        integer :: i
+        !
+        call table_check_not_shared(self, "top_n")
+        ! Called here rather than left to sort_collect_keys, because the delegation below reads
+        ! row_count first -- and calling it here is also what makes an unopened table say "top_n"
+        ! rather than "sort_by".
+        call table_check_open(self, "top_n")
+        ! Keeping every row in key order IS a sort, so it delegates rather than clamping into the
+        ! gather path. That is not an optimisation: %sort_by declines to touch a table whose rows are
+        ! already in the order asked for, and going through the gather would detach it instead.
+        if (int(n, int64) >= self%row_count) then
+            call table_sort_by(self, keys, descending, nulls_first)
+            return
+        end if
+        ! Selects (and so validates every key) before a single column is touched. Also rejects a
+        ! negative n.
+        call table_build_top_n_permutation(self, keys, n, descending, nulls_first, sel)
+        call check_selection(sel, self%row_count)
+        do i = 1, self%cache%ncols
+            if (.not. table_mutable_column(self, i)) cycle
+            call self%cache%cols(i)%values%gather(sel)
+        end do
+        self%row_count = int(n, int64)
+        self%cache%generation = self%cache%generation + 1_int64
+        call table_detach(self)
+    end procedure table_top_n
+    !
+    !> Checks that a selection really is a set of distinct rows of this table, before any column
+    !! takes it.
+    !!
+    !! `%gather` deliberately does not do this itself: it permits repeats, and a per-column duplicate
+    !! scan would need a seen-set sized by the ROW COUNT once per column, which is the cost the
+    !! gather path exists to avoid. Checking once here costs one such seen-set for the whole
+    !! operation, and it is the only thing standing between a defective selection engine and a table
+    !! whose rows are silently duplicated -- the same reasoning that keeps exactly one column of
+    !! `%sort_by` on the validating path.
+    !!
+    !! This is a fourth copy of the bit-packed seen-set shape (`check_row_permutation` in
+    !! `parquet_columns_structural.f90`, `parquet_string_column%reindex`, `check_permutation` in
+    !! `parquet_sorting_keys.f90`), and deliberately so: **all three of those check a permutation of
+    !! length nrows**, where this checks a SUBSET of length n against a range of nrows -- sized by
+    !! `nrows` bits but scanned over `n` entries. It cannot be merged with them and is not a
+    !! duplicate to delete.
+    subroutine check_selection(sel, nrows)
+        integer(int64), intent(in) :: sel(:)  !! the selected 1-based row indices.
+        integer(int64), intent(in) :: nrows   !! the table's row count.
+        integer(int64), allocatable :: seen(:)
+        integer(int64) :: k, p, word
+        character(len=32) :: got, want
+        !
+        if (size(sel, kind=int64) == 0_int64) return
+        ! 64-bit words, matching parquet_column's own validity bitmap rather than the int8 the two
+        ! permutation checks use -- int8 is not in this module's iso_fortran_env import list, and the
+        ! word width makes no difference to a scan this short.
+        allocate(seen((nrows + 63_int64)/64_int64))
+        seen = 0_int64
+        ! Both arms below are DEFENSIVE and have no error scenario: the selection comes from
+        ! pf_partial_argsort, not from the caller, so reaching either means the sort engine returned
+        ! something that is not a set of distinct rows of this table. That is not constructible from
+        ! user input -- only from a library bug -- which is exactly the class this check exists to
+        ! catch rather than let through as silently duplicated rows.
+        do k = 1_int64, size(sel, kind=int64)
+            p = sel(k)
+            if (p < 1_int64 .or. p > nrows) then ! GCOVR_EXCL_START
+                write(got, "(I0)") p
+                write(want, "(I0)") nrows
+                error stop EP // "top_n: the selection names row " // trim(got) // ", outside " // &
+                    "this table's 1.." // trim(want) // " rows"
+            end if ! GCOVR_EXCL_STOP
+            word = (p - 1_int64)/64_int64 + 1_int64
+            if (btest(seen(word), int(mod(p - 1_int64, 64_int64)))) then ! GCOVR_EXCL_START
+                write(got, "(I0)") p
+                error stop EP // "top_n: the selection names row " // trim(got) // " twice"
+            end if ! GCOVR_EXCL_STOP
+            seen(word) = ibset(seen(word), int(mod(p - 1_int64, 64_int64)))
+        end do
+    end subroutine check_selection
     !
     !> .true. when a sort permutation sends every row to its own position, i.e. the sort is a
     !! no-op. A zero- or one-row table always answers .true.

@@ -312,10 +312,9 @@ new bulk path for the same reason: the primitive is correct, and calling it n ti
 
 `%argsort_by` and `%argsort_partial` hand back plain integer arrays of row indices. Nothing links
 such an array back to the table it describes, so every row-structural change — `%sort_by`,
-`%filter_rows`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` — silently invalidates
-every permutation taken before it. **This applies to any future binding that returns row indices**,
-not only to those two; the deferred mutating top-N in `feature_table.md` §2.7 would inherit it the
-day it is written.
+`%top_n`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` — silently
+invalidates every permutation taken before it. **This applies to any future binding that returns row
+indices**, not only to those two.
 
 **Why the failure is quiet, and why it is worse than the pointer case.** `feature_risks.md`'s
 existing `%col`-pointer risks describe the same staleness with the opposite failure direction: a
@@ -616,8 +615,8 @@ untested.
 ### Risk-11 — A `%col` pointer is dangling after a row-structural mutation
 
 `%col` (and `%ref`, and a `parquet_string_column` pointer) hands back a live pointer into a column's
-storage, and every row-structural mutation (`%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`,
-`%append`, `%append_null_rows`) reallocates that storage exact-fit. `%cast` replaces the storage too,
+storage, and every row-structural mutation (`%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`,
+`%truncate`, `%append`, `%append_null_rows`) reallocates that storage exact-fit. `%cast` replaces the storage too,
 and so does `%evict_column` — including the eviction `parquet_write_table(release=.true.)` performs.
 A pointer taken before any of them points at freed memory afterwards, and **Fortran offers no way to
 detect this** — the code compiles and usually appears to work. Mitigation is documentation plus the

@@ -75,6 +75,16 @@ contains
         call pf_partial_argsort(skeys, perm, n)
     end procedure table_argsort_partial_i32
     !
+    module procedure table_build_top_n_permutation
+        type(pf_sort_keys) :: skeys
+        !
+        ! "top_n" rather than "argsort_partial" here, so every refusal names the binding the caller
+        ! actually used -- which is the whole reason sort_collect_keys takes a procedure name.
+        call sort_partial_check_n(n, "top_n")
+        call sort_collect_keys(self, keys, descending, nulls_first, "top_n", skeys)
+        call pf_partial_argsort(skeys, perm, n)
+    end procedure table_build_top_n_permutation
+    !
     module procedure table_is_sorted_by
         type(pf_sort_keys) :: skeys
         !

@@ -34,6 +34,7 @@ contains
             new_unittest("erase preserves order and compacts", test_erase), &
             new_unittest("append_column merges payload and nulls", test_append_column), &
             new_unittest("reindex permutes payload and nulls", test_reindex), &
+            new_unittest("gather subsets, reorders and recounts nulls", test_gather), &
             new_unittest("delete_by_mask compacts in one pass", test_delete_by_mask), &
             new_unittest("append_nulls appends n null elements", test_append_nulls), &
             new_unittest("find (exact, trimmed, reverse, absent)", test_find), &
@@ -360,6 +361,80 @@ contains
         call col%get(1_int64, s)
         call check(error, s == "a", "the int32 reindex specific should permute the same way")
     end subroutine test_reindex
+    !
+    !> gather rebuilds the column from an index list of any length, in that list's order.
+    !>
+    !> The property that separates it from `reindex`, and the one easiest to get wrong, is that the
+    !> element count can CHANGE -- so the null count has to be recounted rather than carried over,
+    !> and the payload sized to what is actually selected. `%validate()` is asserted after every
+    !> shape here because it is what checks `n_null` against the bitmap and `offsets(nrows+1)`
+    !> against `nchars`; a gather that got either wrong would still return the right strings.
+    !>
+    !> The fixture puts the SHORTEST element first (CLAUDE.md), so a length taken from element 1
+    !> would truncate the later ones.
+    subroutine test_gather(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
+        !
+        call col%append_string("a")
+        call col%append_string("bcdef")
+        call col%append_null()
+        call col%append_string("gh")
+        !
+        ! Shrink and reorder at once, dropping the null: the count must fall to 0, not stay at 1.
+        call col%gather([4_int64, 2_int64])
+        call check(error, col%size() == 2_int64, "gather must set the element count to the index count")
+        if (allocated(error)) return
+        call col%get(1_int64, s)
+        call check(error, s == "gh", "gather should take elements in the order the list gives")
+        if (allocated(error)) return
+        call col%get(2_int64, s)
+        call check(error, s == "bcdef", "a longer element must survive a gather intact")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 0_int64, &
+            "gather must recount the nulls, not carry the old count over")
+        if (allocated(error)) return
+        call check(error, col%validate(), "gather must leave the column's invariants intact")
+        if (allocated(error)) return
+        !
+        ! Repeats are permitted, so a gather can also grow the column -- and a repeated NULL must be
+        ! counted once per position it lands in.
+        call col%clear()
+        call col%append_string("x")
+        call col%append_null()
+        call col%gather([2_int64, 2_int64, 1_int64])
+        call check(error, col%size() == 3_int64, "a repeated index must lengthen the column")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 2_int64, &
+            "a null taken twice must be counted twice")
+        if (allocated(error)) return
+        call check(error, col%is_null(1_int64) .and. col%is_null(2_int64), &
+            "both copies of a repeated null element must be null")
+        if (allocated(error)) return
+        call col%get(3_int64, s)
+        call check(error, s == "x", "a non-null element must survive alongside repeated nulls")
+        if (allocated(error)) return
+        call check(error, col%validate(), "a growing gather must leave the invariants intact")
+        if (allocated(error)) return
+        !
+        ! An empty index list empties the column and leaves it usable.
+        call col%gather([integer(int64) ::])
+        call check(error, col%size() == 0_int64, "an empty index list must empty the column")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 0_int64, "emptying must clear the null count")
+        if (allocated(error)) return
+        call check(error, col%validate(), "an emptied column must still satisfy its invariants")
+        if (allocated(error)) return
+        !
+        ! the int32 convenience specific must behave identically to the int64 one
+        call col%clear()
+        call col%append_string("p")
+        call col%append_string("qr")
+        call col%gather([2, 1])
+        call col%get(1_int64, s)
+        call check(error, s == "qr", "the int32 gather specific should select the same way")
+    end subroutine test_gather
     !
     !> delete_by_mask is the bulk counterpart of erase: deleting m elements one at a time is
     !> O(m*nchars), this is O(nchars) once.

@@ -54,6 +54,7 @@ contains
             new_unittest("a struct-leaf path is a valid key", test_struct_leaf_key), &
             new_unittest("sorting by a column that is never read", test_key_column_not_read), &
             new_unittest("the counting fast path matches the comparator", test_counting_path_matches), &
+            new_unittest("table top_n selects rather than fully sorting", test_top_n_selects), &
             new_unittest("sort composes with a filter", test_sort_with_filter), &
             new_unittest("sort composes with a sample", test_sort_with_sample), &
             new_unittest("parquet_get_nrows is unchanged by sorting", test_nrows_unchanged), &
@@ -484,6 +485,87 @@ contains
         n = int(got_cmp(), int64)
         call count_cmp(0)
     end function sort_comparisons
+    !
+    !> `parquet_table%top_n` must SELECT, not sort the whole table and keep the front of it.
+    !>
+    !> **This is the only test that can tell those two apart.** A `%top_n` written as `%sort_by`
+    !> followed by `%truncate` returns exactly the right rows in exactly the right order, so every
+    !> correctness assertion in test_table.f90 passes against it -- the whole asymptotic argument for
+    !> the feature would be gone with no test failing. Only the comparison counter sees it.
+    !>
+    !> Its shape is deliberate in three ways, each of which a simplification would undo:
+    !>
+    !> * **The key is float64 with distinct values**, so the integer counting fast path declines it.
+    !>   That path performs zero comparisons by construction, and zero is not less than zero -- a
+    !>   low-cardinality integer key would make both halves count 0 and the test would pass while
+    !>   measuring nothing (feature_risks.md Risk-35).
+    !> * **The fixture is 2000 rows, not a handful.** std::partial_sort saves roughly log(N)/log(n)
+    !>   comparisons, which is only a visible margin once N is well past n.
+    !> * **Sorting is forced serial**, because the counter is one process-global integer and a
+    !>   threaded sort would have several threads incrementing it.
+    !>
+    !> It lives in this suite, not in `table`, because that counter and `parquet_set_sort_threads`
+    !> are process-global: `run_tester.f90` excludes `sort` from per-test parallelism, and `table` is
+    !> deliberately not excluded.
+    subroutine test_top_n_selects(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t1, t2
+        type(parquet_writer) :: w
+        integer, parameter :: N = 2000
+        real(real64) :: v(N)
+        integer(int32) :: id(N)
+        integer(int64) :: cmp_top, cmp_sort
+        integer :: i, saved
+        character(len=*), parameter :: f1 = "test_run/sort_top_n_sel1.parquet"
+        character(len=*), parameter :: f2 = "test_run/sort_top_n_sel2.parquet"
+        !
+        do i = 1, N
+            id(i) = int(i, int32)
+            ! Distinct, unordered float64 keys: distinct so the counting path declines the column,
+            ! unordered so neither engine gets a sorted input to shortcut on.
+            v(i) = real(mod(i*7919, N), real64) + 0.5_real64
+        end do
+        call parquet_open_writer(w, f1)
+        call parquet_write_column(w, "id", id)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        call parquet_open_writer(w, f2)
+        call parquet_write_column(w, "id", id)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        !
+        saved = parquet_get_sort_threads()
+        call parquet_set_sort_threads(1)
+        call parquet_open_table(t1, f1)
+        call t1%materialize_all()
+        call arm_sort_comparisons()
+        call t1%top_n(["v"], 5)
+        cmp_top = sort_comparisons()
+        !
+        call parquet_open_table(t2, f2)
+        call t2%materialize_all()
+        call arm_sort_comparisons()
+        call t2%sort_by(["v"])
+        call t2%truncate(5)
+        cmp_sort = sort_comparisons()
+        call parquet_set_sort_threads(saved)
+        !
+        ! The negative control: without this, a counter that never fires would pass the comparison
+        ! below with two zeroes.
+        call check(error, cmp_sort > 0_int64, &
+            "the full-sort control must actually reach the comparator, or the margin below is vacuous")
+        if (allocated(error)) return
+        call check(error, cmp_top > 0_int64, &
+            "top_n must reach the comparator too, or it took a fast path this test cannot measure")
+        if (allocated(error)) return
+        call check(error, cmp_top < cmp_sort, &
+            "top_n must select rather than sort the whole table and keep the front of it")
+        if (allocated(error)) return
+        !
+        ! And it must still be right: selection is only worth having if it answers correctly.
+        call check(error, t1%nrows() == 5_int64 .and. t2%nrows() == 5_int64, &
+            "both routes must leave five rows")
+    end subroutine test_top_n_selects
     !
     !> The integer counting fast path and the comparator path must produce the SAME permutation.
     !> The fast path is the one place in the engine where a wrong answer would be fast rather than

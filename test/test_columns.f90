@@ -59,6 +59,7 @@ contains
             new_unittest("paste replaces the pasted range's validity", test_paste_validity), &
             new_unittest("reindex permutes values and validity together", test_reindex), &
             new_unittest("delete_by_mask keeps order and recompacts", test_delete_by_mask), &
+            new_unittest("gather subsets and reorders in one pass", test_gather), &
             new_unittest("deep_copy is independent of its source", test_deep_copy), &
             new_unittest("zero-row and no-op edge cases", test_edge_cases), &
             new_unittest("unit string is stored, copied and cleared", test_unit_string), &
@@ -910,6 +911,113 @@ contains
         call c%get_at(2_int64, s)
         call check(error, s == "ijk  ", "the second surviving string should follow in order")
     end subroutine test_delete_by_mask
+    !
+    !> `%gather` is the subset-and-reorder primitive neither `reindex` (a permutation of the whole
+    !> column) nor `delete_by_mask` (a subset in the existing order) provides between them.
+    !>
+    !> Both index kinds are exercised on purpose: the int32 form converts and delegates, and a
+    !> generic whose thin specific is mis-wired compiles and runs perfectly well.
+    subroutine test_gather(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer(int32) :: v
+        character(len=:), allocatable :: s
+        real(real64) :: row(2)
+        !
+        ! Subset AND reorder in one call -- the thing that distinguishes this from its two siblings.
+        call c%init(PK_INT32, 5_int64)
+        call c%set_all([10_int32, 20_int32, 30_int32, 40_int32, 50_int32])
+        call c%set_null(4_int64)
+        call c%gather([4_int64, 1_int64])
+        call check(error, c%length() == 2_int64, "gather must set the row count to the index count")
+        if (allocated(error)) return
+        call check(error, c%is_null(1_int64), "gather must carry a null along with the row it belongs to")
+        if (allocated(error)) return
+        call c%get_at(2_int64, v)
+        call check(error, v == 10_int32, "gather must take rows in the order the index list gives")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64), "gather must not leave a stale null bit behind")
+        if (allocated(error)) return
+        !
+        ! The int32 form must agree with the int64 one, on the same column and the same indices.
+        call c%init(PK_INT32, 5_int64)
+        call c%set_all([10_int32, 20_int32, 30_int32, 40_int32, 50_int32])
+        call c%gather([4_int32, 1_int32])
+        call c%get_at(1_int64, v)
+        call check(error, v == 40_int32, "the int32 index form must gather the same rows")
+        if (allocated(error)) return
+        !
+        ! Repeats are permitted -- it is a gather, not a permutation -- so a column can also GROW.
+        call c%init(PK_INT32, 2_int64)
+        call c%set_all([7_int32, 8_int32])
+        call c%gather([2_int64, 2_int64, 1_int64])
+        call check(error, c%length() == 3_int64, "a repeated index must lengthen the column")
+        if (allocated(error)) return
+        call c%get_at(1_int64, v)
+        call check(error, v == 8_int32, "a repeated row must appear at each position naming it")
+        if (allocated(error)) return
+        call c%get_at(2_int64, v)
+        call check(error, v == 8_int32, "the second copy of a repeated row must hold the same value")
+        if (allocated(error)) return
+        !
+        ! An empty selection leaves a valid, empty column rather than a one-row remnant: the index
+        ! expansion the string path uses pads its allocation to 1, so this case has to be sliced.
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32])
+        call c%gather([integer(int64) ::])
+        call check(error, c%length() == 0_int64, "an empty index list must empty the column")
+        if (allocated(error)) return
+        !
+        ! The string store has its own gather, which must recount n_null rather than carry it over.
+        call c%init(PK_STRING, 4_int64)
+        call c%set_all(["a    ", "bcdef", "gh   ", "ijk  "])
+        call c%set_null(2_int64)
+        call c%gather([3_int64, 2_int64])
+        call check(error, c%length() == 2_int64, "gather must shrink a string column")
+        if (allocated(error)) return
+        call c%get_at(1_int64, s)
+        call check(error, s == "gh   ", "a gathered string payload must be intact, not truncated")
+        if (allocated(error)) return
+        call check(error, c%is_null(2_int64), "a gathered string null must land at its new position")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(1_int64), "a gathered non-null string must stay non-null")
+        if (allocated(error)) return
+        !
+        call c%init(PK_STRING, 3_int64)
+        call c%set_all(["a  ", "bcd", "ef "])
+        call c%gather([integer(int64) ::])
+        call check(error, c%length() == 0_int64, "an empty gather of a string column must empty it")
+        if (allocated(error)) return
+        !
+        ! A vector column moves whole rows, and its validity is per ELEMENT.
+        call c%init(PK_FLOAT64_VEC, 3_int64, width=2_int32)
+        call c%set_all(reshape([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, &
+            6.0_real64], [2, 3]))
+        call c%set_null(2_int64, 1_int64)
+        call c%gather([3_int64, 2_int64])
+        call c%get_at(1_int64, row)
+        call check(error, all(row == [5.0_real64, 6.0_real64]), "gather must move whole vector rows")
+        if (allocated(error)) return
+        call check(error, c%is_null(2_int64, 1_int64), &
+            "gather must move a per-element null to the element it belongs to")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 2_int64), &
+            "gather must not widen a per-element null across the row")
+        if (allocated(error)) return
+        !
+        ! A temporal column carries its null state INSIDE each element, so `any_null` answers from a
+        ! cache that a mutation has to invalidate. Gathering only the non-null rows must therefore
+        ! make the column report no nulls -- a gather that forgets to mark the cache dirty keeps
+        ! answering .true. here while every value it returns is correct.
+        call c%init(PK_DATE, 3_int64)
+        call c%set_at(1_int64, parquet_date(2024, 1, 1))
+        call c%set_at(3_int64, parquet_date(2024, 1, 3))
+        call check(error, c%any_null(), "the fixture must start with its middle element null")
+        if (allocated(error)) return
+        call c%gather([3_int64, 1_int64])
+        call check(error, .not. c%any_null(), &
+            "gathering away every null must clear a temporal column's cached null state")
+    end subroutine test_gather
     !
     subroutine test_deep_copy(error)
         type(error_type), allocatable, intent(out) :: error

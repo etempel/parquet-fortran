@@ -85,7 +85,7 @@ Three things to know:
 
 A **string** column gets a second accessor, `%<name>_chr(arr)`, a subroutine that copies the column out as a `character` array sized to the longest value present. A string *vector* column gets **only** that form, because `%col` has no pointer specific for `PK_STRING_VEC` to alias.
 
-Every accessor pointer is **invalidated by a row-structural mutation** (`%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`, `%append`) — Fortran cannot detect this, so take the pointer again afterwards. See [Tables](table.html) for the full rule.
+Every accessor pointer is **invalidated by a row-structural mutation** (`%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`) — Fortran cannot detect this, so take the pointer again afterwards. See [Tables](table.html) for the full rule.
 
 ## Opening one: `%init`, `%init_slice`, `%init_empty`
 

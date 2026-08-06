@@ -1324,6 +1324,16 @@ program error_scenarios
         call scenario_table_argsort_by_group_nkeys_without_offsets()
     case ("table_argsort_partial_negative_n")
         call scenario_table_argsort_partial_negative_n()
+    case ("table_top_n_negative_n")
+        call scenario_table_top_n_negative_n()
+    case ("table_top_n_unknown_column")
+        call scenario_table_top_n_unknown_column()
+    case ("table_top_n_detached_read")
+        call scenario_table_top_n_detached_read()
+    case ("column_gather_out_of_range")
+        call scenario_column_gather_out_of_range()
+    case ("string_column_gather_out_of_range")
+        call scenario_string_column_gather_out_of_range()
     case ("table_append_unknown_column")
         call scenario_table_append_unknown_column()
     case ("table_append_kind_mismatch")
@@ -11298,6 +11308,66 @@ contains
         call t%argsort_partial(["a"], perm, -1)   ! -> aborts
         print '(a,i0)', "unexpectedly ordered a negative number of rows, n=", size(perm)
     end subroutine scenario_table_argsort_partial_negative_n
+
+    !> `%top_n` clamps too large an n and refuses a negative one -- and the message must name
+    !! `top_n`, not the `argsort_partial` machinery underneath it. That is the whole reason
+    !! `sort_partial_check_n` takes a procedure name, and passing the wrong one is invisible from
+    !! inside the library.
+    subroutine scenario_table_top_n_negative_n()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%top_n(["a"], -1)   ! -> aborts
+        print '(a,i0)', "unexpectedly kept a negative number of rows, nrows=", t%nrows()
+    end subroutine scenario_table_top_n_negative_n
+
+    !> The other half of the naming check: this refusal comes from `sort_lookup_key` rather than
+    !! `sort_partial_check_n`, so it proves the procedure name reaches the shared key validator too.
+    subroutine scenario_table_top_n_unknown_column()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [2_int32, 1_int32])
+        call t%top_n(["nope"], 1)   ! -> aborts
+        print '(a,i0)', "unexpectedly selected on a column that does not exist, nrows=", t%nrows()
+    end subroutine scenario_table_top_n_unknown_column
+
+    !> A column left in the file when `%top_n` drops rows can never be lined up with the rows in
+    !! memory again, so reading it afterwards is a named error rather than silently wrong data.
+    subroutine scenario_table_top_n_detached_read()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        integer(int32), allocatable :: got(:)
+        character(len=*), parameter :: f = "test_run/es_table_top_n_detach.parquet"
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "a", [3_int32, 1_int32, 2_int32])
+        call parquet_write_column(w, "b", [30_int32, 10_int32, 20_int32])
+        call parquet_close_writer(w)
+        call parquet_open_table(t, f)
+        call t%prefetch("a")
+        call t%top_n(["a"], 2)
+        call t%get("b", got)   ! -> aborts: "b" was never read, and the rows have moved
+        print '(a,i0)', "unexpectedly read a column stranded by top_n, n=", size(got)
+    end subroutine scenario_table_top_n_detached_read
+
+    !> `%gather` permits repeats and any order, but an index outside the column is a bounds
+    !! violation it must refuse rather than read past its own storage.
+    subroutine scenario_column_gather_out_of_range()
+        type(parquet_column) :: c
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32])
+        call c%gather([1_int64, 9_int64])   ! -> aborts
+        print '(a,i0)', "unexpectedly gathered a row outside the column, n=", c%length()
+    end subroutine scenario_column_gather_out_of_range
+
+    !> The string store's own gather is reachable directly, so it carries its own range check
+    !! rather than relying on parquet_column's.
+    subroutine scenario_string_column_gather_out_of_range()
+        type(parquet_string_column) :: col
+        call col%append_string("a")
+        call col%append_string("bc")
+        call col%gather([2_int64, 5_int64])   ! -> aborts
+        print '(a,i0)', "unexpectedly gathered an element outside the column, n=", col%size()
+    end subroutine scenario_string_column_gather_out_of_range
 
     !> A column the appended table has and this one does not is never silently dropped.
     subroutine scenario_table_append_unknown_column()

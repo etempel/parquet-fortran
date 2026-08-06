@@ -766,6 +766,16 @@ contains
                 test_table_argsort_by_group_nkeys_without_offsets_aborts), &
             new_unittest("argsort_partial with a negative n aborts", &
                 test_table_argsort_partial_negative_n_aborts), &
+            new_unittest("top_n with a negative n aborts, naming top_n", &
+                test_table_top_n_negative_n_aborts), &
+            new_unittest("top_n on an unknown column aborts, naming top_n", &
+                test_table_top_n_unknown_column_aborts), &
+            new_unittest("reading a column stranded by top_n aborts", &
+                test_table_top_n_detached_read_aborts), &
+            new_unittest("column gather with an out-of-range index aborts", &
+                test_column_gather_out_of_range_aborts), &
+            new_unittest("string column gather with an out-of-range index aborts", &
+                test_string_column_gather_out_of_range_aborts), &
             new_unittest("filter_rows with a wrong-length mask aborts", &
                 test_table_filter_rows_mask_length_aborts), &
             new_unittest("delete_rows with an out-of-range index aborts", &
@@ -5699,6 +5709,49 @@ contains
             failure_message="argsort_partial with a negative n was expected to abort", &
             required_stderr="argsort_partial: n is -1; a negative number of rows cannot be ordered")
     end subroutine test_table_argsort_partial_negative_n_aborts
+
+    subroutine test_table_top_n_negative_n_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The message must name top_n, not argsort_partial: %top_n reaches the same check through
+        ! table_build_top_n_permutation, and passing the wrong procedure name there would be
+        ! invisible except here.
+        call check_scenario_exit_status_and_stderr(error, "table_top_n_negative_n", &
+            expect_abort=.true., &
+            failure_message="top_n with a negative n was expected to abort", &
+            required_stderr="top_n: n is -1; a negative number of rows cannot be ordered")
+    end subroutine test_table_top_n_negative_n_aborts
+
+    subroutine test_table_top_n_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_top_n_unknown_column", &
+            expect_abort=.true., &
+            failure_message="top_n on a column that does not exist was expected to abort", &
+            required_stderr="top_n: no column of this name (column 'nope')")
+    end subroutine test_table_top_n_unknown_column_aborts
+
+    subroutine test_table_top_n_detached_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_top_n_detached_read", &
+            expect_abort=.true., &
+            failure_message="reading a column stranded by top_n was expected to abort", &
+            required_stderr="detached")
+    end subroutine test_table_top_n_detached_read_aborts
+
+    subroutine test_column_gather_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_gather_out_of_range", &
+            expect_abort=.true., &
+            failure_message="gathering a row outside the column was expected to abort", &
+            required_stderr="gather: row index 9 is outside this column's 1..3 rows")
+    end subroutine test_column_gather_out_of_range_aborts
+
+    subroutine test_string_column_gather_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_column_gather_out_of_range", &
+            expect_abort=.true., &
+            failure_message="gathering an element outside the string column was expected to abort", &
+            required_stderr="gather: index out of range")
+    end subroutine test_string_column_gather_out_of_range_aborts
 
     subroutine test_table_filter_rows_mask_length_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -42,7 +42,7 @@ disturbing that.
 | `%set_null`/`%clear_null` on a **date/time/timestamp** column | **yes** | — (the null lives in the element; nothing is allocated) |
 | `%append` into a shared table | **yes** — serialised by the table's own lock | — |
 | **Reading** a shared table while any thread appends to it | no | hard error (best-effort — see below) |
-| Any other change to a shared table: `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast`, `%evict_column`, `%reload`, `%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`, `%append_null_rows`, `parquet_write_table` | no | hard error; do it before or after the region |
+| Any other change to a shared table: `%add_column`, `%drop_column`, `%rename_column`, `%copy_column`, `%cast`, `%evict_column`, `%reload`, `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append_null_rows`, `parquet_write_table` | no | hard error; do it before or after the region |
 | The same change on a table **this** thread opened inside the region | **yes** | — |
 
 Three things the library cannot see, which stay your responsibility:

@@ -626,9 +626,12 @@ contains
                     if (mod(k, 2) == 0) keep(k) = .true.
                 end do
                 ! Every one of these is a structural change, on a table this thread opened inside
-                ! the region: all four must be permitted.
+                ! the region: all five must be permitted. %top_n is here because it takes the same
+                ! table_check_not_shared guard as its neighbours, and a guard that fires
+                ! unconditionally passes its own abort scenario while breaking the permitted case.
                 call mine%filter_rows(keep)
                 call mine%sort_by(["a"])
+                call mine%top_n(["a"], int(mine%nrows()))
                 call mine%rename_column("a", "aa")
                 call mine%drop_column("b")
                 counts(g) = mine%nrows()

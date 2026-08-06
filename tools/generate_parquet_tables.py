@@ -732,6 +732,7 @@ def gen_table_type():
         ! --- mutation: the row set itself -- every one of these DETACHES the table ---
         procedure :: filter_rows => table_filter_rows !! Keep only the rows a mask selects.
         procedure :: sort_by => table_sort_by         !! Reorder rows by one or more key columns.
+        procedure :: top_n => table_top_n             !! Keep only the n best rows, in key order.
         ! --- the ORDER, without applying it: read-only, and they do NOT detach ---
         procedure, private :: table_argsort_by_i32    !! %argsort_by specific, int32 permutation.
         procedure, private :: table_argsort_by_i64    !! %argsort_by specific, int64 permutation.
@@ -2161,7 +2162,37 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
             logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
             logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
-        end subroutine table_sort_by""")
+        end subroutine table_sort_by
+        !> Keeps only the `n` rows a `%sort_by` on the same keys would put first, in that order.
+        !!
+        !! Selection rather than a full sort, which is the point: asking a 100-million-row table for
+        !! its best 100 costs O(nrows) instead of O(nrows log nrows), and each column is gathered
+        !! straight to `n` rows rather than reindexed in full and then shrunk. `%sort_by` followed by
+        !! `%truncate` gives the same answer and does neither of those things.
+        !!
+        !! Same keys, same engine and same refusals as `%sort_by`, including the lazy first touch of
+        !! a key column that has not been read yet. "The last `n`" is `descending=`, not a separate
+        !! binding.
+        !!
+        !! Row-structural, so it DETACHES -- except when `n` is at or above the row count, where this
+        !! IS `%sort_by` and inherits its rule that a table already in that order is left alone.
+        !!
+        !! Deliberately the only way to reduce a table to a chosen set of rows in a chosen order:
+        !! there is no `%take(indices)` taking a caller-supplied permutation, because applying one
+        !! partially, or applying a stale one, breaks row correspondence with nothing to report it
+        !! (`feature_risks.md` Risk-33). Here the indices are produced inside the call, from this
+        !! table's own columns, and applied to every column together.
+        module subroutine table_top_n(self, keys, n, descending, nulls_first)
+            class(parquet_table), intent(inout) :: self       !! the table.
+            character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
+            !> how many rows to keep, CLAMPED to the row count rather than checked, so an `n`
+            !! derived from a fraction or a config value needs no `min()` of its own; a negative `n`
+            !! is an error. Deliberately a plain default-kind `integer` and not also an int64 form:
+            !! an `n` that large is not a top-N but a whole sort, which is what this delegates to.
+            integer, intent(in) :: n
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+        end subroutine table_top_n""")
 
     for ik, idecl, aname in (("i32", "integer(int32)", "int32"), ("i64", "integer(int64)", "int64")):
         w(f"""        !> The 1-based row order `keys` implies, WITHOUT applying it, as {aname} indices.
@@ -2172,7 +2203,7 @@ def gen_spec_interfaces():
         !! parquet_slice_list(perm), values)` is how the permutation is consumed.
         !!
         !! **The permutation describes the table AS IT WAS.** Nothing links the two afterwards, so
-        !! any row-structural change (`%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`,
+        !! any row-structural change (`%sort_by`, `%top_n`, `%filter_rows`, `%delete_rows`, `%truncate`,
         !! `%append`) silently invalidates it -- against a table that has since shrunk the indices
         !! stay in range and name the wrong rows. `%generation()` is bumped by every such change:
         !! record it beside a permutation you intend to keep, and compare before reusing.
@@ -2422,6 +2453,20 @@ def gen_spec_interfaces():
             logical, intent(in), optional :: nulls_first(:) !! per key: .true. to put nulls first.
             integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based permutation.
         end subroutine table_build_sort_permutation
+        !> Builds the 1-based indices of the `n` rows `keys` would put first, without applying them.
+        !!
+        !! Split out from `%top_n` for the same reason `table_build_sort_permutation` is split out
+        !! from `%sort_by`, and for one more: `sort_collect_keys` and `sort_partial_check_n` are
+        !! contained procedures of the `parquet_tables_sort` submodule, which the sibling submodule
+        !! holding the mutation cannot reach.
+        module subroutine table_build_top_n_permutation(self, keys, n, descending, nulls_first, perm)
+            class(parquet_table), intent(in) :: self        !! the table.
+            character(len=*), intent(in) :: keys(:)         !! key columns, primary first.
+            integer, intent(in) :: n                        !! rows to select; clamped to the row count.
+            logical, intent(in), optional :: descending(:)  !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:) !! per key: .true. to put nulls first.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the selected rows, in key order.
+        end subroutine table_build_top_n_permutation
     end interface""")
     w("    !")
     w("    ! ---- Row selection (parquet_tables_slice, and the per-kind copies in ..._access) ----")

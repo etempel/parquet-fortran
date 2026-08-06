@@ -120,6 +120,9 @@ module parquet_strings
         !! no narrower visibility -- see reindex_trusted_i64.
         generic :: reindex_trusted => reindex_trusted_i32, reindex_trusted_i64
         procedure :: delete_by_mask                    !! Keep only the elements whose mask entry is .true.
+        procedure, private :: gather_i32               !! int32 specific of gather.
+        procedure, private :: gather_i64               !! int64 specific of gather.
+        generic :: gather => gather_i32, gather_i64    !! Keep the listed elements, in the listed order.
         procedure, private :: append_nulls_i32         !! int32 specific of append_nulls.
         procedure, private :: append_nulls_i64         !! int64 specific of append_nulls.
         generic :: append_nulls => append_nulls_i32, append_nulls_i64 !! Append n null elements in bulk.
@@ -1230,6 +1233,91 @@ contains
             self%n_null = nn
         end if
     end subroutine delete_by_mask
+    !
+    !> int32 specific of gather; see the gather generic.
+    subroutine gather_i32(self, idx)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: idx(:)                !! 1-based source index per destination element.
+        call self%gather_i64(int(idx, int64))
+    end subroutine gather_i32
+    !
+    !> int64 specific of gather: rebuilds the column so that element `k` is the element that was at
+    !! `idx(k)`, for an index list of ANY length.
+    !!
+    !! This is the subset-and-reorder primitive `reindex` and `delete_by_mask` do not provide between
+    !! them: `reindex` demands a permutation of the whole column, and `delete_by_mask` keeps the
+    !! existing order. `idx` may name any element in 1..size(), in any order, and **may name one more
+    !! than once** -- it is a gather, not a permutation, so the result may be shorter than, as long as,
+    !! or longer than the column it replaces.
+    !!
+    !! **Only the range is checked.** Refusing repeats would need a seen-set sized by the SOURCE
+    !! element count on every call, which is exactly the cost this primitive exists to avoid; a caller
+    !! that needs distinctness (parquet_table%top_n does) checks it once for itself.
+    !!
+    !! Rebuilds into fresh buffers rather than compacting in place, because a reordering write cursor
+    !! can overtake its own read cursor -- which is why `delete_by_mask`, whose output order is the
+    !! input order, may compact in place and this may not. Two further differences from
+    !! `reindex_apply`, both consequences of the length being free to change: the payload is sized to
+    !! the SELECTED characters rather than to `nchars`, and `n_null` is recounted rather than carried
+    !! over.
+    subroutine gather_i64(self, idx)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: idx(:)                !! 1-based source index per destination element.
+        integer(int64) :: n, m, k, a, b, elen, pos, want, nn
+        integer(int64), allocatable :: new_off(:)
+        character(len=1), allocatable :: new_data(:)
+        logical, allocatable :: sel_null(:)
+        n = self%nrows
+        m = size(idx, kind=int64)
+        do k = 1_int64, m
+            if (idx(k) < 1_int64 .or. idx(k) > n) then
+                error stop EP//"gather: index out of range"
+            end if
+        end do
+        ! Both preparation passes are O(m), not O(size()): the selected elements' null flags have to
+        ! be read before any buffer is replaced, and the payload is sized to what is selected.
+        if (self%has_nulls) then
+            allocate(sel_null(max(m, 1_int64)))
+            do k = 1_int64, m
+                sel_null(k) = .not. bit_valid(self, idx(k))
+            end do
+        end if
+        want = 0_int64
+        do k = 1_int64, m
+            call elem_bounds(self, idx(k), a, b)
+            want = want + (b - a + 1_int64)
+        end do
+        allocate(new_off(m + 1_int64))
+        new_off(1) = 0_int64
+        allocate(new_data(max(want, 1_int64)))
+        pos = 0_int64
+        do k = 1_int64, m
+            call elem_bounds(self, idx(k), a, b)
+            elen = b - a + 1_int64
+            if (elen > 0_int64) new_data(pos+1_int64:pos+elen) = self%data(a:b)
+            pos = pos + elen
+            new_off(k+1_int64) = pos
+        end do
+        call move_alloc(new_off, self%offsets)
+        call move_alloc(new_data, self%data)
+        self%nrows = m
+        self%nchars = pos
+        ! The null COUNT can change here -- an element may be dropped, or taken twice -- so it is
+        ! recounted, where a permutation lets reindex_apply carry it over unchanged.
+        if (self%has_nulls) then
+            call ensure_validity_cap(self, m)
+            nn = 0_int64
+            do k = 1_int64, m
+                if (sel_null(k)) then
+                    call set_bit_null(self, k)
+                    nn = nn + 1_int64
+                else
+                    call set_bit_valid(self, k)
+                end if
+            end do
+            self%n_null = nn
+        end if
+    end subroutine gather_i64
     !
     !> int32 specific of append_nulls; see the append_nulls generic.
     subroutine append_nulls_i32(self, n)

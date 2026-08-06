@@ -177,6 +177,11 @@ module parquet_columns
         !! already established is one. Public only because Fortran offers no narrower visibility;
         !! see the interface below.
         procedure :: reindex_trusted
+        procedure, private :: gather_i32               !! int32 specific of gather.
+        procedure, private :: gather_i64               !! int64 specific of gather.
+        !> Keeps the listed rows, in the listed order. Unlike `reindex` the list may be any length,
+        !! and unlike `delete_by_mask` it may reorder -- see the interface below.
+        generic :: gather => gather_i32, gather_i64
         ! --- string-kind storage access (PK_STRING / PK_STRING_VEC) ---
         procedure :: string_column                     !! Pointer to the embedded string store.
         ! --- get_at ---
@@ -426,6 +431,31 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: perm(:)        !! 1-based permutation of 1..nrows, unchecked.
         end subroutine reindex_trusted
+        !> int32 form of `gather` -- see the int64 form below, which does the work.
+        module subroutine gather_i32(self, idx)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int32), intent(in) :: idx(:)         !! 1-based source row per destination row.
+        end subroutine gather_i32
+        !> Keeps the rows `idx` lists, in the order it lists them: row `k` of the result is the row
+        !! that was at `idx(k)`, and the column ends up `size(idx)` rows long.
+        !!
+        !! This is the subset-and-reorder primitive the other two do not provide between them:
+        !! `reindex` demands a permutation of the whole column, and `delete_by_mask` keeps the
+        !! existing order. It is what makes `parquet_table%top_n` cost O(n) per column rather than
+        !! O(nrows) -- a keep mask would make every column pay for a full scan to keep a handful of
+        !! rows.
+        !!
+        !! **It is a gather, not a permutation.** Any row in 1..nrows, in any order, and a row may be
+        !! named more than once, so the result may be shorter than, as long as, or longer than the
+        !! column it replaces. Only the range is checked: refusing repeats would need a seen-set
+        !! sized by the row count on every call, which is the very cost this exists to avoid, and a
+        !! caller that needs distinctness can check it once for itself.
+        !!
+        !! Validity travels with the rows it belongs to, per element for a vector column.
+        module subroutine gather_i64(self, idx)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: idx(:)         !! 1-based source row per destination row.
+        end subroutine gather_i64
     end interface
     !
     ! ---- Validity, kind-dispatched (parquet_columns_validity) ----

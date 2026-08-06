@@ -193,6 +193,8 @@ contains
             new_unittest("argsort_by recovers file order via the row index", test_argsort_by_row_index), &
             new_unittest("is_sorted_by answers both ways", test_is_sorted_by), &
             new_unittest("argsort_partial returns the n best rows", test_argsort_partial), &
+            new_unittest("top_n keeps the n best rows, in key order", test_top_n), &
+            new_unittest("top_n clamps, empties, delegates and reads its key", test_top_n_edges), &
             new_unittest("append concatenates a batch and null-fills the columns it omits", &
                 test_append_table), &
             new_unittest("append_null_rows supports the extend-fill-append workflow", &
@@ -4781,6 +4783,130 @@ contains
         call t%sort_by(["v"])
         call check(error, t%is_sorted_by(["v"]), "after sort_by the table must report sorted")
     end subroutine test_is_sorted_by
+    !
+    !> `%top_n` against the composition it replaces: `%sort_by` then `%truncate`.
+    !>
+    !> That oracle is what makes this test complete rather than partial. Asserting only WHICH rows
+    !> survived would pass against "the right rows in the wrong order", which is the mistake this
+    !> feature is most likely to make -- the gather has to apply the selection and the ordering at
+    !> once. Comparing against a table that was sorted and then cut catches order, membership,
+    !> values, nulls and any column silently left behind, in one assertion per column.
+    !>
+    !> Every column of the fixture is checked, not just the key: a mutation that skips one column
+    !> leaves it holding another row's values, which is the row-correspondence failure with no abort
+    !> and no symptom.
+    subroutine test_top_n(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, ref
+        integer(int32), allocatable :: id(:), rid(:), g(:), rg(:)
+        real(real64), allocatable :: v(:), rv(:)
+        character(len=:), allocatable :: s(:), rs(:)
+        character(len=*), parameter :: f = "test_run/table_top_n.parquet"
+        character(len=*), parameter :: f2 = "test_run/table_top_n_ref.parquet"
+        !
+        call write_sort_fixture(f)
+        call write_sort_fixture(f2)
+        call parquet_open_table(t, f)
+        call parquet_open_table(ref, f2)
+        call t%materialize_all()
+        call ref%materialize_all()
+        !
+        ! The oracle, on the descending multi-key form so that direction, key precedence and tie
+        ! breaking are all covered by the same comparison.
+        call ref%sort_by(["g", "v"], descending=[.true., .false.])
+        call ref%truncate(4)
+        call t%top_n(["g", "v"], 4, descending=[.true., .false.])
+        call check(error, t%nrows() == 4_int64, "top_n must leave exactly n rows")
+        if (allocated(error)) return
+        call t%get("id", id)
+        call ref%get("id", rid)
+        call check(error, all(id == rid), "top_n must keep the rows sort_by+truncate keeps, in order")
+        if (allocated(error)) return
+        call t%get("v", v)
+        call ref%get("v", rv)
+        call check(error, all(v == rv), "the key column's values must match sort_by+truncate")
+        if (allocated(error)) return
+        call t%get("g", g)
+        call ref%get("g", rg)
+        call check(error, all(g == rg), "the second key column must match sort_by+truncate")
+        if (allocated(error)) return
+        ! The string column goes through parquet_string_column%gather, the one new algorithm here,
+        ! so its agreement is the interesting half of this comparison.
+        call t%get("s", s)
+        call ref%get("s", rs)
+        call check(error, size(s) == size(rs), "the string column must have n rows after top_n")
+        if (allocated(error)) return
+        call check(error, all(s == rs), "the string column must match sort_by+truncate")
+        if (allocated(error)) return
+        !
+        call check(error, t%is_detached(), "top_n drops rows, so it must detach the table")
+        if (allocated(error)) return
+        call check(error, t%generation() > 0_int64, "top_n must bump the generation counter")
+    end subroutine test_top_n
+    !
+    !> `%top_n`'s edges, each of which is a separate decision rather than a consequence of the main
+    !> path: the clamp, the empty result, the delegation to `%sort_by`, the lazy key read, and the
+    !> rule that a table with no file to lose does not report itself detached.
+    subroutine test_top_n_edges(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, t2, t3, mem
+        integer(int32), allocatable :: id(:)
+        real(real64), allocatable :: v(:)
+        integer(int32) :: raw(4)
+        character(len=*), parameter :: f = "test_run/table_top_n_e1.parquet"
+        character(len=*), parameter :: f2 = "test_run/table_top_n_e2.parquet"
+        character(len=*), parameter :: f3 = "test_run/table_top_n_e3.parquet"
+        !
+        ! n at or past the row count keeps every row, in key order -- this is a whole sort, and is
+        ! delegated to %sort_by rather than clamped into the gather path.
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%top_n(["v"], 999)
+        call check(error, t%nrows() == int(NROW, int64), "n past the row count must clamp, not abort")
+        if (allocated(error)) return
+        call t%get("v", v)
+        call check(error, all(v == [10.0_real64, 20.0_real64, 30.0_real64, 40.0_real64, &
+            50.0_real64, 60.0_real64]), "a fully clamped top_n must order every row")
+        if (allocated(error)) return
+        !
+        ! n = 0 empties the table without disturbing its columns.
+        call write_sort_fixture(f2)
+        call parquet_open_table(t2, f2)
+        call t2%materialize_all()
+        call t2%top_n(["v"], 0)
+        call check(error, t2%nrows() == 0_int64, "top_n with n = 0 must leave no rows")
+        if (allocated(error)) return
+        call check(error, t2%ncols() == 4, "top_n with n = 0 must keep every column")
+        if (allocated(error)) return
+        call check(error, t2%is_detached(), "emptying a file-backed table must detach it")
+        if (allocated(error)) return
+        !
+        ! A key column that has not been read yet is READ, exactly as %sort_by reads it -- so a
+        ! top_n on a freshly opened table needs no %prefetch. "id" is prefetched only because it is
+        ! asserted afterwards, and a column still in the file when the rows move is lost.
+        call write_sort_fixture(f3)
+        call parquet_open_table(t3, f3)
+        call t3%prefetch("id")
+        call check(error, t3%residency("v") /= RES_FULL, "the key column must start unread")
+        if (allocated(error)) return
+        call t3%top_n(["v"], 2)
+        call t3%get("id", id)
+        call check(error, all(id == [2_int32, 4_int32]), &
+            "top_n must read its key column itself and keep the two smallest rows")
+        if (allocated(error)) return
+        !
+        ! A table built in memory has no file to lose, so reducing it must not report it detached --
+        ! otherwise every from-scratch table would claim detachment the moment it was cut down.
+        raw = [40_int32, 10_int32, 30_int32, 20_int32]
+        call parquet_new_table(mem)
+        call mem%add_column("k", raw)
+        call mem%top_n(["k"], 2)
+        call check(error, mem%nrows() == 2_int64, "top_n must reduce an in-memory table too")
+        if (allocated(error)) return
+        call check(error, .not. mem%is_detached(), &
+            "a table that never had a file must not report itself detached")
+    end subroutine test_top_n_edges
     !
     !> Top-N by selection. Its oracle is `%argsort_by`'s first `n`, which a partial sort must
     !> reproduce exactly -- it orders that prefix and leaves the rest alone.

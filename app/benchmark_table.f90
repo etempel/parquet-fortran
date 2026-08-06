@@ -874,6 +874,8 @@ contains
         integer, parameter :: slen = 16     !! width of the one character column.
         type(parquet_table) :: t
         type(parquet_string_column) :: sc
+        type(parquet_column), allocatable :: cols(:)
+        type(parquet_column) :: scol
         real(real64), allocatable :: v(:)
         character(len=slen) :: sbuf
         real(real64), pointer :: kp(:)
@@ -881,7 +883,7 @@ contains
         integer(int64) :: nrows, i, sink
         integer :: c, round, nvalid
         real(real64) :: t0, t_sort, t_argsort, t_val_log, t_val_bit, dt, acc
-        real(real64) :: total_log, total_bit
+        real(real64) :: total_log, total_bit, t_all, t_one
 
         nrows = int(size_gb * 1.0e9_real64 / (8.0_real64 * real(max(ncols, 1), real64)), int64)
         if (nrows < 2_int64) nrows = 2_int64
@@ -943,6 +945,37 @@ contains
             if (dt < t_sort) t_sort = dt
         end do
 
+        ! The reindex phase itself, measured directly rather than derived by subtracting the
+        ! permutation build from %sort_by: standalone columns of the same shape, reindexed the two
+        ! ways %sort_by can do it. This is also the only observation that PROVES %reindex_trusted
+        ! does something -- if it silently still validated, the two figures would coincide.
+        t_all = huge(1.0_real64)
+        t_one = huge(1.0_real64)
+        do round = 1, nround
+            call build_reindex_columns(cols, scol, nrows, ncols)
+            t0 = now()
+            do c = 1, ncols
+                call cols(c)%reindex(perm)
+            end do
+            call scol%reindex(perm)
+            dt = now() - t0
+            if (dt < t_all) t_all = dt
+            !
+            call build_reindex_columns(cols, scol, nrows, ncols)
+            t0 = now()
+            call cols(1)%reindex(perm)
+            do c = 2, ncols
+                call cols(c)%reindex_trusted(perm)
+            end do
+            call scol%reindex_trusted(perm)
+            dt = now() - t0
+            if (dt < t_one) t_one = dt
+        end do
+        do c = 1, ncols
+            call cols(c)%clear()
+        end do
+        call scol%clear()
+
         ! One validation of the permutation, each way, best of the same number of rounds.
         sink = 0_int64
         t_val_log = huge(1.0_real64)
@@ -969,6 +1002,15 @@ contains
         write(output_unit, '(a,f9.4,a)') "sort_by (best of "//itoa(nround)//")     : ", t_sort, " s"
         write(output_unit, '(a,f9.4,a)') "  of which pf_argsort      : ", t_argsort, " s"
         write(output_unit, '(a)') ""
+        write(output_unit, '(a,f9.4,a)') "reindex phase, all validate: ", t_all, " s"
+        write(output_unit, '(a,f9.4,a)') "reindex phase, one validates: ", t_one, " s"
+        write(output_unit, '(a,f6.2,a)') "  measured saving          : ", &
+            100.0_real64 * (t_all - t_one) / t_all, "% of the reindex phase"
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a)') "-- reference: the two seen-set representations, measured in isolation."
+        write(output_unit, '(a)') "   `logical` is what reindex used before the bit-packed set replaced it,"
+        write(output_unit, '(a)') "   so the (i)/(ii) lines below are what that change was worth, not a"
+        write(output_unit, '(a)') "   further saving still available."
         write(output_unit, '(a,i0)')     "validations per sort_by    : ", nvalid
         write(output_unit, '(a,f9.4,a)') "one validation, logical    : ", t_val_log, " s"
         write(output_unit, '(a,f9.4,a)') "one validation, bit-packed : ", t_val_bit, " s"
@@ -990,6 +1032,42 @@ contains
             max((nrows + 7_int64) / 8_int64 / 1048576_int64, 0_int64), " MiB live at a time"
         write(output_unit, '(a,i0,a,f0.1)') "(sink ", sink, ", checksum ", acc
     end subroutine bench_sort
+
+    !> Builds `ncols` float64 columns plus one string column, each `nrows` rows, for the reindex
+    !! measurement. Rebuilt before every timed round because `reindex` consumes its input ordering.
+    subroutine build_reindex_columns(cols, scol, nrows, ncols)
+        type(parquet_column), allocatable, intent(inout) :: cols(:) !! the float columns.
+        type(parquet_column), intent(inout) :: scol                 !! the string column.
+        integer(int64), intent(in) :: nrows                         !! rows per column.
+        integer, intent(in) :: ncols                                !! float columns to build.
+        real(real64), allocatable :: v(:)
+        character(len=16), allocatable :: s(:)
+        integer(int64) :: i
+        integer :: c
+        !
+        if (allocated(cols)) then
+            do c = 1, size(cols)
+                call cols(c)%clear()
+            end do
+            deallocate(cols)
+        end if
+        call scol%clear()
+        allocate(cols(ncols))
+        allocate(v(nrows))
+        do i = 1_int64, nrows
+            v(i) = real(i, real64)
+        end do
+        do c = 1, ncols
+            call cols(c)%init(PK_FLOAT64, nrows)
+            call cols(c)%set_all(v)
+        end do
+        allocate(s(nrows))
+        do i = 1_int64, nrows
+            write(s(i), '(i16.16)') i
+        end do
+        call scol%init(PK_STRING, nrows)
+        call scol%set_all(s)
+    end subroutine build_reindex_columns
 
     !> Fills `v` with a scattered, deterministic key: distinct enough that the permutation is
     !! irregular, which is what the validation's random access into its seen-set actually costs.

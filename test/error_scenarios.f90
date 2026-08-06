@@ -1410,6 +1410,10 @@ program error_scenarios
         call scenario_codegen_range_out_of_range()
     case ("codegen_missing_file_column")
         call scenario_codegen_missing_file_column()
+    case ("reindex_trusted_length_mismatch")
+        call scenario_reindex_trusted_length_mismatch()
+    case ("permute_assume_valid_short_perm")
+        call scenario_permute_assume_valid_short_perm()
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -10963,6 +10967,30 @@ contains
 
     !> An indexed accessor returns a POINTER to one element, so an out-of-range index would be
     !! undefined behaviour rather than a wrong answer. The generated guard must abort first.
+    !> `%reindex_trusted` skips the O(n) contents scan but NOT the O(1) length check: a
+    !! permutation of the wrong length would make the gather read outside the column, and no
+    !! promise from the caller can make that defined.
+    subroutine scenario_reindex_trusted_length_mismatch()
+        type(parquet_column) :: c
+        integer(int64) :: perm(2) = [2_int64, 1_int64]
+        integer(int32) :: got
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([10_int32, 20_int32, 30_int32])
+        call c%reindex_trusted(perm)   ! 2 entries for a 3-row column -> aborts
+        call c%get_at(1_int64, got)
+        print '(a,i0)', "unexpectedly reindexed with a short permutation, value=", got
+    end subroutine scenario_reindex_trusted_length_mismatch
+
+    !> The same guard reached through `pf_permute(..., assume_valid=.true.)`, which is the other
+    !! supported way into the trusted path. Before the length check was split out of the contents
+    !! check, this read past the end of `values` instead of aborting.
+    subroutine scenario_permute_assume_valid_short_perm()
+        integer(int32) :: v(4) = [1_int32, 2_int32, 3_int32, 4_int32]
+        integer(int32) :: perm(2) = [2_int32, 1_int32]
+        call pf_permute(v, perm, assume_valid=.true.)   ! 2 entries for 4 values -> aborts
+        print '(a,i0)', "unexpectedly permuted with a short permutation, first=", v(1)
+    end subroutine scenario_permute_assume_valid_short_perm
+
     subroutine scenario_codegen_row_index_out_of_range()
         type(parquet_table_test) :: t
         real(real64), pointer :: p

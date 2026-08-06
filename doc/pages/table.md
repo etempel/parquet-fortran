@@ -731,6 +731,22 @@ Four things follow from strings having no fixed-width storage:
   `%add_column` all take one (`%set` and `%add_column` copy it in, so the caller's own column and
   the table's do not share storage afterwards). The `character(len=*)` forms are still there for
   when a fixed-width array is what you have.
+- **A character ARRAY is trimmed on the way in; a character SCALAR is not.** Every element of a
+  `character(len=*)` array shares one declared length, so a shorter value is blank-padded by
+  Fortran and those blanks carry nothing you could have meant — `%add_column`, `%set` and
+  `%set_slice` therefore store `"ab"` from a `character(len=32)` array as two characters, not
+  thirty-two. `%set_element` and a row handle's `%set` take a *scalar*, whose length is exactly
+  what you wrote, so they store it verbatim. This is why `%get` into a
+  `character(len=:), allocatable` comes back sized to the longest real value rather than to the
+  width you put in:
+
+  ```fortran
+  character(len=32) :: src(3) = ["ab", "cde", "f"]
+  character(len=:), allocatable :: back(:)
+
+  call t%add_column("tag", src)
+  call t%get("tag", back)        ! len(back) == 3, not 32
+  ```
 - **`%get_slice` offers all three** — `parquet_string_column`, `character(:)` and the
   `(element, row)` rank-2 form — and a row handle's `%get` hands back a
   `character(len=:), allocatable` scalar for a `PK_STRING` column, or a rank-1 array of them for a

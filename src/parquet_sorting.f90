@@ -222,8 +222,12 @@ module parquet_sorting
     !> `perm` is validated as a true permutation of 1..n before anything is written, since an
     !> invalid one would silently duplicate some elements and drop others. Pass
     !> `assume_valid=.true.` to skip that check when the permutation came from `pf_argsort`
-    !> and is known good. The two column types ignore it -- their own `%reindex` validates
-    !> unconditionally.
+    !> and is known good -- it means the same thing for all eleven types, the two column ones
+    !> included.
+    !>
+    !> **`assume_valid` skips the O(n) contents check only.** `perm`'s LENGTH is checked either
+    !> way, because a short permutation would make the gather read past the end of `values` and
+    !> no promise from the caller can make that defined.
     interface pf_permute
         module procedure permute_i32_i32
         module procedure permute_i32_i64
@@ -1013,10 +1017,16 @@ module parquet_sorting
         end subroutine valid_from_mask
         !> Aborts unless `perm` is a true permutation of 1..n. Uses a bit-packed seen-set, so
         !! the scratch is n/8 bytes rather than the 4n a default LOGICAL array would cost.
-        module subroutine check_permutation(perm, n, proc)
+        !!
+        !! The LENGTH check always runs; `scan=.false.` skips only the O(n) range/duplicate
+        !! walk. That split is what `assume_valid=` selects: a caller may promise the contents
+        !! are a permutation, but a wrong-LENGTH perm would make the gather that follows read
+        !! past the end of the array, and no promise can make that defined.
+        module subroutine check_permutation(perm, n, proc, scan)
             integer(int64), intent(in) :: perm(:) !! the permutation to validate.
             integer(int64), intent(in) :: n       !! expected length.
             character(len=*), intent(in) :: proc  !! calling procedure, for messages.
+            logical, intent(in), optional :: scan !! .false. checks the length only; default .true.
         end subroutine check_permutation
         !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output
         !! position k holds a row comparing equal to the one before it. One call, because
@@ -2819,133 +2829,199 @@ module parquet_sorting
         module subroutine permute_i32_i32(values, perm, assume_valid)
         integer(int32), intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_i32_i32
         !> pf_permute over a 32-bit integer array, with an int64 permutation.
         module subroutine permute_i32_i64(values, perm, assume_valid)
         integer(int32), intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_i32_i64
         !> pf_permute over a 64-bit integer array, with an int32 permutation.
         module subroutine permute_i64_i32(values, perm, assume_valid)
         integer(int64), intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_i64_i32
         !> pf_permute over a 64-bit integer array, with an int64 permutation.
         module subroutine permute_i64_i64(values, perm, assume_valid)
         integer(int64), intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_i64_i64
         !> pf_permute over a 32-bit real array, with an int32 permutation.
         module subroutine permute_f32_i32(values, perm, assume_valid)
         real(real32), intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_f32_i32
         !> pf_permute over a 32-bit real array, with an int64 permutation.
         module subroutine permute_f32_i64(values, perm, assume_valid)
         real(real32), intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_f32_i64
         !> pf_permute over a 64-bit real array, with an int32 permutation.
         module subroutine permute_f64_i32(values, perm, assume_valid)
         real(real64), intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_f64_i32
         !> pf_permute over a 64-bit real array, with an int64 permutation.
         module subroutine permute_f64_i64(values, perm, assume_valid)
         real(real64), intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_f64_i64
         !> pf_permute over a logical array, with an int32 permutation.
         module subroutine permute_bool_i32(values, perm, assume_valid)
         logical, intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_bool_i32
         !> pf_permute over a logical array, with an int64 permutation.
         module subroutine permute_bool_i64(values, perm, assume_valid)
         logical, intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_bool_i64
         !> pf_permute over a string array, with an int32 permutation.
         module subroutine permute_chr_i32(values, perm, assume_valid)
         character(len=*), intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_chr_i32
         !> pf_permute over a string array, with an int64 permutation.
         module subroutine permute_chr_i64(values, perm, assume_valid)
         character(len=*), intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_chr_i64
         !> pf_permute over a date array, with an int32 permutation.
         module subroutine permute_date_i32(values, perm, assume_valid)
         type(parquet_date), intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_date_i32
         !> pf_permute over a date array, with an int64 permutation.
         module subroutine permute_date_i64(values, perm, assume_valid)
         type(parquet_date), intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_date_i64
         !> pf_permute over a time array, with an int32 permutation.
         module subroutine permute_time_i32(values, perm, assume_valid)
         type(parquet_time), intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_time_i32
         !> pf_permute over a time array, with an int64 permutation.
         module subroutine permute_time_i64(values, perm, assume_valid)
         type(parquet_time), intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_time_i64
         !> pf_permute over a timestamp array, with an int32 permutation.
         module subroutine permute_ts_i32(values, perm, assume_valid)
         type(parquet_timestamp), intent(inout) :: values(:)
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_ts_i32
         !> pf_permute over a timestamp array, with an int64 permutation.
         module subroutine permute_ts_i64(values, perm, assume_valid)
         type(parquet_timestamp), intent(inout) :: values(:)
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_ts_i64
         !> pf_permute over a packed string column array, with an int32 permutation.
         module subroutine permute_strcol_i32(values, perm, assume_valid)
         type(parquet_string_column), intent(inout) :: values
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_strcol_i32
         !> pf_permute over a packed string column array, with an int64 permutation.
         module subroutine permute_strcol_i64(values, perm, assume_valid)
         type(parquet_string_column), intent(inout) :: values
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_strcol_i64
         !> pf_permute over a type-erased column array, with an int32 permutation.
         module subroutine permute_col_i32(values, perm, assume_valid)
         type(parquet_column), intent(inout) :: values
             integer(int32), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_col_i32
         !> pf_permute over a type-erased column array, with an int64 permutation.
         module subroutine permute_col_i64(values, perm, assume_valid)
         type(parquet_column), intent(inout) :: values
             integer(int64), intent(in) :: perm(:) !! 1-based permutation; not modified.
-            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.
+            logical, intent(in), optional :: assume_valid
+            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.
+            !! Its LENGTH is checked either way. A false promise silently duplicates and
+            !! drops elements.
         end subroutine permute_col_i64
         !> pf_is_sorted over a 32-bit integer array.
         module subroutine is_sorted_i32(values, answer, descending, nulls_first, is_valid)

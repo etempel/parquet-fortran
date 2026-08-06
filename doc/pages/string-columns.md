@@ -250,7 +250,13 @@ call col%append_string("  hi  ", trim=.true.)    ! stored as "  hi" (trailing on
 ```
 
 `strip` removes leading **and** trailing blanks; `trim` removes trailing blanks only; when both
-are given, `strip` wins. To trim a whole column that is already built, use `strip_all()` (both
+are given, `strip` wins.
+
+**This type's verbatim default is deliberate, and differs from `parquet_column`/`parquet_table`.**
+Here you hand over one string at a time and its length is exactly what you wrote, so there is
+nothing to guess. Those two take whole `character(len=*)` **arrays**, whose elements share one
+declared length and are blank-padded by Fortran — so they trim, because the padding cannot have
+been meant. See [table.md](table.html#string-columns-in-a-table). To trim a whole column that is already built, use `strip_all()` (both
 ends) or `trim_all()` (trailing only) — both operate in place and skip null elements:
 
 ```fortran

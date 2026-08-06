@@ -398,8 +398,12 @@ module parquet_sorting
     w("    !> `perm` is validated as a true permutation of 1..n before anything is written, since an")
     w("    !> invalid one would silently duplicate some elements and drop others. Pass")
     w("    !> `assume_valid=.true.` to skip that check when the permutation came from `pf_argsort`")
-    w("    !> and is known good. The two column types ignore it -- their own `%reindex` validates")
-    w("    !> unconditionally.")
+    w("    !> and is known good -- it means the same thing for all eleven types, the two column ones")
+    w("    !> included.")
+    w("    !>")
+    w("    !> **`assume_valid` skips the O(n) contents check only.** `perm`'s LENGTH is checked either")
+    w("    !> way, because a short permutation would make the gather read past the end of `values` and")
+    w("    !> no promise from the caller can make that defined.")
     w("    interface pf_permute")
     for t in TYPES:
         for ik, _, _ in IDX_KINDS:
@@ -780,10 +784,16 @@ module parquet_sorting
     w("        end subroutine valid_from_mask")
     w("        !> Aborts unless `perm` is a true permutation of 1..n. Uses a bit-packed seen-set, so")
     w("        !! the scratch is n/8 bytes rather than the 4n a default LOGICAL array would cost.")
-    w("        module subroutine check_permutation(perm, n, proc)")
+    w("        !!")
+    w("        !! The LENGTH check always runs; `scan=.false.` skips only the O(n) range/duplicate")
+    w("        !! walk. That split is what `assume_valid=` selects: a caller may promise the contents")
+    w("        !! are a permutation, but a wrong-LENGTH perm would make the gather that follows read")
+    w("        !! past the end of the array, and no promise can make that defined.")
+    w("        module subroutine check_permutation(perm, n, proc, scan)")
     w("            integer(int64), intent(in) :: perm(:) !! the permutation to validate.")
     w("            integer(int64), intent(in) :: n       !! expected length.")
     w("            character(len=*), intent(in) :: proc  !! calling procedure, for messages.")
+    w("            logical, intent(in), optional :: scan !! .false. checks the length only; default .true.")
     w("        end subroutine check_permutation")
     w("        !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output")
     w("        !! position k holds a row comparing equal to the one before it. One call, because")
@@ -1018,7 +1028,10 @@ module parquet_sorting
             w(f"        module subroutine permute_{tag}_{ik}(values, perm, assume_valid)")
             w(val_decl(t, "inout"))
             w(f"            {idecl}, intent(in) :: perm(:) !! 1-based permutation; not modified.")
-            w("            logical, intent(in), optional :: assume_valid !! .true. skips validating `perm`.")
+            w("            logical, intent(in), optional :: assume_valid")
+            w("            !! .true. promises `perm` is a permutation of 1..n, skipping the O(n) check.")
+            w("            !! Its LENGTH is checked either way. A false promise silently duplicates and")
+            w("            !! drops elements.")
             w(f"        end subroutine permute_{tag}_{ik}")
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
@@ -2015,8 +2028,11 @@ contains
     module procedure check_permutation
         integer(int8), allocatable :: seen(:)
         integer(int64) :: k, v, word
+        logical :: do_scan
         character(len=32) :: a_str, b_str
         !
+        do_scan = .true.
+        if (present(scan)) do_scan = scan
         if (size(perm, kind=int64) /= n) then
             write (a_str, "(i0)") size(perm, kind=int64)
             write (b_str, "(i0)") n
@@ -2024,6 +2040,9 @@ contains
                 "have " // trim(b_str)
         end if
         if (n < 1_int64) return
+        ! The length check above is unconditional; only the walk below is skippable. See the
+        ! interface's own note for why a caller's promise cannot cover a wrong length.
+        if (.not. do_scan) return
         ! A BIT-PACKED seen-set, not a LOGICAL array: gfortran's default LOGICAL is 32 bits, so a
         ! plain seen(n) would cost 4n bytes of scratch to validate a permutation whose own payload
         ! is 8n -- a 50% overhead on an operation whose whole point is to be cheap. This is n/8.
@@ -2487,7 +2506,8 @@ def gen_permute():
 !! symptom class this project guards hardest against. The check is O(n) in front of an O(n)
 !! operation, so it is a constant factor rather than a change of complexity, which is why it is on
 !! by default; `assume_valid=.true.` skips it for a permutation that came straight from
-!! `pf_argsort`.
+!! `pf_argsort`. It skips the CONTENTS check only -- `perm`'s length is checked either way, since a
+!! short permutation makes the gather read past the end of `values`.
 submodule (parquet_sorting) parquet_sorting_permute
     implicit none
     !
@@ -2513,7 +2533,10 @@ contains
             w("        p64 = int(perm, int64)")
             if how == "gather":
                 w(f"        n = {rows_expr(t)}")
-                w("        if (.not. skip) call check_permutation(p64, n, \"pf_permute\")")
+                w("        ! The LENGTH is checked even under assume_valid=.true.: the gather below")
+                w("        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read")
+                w("        ! past its end. Only the O(n) contents walk is what the caller may skip.")
+                w("        call check_permutation(p64, n, \"pf_permute\", scan=.not. skip)")
                 if family == "chr":
                     w("        allocate(character(len=len(values)) :: tmp(n))")
                 else:
@@ -2525,10 +2548,14 @@ contains
                 w("            values(k) = tmp(k)")
                 w("        end do")
             else:
-                w("        ! `assume_valid` is deliberately ignored here: %reindex validates")
-                w("        ! unconditionally, and adding an unvalidated back door into a column's")
-                w("        ! storage is not worth saving one O(n) pass.")
-                w("        call values%reindex(p64)")
+                w("        ! `assume_valid` means the same thing here as for the nine array types:")
+                w("        ! %reindex_trusted skips the O(n) contents walk and keeps the O(1) length")
+                w("        ! check. Both column types validate unconditionally without it.")
+                w("        if (skip) then")
+                w("            call values%reindex_trusted(p64)")
+                w("        else")
+                w("            call values%reindex(p64)")
+                w("        end if")
             w(f"    end procedure permute_{tag}_{ik}")
             w("    !")
 

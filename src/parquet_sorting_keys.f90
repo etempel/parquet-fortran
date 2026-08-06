@@ -999,8 +999,11 @@ contains
     module procedure check_permutation
         integer(int8), allocatable :: seen(:)
         integer(int64) :: k, v, word
+        logical :: do_scan
         character(len=32) :: a_str, b_str
         !
+        do_scan = .true.
+        if (present(scan)) do_scan = scan
         if (size(perm, kind=int64) /= n) then
             write (a_str, "(i0)") size(perm, kind=int64)
             write (b_str, "(i0)") n
@@ -1008,6 +1011,9 @@ contains
                 "have " // trim(b_str)
         end if
         if (n < 1_int64) return
+        ! The length check above is unconditional; only the walk below is skippable. See the
+        ! interface's own note for why a caller's promise cannot cover a wrong length.
+        if (.not. do_scan) return
         ! A BIT-PACKED seen-set, not a LOGICAL array: gfortran's default LOGICAL is 32 bits, so a
         ! plain seen(n) would cost 4n bytes of scratch to validate a permutation whose own payload
         ! is 8n -- a 50% overhead on an operation whose whole point is to be cheap. This is n/8.

@@ -850,6 +850,10 @@ contains
                 test_codegen_range_out_of_range_aborts), &
             new_unittest("opening a generated table on a file missing a column aborts", &
                 test_codegen_missing_file_column_aborts), &
+            new_unittest("reindex_trusted still checks the permutation LENGTH", &
+                test_reindex_trusted_length_aborts), &
+            new_unittest("pf_permute checks the length even under assume_valid", &
+                test_permute_assume_valid_length_aborts), &
             new_unittest("set into an incompatible column kind aborts", &
                 test_table_set_kind_mismatch_aborts), &
             new_unittest("get_file_metadata on an in-memory table aborts", &
@@ -1488,6 +1492,20 @@ contains
             failure_message="opening a generated table on a file missing a declared column was expected to abort", &
             required_stderr="but this file has no such column")
     end subroutine test_codegen_missing_file_column_aborts
+
+    subroutine test_reindex_trusted_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "reindex_trusted_length_mismatch", expect_abort=.true., &
+            failure_message="reindex_trusted with a wrong-length permutation was expected to abort", &
+            required_stderr="reindex_trusted: permutation length does not match")
+    end subroutine test_reindex_trusted_length_aborts
+
+    subroutine test_permute_assume_valid_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "permute_assume_valid_short_perm", expect_abort=.true., &
+            failure_message="pf_permute(assume_valid=.true.) with a short permutation was expected to abort", &
+            required_stderr="elements but the values have")
+    end subroutine test_permute_assume_valid_length_aborts
 
     subroutine test_table_set_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

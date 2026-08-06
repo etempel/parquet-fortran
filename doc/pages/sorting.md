@@ -84,7 +84,7 @@ Eleven element types, in three groups.
 | `character(len=*)` | yes | yes | yes | compared over the full declared length |
 | `parquet_date`, `parquet_time` | no | yes | yes | carries its own null state |
 | `parquet_timestamp` | no | yes | yes | ordered by seconds, then nanoseconds |
-| `parquet_string_column` | no | no | yes | `pf_permute` delegates to `%reindex` |
+| `parquet_string_column` | no | no | yes | `pf_permute` reorders the store in place |
 | `parquet_column` | no | no | no | element kind resolved at runtime |
 
 `pf_argsort`, `pf_partial_argsort`, `pf_permute` and `pf_is_sorted` apply to **all eleven**: their
@@ -206,8 +206,13 @@ Use `assume_valid=.true.` only for a permutation you know is good — one that c
 `check_valid=` defaulting `.true.` would read backwards. `assume_valid` states the caller's claim
 instead, and defaults to `.false.` so that forgetting it is safe.
 
-`pf_permute` over `parquet_column` and `parquet_string_column` **ignores `assume_valid`**: those
-delegate to `%reindex`, which validates unconditionally.
+`assume_valid` means the same thing for all eleven types, the two column ones included — they
+reorder their storage without the scan instead of with it.
+
+**It skips the contents check only.** `perm`'s *length* is checked either way, because a short
+permutation would make the gather read past the end of `values`, and no promise from the caller can
+make that defined. What a false promise costs is the other half: elements silently duplicated and
+dropped, with no abort and no symptom.
 
 ## Sorting a table
 

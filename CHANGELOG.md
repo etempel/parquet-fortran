@@ -358,6 +358,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`parquet_table%sort_by` is substantially faster on wide tables** — measured at 6.22 s to 3.76 s
+  on a 15.6-million-row, 25-column table, and the gap grows with both dimensions. Two things
+  changed: the permutation check now uses a bit-packed seen-set rather than a `logical` array
+  (gfortran's default `LOGICAL` is 32 bits, so validating an *n*-row permutation used to allocate
+  4*n* bytes to record one bit per row — 59 MiB at 15.6 M rows), and the permutation is validated
+  **once per sort** rather than once per column. Sorting a 24-column table used to re-verify the
+  same permutation 26 times, which was over a third of its total run time. The trusted per-column
+  path this needs is exposed as `parquet_column%reindex_trusted` /
+  `parquet_string_column%reindex_trusted`, and `pf_permute`'s `assume_valid=.true.` now routes
+  there for the two column types instead of ignoring the argument — so it means the same thing for
+  all eleven element types. Both are internal plumbing, public only because Fortran offers no
+  narrower visibility: a permutation that is not one silently duplicates and drops rows.
+
 - **BREAKING: `parquet_set_max_threads` is renamed to `parquet_set_arrow_threads`.** The old name is
   removed rather than kept as an alias, so a call to it no longer compiles; the replacement takes the
   same argument, does the same thing, and aborts on the same values. The new name says *whose*
@@ -423,6 +436,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Filling a string column from a `character` array is no longer quadratic.** `%add_column`,
+  `%set`, `%set_slice` and `parquet_column%set_all` wrote one element at a time, and each write
+  rewrote every later offset in the packed store — so building an *n*-row string column cost
+  *n*²/2 offset writes and stopped completing at realistic sizes (a 15.6-million-row
+  `character(16)` column did not finish in ten minutes). They now build the store in one linear
+  pass.
+- **A `character` ARRAY handed to a table or column is now trimmed of trailing blanks, as
+  documented.** `%add_column`'s doc-comment had promised this since 1.0.0 and nothing did it, so a
+  `character(len=32)` array of short names was stored — and written to file — padded to 32 bytes.
+  Every element of such an array shares one declared length, so a shorter value is blank-padded by
+  Fortran and the padding cannot have been meant; `%add_column`, `%set`, `%set_slice`,
+  `%append_values` and `parquet_column%set_all` therefore trim. **`%set_element` and a row handle's
+  `%set` do not**: they take a *scalar*, whose length is exactly what the caller wrote.
+  `parquet_string_column`'s own API is unchanged and still stores bytes verbatim unless asked with
+  `trim=`/`strip=`. One visible consequence: `%get` into a `character(len=:), allocatable` now
+  comes back sized to the longest *real* value rather than to the width that was put in.
+- **`pf_permute(..., assume_valid=.true.)` no longer reads past the end of its array** when handed
+  a permutation shorter than the values. `assume_valid` skipped the length check along with the
+  contents check; it now skips the contents check only, and a wrong length aborts cleanly.
 - Fixed a use-after-free in the compact string-buffer read path for struct-nested string columns.
 - Fixed silent truncation of MAML lines beyond 1024 characters, and CRLF (Windows line-ending)
   handling in MAML files.

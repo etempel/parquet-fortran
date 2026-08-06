@@ -2337,7 +2337,10 @@ module parquet_tables
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
         end subroutine set_arr_tsv
-        !> Replaces every value of a PK_STRING column from a character array.
+        !> Replaces every value of a PK_STRING column from a character array. **Trailing blanks
+        !! are trimmed** -- every element of a `character(len=*)` array shares one declared length,
+        !! so a shorter value is blank-padded by Fortran and those blanks carry nothing the caller
+        !! could have meant. `%set_element`, which takes a scalar, stores its value verbatim.
         module subroutine set_arr_chr(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
@@ -2346,6 +2349,7 @@ module parquet_tables
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_arr_chr
         !> Replaces every value of a PK_STRING_VEC column from a character (element, row) array.
+        !! Trailing blanks are trimmed, as in the rank-1 form above.
         module subroutine set_arr_chrv(self, name, arr, is_valid, modify_nulls)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
@@ -4333,7 +4337,8 @@ module parquet_tables
             logical, intent(in), optional :: modify_nulls !! .false. leaves a selected null entry null.
             logical, intent(out), optional :: found      !! present: report a miss instead of aborting.
         end subroutine set_slice_tsv
-        !> Writes a character array into the rows `s` selects of a PK_STRING column.
+        !> Writes a character array into the rows `s` selects of a PK_STRING column. Trailing
+        !! blanks are trimmed, as in `%set`.
         module subroutine set_slice_chr(self, name, s, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.

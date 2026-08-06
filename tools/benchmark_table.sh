@@ -18,6 +18,10 @@
 #   TOUCH=2                   Columns the lazy-read mode actually reads, out of NCOLS.
 #   SLICES=4                  Equal row slices to divide the file into for the slice mode.
 #   NULLFRAC=0.1              Fraction of rows the write_nulls run marks null (0 < f < 1).
+#   SORT_SIZE_GB=1            Size of the IN-MEMORY table the sort run builds. That run needs no
+#                              file fixture, so it is sized independently of TARGET_FILE_SIZE_GB --
+#                              the cost it measures grows with rows AND with columns, and the
+#                              default file size is too small to separate the two.
 #   TEST_FILE                 Path for the synthetic test file. Default: a fresh mktemp -d
 #                              directory, deleted automatically when the script exits. Set this
 #                              to keep the file around afterward -- it is NOT deleted when
@@ -32,6 +36,7 @@ NCOLS="${NCOLS:-8}"
 TOUCH="${TOUCH:-2}"
 SLICES="${SLICES:-4}"
 NULLFRAC="${NULLFRAC:-0.1}"
+SORT_SIZE_GB="${SORT_SIZE_GB:-1}"
 TEST_FILE="${TEST_FILE:-}"
 
 cleanup_dir=""
@@ -80,3 +85,9 @@ echo
 # The write run above measures the null-free path, where the writer is handed no validity mask at
 # all. This one measures what a mask actually costs, which is the case the shortcut cannot help.
 fpm run benchmark_table --profile release -- --mode=write_nulls --file="$TEST_FILE" --nullfrac="$NULLFRAC"
+echo
+
+# The one run that uses no file at all: it builds its table in memory, because what it measures is
+# the cost of REORDERING a resident table (%sort_by's permutation build against its per-column
+# reindex), and reading a fixture first would only add a decode to both sides.
+fpm run benchmark_table --profile release -- --mode=sort --size="$SORT_SIZE_GB" --ncols="$NCOLS"

@@ -280,6 +280,8 @@ scenarios=(
     "codegen_row_index_out_of_range:1"
     "codegen_range_out_of_range:1"
     "codegen_missing_file_column:1"
+    "reindex_trusted_length_mismatch:1"
+    "permute_assume_valid_short_perm:1"
     "table_set_kind_mismatch:1"
     "table_get_file_metadata_in_memory:1"
     "table_get_file_metadata_missing_key:1"

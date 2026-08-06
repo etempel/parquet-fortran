@@ -110,6 +110,8 @@ something a reader is expected to have.
 | [Risk-43](#risk-43--a-second-copy-of-the-row-group-sizing-arithmetic-ignores-target_row_group_bytes) | A second copy of the row-group sizing arithmetic ignores `target_row_group_bytes` | 4 — covered |
 | [Risk-44](#risk-44--a-knob-with-no-environment-variable-or-one-wired-to-the-wrong-knob-is-silent) | A knob with no environment variable, or one wired to the wrong knob, is silent | 4 — covered |
 | [Risk-45](#risk-45--the-two-compilers-rules-for-the-prefetch-region-conflict-and-only-one-shape-satisfies-both) | The two compilers' rules for the prefetch region conflict, and only one shape satisfies both | 4 — covered |
+| [Risk-46](#risk-46--one-validation-stands-between-the-sort-engine-and-silently-duplicated-rows) | One validation stands between the sort engine and silently duplicated rows | 4 — covered |
+| [Risk-47](#risk-47--a-per-element-string-fill-is-quadratic-and-no-test-fails-when-it-comes-back) | A per-element string fill is quadratic, and no test fails when it comes back | 3 — not testable |
 
 ---
 
@@ -117,7 +119,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-45**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-48**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1756,3 +1758,67 @@ the parallel path being disabled everywhere. Do not conclude anything about this
 `-O0` run, a `--profile debug` run, or a single-file reproducer. And note the coupling to
 `parquet_table`'s "no allocatable components" rule: the first one added to that type would make
 every block-local per-thread table in user code start crashing under ifx as well.
+
+---
+
+### Risk-46 — One validation stands between the sort engine and silently duplicated rows
+
+`parquet_table%sort_by` used to call `parquet_column%reindex` on every column, and `reindex`
+validates its permutation unconditionally — so a 24-column table checked the same permutation 26
+times, which measured as over a third of the operation. It now validates **once**, by calling the
+ordinary `%reindex` on the first mutable column and `%reindex_trusted` on every column after it.
+
+**Why the failure is quiet.** The permutation comes from the sort engine, never from user input, so
+the only way it can be invalid is a defect in `sort_build_permutation` or in whatever later feeds
+this path. A duplicate index does not abort: `gather_storage` simply copies one row twice and drops
+another, leaving every column individually well-formed and the table jointly wrong. Nothing reports
+it, and the rows still look plausible.
+
+**What this forbids.**
+
+- **Do not remove the remaining validation** on the grounds that the engine is tested. It is the
+  only check left, and it costs one bit-packed pass (~50 ms at 20 M rows) against the ~2 s the
+  reindex phase takes at that size.
+- **Do not collapse the loop to all-trusted** when parallelizing it (`feature_table.md` §2.5).
+  Exactly one column must stay on the validating path; which one does not matter.
+- **Do not add a fourth copy of the check.** There are three — `check_row_permutation`
+  (`src/parquet_columns_structural.f90`), `parquet_string_column%reindex` (`src/parquet_strings.f90`)
+  and `check_permutation` (`src/parquet_sorting_keys.f90`) — and a table-layer validator was
+  deliberately not written, which is the whole reason the first-column shape was chosen over
+  validating in `table_sort_by` itself.
+- **`%reindex_trusted` keeps its O(1) length check.** That guards a different invariant (a column
+  whose row count disagrees with the permutation) and is what stops the gather reading outside the
+  column. Only the O(n) contents walk is skippable.
+
+**Covered by** every existing `%sort_by` test — they exercise the trusted path on each call, and a
+wrong trusted path reorders columns inconsistently, which their value assertions catch. The
+length check has its own scenario (`reindex_trusted_length_mismatch`), and
+`pf_permute`'s route into the same path is asserted by
+`assume_valid really skips the scan for a column` (`test/test_sorting.f90`), which passes a
+**duplicate-bearing** index array — the only observation that separates "skips the scan" from "still
+validates", since a valid permutation behaves identically either way.
+
+### Risk-47 — A per-element string fill is quadratic, and no test fails when it comes back
+
+`parquet_column%set_all` on a string column, and `%append_values`, must fill the packed store in
+**one linear pass** (`refill_string_store` in `src/parquet_columns_string.f90`). The obvious
+implementation — a loop calling `parquet_string_column%set` once per element — is O(n²), because
+`set` shifts the payload tail and rewrites every later offset whenever an element's length changes,
+which filling an empty column does for every element.
+
+**Why the failure is quiet.** It is not a wrong answer. Every value is correct, every test passes,
+and the only symptom is that the operation stops completing: a 15.6-million-row `character(16)`
+column ran for over ten minutes without finishing, where the linear form takes seconds. Nothing in
+the suite runs at a size where n²/2 offset writes is distinguishable from 2n.
+
+**Not testable in the suite.** A timing assertion at a size that would separate the two is far past
+what `fpm test` should attempt, and a timing test small enough to run would be flaky. The guard is
+the comment on `refill_string_store` saying *why* the shape is what it is, plus
+`tools/benchmark_table.sh`'s `sort` run, which builds a large string column and would simply stop
+finishing.
+
+**What this forbids.** Do not rewrite either `set_all` string specific as a per-element loop over
+`%set`, however much simpler it reads. Do not "simplify" `refill_string_store` by dropping its
+`modify_nulls = .false.` branch — that branch preserves null elements, and rebuilding from the
+caller's array alone would overwrite them with no test noticing. And do not reach for `%set` in a
+new bulk path for the same reason: the primitive is correct, and calling it n times is what is not.

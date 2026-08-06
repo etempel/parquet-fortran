@@ -76,7 +76,9 @@ contains
             new_unittest("element_validity reports the true per-element state", test_element_validity), &
             new_unittest("set_validity writes a whole mask and only adds nulls", test_set_validity), &
             new_unittest("modify_nulls= protects elements, not whole rows", test_modify_nulls_is_element_wise), &
-            new_unittest("element nulls survive sort, delete and append", test_element_nulls_survive_mutation) &
+            new_unittest("element nulls survive sort, delete and append", test_element_nulls_survive_mutation), &
+            new_unittest("a character ARRAY trims, a scalar does not", test_string_array_trims_scalar_does_not), &
+            new_unittest("set_all preserves null elements under modify_nulls=.false.", test_string_set_all_keeps_nulls) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -204,7 +206,10 @@ contains
         call c%init(PK_STRING, 4_int64)
         call c%set_all(["a    ", "bcdef", "gh   ", "ijk  "])
         call c%get_at(1_int64, s)
-        call check(error, s == "a    ", "get_at should return the first (shortest) string verbatim")
+        ! Compared with `==`, "a" and "a    " are equal -- Fortran blank-pads the shorter side --
+        ! so only the LENGTH distinguishes a trimmed store from a padded one. See
+        ! test_string_array_trims_scalar_does_not for the assertion that pins that.
+        call check(error, s == "a", "get_at should return the first (shortest) string")
         if (allocated(error)) return
         call c%get_at(2_int64, s)
         call check(error, s == "bcdef", "a later, LONGER element must not be truncated to the first one's length")
@@ -2030,5 +2035,94 @@ contains
         if (allocated(error)) return
         call check(error, .not. c%is_null(2_int64, 3_int64), "append must not widen the source's element null")
     end subroutine test_element_nulls_survive_mutation
+    !
+    !> Every character ARRAY entry point trims trailing blanks; the SCALAR one stores verbatim.
+    !!
+    !! **Asserts the stored LENGTH, not equality.** Fortran blank-pads the shorter operand of `==`,
+    !! so a padded store and a trimmed one compare equal on every value -- the length is the only
+    !! thing that can tell them apart, which is why this bug survived unnoticed until a benchmark
+    !! hit the O(n^2) fill it shares a code path with. `get_at` hands back a deferred-length
+    !! allocatable, so `len(s)` IS the stored length.
+    !!
+    !! The rule being pinned: an array's elements share one declared length, so a shorter value is
+    !! padded by Fortran and those blanks mean nothing; a scalar is exactly as long as the caller
+    !! wrote it, so trimming would destroy something the caller could express.
+    subroutine test_string_array_trims_scalar_does_not(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c, v
+        type(parquet_string_column), pointer :: sp
+        character(len=:), allocatable :: s
+        character(len=4) :: m(2, 2)
+        !
+        ! First element deliberately the shortest, per CLAUDE.md's fixture rule for this class.
+        call c%init(PK_STRING, 3_int64)
+        call c%set_all(["a  ", "bc ", "def"])
+        call c%get_at(1_int64, s)
+        call check(error, len(s) == 1, "set_all must store 'a  ' trimmed to 1 character, not padded")
+        if (allocated(error)) return
+        call c%get_at(2_int64, s)
+        call check(error, len(s) == 2 .and. s == "bc", "set_all must store 'bc ' as exactly 'bc'")
+        if (allocated(error)) return
+        call c%get_at(3_int64, s)
+        call check(error, len(s) == 3, "an element needing the full declared width keeps all of it")
+        if (allocated(error)) return
+        !
+        ! The scalar form is the deliberate exception.
+        call c%set_at(1_int64, "zz   ")
+        call c%get_at(1_int64, s)
+        call check(error, len(s) == 5, "set_at takes a SCALAR, whose trailing blanks are the caller's own")
+        if (allocated(error)) return
+        !
+        ! %append_values shares the rule, so a column filled either way holds the same bytes.
+        call c%append_values(["q  ", "rs "])
+        call c%get_at(4_int64, s)
+        call check(error, len(s) == 1, "append must trim a character array exactly as set_all does")
+        if (allocated(error)) return
+        !
+        ! The vector kind, read through the flat store so the stored length is visible at all --
+        ! get_at blank-pads into the caller's fixed-width array and would hide this.
+        m(1, 1) = "a"
+        m(2, 1) = "bb"
+        m(1, 2) = "ccc"
+        m(2, 2) = "dddd"
+        call v%init(PK_STRING_VEC, 2_int64, width=2_int32)
+        call v%set_all(m)
+        call v%string_column(sp)
+        call sp%get(1_int64, s)
+        call check(error, len(s) == 1, "set_all on a vector string column must trim element (1,1) too")
+        if (allocated(error)) return
+        call sp%get(4_int64, s)
+        call check(error, len(s) == 4 .and. s == "dddd", "the widest element of a vector column keeps its full width")
+    end subroutine test_string_array_trims_scalar_does_not
+    !
+    !> `modify_nulls=.false.` must survive the rebuild `set_all` now does: a null element keeps both
+    !! its null state and its (empty) content, and every other element is replaced.
+    !!
+    !! This is the branch the obvious linear rewrite drops silently -- rebuilding the store from the
+    !! caller's array alone would overwrite the nulls and no other assertion here would notice.
+    subroutine test_string_set_all_keeps_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        character(len=:), allocatable :: s
+        !
+        call c%init(PK_STRING, 3_int64)
+        call c%set_all(["aa", "bb", "cc"])
+        call c%set_null(2_int64)
+        call c%set_all(["xx", "yy", "zz"], modify_nulls=.false.)
+        call check(error, c%is_null(2_int64), "modify_nulls=.false. must leave the null element null")
+        if (allocated(error)) return
+        call c%get_at(1_int64, s)
+        call check(error, s == "xx", "modify_nulls=.false. must still replace the non-null elements")
+        if (allocated(error)) return
+        call c%get_at(3_int64, s)
+        call check(error, s == "zz", "the element after a preserved null must come from the new array")
+        if (allocated(error)) return
+        ! The default replaces everything, nulls included.
+        call c%set_all(["pp", "qq", "rr"])
+        call check(error, .not. c%is_null(2_int64), "the default modify_nulls=.true. must clear the null")
+        if (allocated(error)) return
+        call c%get_at(2_int64, s)
+        call check(error, s == "qq", "the formerly null element must hold its new value")
+    end subroutine test_string_set_all_keeps_nulls
     !
 end module test_columns

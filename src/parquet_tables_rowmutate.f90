@@ -173,6 +173,7 @@ contains
     module procedure table_sort_by
         integer(int64), allocatable :: perm(:)
         integer :: i
+        logical :: validated
         character(len=32) :: got, want
         !
         call table_check_not_shared(self, "sort_by")
@@ -202,9 +203,27 @@ contains
         ! already-ordered column keeps the table attached, sorting the same column after an edit
         ! may not. Fewer than two rows always lands here.
         if (permutation_moves_nothing(perm(1:self%row_count))) return
+        ! The permutation is validated ONCE, by the first column that takes it, and trusted by every
+        ! column after that. `%reindex` validates unconditionally -- correctly, since it is a public
+        ! entry point -- so replaying it per column re-checked one permutation the sort engine had
+        ! just produced: measured at a THIRD of %sort_by's total time on a 24-column, 20M-row table.
+        !
+        ! Doing it this way rather than with a validator here is deliberate: the check stays in the
+        ! code that owns it, with its existing messages and no fourth copy of the loop (see
+        ! check_row_permutation in parquet_columns_structural.f90). The one validation is what stands
+        ! between a defective sort engine and silently duplicated rows -- an invalid permutation is
+        ! not reachable from user input here, only from a library bug, but that is exactly the class
+        ! of failure this project refuses to leave undetected. Anything that later parallelizes this
+        ! loop must keep exactly one column on the validating path.
+        validated = .false.
         do i = 1, self%cache%ncols
             if (.not. table_mutable_column(self, i)) cycle
-            call self%cache%cols(i)%values%reindex(perm(1:self%row_count))
+            if (validated) then
+                call self%cache%cols(i)%values%reindex_trusted(perm(1:self%row_count))
+            else
+                call self%cache%cols(i)%values%reindex(perm(1:self%row_count))
+                validated = .true.
+            end if
         end do
         self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)

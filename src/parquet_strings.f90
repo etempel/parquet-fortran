@@ -114,6 +114,11 @@ module parquet_strings
         procedure, private :: reindex_i32              !! int32 specific of reindex.
         procedure, private :: reindex_i64              !! int64 specific of reindex.
         generic :: reindex => reindex_i32, reindex_i64 !! Reorder every element by a permutation.
+        procedure, private :: reindex_trusted_i32      !! int32 specific of reindex_trusted.
+        procedure, private :: reindex_trusted_i64      !! int64 specific of reindex_trusted.
+        !> INTERNAL: reindex without the duplicate/range scan. Public only because Fortran offers
+        !! no narrower visibility -- see reindex_trusted_i64.
+        generic :: reindex_trusted => reindex_trusted_i32, reindex_trusted_i64
         procedure :: delete_by_mask                    !! Keep only the elements whose mask entry is .true.
         procedure, private :: append_nulls_i32         !! int32 specific of append_nulls.
         procedure, private :: append_nulls_i64         !! int64 specific of append_nulls.
@@ -1075,25 +1080,68 @@ contains
     subroutine reindex_i64(self, perm)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
-        integer(int64) :: n, k, p, a, b, elen, pos
-        integer(int64), allocatable :: new_off(:)
-        character(len=1), allocatable :: new_data(:)
-        logical, allocatable :: seen(:), old_null(:)
+        integer(int64) :: n, k, p, word
+        integer(int8), allocatable :: seen(:)
         n = self%nrows
         if (size(perm, kind=int64) /= n) then
             error stop EP//"reindex: permutation length does not match the row count"
         end if
         if (n == 0_int64) return
-        ! validate first: a bad permutation must not leave the column half-rebuilt
-        allocate(seen(n))
-        seen = .false.
+        ! Validate first: a bad permutation must not leave the column half-rebuilt. The seen-set is
+        ! BIT-PACKED rather than a `logical` array, which on gfortran costs 4 bytes per element to
+        ! record one bit -- and this walk is per ELEMENT, so a vector string column pays it over
+        ! width*nrows. Same shape as parquet_column%reindex and check_permutation; keep them in step.
+        allocate(seen((n + 7_int64)/8_int64))
+        seen = 0_int8
         do k = 1_int64, n
             p = perm(k)
             if (p < 1_int64 .or. p > n) error stop EP//"reindex: permutation entry out of range"
-            if (seen(p)) error stop EP//"reindex: permutation contains a duplicate index"
-            seen(p) = .true.
+            word = (p - 1_int64)/8_int64 + 1_int64
+            if (btest(seen(word), int(mod(p - 1_int64, 8_int64)))) then
+                error stop EP//"reindex: permutation contains a duplicate index"
+            end if
+            seen(word) = ibset(seen(word), int(mod(p - 1_int64, 8_int64)))
         end do
         deallocate(seen)
+        call reindex_apply(self, perm)
+    end subroutine reindex_i64
+    !
+    !> int32 specific of reindex_trusted; see the reindex_trusted generic.
+    subroutine reindex_trusted_i32(self, perm)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int32), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        call self%reindex_trusted_i64(int(perm, int64))
+    end subroutine reindex_trusted_i32
+    !
+    !> int64 specific of reindex_trusted: `reindex` without the O(n) range/duplicate scan, for a
+    !! permutation the caller has already established is one. The O(1) length check still runs.
+    !!
+    !! **Public only because Fortran has no narrower visibility**, and reached from exactly two
+    !! places: `parquet_column%reindex_trusted` (which is how `parquet_table%sort_by` avoids
+    !! re-validating one permutation once per column) and `pf_permute(..., assume_valid=.true.)`.
+    !! A caller who passes a non-permutation gets silently duplicated and dropped elements, so this
+    !! is internal plumbing rather than an alternative to `%reindex`.
+    subroutine reindex_trusted_i64(self, perm)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        if (size(perm, kind=int64) /= self%nrows) then
+            error stop EP//"reindex_trusted: permutation length does not match the row count"
+        end if
+        if (self%nrows == 0_int64) return
+        call reindex_apply(self, perm)
+    end subroutine reindex_trusted_i64
+    !
+    !> Rebuilds payload, offsets and validity in the order `perm` gives, for a permutation that has
+    !! already been checked (or trusted). Split out so the two entry points differ only in whether
+    !! they scan, rather than carrying two copies of the rebuild.
+    subroutine reindex_apply(self, perm)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        integer(int64) :: n, k, a, b, elen, pos
+        integer(int64), allocatable :: new_off(:)
+        character(len=1), allocatable :: new_data(:)
+        logical, allocatable :: old_null(:)
+        n = self%nrows
         ! capture the old null flags before any buffer is replaced
         if (self%has_nulls) then
             allocate(old_null(n))
@@ -1126,7 +1174,7 @@ contains
                 end if
             end do
         end if
-    end subroutine reindex_i64
+    end subroutine reindex_apply
     !
     !> Keeps only the elements whose `keep` entry is .true., in order, compacting payload, offsets
     !! and validity in one O(nchars) in-place pass. `keep` must have exactly `size()` entries.

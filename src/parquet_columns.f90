@@ -173,6 +173,10 @@ module parquet_columns
         procedure :: paste                             !! Overwrite an existing row range from another column.
         procedure :: delete_by_mask                    !! Keep only rows whose mask entry is .true.
         procedure :: reindex                           !! Reorder rows by a permutation.
+        !> INTERNAL: reindex without the duplicate/range scan, for a permutation the caller has
+        !! already established is one. Public only because Fortran offers no narrower visibility;
+        !! see the interface below.
+        procedure :: reindex_trusted
         ! --- string-kind storage access (PK_STRING / PK_STRING_VEC) ---
         procedure :: string_column                     !! Pointer to the embedded string store.
         ! --- get_at ---
@@ -408,6 +412,20 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: perm(:)        !! 1-based permutation of 1..nrows.
         end subroutine reindex
+        !> **INTERNAL.** `reindex` without the O(nrows) range/duplicate scan, for a permutation the
+        !! caller has already established is one. The O(1) length check still runs, since it guards
+        !! a different invariant and costs nothing.
+        !!
+        !! Public only because Fortran has no narrower visibility: `parquet_column`'s components are
+        !! private to this module, so `parquet_tables` cannot reach them, and `%sort_by` needs this
+        !! to stop re-validating one permutation once per column -- measured at a third of its total
+        !! time on a 24-column table. Deliberately absent from README.md's API overview. A caller who
+        !! passes a non-permutation gets silently duplicated and dropped rows; a library can refuse
+        !! accidents, not deliberate misuse of something documented as internal.
+        module subroutine reindex_trusted(self, perm)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: perm(:)        !! 1-based permutation of 1..nrows, unchecked.
+        end subroutine reindex_trusted
     end interface
     !
     ! ---- Validity, kind-dispatched (parquet_columns_validity) ----
@@ -538,38 +556,51 @@ module parquet_columns
             integer(int64), intent(in) :: i            !! 1-based row index.
             character(len=*), intent(out) :: value(:)  !! receives width values, blank-padded.
         end subroutine get_at_strv
-        !> Writes string element `i` (PK_STRING).
+        !> Writes string element `i` (PK_STRING). `value` is a SCALAR, so it is stored verbatim,
+        !! trailing blanks included -- a scalar is exactly as long as the caller wrote it. Every
+        !! character ARRAY entry point below trims instead; see `set_all_str`.
         module subroutine set_at_str(self, i, value, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: i              !! 1-based row index.
             character(len=*), intent(in) :: value        !! the new value.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_str
-        !> Writes row `i`'s whole string vector (PK_STRING_VEC).
+        !> Writes row `i`'s whole string vector (PK_STRING_VEC). Trailing blanks are trimmed --
+        !! `value` is an array, so see `set_all_str` for why that differs from `set_at_str`.
         module subroutine set_at_strv(self, i, value, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: i              !! 1-based row index.
             character(len=*), intent(in) :: value(:)     !! width values for row i.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_strv
-        !> Replaces every value in a PK_STRING column.
+        !> Replaces every value in a PK_STRING column. **Trailing blanks are trimmed.**
+        !!
+        !! Every element of a `character(len=*)` array shares one declared length, so a shorter
+        !! value is blank-padded by Fortran and those blanks carry nothing the caller could have
+        !! meant. That is why every character ARRAY entry point here trims while the SCALAR
+        !! `set_at_str` stores its value verbatim, and why `parquet_string_column`'s own API --
+        !! which takes bytes the caller controls exactly -- trims only when asked with `trim=`.
         module subroutine set_all_str(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
             character(len=*), intent(in) :: values(:)    !! exactly nrows values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_str
-        !> Replaces every value in a PK_STRING_VEC column, shaped (width, nrows).
+        !> Replaces every value in a PK_STRING_VEC column, shaped (width, nrows). Trailing blanks
+        !! are trimmed, as in `set_all_str`.
         module subroutine set_all_strv(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
             character(len=*), intent(in) :: values(:,:)  !! (width, nrows) values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_all_strv
-        !> Appends string rows to a PK_STRING column.
+        !> Appends string rows to a PK_STRING column. Trailing blanks are trimmed, as in
+        !! `set_all_str`, so a column filled by `%append` holds the same bytes as one filled by
+        !! `%set_all`.
         module subroutine append_values_str(self, values)
             class(parquet_column), intent(inout) :: self !! the column.
             character(len=*), intent(in) :: values(:)    !! rows to append.
         end subroutine append_values_str
-        !> Appends string vector rows to a PK_STRING_VEC column, shaped (width, n).
+        !> Appends string vector rows to a PK_STRING_VEC column, shaped (width, n). Trailing
+        !! blanks are trimmed, as in `set_all_str`.
         module subroutine append_values_strv(self, values)
             class(parquet_column), intent(inout) :: self !! the column.
             character(len=*), intent(in) :: values(:,:)  !! (width, n) rows to append.

@@ -283,7 +283,9 @@ contains
             new_unittest("parquet_write_table accepts a type extending parquet_table", &
                 test_write_table_accepts_extension), &
             new_unittest("a predefined column drops with force=, and a plain one without it", &
-                test_drop_predefined_with_force) &
+                test_drop_predefined_with_force), &
+            new_unittest("add_column trims a character array, and %get is sized to the real values", &
+                test_add_column_chr_trims) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -7021,5 +7023,42 @@ contains
         !
         v = i
     end function i32_seq
+    !
+    !> `%add_column` from a `character` array trims trailing blanks, so `%get` comes back sized to
+    !! the longest REAL value rather than to the caller's declared width.
+    !!
+    !! This is the user-visible half of the array-versus-scalar rule (`parquet_columns_string.f90`'s
+    !! `refill_string_store`), and it is asserted on the LENGTH because nothing else can see it:
+    !! Fortran blank-pads the shorter side of `==`, so a padded store and a trimmed one compare
+    !! equal on every value. `%get` is documented as sized to the longest element present, which is
+    !! exactly the observation this makes.
+    subroutine test_add_column_chr_trims(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=12) :: src(3)
+        character(len=:), allocatable :: got(:), one
+        !
+        ! Declared width 12, longest real value 5 -- and the FIRST element is the shortest, per
+        ! CLAUDE.md's fixture rule for anything sized from element one.
+        src(1) = "a"
+        src(2) = "bcde"
+        src(3) = "fghij"
+        call parquet_new_table(t)
+        call t%add_column("name", src)
+        call t%get("name", got)
+        call check(error, len(got) == 5, "%get should be sized to the longest stored value, not the declared width 12")
+        if (allocated(error)) return
+        call check(error, got(1) == "a" .and. got(3) == "fghij", "the values themselves must survive the trim")
+        if (allocated(error)) return
+        !
+        ! %set shares the rule; %set_element takes a scalar and does not.
+        call t%set("name", ["xy  ", "zw  ", "vu  "])
+        call t%get("name", got)
+        call check(error, len(got) == 2, "%set should trim a character array exactly as %add_column does")
+        if (allocated(error)) return
+        call t%set_element("name", 1_int64, "keep me   ")
+        call t%get_element("name", 1_int64, one)
+        call check(error, len(one) == 10, "%set_element takes a SCALAR, whose trailing blanks are the caller's own")
+    end subroutine test_add_column_chr_trims
     !
 end module test_table

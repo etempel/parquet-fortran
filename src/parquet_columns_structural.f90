@@ -325,32 +325,87 @@ contains
     !! rebuilt. This is the primitive the table's in-memory `sort_by` is built on: the sort
     !! engine produces the permutation, every column then replays it.
     module procedure reindex
-        integer(int64) :: n, k, p
-        integer(int64), allocatable :: elem_perm(:)
-        logical, allocatable :: seen(:)
+        call check_row_permutation(self, perm)
+        call apply_row_permutation(self, perm, trusted=.false.)
+    end procedure reindex
+    !
+    !> `reindex` without the O(n) range/duplicate scan, for a permutation the caller has already
+    !! established is one. **The O(1) length check still runs**, because it guards a different
+    !! invariant -- a column whose row count disagrees with the permutation -- and costs nothing.
+    !!
+    !! **This is public only because Fortran has no narrower visibility.** `parquet_column`'s
+    !! components are private to this module, so `parquet_tables` -- a different module -- cannot
+    !! reach them, and `%sort_by` needs exactly this to stop re-validating one permutation once per
+    !! column (measured at a third of its total time on a wide table). It is internal plumbing, is
+    !! deliberately absent from README.md's API overview, and a caller who passes a non-permutation
+    !! gets silently duplicated and dropped rows. A library can refuse accidents; it cannot refuse
+    !! deliberate misuse of a procedure documented as internal.
+    !!
+    !! `pf_permute(..., assume_valid=.true.)` routes here for the two container types, which is the
+    !! only other supported way in.
+    module procedure reindex_trusted
+        if (size(perm, kind=int64) /= self%nrows) then
+            error stop EP//"reindex_trusted: permutation length does not match the column's row count"
+        end if
+        call apply_row_permutation(self, perm, trusted=.true.)
+    end procedure reindex_trusted
+    !
+    !> The full length/range/duplicate check `reindex` runs before touching any storage, so that a
+    !! bad permutation aborts with the column still intact rather than half rebuilt.
+    subroutine check_row_permutation(self, perm)
+        class(parquet_column), intent(in) :: self !! the column being reindexed.
+        integer(int64), intent(in) :: perm(:)     !! the permutation to check.
+        integer(int64) :: n, k, p, word
+        integer(int8), allocatable :: seen(:)
         n = self%nrows
         if (size(perm, kind=int64) /= n) then
             error stop EP//"reindex: permutation length does not match the column's row count"
         end if
         if (n == 0_int64) return
-        allocate(seen(n))
-        seen = .false.
+        ! A BIT-PACKED seen-set, not a `logical` array: gfortran's default LOGICAL is 32 bits, so a
+        ! plain seen(n) would spend 4 bytes per row to record one bit -- 59 MiB at 15.6M rows, and
+        ! %sort_by used to pay it once per COLUMN. Measured at 3.9-4.4x faster per validation on a
+        ! 15-20M-row column, purely from the scratch fitting in cache. The same shape appears in
+        ! parquet_string_column%reindex (src/parquet_strings.f90) and in check_permutation
+        ! (src/parquet_sorting_keys.f90); keep the three in step rather than adding a fourth.
+        allocate(seen((n + 7_int64)/8_int64))
+        seen = 0_int8
         do k = 1_int64, n
             p = perm(k)
             if (p < 1_int64 .or. p > n) error stop EP//"reindex: permutation entry out of range"
-            if (seen(p)) error stop EP//"reindex: permutation contains a duplicate index"
-            seen(p) = .true.
+            word = (p - 1_int64)/8_int64 + 1_int64
+            if (btest(seen(word), int(mod(p - 1_int64, 8_int64)))) then
+                error stop EP//"reindex: permutation contains a duplicate index"
+            end if
+            seen(word) = ibset(seen(word), int(mod(p - 1_int64, 8_int64)))
         end do
-        deallocate(seen)
+    end subroutine check_row_permutation
+    !
+    !> Applies an already-checked row permutation to storage and validity. `trusted` selects which
+    !! of the string store's two entry points is used, so the trust decision is made once here
+    !! rather than being re-derived one level down.
+    subroutine apply_row_permutation(self, perm, trusted)
+        class(parquet_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: perm(:)        !! source row index per destination row.
+        logical, intent(in) :: trusted               !! .true. skips the string store's own scan too.
+        integer(int64), allocatable :: elem_perm(:)
+        if (self%nrows == 0_int64) return
         if (is_string_kind(self%kind)) then
             call expand_row_perm(perm, int(self%width, int64), elem_perm)
-            call self%str%reindex(elem_perm)
+            ! The string store validates its own (expanded, element-level) permutation, so a trusted
+            ! reindex has to say so here as well -- otherwise a string column keeps paying the very
+            ! scan this path exists to skip, over width*nrows elements rather than nrows.
+            if (trusted) then
+                call self%str%reindex_trusted(elem_perm)
+            else
+                call self%str%reindex(elem_perm)
+            end if
         else
             call gather_storage(self, perm)
         end if
         call gather_validity(self, perm)
         if (is_temporal_kind(self%kind)) self%nulls_dirty = .true.
-    end procedure reindex
+    end subroutine apply_row_permutation
     !
     ! ==================================================================================
     ! Private helpers

@@ -212,10 +212,10 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
 writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`
-through seven runs: a raw reader baseline, a table open+`materialize_all`, a lazy open that reads
+through eight runs: a raw reader baseline, a table open+`materialize_all`, a lazy open that reads
 only `TOUCH` of the columns, a slice-regime open covering one of `SLICES` equal row ranges, an
-access comparison, and `parquet_write_table` against a hand-written per-column write loop — once on
-a null-free table and once on one where `NULLFRAC` of the rows are null.
+access comparison, `parquet_write_table` against a hand-written per-column write loop — once on
+a null-free table and once on one where `NULLFRAC` of the rows are null — and a sort run.
 
 The **access** run needs a fixture with at least two columns (`NCOLS=2` or more) and reports two
 separate things. First, on already-materialized columns, what `%get` and `%col` themselves cost —
@@ -249,6 +249,21 @@ hoist it. It builds its null-carrying input itself (an untimed extra write plus 
 asking the fixture writer for one, because `parquet_table` exposes no way to mark a row null in
 memory.
 
+The **sort** run is the only one that touches no file: it builds a table of `SORT_SIZE_GB` worth
+of float64 columns plus one character column **in memory**, because what it measures is the cost of
+reordering an already-resident table and reading a fixture first would only add a decode to both
+sides. It splits `%sort_by` into its two halves — the permutation build (`pf_argsort`, parallel, in
+C++) and the per-column reindex loop (serial Fortran) — which is the split worth watching, because
+on a many-core machine the second dominates: 1.9 s against 13.1 s on a 100+ core server, since only
+the first half is threaded.
+
+It then measures the reindex phase **two ways**, all columns validating the permutation against
+only the first one doing so. That comparison is also the only thing that would notice if
+`%reindex_trusted` silently stopped differing from `%reindex` — the two figures would simply
+coincide, with every test still passing. The trailing "reference" block prices the two seen-set
+representations against each other; `logical` is what `reindex` used before the bit-packed set
+replaced it, so those lines say what that change was worth rather than what is still available.
+
 The lazy and slice runs are the ones to read against `read_table`: the open figure shows what an
 open costs when it reads nothing, and the two partial modes show that a program pays only for the
 columns and rows it asks for. A slice cannot be cheaper than one row group, so a fixture written
@@ -275,7 +290,15 @@ TARGET_FILE_SIZE_GB=2.0 NCOLS=16 tools/benchmark_table.sh
 NCOLS=32 TOUCH=2 SLICES=8 tools/benchmark_table.sh
 # Keep the synthetic file instead of a temp dir that gets deleted:
 TEST_FILE=/tmp/bench_table.parquet tools/benchmark_table.sh
+# The sort run is sized on its own, since it builds its table in memory:
+SORT_SIZE_GB=3 NCOLS=24 tools/benchmark_table.sh
 ```
+
+**Use `--profile release`, never `FPM_FFLAGS`, for any measurement here.** `FPM_FFLAGS` *replaces*
+fpm's profile flags rather than adding to them, so `FPM_FFLAGS="-O3 -fopenmp" fpm run` leaves the
+C++ half at whatever the environment supplies and gives no optimisation at all when it supplies
+none — measured as a 5.7x difference in `pf_argsort` alone, which is enough to invert a comparison.
+The wrapper already passes `--profile release` on every run.
 
 `tools/check_arrow_release.sh` is the assertion form of the figure the benchmark above only reports. It drives `app/check_arrow_release.f90` over every `parquet_table` materialization path — `%materialize_all`, `%prefetch`, a single lazy `%get`, a slice, and `parquet_write_table(release=.true.)` — and **exits nonzero** if any of them still holds more than `TOLERANCE` of one copy of the data it just read in Arrow's pool. That failure is otherwise completely silent: a path that forgets to release leaves the values correct and every test passing, with the table quietly holding two copies of every column ([feature_risks.md](feature_risks.md) Risk-1).
 

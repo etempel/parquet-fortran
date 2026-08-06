@@ -114,7 +114,8 @@ contains
             new_unittest("threads are really created", test_threads_really_used), &
             new_unittest("auto is serial inside a parallel region", test_threads_auto_in_parallel), &
             new_unittest("threads=1 forces serial", test_threads_one_is_serial), &
-            new_unittest("unique and rank take threads too", test_threads_on_derived) &
+            new_unittest("unique and rank take threads too", test_threads_on_derived), &
+            new_unittest("assume_valid really skips the scan for a column", test_permute_column_assume_valid) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -1744,5 +1745,47 @@ contains
         if (allocated(error)) return
         call check(error, all(r1 == r2), "a threaded pf_rank must produce the same ranks")
     end subroutine test_threads_on_derived
+    !
+    !> `pf_permute` over a `parquet_column` HONOURS `assume_valid`, routing to `%reindex_trusted`.
+    !!
+    !! **The proof has to be a permutation that is not one.** A valid permutation behaves
+    !! identically whether the check runs or not, so asserting "same result" would pass just as
+    !! happily against an implementation that still validates — which is what this generic did
+    !! until the trusted path existed. Handing it a duplicate-bearing index array is the only
+    !! observation that separates the two: with the check it aborts, without it the gather is
+    !! defined and simply repeats an element.
+    !!
+    !! The `parquet_string_column` half is checked too, because it has its own second validation
+    !! one level down and would otherwise keep scanning while the outer one skipped.
+    subroutine test_permute_column_assume_valid(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        type(parquet_string_column) :: sc
+        integer(int64) :: dup(3) = [2_int64, 2_int64, 3_int64]
+        integer(int32) :: got
+        character(len=:), allocatable :: s
+        !
+        ! Not a permutation: index 2 twice, index 1 never. With the scan this aborts the process;
+        ! trusted, it gathers rows 2, 2, 3.
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([10_int32, 20_int32, 30_int32])
+        call pf_permute(c, dup, assume_valid=.true.)
+        call c%get_at(1_int64, got)
+        call check(error, got == 20_int32, "a trusted permute must gather row 2 into row 1")
+        if (allocated(error)) return
+        call c%get_at(2_int64, got)
+        call check(error, got == 20_int32, "a trusted permute must repeat the duplicated index rather than abort")
+        if (allocated(error)) return
+        !
+        call sc%append_string("aa")
+        call sc%append_string("bb")
+        call sc%append_string("cc")
+        call pf_permute(sc, dup, assume_valid=.true.)
+        call sc%get(1_int64, s)
+        call check(error, s == "bb", "the string store must skip its own scan under assume_valid too")
+        if (allocated(error)) return
+        call sc%get(2_int64, s)
+        call check(error, s == "bb", "a trusted string permute must repeat the duplicated index")
+    end subroutine test_permute_column_assume_valid
     !
 end module test_sorting

@@ -53,6 +53,7 @@ working rules).
   - [Guard mutating public procedures against being called twice](#guard-mutating-public-procedures-against-being-called-twice)
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
+  - [A character ARRAY is trimmed on the way into a column; a character SCALAR is not](#a-character-array-is-trimmed-on-the-way-into-a-column-a-character-scalar-is-not)
   - [Validity is per ELEMENT, and a vector row is not one bit](#validity-is-per-element-and-a-vector-row-is-not-one-bit)
   - [Auto-threading: `omp_in_parallel()` picks a DEFAULT](#auto-threading-omp_in_parallel-picks-a-default-and-that-is-not-the-guard-claudemd-warns-about)
   - [`parquet_table` concurrency: one file owns the OpenMP plumbing](#parquet_table-concurrency-one-file-owns-the-openmp-plumbing-and-guards-key-on-ownership)
@@ -1082,6 +1083,27 @@ library has no reader-side API to introspect a file's physical encoding, so `pya
 external tool) is the only way to confirm this end-to-end; a pure test-drive/Fortran test can only
 confirm the *data* round-trips correctly, not which encoding was used to store it.
 
+### A character ARRAY is trimmed on the way into a column; a character SCALAR is not
+
+Every element of a `character(len=*)` array shares one declared length, so a shorter value is
+blank-padded by Fortran and the padding cannot be what the caller meant. A `character(len=*)`
+**scalar** is exactly as long as the caller wrote it. So:
+
+- **Array arguments trim** — `parquet_column%set_all`/`%append_values`, `parquet_table`'s
+  `%add_column`/`%set`/`%set_slice`, and `%set_element`'s *vector* form (whose `value(:)` is an
+  array). `refill_string_store` (`src/parquet_columns_string.f90`) is where the rule is implemented
+  and explained.
+- **Scalar arguments do not** — `%set_at`'s scalar form, `%set_element` on a `PK_STRING` column, a
+  row handle's `%set`.
+- **`parquet_string_column`'s own API never trims by default**, because it takes bytes the caller
+  controls exactly and offers explicit `trim=`/`strip=`.
+
+Do not "harmonize" these into one behaviour: the asymmetry *is* the rule, and it is what makes
+`%get` into a `character(len=:), allocatable` come back sized to the longest real value rather than
+to whatever width the caller happened to declare. `%add_column` documented the trimming from 1.0.0
+and did not do it until this was fixed, so the doc-comments now state the rule rather than just the
+behaviour.
+
 ### Validity is per ELEMENT, and a vector row is not one bit
 
 `parquet_column`'s validity API comes in a **row** form and an **element** form, and the storage has
@@ -2031,6 +2053,13 @@ before being noticed:**
   faults on its first pass and never again, so whichever variant runs first absorbs them. This is
   strong enough to reverse a comparison: the `%col` pointer form measured *25% faster* than plain
   arrays purely by running second. Write the result once through every path before the timed loop.
+- **Measure with `--profile release`, NEVER with `FPM_FFLAGS`.** `FPM_FFLAGS` *replaces* fpm's
+  profile flags rather than adding to them, so `FPM_FFLAGS="-fopenmp" fpm run` builds at **-O0**,
+  and `FPM_FFLAGS="-O3 -fopenmp"` optimizes the Fortran half while leaving the C++ half at whatever
+  the environment supplies — which on a dev machine may be nothing. Measured 5.7x on `pf_argsort`
+  alone between the two, which is enough to invert a comparison and did: an early run of the sort
+  benchmark showed bit-packing *losing* below 2M rows, an artifact that vanished under `-O3`. The
+  `tools/*.sh` wrappers already pass `--profile release`; match them.
 - **Take the best of several rounds, not one measurement.** Single rounds of the `access` mode swung
   0.96x–1.22x on the same build — wider than the effect being measured. The minimum is the run least
   disturbed by everything else on the machine, which is what these modes are actually asking about.

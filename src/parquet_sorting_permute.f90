@@ -18,7 +18,8 @@
 !! symptom class this project guards hardest against. The check is O(n) in front of an O(n)
 !! operation, so it is a constant factor rather than a change of complexity, which is why it is on
 !! by default; `assume_valid=.true.` skips it for a permutation that came straight from
-!! `pf_argsort`.
+!! `pf_argsort`. It skips the CONTENTS check only -- `perm`'s length is checked either way, since a
+!! short permutation makes the gather read past the end of `values`.
 submodule (parquet_sorting) parquet_sorting_permute
     implicit none
     !
@@ -35,7 +36,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -56,7 +60,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -77,7 +84,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -98,7 +108,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -119,7 +132,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -140,7 +156,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -161,7 +180,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -182,7 +204,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -203,7 +228,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -224,7 +252,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -245,7 +276,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(character(len=len(values)) :: tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -266,7 +300,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(character(len=len(values)) :: tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -287,7 +324,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -308,7 +348,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -329,7 +372,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -350,7 +396,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -371,7 +420,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -392,7 +444,10 @@ contains
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
         n = size(values, kind=int64)
-        if (.not. skip) call check_permutation(p64, n, "pf_permute")
+        ! The LENGTH is checked even under assume_valid=.true.: the gather below
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
+        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
@@ -410,10 +465,14 @@ contains
         if (present(assume_valid)) skip = assume_valid
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
-        ! `assume_valid` is deliberately ignored here: %reindex validates
-        ! unconditionally, and adding an unvalidated back door into a column's
-        ! storage is not worth saving one O(n) pass.
-        call values%reindex(p64)
+        ! `assume_valid` means the same thing here as for the nine array types:
+        ! %reindex_trusted skips the O(n) contents walk and keeps the O(1) length
+        ! check. Both column types validate unconditionally without it.
+        if (skip) then
+            call values%reindex_trusted(p64)
+        else
+            call values%reindex(p64)
+        end if
     end procedure permute_strcol_i32
     !
     module procedure permute_strcol_i64
@@ -424,10 +483,14 @@ contains
         if (present(assume_valid)) skip = assume_valid
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
-        ! `assume_valid` is deliberately ignored here: %reindex validates
-        ! unconditionally, and adding an unvalidated back door into a column's
-        ! storage is not worth saving one O(n) pass.
-        call values%reindex(p64)
+        ! `assume_valid` means the same thing here as for the nine array types:
+        ! %reindex_trusted skips the O(n) contents walk and keeps the O(1) length
+        ! check. Both column types validate unconditionally without it.
+        if (skip) then
+            call values%reindex_trusted(p64)
+        else
+            call values%reindex(p64)
+        end if
     end procedure permute_strcol_i64
     !
     module procedure permute_col_i32
@@ -438,10 +501,14 @@ contains
         if (present(assume_valid)) skip = assume_valid
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
-        ! `assume_valid` is deliberately ignored here: %reindex validates
-        ! unconditionally, and adding an unvalidated back door into a column's
-        ! storage is not worth saving one O(n) pass.
-        call values%reindex(p64)
+        ! `assume_valid` means the same thing here as for the nine array types:
+        ! %reindex_trusted skips the O(n) contents walk and keeps the O(1) length
+        ! check. Both column types validate unconditionally without it.
+        if (skip) then
+            call values%reindex_trusted(p64)
+        else
+            call values%reindex(p64)
+        end if
     end procedure permute_col_i32
     !
     module procedure permute_col_i64
@@ -452,10 +519,14 @@ contains
         if (present(assume_valid)) skip = assume_valid
         allocate(p64(size(perm, kind=int64)))
         p64 = int(perm, int64)
-        ! `assume_valid` is deliberately ignored here: %reindex validates
-        ! unconditionally, and adding an unvalidated back door into a column's
-        ! storage is not worth saving one O(n) pass.
-        call values%reindex(p64)
+        ! `assume_valid` means the same thing here as for the nine array types:
+        ! %reindex_trusted skips the O(n) contents walk and keeps the O(1) length
+        ! check. Both column types validate unconditionally without it.
+        if (skip) then
+            call values%reindex_trusted(p64)
+        else
+            call values%reindex(p64)
+        end if
     end procedure permute_col_i64
     !
     module procedure is_sorted_i32

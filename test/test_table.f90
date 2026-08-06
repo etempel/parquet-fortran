@@ -4610,7 +4610,11 @@ contains
         !
         call write_sort_fixture(f)
         call parquet_open_table(t, f)
-        ! Nothing has been read at this point -- no %prefetch, no %materialize_all.
+        ! "id" is read up front only because its values are asserted AFTER the sort: %sort_by
+        ! reorders the columns that are resident and then detaches, so a column still sitting in
+        ! the file when the rows move can never be read again. The KEY is deliberately left
+        ! unread -- that is what this test is about.
+        call t%prefetch("id")
         call check(error, t%residency("v") /= RES_FULL, "the key column must start unread")
         if (allocated(error)) return
         call t%sort_by(["v"])
@@ -4618,10 +4622,14 @@ contains
         call check(error, all(id == [2_int32, 4_int32, 1_int32, 6_int32, 3_int32, 5_int32]), &
             "sort_by must read the key column itself and order by it")
         if (allocated(error)) return
+        ! Only the KEY is read implicitly: a non-key column that was unread stays unread, which is
+        ! what keeps a %sort_by on a wide lazy table from pulling the whole file into memory.
+        call check(error, t%residency("g") /= RES_FULL, &
+            "sort_by must read its key column only, not every column")
+        if (allocated(error)) return
         !
-        ! Only the KEY is read implicitly. Every other column is fetched by the sort's own reindex
-        ! (which needs every resident column), so what matters is that the result is right rather
-        ! than that some column stayed lazy -- assert the values, which is what a user sees.
+        ! %argsort_by reads its key the same way -- and, moving no row, leaves t2 attached, so
+        ! nothing else has to be read first.
         call write_sort_fixture(f2)
         call parquet_open_table(t2, f2)
         call t2%argsort_by(["v"], perm)

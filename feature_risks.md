@@ -411,12 +411,29 @@ approximately.
 - **Do not raise the thread count above the column count** as a "why not use the spare cores"
   optimisation. There is no work for them, and it would break the bound the claim rests on.
 
-**Test.** Not testable as a unit test, for the reason CLAUDE.md gives about measuring Arrow memory
-in reverse: peak RSS is the right instrument here (these are ordinary Fortran allocations, so the
-question is the live high-water mark rather than what was returned to the OS), but a peak-memory
+**Test.** Still not testable as a unit test, for the reason CLAUDE.md gives about measuring Arrow
+memory in reverse: peak RSS is the right instrument here (these are ordinary Fortran allocations, so
+the question is the live high-water mark rather than what was returned to the OS), but a peak-memory
 assertion in a test suite that runs other tests concurrently measures the whole process, not this
-call. It belongs in the post-implementation benchmark instead, where the mutation runs in its own
-process at `T = 1` and `T = max`.
+call. It belongs in a benchmark instead, and **it has since been measured there**:
+`app/benchmark_table.f90`'s `--mode=peakmem` builds one table, sorts it exactly once, and is run at
+`T = 1` and `T = max` in separate processes under an external timer, with
+`tools/benchmark_table.sh` driving the two points.
+
+**The bound holds with margin.** The transient measured **85.7 % of `(T-1)` column copies** in two
+configurations — 954 MiB against a predicted 1113 at 24 columns, 1431 against 1669 at 8 columns, the
+same ratio at different row counts and column sizes. The shortfall is because the copies are not
+simultaneous: each lives only between its column's allocation and its `move_alloc`, and
+`schedule(dynamic)` staggers when columns finish. Even at 8 threads against 9 mutable columns, where
+`T` is nearly the column count and the doubling bound is tightest, the transient reached a third of
+the table's resident size. `(T-1)` copies remains the right thing to document — it is a true upper
+bound, and the margin is an implementation detail a different schedule or column mix would change.
+
+**Two traps this measurement fell into first**, both of which produced a confident wrong number and
+neither of which is specific to this risk. Reading a peak off a benchmark mode that *also* builds
+standalone columns for another purpose measures those instead — three machines reported such a figure
+and all three had to discard it. And "touching" a column with `size(ptr)` faults in no data page at
+all, so an identical build reported 2828 MiB once and 5423 MiB the next time; the touch has to sum.
 
 ---
 

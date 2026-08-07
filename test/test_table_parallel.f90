@@ -64,6 +64,18 @@ module test_table_parallel
             import :: c_int64_t
             integer(c_int64_t), value :: n !! new counter value; tests use 0.
         end subroutine parquet_debug_set_table_threads_used
+        !> Overrides the parallel gate's work floor, in elements. 0 or less restores the real one.
+        subroutine parquet_debug_set_colwork_min_elements(n) &
+            bind(C, name="parquet_debug_set_colwork_min_elements")
+            import :: c_int64_t
+            integer(c_int64_t), value :: n !! new floor, or 0 to restore.
+        end subroutine parquet_debug_set_colwork_min_elements
+        !> Overrides the parallel gate's minimum mutable-column count. 0 or less restores the real one.
+        subroutine parquet_debug_set_colwork_min_columns(n) &
+            bind(C, name="parquet_debug_set_colwork_min_columns")
+            import :: c_int64_t
+            integer(c_int64_t), value :: n !! new minimum, or 0 to restore.
+        end subroutine parquet_debug_set_colwork_min_columns
     end interface
     !
 contains
@@ -80,7 +92,9 @@ contains
             new_unittest("top_n gives the same table on many threads as on one", &
                 test_top_n_parallel_equals_serial), &
             new_unittest("a mutation inside the caller's own parallel region stays serial", &
-                test_mutation_in_caller_region_is_serial) &
+                test_mutation_in_caller_region_is_serial), &
+            new_unittest("each gate limit can be overridden, and each one alone closes the gate", &
+                test_gate_limit_overrides) &
             ]
     end subroutine collect_tests_table_parallel
     !
@@ -225,6 +239,85 @@ contains
         call check(error, used == 1, &
             "a mutation inside the caller's own parallel region must rewrite its columns serially")
     end subroutine test_mutation_in_caller_region_is_serial
+    !
+    !> The two test-only overrides of the gate's tuning constants (`colwork_gate_limits`,
+    !> `src/parquet_tables_parallel.f90`).
+    !>
+    !> **A round trip would prove nothing here — the overrides have no getter to round-trip against,
+    !> and their only observable is whether the gate changes its mind.** So each limit is exercised
+    !> in three steps: confirm the gate is open at the real constants, close it with that one
+    !> override alone, and confirm it opens again when the override is cleared. The middle step is
+    !> what the override is for; the first and third are what stop a hook that does nothing (or one
+    !> that never restores) from passing.
+    !>
+    !> **Each limit is raised on its own, never both at once.** `colwork_threads` returns 1 if *any*
+    !> gate closes, so overriding both together would pass identically against an implementation that
+    !> read only one of them — which is exactly the defect two separate overrides could introduce.
+    !>
+    !> The answer is checked after every mutation, not only the thread count: an override that
+    !> accidentally changed the *result* rather than only the schedule would otherwise go unnoticed.
+    subroutine test_gate_limit_overrides(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer :: used, avail
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        ! With one thread available the gate's answer is 1 whatever the limits say, so there is no
+        ! observable to assert on and the test would be vacuous rather than failing.
+        if (avail <= 1) return
+        !
+        ! (1) The gate is open at the real constants. Without this the two "closed" assertions below
+        !     would pass against a gate that was never open in the first place.
+        call run_sort(t, used)
+        call check(error, used > 1, "the gate must be open at the real constants")
+        if (allocated(error)) return
+        call check_rows_consistent(error, t, "sort_by at the real constants")
+        if (allocated(error)) return
+        !
+        ! (2) The column minimum alone closes it. The fixture has 5 columns, so 6 excludes it.
+        call parquet_debug_set_colwork_min_columns(6_c_int64_t)
+        call run_sort(t, used)
+        call parquet_debug_set_colwork_min_columns(0_c_int64_t)
+        call check(error, used == 1, "raising the minimum column count above the fixture's must close the gate")
+        if (allocated(error)) return
+        call check_rows_consistent(error, t, "sort_by under a raised column minimum")
+        if (allocated(error)) return
+        !
+        ! (3) The work floor alone closes it. The largest column is VW*NROW elements, so one more
+        !     than that excludes it -- and only just, so a floor compared with the wrong operator
+        !     or against the wrong column shows up here.
+        call parquet_debug_set_colwork_min_elements(int(VW, c_int64_t) * int(NROW, c_int64_t) + 1_c_int64_t)
+        call run_sort(t, used)
+        call parquet_debug_set_colwork_min_elements(0_c_int64_t)
+        call check(error, used == 1, "raising the work floor above the largest column must close the gate")
+        if (allocated(error)) return
+        call check_rows_consistent(error, t, "sort_by under a raised work floor")
+        if (allocated(error)) return
+        !
+        ! (4) Both overrides cleared, the gate is open again. This is what proves the restore path:
+        !     without it a hook that latched would leave every later test in this process serial,
+        !     and they would all still pass.
+        call run_sort(t, used)
+        call check(error, used > 1, "clearing both overrides must reopen the gate")
+    end subroutine test_gate_limit_overrides
+    !
+    !> Builds a fresh fixture, sorts it, and reports the thread count that mutation resolved to.
+    !>
+    !> Fresh each time because `%sort_by` returns early without touching a column when the rows are
+    !> already in order, so re-sorting an already-sorted table would report a thread count for a
+    !> mutation that never happened.
+    subroutine run_sort(t, used)
+        type(parquet_table), intent(out) :: t !! receives the sorted fixture.
+        integer, intent(out) :: used          !! threads the mutation resolved to.
+        !
+        call build_fixture(t)
+        call parquet_debug_set_table_threads_used(0_c_int64_t)
+        call t%sort_by(["k"])
+        used = int(parquet_debug_get_table_threads_used())
+    end subroutine run_sort
     !
     ! ==================================================================================
     ! Fixture and comparison helpers

@@ -47,6 +47,16 @@ program benchmark_table
             import :: c_int64_t
             integer(c_int64_t) :: bytes !! bytes currently allocated from Arrow's default pool.
         end function parquet_get_arrow_bytes_allocated
+        !> Threads the last row-structural table mutation resolved to; 1 when it ran serially.
+        !!
+        !! Used by `--mode=peakmem` only, to prove the run under measurement actually threaded --
+        !! a peak-memory comparison between two thread counts is meaningless if the second one
+        !! silently ran serially. Same local-declaration convention as the hook above.
+        function parquet_debug_get_table_threads_used() &
+                bind(C, name="parquet_debug_get_table_threads_used") result(res)
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! resolved thread count of the last mutation.
+        end function parquet_debug_get_table_threads_used
     end interface
 
     character(len=:), allocatable :: mode, file
@@ -75,6 +85,8 @@ program benchmark_table
         call bench_write_nulls(file, nullfrac)
     case ("sort")
         call bench_sort(size_gb, ncols)
+    case ("peakmem")
+        call bench_peakmem(size_gb, ncols, threads)
     case ("argsort")
         call bench_argsort(nrows_arg, threads)
     case default
@@ -99,8 +111,11 @@ contains
         write(output_unit, '(a)') "  --mode=write_nulls    the same, on a table with nulls (three ways)"
         write(output_unit, '(a)') "  --mode=sort           what %sort_by spends re-validating one permutation"
         write(output_unit, '(a)') "  --mode=argsort        pf_argsort at one thread count, split by sort phase"
+        write(output_unit, '(a)') "  --mode=peakmem        build a table and sort it ONCE, for external peak-RSS"
         write(output_unit, '(a)') "  --nrows=<n>           rows for argsort mode (default 20000000)"
-        write(output_unit, '(a)') "  --threads=<n>         sort threads for argsort mode (1 = serial; default 1)"
+        write(output_unit, '(a)') "  --threads=<n>         sort threads for argsort mode (1 = serial; default 1);"
+        write(output_unit, '(a)') "                        in peakmem mode, the table-mutation thread cap"
+        write(output_unit, '(a)') "                        (1 = serial, 0 = automatic)"
         write(output_unit, '(a)') "  --size=<GB>           approximate uncompressed size (write_fixture)"
         write(output_unit, '(a)') "  --ncols=<n>           float64 columns in the fixture (default 8)"
         write(output_unit, '(a)') "  --touch=<n>           columns to read in read_lazy (default 2)"
@@ -889,6 +904,114 @@ contains
     !! sort of an already-sorted column would either return early or measure a reversal
     !! permutation -- a perfectly regular access pattern, unlike the scattered one a real sort
     !! walks.
+    !> Builds one table and sorts it exactly ONCE, so an external tool's peak-RSS figure describes
+    !! `%sort_by` and nothing else.
+    !!
+    !! **This mode exists because `--mode=sort` cannot answer the peak-memory question, and its own
+    !! figure looks as though it can.** That mode builds a *second*, standalone set of columns in
+    !! order to time the reindex phase in isolation, so the process high-water mark is set by those
+    !! rather than by the mutation — three separate machines reported an RSS figure from it and all
+    !! three had to discard it (feature_table_parallel.md section 17.2). Nothing here allocates
+    !! anything the sort does not need.
+    !!
+    !! **The answer is a DIFFERENCE between two runs, not this run's number.** Run it twice at the
+    !! same `--size`/`--ncols`, once with `--threads=1` and once with `--threads=0` (automatic), each
+    !! under `/usr/bin/time` (`-l` on macOS, `-v` on Linux). The builds are identical, so the whole
+    !! difference in peak RSS is the mutation's transient. What is being tested is section 7.5's
+    !! claim that a parallel mutation holds one transient column copy per thread and therefore at
+    !! most doubles the table's peak: the predicted difference is `(T - 1)` copies of the largest
+    !! column, which this mode prints so the two can be compared without arithmetic afterwards.
+    !!
+    !! In-process RSS is reported at two points as context. It is the CURRENT figure (`ps`), not the
+    !! peak — the transient exists only while the mutation is running, and this program is inside
+    !! that call when it happens — so it cannot answer the question on its own. That is precisely
+    !! why the peak has to come from outside.
+    subroutine bench_peakmem(size_gb, ncols, threads)
+        real(real64), intent(in) :: size_gb !! approximate size of the float64 columns, in GB.
+        integer, intent(in) :: ncols        !! float64 columns, the first of which is the sort key.
+        integer, intent(in) :: threads      !! table-mutation thread cap; 1 serial, 0 automatic.
+        integer, parameter :: slen = 16     !! width of the one character column.
+        type(parquet_table) :: t
+        type(parquet_string_column) :: sc
+        real(real64), allocatable :: v(:)
+        character(len=slen) :: sbuf
+        real(real64), pointer :: kp(:)
+        integer(int64) :: nrows, i, colbytes
+        integer :: c, used
+        real(real64) :: rss_built, rss_sorted, t0, dt, acc
+
+        nrows = int(size_gb * 1.0e9_real64 / (8.0_real64 * real(max(ncols, 1), real64)), int64)
+        if (nrows < 2_int64) nrows = 2_int64
+        colbytes = nrows * 8_int64
+        write(output_unit, '(a,i0,a,i0,a)') "in-memory table: ", nrows, " rows x ", ncols, &
+            " float64 columns + 1 character column"
+
+        ! Identical in shape to --mode=sort's table, so the two modes' figures describe the same
+        ! object. One staging array, reused per column and released before the sort, so the build's
+        ! own high-water mark stays as far below the mutation's as it can.
+        allocate(v(nrows))
+        call parquet_new_table(t)
+        call scatter_key(v)
+        call t%add_column("key", v)
+        do c = 2, ncols
+            do i = 1_int64, nrows
+                v(i) = real(i, real64) * real(c, real64)
+            end do
+            call t%add_column("c"//itoa(c), v)
+        end do
+        deallocate(v)
+        call sc%reserve(nrows, nrows * int(slen, int64))
+        do i = 1_int64, nrows
+            write(sbuf, '(i16.16)') i
+            call sc%append_string(sbuf)
+        end do
+        call t%add_column("s", sc)
+        call sc%clear()
+
+        ! First-touch every column, so no page fault the build owes lands inside the measured sort
+        ! and so the RSS reading below describes a fully resident table. This must SUM rather than
+        ! merely take the pointer: `size(kp)` reads a descriptor and touches no data page at all,
+        ! which leaves the whole table unfaulted and the reading meaningless.
+        acc = 0.0_real64
+        do c = 1, ncols
+            if (c == 1) then
+                call t%col("key", kp)
+            else
+                call t%col("c"//itoa(c), kp)
+            end if
+            acc = acc + sum(kp)
+        end do
+
+        rss_built = rss_mib()
+        call parquet_set_table_threads(threads)
+        t0 = now()
+        call t%sort_by(["key"])
+        dt = now() - t0
+        used = int(parquet_debug_get_table_threads_used())
+        rss_sorted = rss_mib()
+        call parquet_reset_settings()
+
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,i0,a)') "--threads=", threads, "   (0 = automatic)"
+        write(output_unit, '(a,i0)')   "threads the mutation actually used : ", used
+        write(output_unit, '(a,f10.4,a)') "sort_by (one run)        : ", dt, " s"
+        write(output_unit, '(a,f10.1,a)') "one column               : ", &
+            real(colbytes, real64) / 1048576.0_real64, " MiB"
+        write(output_unit, '(a,f10.1,a)') "predicted transient      : ", &
+            real(max(used - 1, 0), real64) * real(colbytes, real64) / 1048576.0_real64, &
+            " MiB   ((T-1) x one column)"
+        write(output_unit, '(a,f10.1,a)') "current RSS after build  : ", rss_built, " MiB"
+        write(output_unit, '(a,f10.1,a)') "current RSS after sort   : ", rss_sorted, " MiB"
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a)') "The number that answers the question is the PEAK, which only an external"
+        write(output_unit, '(a)') "tool can see -- the transient exists only while %sort_by is running. Run"
+        write(output_unit, '(a)') "this mode twice, --threads=1 and --threads=0, under /usr/bin/time, and"
+        write(output_unit, '(a)') "compare the two peaks against the predicted transient above."
+        ! Keeps the first-touch pass from being optimised away -- without a use, -O3 is free to
+        ! delete the very sum that makes the table resident.
+        write(output_unit, '(a,es22.15)') "(sink, checksum ", acc
+    end subroutine bench_peakmem
+
     subroutine bench_sort(size_gb, ncols)
         real(real64), intent(in) :: size_gb !! approximate size of the float64 columns, in GB.
         integer, intent(in) :: ncols        !! float64 columns, the first of which is the sort key.

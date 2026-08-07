@@ -26,6 +26,9 @@
 #                             Row counts the argsort thread sweep runs at. Also file-free.
 #   ARGSORT_THREADS="1 2 4 8" Thread counts the argsort sweep runs at. 1 is the serial baseline
 #                              every speedup below is measured against, so keep it first.
+#   PEAKMEM_THREADS="1 0"     Table-mutation thread caps the peak-memory runs use (1 = serial,
+#                              0 = automatic). The answer is the DIFFERENCE between the two peaks,
+#                              so both are needed and 1 must come first.
 #   TEST_FILE                 Path for the synthetic test file. Default: a fresh mktemp -d
 #                              directory, deleted automatically when the script exits. Set this
 #                              to keep the file around afterward -- it is NOT deleted when
@@ -43,6 +46,7 @@ NULLFRAC="${NULLFRAC:-0.1}"
 SORT_SIZE_GB="${SORT_SIZE_GB:-1}"
 ARGSORT_NROWS="${ARGSORT_NROWS:-1000000 20000000}"
 ARGSORT_THREADS="${ARGSORT_THREADS:-1 2 4 8}"
+PEAKMEM_THREADS="${PEAKMEM_THREADS:-1 0}"
 TEST_FILE="${TEST_FILE:-}"
 
 cleanup_dir=""
@@ -106,6 +110,33 @@ echo
 # single-threaded pass over the whole array whose share does not shrink as threads are added. That
 # share is what a co-ranked parallel merge would remove, and reading it off is why this sweep
 # exists (feature_sort_merge.md step 0). Also file-free: it sorts an array it generates itself.
+# A parallel row-structural mutation holds one transient column copy per thread instead of one in
+# total, and the library's answer to that is documentation plus the parquet_set_table_threads cap
+# rather than a memory-derived limit -- so the "at most doubles the table's peak" claim needs
+# measuring rather than asserting. The --mode=sort run above CANNOT measure it: it builds a second,
+# standalone set of columns to time the reindex phase in isolation, and that second set, not the
+# mutation, is what sets its process peak. --mode=peakmem builds nothing the sort does not need.
+#
+# The answer is the DIFFERENCE between the two runs below. Both build the identical table, so
+# whatever separates their peaks is the mutation's transient, and the mode prints the predicted
+# value -- (T-1) copies of one column -- next to it. /usr/bin/time is the measurement: the
+# transient is gone by the time the program regains control, so no in-process reading can see it.
+# --runner puts the timer around the benchmark binary rather than around fpm, whose own compile and
+# link peaks would otherwise dominate.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    TIME_FLAG="-l"        # macOS: reports "maximum resident set size" in BYTES
+else
+    TIME_FLAG="-v"        # GNU time: reports "Maximum resident set size (kbytes)"
+fi
+
+echo "=== %sort_by peak memory: serial vs automatic threads ==="
+for pt in $PEAKMEM_THREADS; do
+    fpm run benchmark_table --profile release --runner "/usr/bin/time $TIME_FLAG" -- \
+        --mode=peakmem --size="$SORT_SIZE_GB" --ncols="$NCOLS" --threads="$pt" 2>&1 |
+        grep -Ei "in-memory table|--threads=|threads the mutation|sort_by \(one run\)|one column|predicted transient|current RSS|maximum resident set size"
+    echo
+done
+
 echo "=== pf_argsort thread sweep (permutation build, by phase) ==="
 for nr in $ARGSORT_NROWS; do
     for t in $ARGSORT_THREADS; do

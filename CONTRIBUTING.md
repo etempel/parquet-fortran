@@ -214,11 +214,11 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
 writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`
-through eight runs plus a sweep: a raw reader baseline, a table open+`materialize_all`, a lazy open
-that reads only `TOUCH` of the columns, a slice-regime open covering one of `SLICES` equal row
+through eight runs plus two sweeps: a raw reader baseline, a table open+`materialize_all`, a lazy
+open that reads only `TOUCH` of the columns, a slice-regime open covering one of `SLICES` equal row
 ranges, an access comparison, `parquet_write_table` against a hand-written per-column write loop —
-once on a null-free table and once on one where `NULLFRAC` of the rows are null — a sort run, and
-an argsort thread sweep.
+once on a null-free table and once on one where `NULLFRAC` of the rows are null — a sort run, a
+peak-memory pair, and an argsort thread sweep.
 
 The **access** run needs a fixture with at least two columns (`NCOLS=2` or more) and reports two
 separate things. First, on already-materialized columns, what `%get` and `%col` themselves cost —
@@ -284,6 +284,26 @@ reported. Any before/after claim about this phase should come from one process, 
 Keep `1` first in `ARGSORT_THREADS`: it is the serial baseline, and it reports no phases at all,
 because the engine takes the plain `std::sort` path rather than chunking.
 
+The **peakmem** pair answers a question none of the runs above can, and the reason it needs its own
+mode is worth knowing before anyone tries to fold it back into `sort`. A parallel row-structural
+mutation holds one transient column copy per thread instead of one in total; the library's answer to
+that is documentation plus the `parquet_set_table_threads` cap rather than a memory-derived limit, so
+the "at most doubles the table's peak" claim has to be measured rather than asserted. **`sort` cannot
+measure it** — it builds a *second*, standalone set of columns in order to time the reindex phase in
+isolation, and that second set, not the mutation, is what sets its process peak. Three different
+machines reported an RSS figure from that mode and all three had to discard it. `--mode=peakmem`
+builds one table, sorts it exactly once, and allocates nothing else.
+
+The answer is the **difference** between the run's two points, `PEAKMEM_THREADS="1 0"` (serial, then
+automatic). Both build the identical table, so whatever separates their peaks is the mutation's
+transient, and the mode prints the predicted value — `(T-1)` copies of one column — beside it. The
+peak is read with `/usr/bin/time` wrapped around the benchmark binary via `fpm run --runner`, not
+around `fpm`, whose own compile and link peaks would dominate; the mode's two in-process RSS lines
+are context, not the answer, because the transient is gone before the program regains control. On an
+8-core machine the transient measures about 86% of `(T-1)` copies, the shortfall being that the
+copies are not simultaneous — each lives only between its column's allocation and its `move_alloc`,
+and `schedule(dynamic)` staggers when columns finish.
+
 The lazy and slice runs are the ones to read against `read_table`: the open figure shows what an
 open costs when it reads nothing, and the two partial modes show that a program pays only for the
 columns and rows it asks for. A slice cannot be cheaper than one row group, so a fixture written
@@ -314,6 +334,20 @@ TEST_FILE=/tmp/bench_table.parquet tools/benchmark_table.sh
 SORT_SIZE_GB=3 NCOLS=24 tools/benchmark_table.sh
 # A wider argsort sweep (also file-free), on a machine with more cores:
 ARGSORT_NROWS="1000000 20000000" ARGSORT_THREADS="1 2 4 8 16 32 64" tools/benchmark_table.sh
+```
+
+The peak-memory pair can also be run on its own, which is usually what you want — it is the only
+part of the script whose answer is a difference between two processes, and the rest of the script
+does not have to run for that difference to mean anything. Use a narrow table to make it bite: the
+bound is tightest when the thread count approaches the column count.
+
+```sh
+# The two points, at the sort run's own reference configuration:
+for t in 1 0; do
+    fpm run benchmark_table --profile release --runner "/usr/bin/time -l" -- \
+        --mode=peakmem --size=4.0 --ncols=24 --threads="$t"
+done
+# GNU time (Linux) reports the same figure under -v rather than -l.
 ```
 
 **Use `--profile release`, never `FPM_FFLAGS`, for any measurement here.** `FPM_FFLAGS` *replaces*

@@ -40,10 +40,21 @@ submodule (parquet_tables) parquet_tables_parallel
     !! team costs single-digit microseconds; gathering 1 MiB reads and writes 2 MiB, a few hundred
     !! microseconds at ordinary memory bandwidth. The real break-even is one to two orders of
     !! magnitude below this, so the floor errs toward serial and cannot plausibly be too small. It
-    !! is also low enough for an ordinary unit test to exceed it (131k `float64` rows is ~1 MB),
-    !! which is why it needs no setting and no debug override: a threshold the tests cannot cross
-    !! would mean they only ever exercise the serial path.
+    !! is also low enough for an ordinary unit test to exceed it (131k `float64` rows is ~1 MB), so
+    !! the tests are not confined to the serial path by it.
+    !!
+    !! **Not a public setting** -- it is an input to a decision the library makes for the caller, and
+    !! `parquet_set_table_threads` is already the user-facing control over this loop. It IS
+    !! overridable for tuning through a test-only hook; see `colwork_gate_limits`.
     integer(int64), parameter :: colwork_min_elements = 131072_int64
+    !
+    !> Fewer mutable columns than this and the loop runs serially.
+    !!
+    !! Two is the smallest number that can use a second thread at all, so this is a statement that
+    !! the loop threads whenever threading is possible, not a tuned choice. Named rather than written
+    !! as a literal in `colwork_threads` so that it can carry this note and be swept alongside
+    !! `colwork_min_elements`.
+    integer, parameter :: colwork_min_columns = 2
     !
 contains
     !
@@ -275,9 +286,9 @@ contains
     !! same shape as `parallel_prefetch_ok` (src/parquet_tables_read.f90) and `pf_sort_threads`
     !! (src/parquet_sorting_keys.f90), for the same reasons. Four things make it answer 1:
     !!
-    !!   * **Fewer than two columns to rewrite.** The parallelism is bounded by the column count,
-    !!     so a one-column table can use nothing and a thread team would be pure overhead. This is
-    !!     the opposite bound from `%prefetch`'s, which is bounded by I/O.
+    !!   * **Fewer mutable columns than `colwork_min_columns`.** The parallelism is bounded by the
+    !!     column count, so a one-column table can use nothing and a thread team would be pure
+    !!     overhead. This is the opposite bound from `%prefetch`'s, which is bounded by I/O.
     !!   * **Already inside a parallel region.** Nested regions are the caller's business; without
     !!     this, T threads would each ask for T more, and T*T oversubscription is slower than not
     !!     threading at all. `omp_get_max_threads()` reads an ICV, not the current team size, so
@@ -298,13 +309,16 @@ contains
 #endif
         type(parquet_table_cache), intent(in) :: cache !! the column store.
         integer, intent(in) :: slots(:)                !! slots the mutation will rewrite.
-        integer :: cap
+        integer :: cap, min_columns
+        integer(int64) :: min_elements
         !
         n = 1
 #ifdef _OPENMP
-        if (size(slots) < 2) return
+        ! Cheapest exit first: this one costs nothing and needs neither limit.
         if (omp_in_parallel()) return
-        if (largest_column_elements(cache, slots) < colwork_min_elements) return
+        call colwork_gate_limits(min_elements, min_columns)
+        if (size(slots) < min_columns) return
+        if (largest_column_elements(cache, slots) < min_elements) return
         n = omp_get_max_threads()
         cap = parquet_get_table_threads()
         if (cap > 0 .and. cap < n) n = cap
@@ -312,6 +326,43 @@ contains
         if (n < 1) n = 1
 #endif
     end function colwork_threads
+    !
+    !> The two gate limits actually in force: the test-only override where one is set, otherwise the
+    !> real constant.
+    !!
+    !! **Neither constant can be tuned by a benchmark, which is why the override exists.** Every
+    !! table size a benchmark can afford sits orders of magnitude above `colwork_min_elements`, so no
+    !! sweep over rows or columns ever visits its break-even — the only way to find it is to move the
+    !! constant rather than the input. `parquet_debug_set_sort_merge_min_segment` exists for the
+    !! mirror-image problem (a constant no test-sized input can reach) and takes the same shape.
+    !!
+    !! The overrides live in `src/parquet_wrapper.cpp` rather than in a public Fortran procedure for
+    !! the reason CLAUDE.md gives: a Fortran-side hook would have to be public. Two `bind(C)` reads
+    !! per mutation is the same ratio `parquet_debug_note_table_threads` justifies — a coarse
+    !! operation about to rewrite every column of a table, never a per-row path.
+    subroutine colwork_gate_limits(min_elements, min_columns)
+        use iso_c_binding, only : c_int64_t
+        integer(int64), intent(out) :: min_elements !! work floor in elements, override applied.
+        integer, intent(out) :: min_columns         !! minimum mutable columns, override applied.
+        interface
+            function get_elems() result(res) bind(C, name="parquet_debug_get_colwork_min_elements")
+                import :: c_int64_t
+                integer(c_int64_t) :: res
+            end function get_elems
+            function get_cols() result(res) bind(C, name="parquet_debug_get_colwork_min_columns")
+                import :: c_int64_t
+                integer(c_int64_t) :: res
+            end function get_cols
+        end interface
+        integer(int64) :: v
+        !
+        min_elements = colwork_min_elements
+        min_columns = colwork_min_columns
+        v = int(get_elems(), int64)
+        if (v > 0_int64) min_elements = v
+        v = int(get_cols(), int64)
+        if (v > 0_int64) min_columns = int(v)
+    end subroutine colwork_gate_limits
     !
     !> Elements (`rows * width`) in the largest column the mutation will rewrite.
     !!

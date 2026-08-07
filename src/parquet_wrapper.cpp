@@ -3304,6 +3304,43 @@ extern "C"
 		return g_debug_table_threads_used;
 	}
 
+	// Test-only overrides of the two constants colwork_threads (src/parquet_tables_parallel.f90) gates
+	// a row-structural mutation on: the work floor in elements, and the minimum number of mutable
+	// columns. <= 0 restores the real one. Unlike the two counters above -- which Fortran only writes
+	// -- these are written from a test and READ from Fortran, which is why each has a getter.
+	//
+	// **They exist because neither constant can be tuned by a benchmark.** Every table size a
+	// benchmark can afford sits orders of magnitude above the work floor, so no sweep over rows or
+	// columns ever visits its break-even; the only way to find it is to move the constant instead of
+	// the input. That is the mirror image of parquet_debug_set_sort_merge_min_segment's problem (a
+	// constant no test-sized input can cross) and takes the same shape for the same reason. See
+	// feature_table_parallel.md section 14.8 and section 17.1.
+	//
+	// Kept here rather than as public Fortran procedures for the reason CLAUDE.md gives: a
+	// Fortran-side hook would have to be public, and visible to every `use parquet`.
+	static int64_t g_debug_colwork_min_elements = -1;
+	static int64_t g_debug_colwork_min_columns = -1;
+
+	void parquet_debug_set_colwork_min_elements(int64_t n)
+	{
+		g_debug_colwork_min_elements = (n > 0) ? n : -1;
+	}
+
+	int64_t parquet_debug_get_colwork_min_elements(void)
+	{
+		return g_debug_colwork_min_elements;
+	}
+
+	void parquet_debug_set_colwork_min_columns(int64_t n)
+	{
+		g_debug_colwork_min_columns = (n > 0) ? n : -1;
+	}
+
+	int64_t parquet_debug_get_colwork_min_columns(void)
+	{
+		return g_debug_colwork_min_columns;
+	}
+
 	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size, int use_threads)
 	{
 		g_debug_last_use_threads = use_threads;

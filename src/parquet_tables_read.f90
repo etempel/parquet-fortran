@@ -697,11 +697,11 @@ contains
         if (sc%detached) return
         if (.not. cache%file_backed) return
         if (.not. allocated(cache%reader)) return
-        ! The two transforms still refused, both on measured COST and both only until P9 rebuilds
-        ! them as shared state -- see parallel_prefetch_ok's doc-comment for the numbers. A sample=
-        ! or a qc= is deliberately NOT tested here; both are carried by every per-thread reader.
-        if (allocated(cache%read_sort)) return
-        if (allocated(cache%read_filter)) return
+        ! NO CLAUSE TESTS THE READ-TIME TRANSFORM, and that is the point rather than an omission.
+        ! Every additional reader adopts the table's own filter mask and sort permutation instead of
+        ! rebuilding them (`table_open_reader_with_transform`), so no transform costs a second reader
+        ! anything to reproduce and none of them can produce a different row set. A clause added back
+        ! here "to be safe" would refuse a case that is now both correct and fast.
         per_thread_readers_ok = .true.
 #endif
     end function per_thread_readers_ok

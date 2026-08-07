@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_reader_adopt_transform(reader, source)`** gives one reader the read-time transform
+  another has already worked out — its `filter=`/`sample_fraction=` row mask and its `sort_by=`
+  permutation — instead of making it derive the same thing from the same file again. This is for the
+  documented "one reader per thread" pattern: without it, every thread reading a filtered or sorted
+  file repeats the whole filter evaluation and the whole sort. The cost is two atomic refcount
+  increments, because a mask and a permutation are immutable Arrow arrays the readers can share, and
+  several threads may adopt from one idle source at once. It aborts rather than producing a reader
+  whose mask describes different rows: the two readers must be open on files with the same row and
+  row-group counts, the adopting reader must have no transform of its own, and no column may have
+  been read on it yet.
 - **Sorting for plain Fortran arrays and column types**, in a new `parquet_sorting` module
   re-exported by `use parquet`. `pf_argsort` returns the permutation that would sort an array,
   `pf_sort` an independent sorted copy, `pf_permute` applies a permutation in place and
@@ -325,11 +335,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too, split across its row groups rather than its columns, so a `%get` or `%prefetch` of one name
   is no longer serial however large the column is — measured at **3.5–3.8x** on a 30 M-row `float64`
   column over 16 row groups. String columns keep the serial read (their packed store has no fixed
-  row slots to write into), as do columns too small for the split to pay for itself. A read-time `qc=` or `sample_fraction=` (seeded
-  or not) keeps that parallelism and returns exactly what a serial read would, at a measured 3.3x
-  and 3.5x; a `filter=` or a `sort=` falls back to the ordinary serial read, because every reader
-  would have to rebuild the row mask or the sort permutation, and measuring that made a filtered
-  read *slower* than reading serially once all cores are used. A soft `qc=` violation still warns at most once per column either way.
+  row slots to write into), as do columns too small for the split to pay for itself. **A read-time transform keeps all of
+  this**: the extra readers adopt the table's own filter mask and sort permutation rather than
+  rebuilding them, so a `filter=` read is 2.2x, a `sort=` read 2.2x and a `qc=` or
+  `sample_fraction=` read 3.3–3.5x, where a filtered or sorted read used to be serial. A soft `qc=`
+  violation still warns at most once per column.
   New `%ensure_validity([name])` materializes a column's validity storage up
   front, which is what makes nulling elements of one column from several threads safe — validity is
   allocated lazily, so the *first* null would otherwise allocate, and two threads doing that race.

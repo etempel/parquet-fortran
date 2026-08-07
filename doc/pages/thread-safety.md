@@ -72,14 +72,12 @@ them wrong — but two consequences are worth knowing:
   business, not the library's: without that rule, *T* of your threads would each ask for *T* more,
   and the oversubscription is slower than not threading at all. So the per-thread-slice pattern
   below loses nothing — each thread's own table is small and there are already *T* of them running.
-- **A read-time transform is carried by every per-thread reader, and two of the four decline the
-  parallel read on cost.** A `qc=` or a `sample_fraction=` table (seeded or not — the table settles
-  one seed when it is opened, so every reader draws the same rows) prefetches in parallel and
-  returns exactly what a serial read would; a `filter=` or a `sort=` falls back to the serial
-  reader, because every reader would otherwise rebuild the mask or the permutation, which measured
-  slower than the parallel read saves. Nothing about the *answer* changes either way. One
-  consequence worth stating because it is the question people ask: **a soft qc violation still
-  warns at most once per column**, since each column is read by exactly one thread.
+- **A read-time transform keeps the parallelism, because the readers SHARE it.** A `filter=`,
+  `sort=`, `qc=` or `sample_fraction=` table still prefetches in parallel and still returns exactly
+  what a serial read would: the extra readers adopt the table's own row mask and sort permutation
+  rather than rebuilding them. One consequence worth stating because it is the question people ask:
+  **a soft qc violation still warns at most once per column**, since each column is read by exactly
+  one thread and only the table's own reader evaluates the filter.
 - **A parallel rewrite holds one transient column copy per thread**, where a serial one holds one in
   total. The thread count never exceeds the column count, so those copies come to at most one extra
   copy of the table: a `%sort_by` can double the table's peak memory for the duration of the call.
@@ -87,6 +85,51 @@ them wrong — but two consequences are worth knowing:
   [Settings](settings.html#threads-for-mutating-a-table). **`%clone` is exempt**: it allocates a
   second copy of the table by definition, so threading it adds no transient beyond the copy you
   asked for.
+
+## Sharing a filter or a sort between your own readers
+
+The safe multi-threaded pattern is one `parquet_reader` per thread (see the cases below). When the
+file is read with a `filter=` or a `sort_by=`, that pattern has a hidden cost: **every one of those
+readers evaluates the same filter over the same bytes, and rebuilds the same sort permutation.** On
+a large file that can cost more than the parallelism saves.
+
+`parquet_reader_adopt_transform` hands the work over instead of repeating it:
+
+```fortran
+type(parquet_reader) :: shared
+type(parquet_filter) :: filt
+
+call filt%add("mag < 20")
+call parquet_open_reader(shared, "catalogue.parquet", filter=filt)   ! evaluated ONCE
+
+!$omp parallel default(shared)
+block
+    type(parquet_reader) :: mine
+    real(real64), allocatable :: v(:)
+    call parquet_open_reader(mine, "catalogue.parquet")              ! no filter= here
+    call parquet_reader_adopt_transform(mine, shared)                ! ...it adopts one
+    call parquet_read_column(mine, my_column(), v)
+    call parquet_close_reader(mine)
+end block
+!$omp end parallel
+
+call parquet_close_reader(shared)
+```
+
+The cost of `adopt_transform` is two atomic refcount increments — a row mask and a sort permutation
+are immutable Arrow arrays, so the readers share the objects rather than copying them, however large
+the file. Any number of threads may adopt from one source at once, **provided the source is idle**;
+it is only ever read. Adopting while another thread is calling into the source is refused rather
+than raced.
+
+It aborts rather than producing a reader whose mask describes different rows: the two readers must
+be open on files with the same row and row-group counts, the adopting reader must have no filter,
+sample or sort of its own, and no column may have been read on it yet. A source carrying no
+transform at all is a no-op, so there is no need to ask first.
+
+**`parquet_table` does this for you** — `%prefetch`/`%materialize_all` on a filtered or sorted table
+already share one transform across their internal readers, and you write no OpenMP at all. This
+procedure is for the case where you are managing the readers yourself.
 
 ## Practical cases
 

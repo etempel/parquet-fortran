@@ -122,6 +122,7 @@ something a reader is expected to have.
 | [Risk-55](#risk-55--two-readers-of-one-table-can-sample-different-rows-and-only-a-count-mismatch-shows-it) | Two readers of one table can sample different rows, and only a count mismatch shows it | 4 — covered |
 | [Risk-56](#risk-56--a-per-thread-reader-that-writes-shared-cache-state-races-silently) | A per-thread reader that writes shared cache state races silently | 3 — not testable |
 | [Risk-57](#risk-57--a-row-group-split-column-read-allocates-its-validity-bitmap-on-first-null-from-any-thread) | A row-group-split column read allocates its validity bitmap on first null, from any thread | 3 — not testable |
+| [Risk-58](#risk-58--an-adopted-transform-is-shared-state-and-only-its-preconditions-stand-between-it-and-a-wrong-row-set) | An adopted transform is shared state, and only its preconditions stand between it and a wrong row set | 4 — covered |
 
 ---
 
@@ -129,7 +130,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-58**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-59**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -526,6 +527,57 @@ worse than no test, because the next person deletes the guard and the suite agre
   other row group owns any of them. A future change that made two row groups' ranges overlap —
   or that pasted at anything other than `bounds(1, rg)` — breaks the whole argument, not just the
   bitmap. That half IS testable and is covered (see `feature_table_parallel.md` section 17.8).
+
+### Risk-58 — An adopted transform is shared state, and only its preconditions stand between it and a wrong row set
+
+`parquet_reader_adopt_transform` (`src/parquet_core.f90` / `parquet_wrapper.cpp`) gives one reader
+another's filter/sample mask and sort permutation. That is what makes a filtered or sorted table
+readable on several threads at all — but it is also **the only place in this library where a reader
+is put into a state it cannot reach on its own**, and the failure mode is a reader whose mask
+describes rows other than the ones it hands back. Nothing about such a reader looks wrong: it returns
+a column of exactly the length it claims, full of real values from the file.
+
+Four checked preconditions are what stand there, and each closes a different way in:
+
+| precondition | what it prevents |
+|---|---|
+| same row-group **and** row counts | a mask built for a different file, selecting real rows of the wrong ones |
+| destination has no mask or permutation of its own | two transforms that would have to compose; the adopted one indexes rows the reader's own has already removed |
+| no column read on the destination yet | a column read **unmasked** that can never be lined up with the adopted mask |
+| the source's deferred sample draw already installed | adopting a mask that is about to be replaced |
+
+**They are checked rather than documented on purpose.** Three of the four are cheap integer or
+pointer tests, and the fourth is a boolean; a comment saying "the caller must ensure" would cost the
+same and catch nothing. Each has an error scenario
+(`adopt_transform_onto_transformed`, `adopt_transform_after_read`, `adopt_transform_other_file`).
+
+**The `busy` check on the source is NOT one of them, and must not be read as one.** Several threads
+adopting from one source at once is the *intended* use, so the source is deliberately read without a
+`ConcurrencyGuard` — guarding it would make the second thread abort on a reader nobody is writing to.
+What makes that safe is that every field read is either an immutable Arrow array or state not
+written after the source's own open. The `src->busy.load()` test is a net for the case that
+assumption is violated, and it is inherently racy: a reader can become busy the instant after it is
+tested. **Do not delete it** (it catches the realistic misuse, a caller adopting from a reader it is
+also reading), and **do not rely on it** to make a new kind of source access safe.
+
+**What this forbids for the next change here.**
+
+- **Any new field added to `ParquetReaderHandle` that is derived from the mask or the permutation
+  must be added to the copy list**, or an adopting reader will hold a mask and stale bookkeeping
+  about it. `row_group_surviving` and `row_group_live_offsets` are the existing examples, and both
+  are silent when wrong — `parquet_get_chunk_size` would simply answer for the unfiltered file.
+- **The `print_stat` cosmetics are part of the transfer, not decoration.** A reader that applies a
+  filter while reporting none is a debugging trap, and the fields cost O(1).
+- **A reader that has adopted must never then be given a transform of its own.** The destination
+  check covers the ordering that exists today; a future path that adopts and *then* calls
+  `parquet_reader_set_filter` would pass every check and produce two composed masks.
+
+**Test.** The preconditions are covered by the three error scenarios above. What is **not** testable
+is the concurrent-adopt safety itself: *T* threads copying two `shared_ptr`s and some vectors out of
+an idle source is either correct or a race no fixture can force, and the mutations that matter (a
+field left out of the copy list) are covered instead by the equality tests in
+`test/test_table_parallel.f90`, which caught all three tried — see `feature_table_parallel.md`
+section 17.9.
 
 ## 4. Risks already covered, kept for what they still forbid
 

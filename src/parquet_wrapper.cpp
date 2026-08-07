@@ -6293,6 +6293,88 @@ extern "C"
 	// A key column is necessarily read WHOLE -- there is no row-group-scoped equivalent, because a
 	// global order needs every row. That is inherent to sorting, and is the one place F3 costs
 	// memory the filter path does not.
+	// Gives `handle` the row transform `source` already worked out -- its filter/sample mask and its
+	// sort permutation, together with the row-group bookkeeping derived from them -- instead of
+	// making it derive the same thing from the same file a second time.
+	//
+	// **This is a POINTER copy of the two expensive objects, not a data copy.** live_mask is an
+	// arrow::BooleanArray and sort_perm an arrow::Array; both are immutable once built, so sharing
+	// them costs one atomic refcount increment each however large the file. Everything else copied
+	// below is O(row groups) or O(1). That is the whole point: a reader that adopts pays nothing,
+	// where one that rebuilds re-decodes the filter's key columns and re-runs the whole sort.
+	//
+	// **`source` is read WITHOUT a ConcurrencyGuard, deliberately.** The intended caller is several
+	// threads each opening their own reader and adopting from one shared, idle source, so guarding
+	// it would make the second thread abort on a reader nobody is writing to. What makes that safe
+	// is that every field read here is either immutable (the two arrays) or not written after the
+	// source's own open (the vectors and strings) -- so this is a concurrent read of settled state,
+	// plus two atomic increments. The `busy` check below is a net for the case that assumption is
+	// wrong, not the thing that makes it right; it cannot be airtight, because a reader could
+	// become busy the instant after it is tested.
+	//
+	// Refuses rather than silently producing a reader whose mask describes a different file: the
+	// two must agree on row-group count and total row count, the destination must be untouched (a
+	// column already read on it was read UNMASKED and would not match the adopted mask), and the
+	// source's own sample draw must be complete rather than deferred. A source with no transform at
+	// all is a legal no-op -- the caller should not have to ask whether there is anything to adopt.
+	int64_t parquet_reader_adopt_transform(void *handle, void *source, char *err_out, int64_t err_cap)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto *src = static_cast<ParquetReaderHandle *>(source);
+
+		if (src->busy.load())
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"the source reader is in use by another thread; its transform can only be adopted while it is idle");
+			return 1;
+		}
+		if (src->num_row_groups != reader_handle->num_row_groups || src->total_nrows != reader_handle->total_nrows)
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"the two readers describe different files (%lld vs %lld row groups, %lld vs %lld rows)",
+				static_cast<long long>(src->num_row_groups), static_cast<long long>(reader_handle->num_row_groups),
+				static_cast<long long>(src->total_nrows), static_cast<long long>(reader_handle->total_nrows));
+			return 1;
+		}
+		if (src->has_pending_sample)
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"the source reader's sample draw has not been installed yet");
+			return 1;
+		}
+		if (reader_handle->live_mask || reader_handle->sort_perm)
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"this reader already has a filter, a sample or a sort of its own");
+			return 1;
+		}
+		if (!reader_handle->column_cache.empty())
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"a column has already been read on this reader, and would have been read unmasked");
+			return 1;
+		}
+
+		// The mask and everything derived from it. Order does not matter here -- unlike
+		// set_filter/set_sort, nothing below is computed from anything else below.
+		reader_handle->nrows = src->nrows;
+		reader_handle->live_mask = src->live_mask;                          // refcount increment
+		reader_handle->row_group_live = src->row_group_live;
+		reader_handle->row_group_live_offsets = src->row_group_live_offsets;
+		reader_handle->row_group_surviving = src->row_group_surviving;
+		reader_handle->row_groups_pruned = src->row_groups_pruned;
+		reader_handle->sort_perm = src->sort_perm;                          // refcount increment
+		// Cosmetic, but they belong to the same act: parquet_reader_print_stat on an adopting
+		// reader should describe the transform it is actually applying, not report none.
+		reader_handle->filter_clauses = src->filter_clauses;
+		reader_handle->filter_expr_text = src->filter_expr_text;
+		reader_handle->sort_key_text = src->sort_key_text;
+		reader_handle->has_sample = src->has_sample;
+		reader_handle->sample_fraction = src->sample_fraction;
+		reader_handle->sample_seed_used = src->sample_seed_used;
+		return 0;
+	}
+
 	int64_t parquet_reader_set_sort(void *handle,
 		const char *names_packed, int64_t name_len,
 		const int8_t *descending, const int8_t *nulls_first,

@@ -861,6 +861,24 @@ contains
         if (sort_by%n == 0) return
         call parquet_apply_sort(reader, sort_by, "parquet_reader_set_sort")
     end procedure parquet_reader_set_sort
+    module procedure parquet_reader_adopt_transform
+        character(len=:), allocatable :: name_suffix
+        character(len=1024) :: c_err
+        integer(c_long_long) :: status
+        !
+        call check_reader_open(reader, "parquet_reader_adopt_transform")
+        call check_reader_open(source, "parquet_reader_adopt_transform")
+        c_err = ""
+        ! Every precondition is checked on the C++ side rather than duplicated here: they are all
+        ! about state this module cannot see (whether a mask is installed, whether a column has been
+        ! decoded, whether the source's deferred sample draw has completed), and a Fortran-side copy
+        ! of any of them could only go stale.
+        status = c_reader_adopt_transform(reader%handle, source%handle, c_err, int(len(c_err), kind=c_long_long))
+        if (status /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_reader_adopt_transform: " // trim(c_err) // name_suffix
+        end if
+    end procedure parquet_reader_adopt_transform
     module procedure parquet_open_reader_nrows_int64
         call parquet_open_reader_base(reader, filename, use_threads, filter, sample_fraction, sample_seed, schema, qc, &
             qc_soft, prefetch, sort_by)

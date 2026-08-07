@@ -512,6 +512,12 @@ program error_scenarios
         call scenario_sort_set_sort_twice()
     case ("sort_set_sort_after_read")
         call scenario_sort_set_sort_after_read()
+    case ("adopt_transform_onto_transformed")
+        call scenario_adopt_transform_onto_transformed()
+    case ("adopt_transform_after_read")
+        call scenario_adopt_transform_after_read()
+    case ("adopt_transform_other_file")
+        call scenario_adopt_transform_other_file()
     case ("sample_negative_fraction")
         call scenario_sample_negative_fraction()
     case ("sample_nan_fraction")
@@ -4273,6 +4279,64 @@ contains
         call parquet_reader_set_sort(reader, srt)   ! -> aborts (a column has already been read)
         print '(a)', "unexpectedly applied a sort after reading a column"
     end subroutine scenario_sort_set_sort_after_read
+
+    !> parquet_reader_adopt_transform onto a reader that already has a transform of its own: the two
+    !> would have to compose, and the adopted mask indexes rows the reader's own mask has already
+    !> removed.
+    subroutine scenario_adopt_transform_onto_transformed()
+        type(parquet_reader) :: src, dst
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_adopt_onto_transformed.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call filt%add("v >= 2")
+        call parquet_open_reader(src, out_file, filter=filt)
+        call parquet_open_reader(dst, out_file, filter=filt)
+        call parquet_reader_adopt_transform(dst, src)   ! -> aborts (already has one of its own)
+        print '(a)', "unexpectedly adopted a transform onto an already-transformed reader"
+    end subroutine scenario_adopt_transform_onto_transformed
+
+    !> parquet_reader_adopt_transform after a column has been read: that column was read UNMASKED
+    !> and could never be lined up with the rows the adopted mask keeps.
+    subroutine scenario_adopt_transform_after_read()
+        type(parquet_reader) :: src, dst
+        type(parquet_filter) :: filt
+        integer(int32) :: back(4)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_adopt_after_read.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call filt%add("v >= 2")
+        call parquet_open_reader(src, out_file, filter=filt)
+        call parquet_open_reader(dst, out_file)
+        call parquet_read_column(dst, "v", back)
+        call parquet_reader_adopt_transform(dst, src)   ! -> aborts (a column has already been read)
+        print '(a)', "unexpectedly adopted a transform after reading a column"
+    end subroutine scenario_adopt_transform_after_read
+
+    !> parquet_reader_adopt_transform between readers on DIFFERENT files: the mask describes one
+    !> file's rows and would silently mis-select the other's.
+    subroutine scenario_adopt_transform_other_file()
+        type(parquet_reader) :: src, dst
+        type(parquet_filter) :: filt
+        type(parquet_writer) :: w
+        integer(int32) :: v(9)
+        integer :: i
+        character(len=*), parameter :: src_file = "test_run/error_scenario_adopt_other_src.parquet"
+        character(len=*), parameter :: dst_file = "test_run/error_scenario_adopt_other_dst.parquet"
+
+        call write_sort_scenario_fixture(src_file)
+        do i = 1, 9
+            v(i) = int(i, int32)
+        end do
+        call parquet_open_writer(w, dst_file)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        call filt%add("v >= 2")
+        call parquet_open_reader(src, src_file, filter=filt)
+        call parquet_open_reader(dst, dst_file)
+        call parquet_reader_adopt_transform(dst, src)   ! -> aborts (different files)
+        print '(a)', "unexpectedly adopted a transform across two different files"
+    end subroutine scenario_adopt_transform_other_file
 
     !> The point of a row-group-SCOPED filter (`parquet_reader_set_filter(reader, filt, lo, hi)`),
     !> asserted rather than assumed: building the mask must not read any column whole-file. That is

@@ -387,10 +387,6 @@ contains
             r => cache%reader
         end if
         masked = table_slice_is_masked(cache)
-        ! On the masked path the filter is attached after the open instead, because only
-        ! parquet_reader_set_filter can carry the slice's row range with it -- see below.
-        if (allocated(cache%read_filter) .and. .not. masked) pass_filter = cache%read_filter
-        if (allocated(cache%read_sort)) pass_sort = cache%read_sort
         ! qc_soft only ever matters when a qc schema is actually attached, and passing it on its
         ! own would be a no-op the reader still has to reason about -- so it travels with the
         ! schema or not at all.
@@ -398,6 +394,31 @@ contains
             pass_schema = cache%read_qc_schema
             pass_qc_soft = cache%read_qc_soft
         end if
+        !
+        ! AN ADDITIONAL READER ADOPTS THE TABLE'S TRANSFORM RATHER THAN REDERIVING IT. The filter
+        ! mask and the sort permutation are immutable Arrow arrays the table's own reader has
+        ! already built, so handing them over costs two atomic refcount increments -- where
+        ! rebuilding them means re-decoding the filter's key columns and re-running the whole sort,
+        ! per reader. That difference is what lets the parallel read paths accept a filtered or
+        ! sorted table at all; before it, both were refused on measured cost.
+        !
+        ! The sample rides along inside the same mask, so it is not passed either: a reader that
+        ! adopts cannot draw a different subset, because it never draws. And a masked slice needs no
+        ! second `parquet_reader_set_filter` call, because the row range is already part of the mask
+        ! being adopted. qc is the one thing that must still be installed per reader -- its rules are
+        ! per reader but its CHECKS run per column read, and each column is read by exactly one
+        ! thread, so nothing is checked or warned twice.
+        if (present(rdr)) then
+            call parquet_open_reader(r, filename, schema=pass_schema, qc_soft=pass_qc_soft, &
+                use_threads=use_threads)
+            call parquet_reader_adopt_transform(r, cache%reader)
+            return
+        end if
+        !
+        ! On the masked path the filter is attached after the open instead, because only
+        ! parquet_reader_set_filter can carry the slice's row range with it -- see below.
+        if (allocated(cache%read_filter) .and. .not. masked) pass_filter = cache%read_filter
+        if (allocated(cache%read_sort)) pass_sort = cache%read_sort
         call parquet_open_reader(r, filename, filter=pass_filter, &
             sort_by=pass_sort, schema=pass_schema, qc_soft=pass_qc_soft, use_threads=use_threads, &
             sample_fraction=cache%read_sample_fraction, &

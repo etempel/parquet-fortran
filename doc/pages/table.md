@@ -399,25 +399,30 @@ row group**, **enough work to pay for opening the extra readers** (a column of a
 or less stays serial), and a **non-string** column: a string column's packed variable-length store has
 no fixed row slots to write row groups into, so it keeps the ordinary whole-column read.
 
-A **read-time transform** is carried by every one of those readers, so `%prefetch` and
-`%materialize_all` return exactly what a serial read would — but two of the four fall back to the
-serial read anyway, because rebuilding them per reader costs more than the parallel read saves:
+**A read-time transform keeps all of this.** The extra readers do not re-derive the table's
+`filter=` mask or its `sort=` permutation — they **share** them, which is a refcount increment
+because both are immutable Arrow arrays. So every combination is parallel, and every one returns
+exactly what a serial read would:
 
-| opened with | prefetches in parallel? | why |
-|---|---|---|
-| `qc=` | **yes** | the rules are installed per reader but checked per column, and each column is read by one thread — nothing is checked twice. Measured **3.3x** |
-| `sample_fraction=` | **yes**, seeded or not | the table settles one seed at open, so every reader draws the same rows (see [`%clone` keeps it](#filtering-sorting-and-checking-rows-as-the-file-is-opened)). Measured **3.5x** |
-| `filter=` | no | every reader would re-decode the filter's key columns and rebuild the row mask. Measured **0.94x** at the automatic thread count (it peaks at ~1.2x around 3–5 threads, then goes negative as the per-reader cost outgrows the saving) |
-| `sort=` | no | every reader would rebuild the whole sort permutation, serially |
+| opened with | measured, 16 columns × 2 M rows, 8 threads |
+|---|---|
+| nothing | **4.5x** |
+| `qc=` | **3.3x** — rules are installed per reader but checked per column, and each column is read by one thread, so nothing is checked or warned twice |
+| `sample_fraction=` | **3.5x**, seeded or not — the table settles one seed at open and the draw rides inside the shared mask |
+| `filter=` | **2.2x** with one key column, **1.3x** with eight — the filter's own evaluation is done once, by the table's reader, and stays serial |
+| `sort=` | **2.2x** — one permutation, built once |
+| `filter=` + `sort=` | **1.8x** |
 
-Both fallbacks are about cost, not correctness, and both are transparent: the answer is identical
-either way, only slower than an untransformed read of the same file would be.
+The transformed cases fall short of 4.5x because the transform itself is still worked out serially,
+once, before the parallel read begins — not because any of it is repeated.
 
-**Qc warnings are not duplicated by this** — with one exception. A `qc_soft=.true.` violation prints
-at most once per column per reader, and each column is read by exactly one thread, so the parallel
-read prints exactly what the serial read prints. The exception is a column that a `filter=` also
-touches while evaluating its own clauses, which every reader evaluates; that combination stays on
-the serial path today, so it does not arise in practice.
+**Qc warnings are not duplicated by this.** A `qc_soft=.true.` violation prints at most once per
+column per reader, and each column is read by exactly one thread, so the parallel read prints exactly
+what the serial read prints — including for a column the filter itself touches, since only the
+table's own reader ever evaluates the filter.
+
+If you open readers yourself rather than through a table, `parquet_reader_adopt_transform` is the
+same mechanism, available directly — see [Thread safety](thread-safety.html).
 
 ### Growing one table from several threads
 

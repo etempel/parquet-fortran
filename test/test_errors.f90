@@ -365,6 +365,12 @@ contains
                 test_sort_set_sort_twice_aborts), &
             new_unittest("sort: parquet_reader_set_sort after a read aborts", &
                 test_sort_set_sort_after_read_aborts), &
+            new_unittest("adopt_transform onto an already-transformed reader aborts", &
+                test_adopt_transform_onto_transformed_aborts), &
+            new_unittest("adopt_transform after a column has been read aborts", &
+                test_adopt_transform_after_read_aborts), &
+            new_unittest("adopt_transform across two different files aborts", &
+                test_adopt_transform_other_file_aborts), &
             new_unittest("filter: vector column aborts", &
                 test_filter_vector_column_aborts), &
             new_unittest("filter: malformed rule aborts", &
@@ -3344,6 +3350,41 @@ contains
             failure_message="applying a sort after reading a column was expected to abort", &
             required_stderr="a column has already been read on this reader")
     end subroutine test_sort_set_sort_after_read_aborts
+
+    !> parquet_reader_adopt_transform abort paths: see the three scenario_adopt_transform_*
+    !> subroutines in test/error_scenarios.f90 for what each does and why that state is rejected.
+    !>
+    !> All three guard the same property from different sides -- that an adopted mask must describe
+    !> exactly the rows the adopting reader will hand back. The primitive puts a reader into a state
+    !> it cannot reach on its own, which is why its preconditions are checked rather than documented.
+    subroutine test_adopt_transform_onto_transformed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "adopt_transform_onto_transformed", &
+            expect_abort=.true., &
+            failure_message="adopting onto an already-transformed reader was expected to abort", &
+            required_stderr="already has a filter, a sample or a sort of its own")
+    end subroutine test_adopt_transform_onto_transformed_aborts
+
+    !> See test_adopt_transform_onto_transformed_aborts for the shared reasoning.
+    subroutine test_adopt_transform_after_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "adopt_transform_after_read", &
+            expect_abort=.true., &
+            failure_message="adopting a transform after reading a column was expected to abort", &
+            required_stderr="a column has already been read on this reader")
+    end subroutine test_adopt_transform_after_read_aborts
+
+    !> See test_adopt_transform_onto_transformed_aborts for the shared reasoning.
+    subroutine test_adopt_transform_other_file_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "adopt_transform_other_file", &
+            expect_abort=.true., &
+            failure_message="adopting a transform across two different files was expected to abort", &
+            required_stderr="describe different files")
+    end subroutine test_adopt_transform_other_file_aborts
 
     !> parquet_open_reader(..., filter=) validates every filter column name
     !> against the schema before applying it -- an unknown column aborts

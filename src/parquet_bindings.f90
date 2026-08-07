@@ -70,6 +70,7 @@ module parquet_bindings
     public :: parquet_sort_argsort_int64, parquet_sort_argsort_double, parquet_sort_argsort_string
     public :: parquet_sort_is_sorted_int64, parquet_sort_is_sorted_double, parquet_sort_is_sorted_string
     public :: parquet_reader_set_sample
+    public :: c_reader_adopt_transform
     public :: parquet_draw_sample_seed
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
@@ -635,6 +636,25 @@ module parquet_bindings
             integer(c_long_long), value :: n !! number of sort keys.
             character(kind=c_char) :: key_text(*) !! whole key list, for print_stat only.
             integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
+            character(kind=c_char) :: err_out(*) !! receives the failure message, if any.
+            integer(c_long_long), value :: err_cap !! capacity of err_out, in characters.
+            integer(c_long_long) :: status !! 0 on success, 1 on failure.
+        end function
+
+        !> Gives `reader` the row transform `source` has already worked out -- its filter/sample
+        !> mask, its sort permutation and the row-group bookkeeping derived from them -- rather than
+        !> making it derive the same thing from the same file again. A POINTER copy of the two
+        !> expensive objects (both immutable Arrow arrays), so the cost is two atomic refcount
+        !> increments however large the file. `source` is read WITHOUT the concurrency guard, so
+        !> several threads may adopt from one idle source at once; see the C++ side for why that is
+        !> safe and what it refuses. Returns 0, or 1 with a NUL-terminated message in `err_out`.
+        !> Named c_reader_adopt_transform here because the public API procedure
+        !> parquet_reader_adopt_transform (parquet_core.f90) owns that name.
+        function c_reader_adopt_transform(reader, source, err_out, err_cap) &
+                bind(C, name="parquet_reader_adopt_transform") result(status)
+            import
+            type(c_ptr), value :: reader !! reader to give the transform to; must have none of its own.
+            type(c_ptr), value :: source !! reader whose transform is adopted; must be idle.
             character(kind=c_char) :: err_out(*) !! receives the failure message, if any.
             integer(c_long_long), value :: err_cap !! capacity of err_out, in characters.
             integer(c_long_long) :: status !! 0 on success, 1 on failure.

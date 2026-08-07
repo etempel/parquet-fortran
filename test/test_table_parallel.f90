@@ -132,8 +132,8 @@ contains
                 test_clone_parallel_equals_serial), &
             new_unittest("clone leaves an unread column unread, on either path", &
                 test_clone_keeps_lazy_columns_unread), &
-            new_unittest("a filtered table still prefetches serially, pending P9", &
-                test_prefetch_filter_still_serial), &
+            new_unittest("a filtered table prefetches in parallel and agrees with the serial read", &
+                test_prefetch_filter_parallel_equals_serial), &
             new_unittest("an UNSEEDED sample prefetches in parallel with every column on one sample", &
                 test_prefetch_sample_unseeded_columns_agree), &
             new_unittest("sample_seed=0 is treated as unseeded and is equally safe in parallel", &
@@ -144,8 +144,8 @@ contains
                 test_prefetch_qc_parallel_equals_serial), &
             new_unittest("a soft qc violation warns once per column, on either path", &
                 test_prefetch_qc_soft_warns_per_column), &
-            new_unittest("a sorted table still prefetches serially, pending P9", &
-                test_prefetch_sort_still_serial), &
+            new_unittest("a sorted table prefetches in parallel, sharing one permutation", &
+                test_prefetch_sort_parallel_equals_serial), &
             new_unittest("one column's read splits across row groups and matches the whole read", &
                 test_colread_split_equals_whole), &
             new_unittest("nulls land in the right rows when one column's read is split", &
@@ -399,30 +399,24 @@ contains
     ! P4 -- the widened prefetch gate
     ! ==================================================================================
     !
-    !> A `filter=` table still prefetches serially, and this asserts the refusal.
+    !> A `filter=` table now prefetches on several threads, and this asserts the answer is unchanged.
     !>
-    !> **The reason is cost, not correctness, and that distinction is the whole point of this
-    !> test.** A filter is a pure function of the file, so every per-thread reader computes the same
-    !> mask, and `table_open_reader_with_transform` would carry it correctly -- the machinery is
-    !> there and is exercised by the sample and qc tests below. But each reader also re-decodes the
-    !> filter's key columns, re-runs the statistics screen and rebuilds the row mask -- a cost that
-    !> grows with the thread count while the saving decays with it. Measured on a 16-column x 2 M-row
-    !> file over three rounds, the speedup peaks at ~1.2x around 3-5 threads and falls to **0.94x at
-    !> the automatic count**, which is what a caller actually gets; the same file with no filter is
-    !> 4.0-4.7x. So the clause was closed again on the evidence, not left open on the argument.
+    !> **It used to assert the refusal, and the change of subject is the milestone.** The clause was
+    !> closed on measured cost -- every per-thread reader re-decoded the filter's key columns and
+    !> rebuilt the row mask, at 0.65x-1.15x depending on how many columns the filter named, against
+    !> 4.5x for an unfiltered read. Additional readers now ADOPT the table's own mask
+    !> (`parquet_reader_adopt_transform`), which is a refcount increment on an immutable Arrow array,
+    !> so there is nothing left to rebuild and nothing left to trade off.
     !>
-    !> **When P9 lands, this becomes an equality test, not a deletion.** Sharing the mask makes the
-    !> per-reader cost a refcount increment, at which point the clause goes and what needs asserting
-    !> is that the shared mask kept the answer.
-    !>
-    !> The serial answer still has to be right, so this also checks it -- a refusal that returned
-    !> wrong rows would pass a thread-count assertion on its own.
-    subroutine test_prefetch_filter_still_serial(error)
+    !> Correctness was never the question -- a filter is a pure function of the file, so every reader
+    !> computed the same mask even when each built its own. What sharing changes is that they can no
+    !> longer differ *at all*, which is a stronger statement than this test is able to make.
+    subroutine test_prefetch_filter_parallel_equals_serial(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: f = "test_run/tblpar_prefetch_filter.parquet"
-        type(parquet_table) :: t
+        type(parquet_table) :: par, ser
         type(parquet_filter) :: filt
-        real(real64), allocatable :: a(:), e(:)
+        real(real64), allocatable :: pa(:), sa(:), pe(:), se(:)
         integer :: used
         !
         call write_wide_fixture(f)
@@ -430,22 +424,37 @@ contains
         !
         call parquet_reset_settings()
         call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
-        call parquet_open_table(t, f, filter=filt)
-        call t%materialize_all()
+        call parquet_open_table(par, f, filter=filt)
+        call par%materialize_all()
         used = int(parquet_debug_get_prefetch_threads_used())
-        call check(error, used == 0, &
-            "a filtered table must still prefetch serially: every per-thread reader would " // &
-            "re-evaluate the filter, which measured slower than the serial read (deferred to P9)")
+        call check_prefetch_really_parallel(error, used, "a filtered table")
         if (allocated(error)) return
         !
-        call t%get("a", a)
-        call t%get("e", e)
-        call check(error, size(a) == FROWS / 2 .and. abs(a(1) - real(FROWS / 2 + 1, real64)) &
-            < 1.0e-9_real64, "the serial read of a filtered table returned the wrong rows")
+        call parquet_set_prefetch_threads(1)
+        call parquet_open_table(ser, f, filter=filt)
+        call ser%materialize_all()
+        call parquet_reset_settings()
+        !
+        call check(error, par%nrows() == ser%nrows() .and. par%nrows() == int(FROWS / 2, int64), &
+            "the parallel and serial reads of a filtered table disagreed on the row count")
         if (allocated(error)) return
-        call check(error, all(abs(e - 5.0_real64 * a) < 1.0e-9_real64), &
+        call par%get("a", pa)
+        call ser%get("a", sa)
+        call par%get("e", pe)
+        call ser%get("e", se)
+        call check(error, all(abs(pa - sa) < 1.0e-9_real64), &
+            "a filtered table's first column differed between the parallel and serial prefetch")
+        if (allocated(error)) return
+        ! The last column too: the first is likeliest to be read by thread 0 either way, so a reader
+        ! that had somehow lost the mask would show up in a later column, not this one.
+        call check(error, all(abs(pe - se) < 1.0e-9_real64), &
+            "a filtered table's last column differed between the parallel and serial prefetch")
+        if (allocated(error)) return
+        ! And the columns must be in step with EACH OTHER, which the A/B comparison above cannot
+        ! see: two readers agreeing on a wrong mask would satisfy it (feature_risks.md Risk-52).
+        call check(error, all(abs(pe - 5.0_real64 * pa) < 1.0e-9_real64), &
             "two columns of a filtered table came from different row sets")
-    end subroutine test_prefetch_filter_still_serial
+    end subroutine test_prefetch_filter_parallel_equals_serial
     !
     !> **The load-bearing test of P4.**
     !>
@@ -670,24 +679,25 @@ contains
             "a soft qc violation gave different values on the parallel and serial prefetch")
     end subroutine test_prefetch_qc_soft_warns_per_column
     !
-    !> `sort=` is the one read-time transform the gate still refuses, and this asserts the refusal
-    !> rather than trusting the comment.
+    !> A `sort=` table now prefetches on several threads, sharing one permutation.
     !>
-    !> **It is a deferral, not a verdict** -- each per-thread reader would rebuild the whole
-    !> permutation serially, which the permutation being an immutable shared object makes avoidable
-    !> (milestone P9). When P9 lands, this test is the one to rewrite into an equality test, not the
-    !> one to delete: what it asserts today is that the refusal is real, and what it should assert
-    !> afterwards is that sharing the permutation kept the answer.
+    !> **This is the case sharing was invented for.** A per-thread reader that rebuilt the sort would
+    !> do it serially -- `pf_sort_threads` stands down inside a parallel region, deliberately -- and
+    !> the rebuild was measured at 5.88 s on a 20.8 M-row file, per thread, against a prefetch saving
+    !> of a couple of seconds. Adopting the permutation instead is one atomic refcount increment on
+    !> an immutable `arrow::Array`, so the cost that justified the refusal is simply gone.
     !>
-    !> The counter is written only on the parallel path, so `0` is the refusal and any positive
-    !> value is the gate having opened. The sibling tests above are the positive control that the
-    !> counter is wired up at all -- without them, `0` would pass against a hook that never fires.
-    subroutine test_prefetch_sort_still_serial(error)
+    !> **The assertion that matters is the cross-column one.** A permutation destroys row-group
+    !> locality: sorted row 5 may come from row group 47. So two readers holding *different*
+    !> permutations of the same rows would each return a perfectly plausible sorted column of exactly
+    !> the right length, and only their disagreement with each other would show it. That is what
+    !> `e == 5*a` catches and what a row count or an A/B length check never could.
+    subroutine test_prefetch_sort_parallel_equals_serial(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: f = "test_run/tblpar_prefetch_sort.parquet"
-        type(parquet_table) :: t
+        type(parquet_table) :: par, ser
         type(parquet_sortkey) :: srt
-        real(real64), allocatable :: a(:), e(:)
+        real(real64), allocatable :: pa(:), sa(:), pe(:), se(:)
         integer :: used
         !
         call write_wide_fixture(f)
@@ -695,23 +705,36 @@ contains
         !
         call parquet_reset_settings()
         call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
-        call parquet_open_table(t, f, sort=srt)
-        call t%materialize_all()
+        call parquet_open_table(par, f, sort=srt)
+        call par%materialize_all()
         used = int(parquet_debug_get_prefetch_threads_used())
-        call check(error, used == 0, &
-            "a sorted table must still prefetch serially: a per-thread reader would rebuild the " // &
-            "whole sort permutation (deferred until P9, not impossible)")
+        call check_prefetch_really_parallel(error, used, "a sorted table")
         if (allocated(error)) return
         !
-        ! The serial path still has to be right, and descending on column a puts the last row first.
-        call t%get("a", a)
-        call t%get("e", e)
-        call check(error, size(a) == FROWS .and. abs(a(1) - real(FROWS, real64)) < 1.0e-9_real64, &
-            "the serial read of a sorted table lost its sort order")
+        call parquet_set_prefetch_threads(1)
+        call parquet_open_table(ser, f, sort=srt)
+        call ser%materialize_all()
+        call parquet_reset_settings()
+        !
+        call par%get("a", pa)
+        call ser%get("a", sa)
+        call par%get("e", pe)
+        call ser%get("e", se)
+        call check(error, size(pa) == FROWS .and. size(sa) == FROWS, &
+            "a sorted table's row count changed between the parallel and serial prefetch")
         if (allocated(error)) return
-        call check(error, all(abs(e - 5.0_real64 * a) < 1.0e-9_real64), &
-            "two columns of a sorted table came back in different orders")
-    end subroutine test_prefetch_sort_still_serial
+        ! Descending on a, so the largest row comes first -- checked before the A/B comparison,
+        ! because two readers that had both lost the sort would agree with each other perfectly.
+        call check(error, abs(pa(1) - real(FROWS, real64)) < 1.0e-9_real64, &
+            "the parallel read of a sorted table lost its sort order")
+        if (allocated(error)) return
+        call check(error, all(abs(pa - sa) < 1.0e-9_real64) .and. all(abs(pe - se) < 1.0e-9_real64), &
+            "a sorted table's values differed between the parallel and serial prefetch")
+        if (allocated(error)) return
+        call check(error, all(abs(pe - 5.0_real64 * pa) < 1.0e-9_real64), &
+            "two columns of a sorted table came back in different orders; the per-thread readers " // &
+            "did not share one permutation")
+    end subroutine test_prefetch_sort_parallel_equals_serial
     !
     !> The prefetch counterpart of `check_really_parallel`: asserts the internally-parallel prefetch
     !> actually engaged, and says nothing on a single-threaded OpenMP build where declining is

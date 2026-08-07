@@ -1092,6 +1092,7 @@ module parquet_core
     public :: parquet_compose_read_qc
     public :: parquet_get_qc_columns
     public :: parquet_reader_set_sort
+    public :: parquet_reader_adopt_transform
     public :: parquet_column_info
     public :: parquet_column_type
     public :: parquet_size_auto
@@ -2360,6 +2361,31 @@ module parquet_core
             type(parquet_reader), intent(inout) :: reader !! open, unsorted reader with no column decoded yet.
             type(parquet_sortkey), intent(in) :: sort_by !! sort keys, parsed and validated here.
         end subroutine parquet_reader_set_sort
+        !> Gives `reader` the read-time transform `source` has already worked out, instead of making
+        !! it work the same thing out again from the same file.
+        !!
+        !! **What this is for.** The recommended way to read one file from several threads is to give
+        !! each thread its own `parquet_reader` (see the Thread safety guide). When that file is read
+        !! with a `filter=` or a `sort_by=`, every one of those readers would otherwise re-decode the
+        !! filter's key columns and rebuild the whole sort permutation -- work that is identical in
+        !! every reader and can cost more than the parallelism saves. This hands it over instead.
+        !!
+        !! **The cost is two atomic refcount increments**, not a data copy: a filter mask and a sort
+        !! permutation are immutable Arrow arrays, so the readers share them. Everything else
+        !! transferred is proportional to the file's row-group count.
+        !!
+        !! **`source` may be adopted from by several threads at once**, provided it is idle -- it is
+        !! only read. What it must NOT be is in use by another thread at the same moment, which is
+        !! refused rather than raced.
+        !!
+        !! Aborts unless: the two readers are open on files with the same row-group and row counts;
+        !! `reader` has no filter, sample or sort of its own; and no column has been read on `reader`
+        !! yet (one already read was read unmasked, and could not be lined up with an adopted mask).
+        !! A `source` carrying no transform at all is a no-op, so a caller need not ask first.
+        module subroutine parquet_reader_adopt_transform(reader, source)
+            type(parquet_reader), intent(inout) :: reader !! open reader with no transform of its own yet.
+            type(parquet_reader), intent(in) :: source !! open, idle reader whose transform is adopted.
+        end subroutine parquet_reader_adopt_transform
         !> Reader, int32 specific of parquet_get_chunk_size -- see the generic interface above.
         module subroutine parquet_get_chunk_size_reader_int32(reader, chunk_size, row_group)
             type(parquet_reader), intent(in) :: reader !! open reader.

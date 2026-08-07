@@ -115,6 +115,12 @@ contains
             new_unittest("auto is serial inside a parallel region", test_threads_auto_in_parallel), &
             new_unittest("threads=1 forces serial", test_threads_one_is_serial), &
             new_unittest("unique and rank take threads too", test_threads_on_derived), &
+            new_unittest("every size from 2 to 400 threads identically", test_merge_size_sweep), &
+            new_unittest("a threaded sort is still a permutation at every size", test_merge_sweep_is_permutation), &
+            new_unittest("the final merge round is really co-ranked", test_merge_round_threads_used), &
+            new_unittest("co-ranking survives its extreme inputs", test_merge_corank_extremes), &
+            new_unittest("strings and multi-key merge identically", test_merge_key_families), &
+            new_unittest("nulls and NaNs merge identically", test_merge_tiers), &
             new_unittest("assume_valid really skips the scan for a column", test_permute_column_assume_valid), &
             new_unittest("group_offsets marks every run of equal rows", test_group_offsets_basic), &
             new_unittest("group_offsets handles empty, single and all-tied", test_group_offsets_edges), &
@@ -1755,6 +1761,354 @@ contains
         if (allocated(error)) return
         call check(error, all(r1 == r2), "a threaded pf_rank must produce the same ranks")
     end subroutine test_threads_on_derived
+    !
+    !> Shrinks the smallest output range the co-ranked merge gives its own thread, so a test-sized
+    !! array reaches the co-rank at all; 0 restores the real floor.
+    !!
+    !! **Every test below that sorts fewer than ~32000 elements is worthless without this**, and
+    !! silently so. The real floor is 16384, and a pair shorter than twice that is merged in one
+    !! piece — which is exactly the old, correct, single-threaded merge. So a dense sweep over small
+    !! arrays exercises the path this feature *replaced*, calls the co-rank zero times, and passes.
+    !! Found by mutation, not by reasoning: two deliberate co-rank defects survived the entire suite
+    !! until the sweeps started calling this. `feature_risks.md` Risk-49.
+    subroutine force_merge_segments(min_segment)
+        integer(int64), intent(in) :: min_segment !! new floor in elements; 0 restores the built-in one.
+        interface
+            subroutine set_min_seg(n) bind(C, name="parquet_debug_set_sort_merge_min_segment")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! elements; <= 0 restores the real floor.
+            end subroutine set_min_seg
+        end interface
+        call set_min_seg(int(min_segment, int64))
+    end subroutine force_merge_segments
+    !
+    !> How many threads worked the last sort's FINAL merge round, the calling thread included.
+    function merge_threads_used() result(n)
+        integer(int64) :: n !! 1 means that round ran on one thread.
+        interface
+            function get_used() bind(C, name="parquet_debug_get_sort_merge_threads_used") result(k)
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: k !! threads that worked the final merge round.
+            end function get_used
+        end interface
+        n = int(get_used(), int64)
+    end function merge_threads_used
+    !
+    !> **The single highest-value test of the co-ranked merge**, and the reason it is a *dense* sweep
+    !! rather than a handful of round numbers.
+    !!
+    !! Co-ranking splits each merge by binary search, and the classic defect it invites is an
+    !! off-by-one that shows up at exactly one array size and passes at every neighbouring one --
+    !! a boundary that lands one element early only matters when some run happens to end there. So
+    !! this asserts the identity oracle at EVERY size from 2 to 400 and at every thread count from 2
+    !! to 8, then at a scattering of larger and deliberately awkward sizes (primes, powers of two and
+    !! their neighbours, exact multiples of the thread count) that reach merge rounds the small sizes
+    !! never do.
+    !!
+    !! The oracle itself is the one the whole feature rests on: `SortRowLess` ends with a tiebreaker
+    !! on the row index, so it is a total order in which no two rows compare equal, and every correct
+    !! sorting algorithm must therefore produce the identical permutation. A threaded answer that
+    !! differs from the serial one at any size or thread count is a defect, never a variation.
+    !!
+    !! ~2800 sorts of trivially small arrays, well under a second, and a decided permanent cost: the
+    !! density IS the test, so do not narrow the range to make it faster.
+    subroutine test_merge_size_sweep(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: nbig = 12
+        !> Sizes past the dense range, chosen to be awkward: primes, powers of two and their
+        !! neighbours, and exact multiples of a thread count.
+        integer, parameter :: big(nbig) = [401, 511, 512, 513, 1021, 1024, 1025, 2048, 3000, 4093, 5000, 8192]
+        real(real64), allocatable :: v(:)
+        integer(int32), allocatable :: ser(:), par(:)
+        integer :: n, t, k
+
+        do n = 2, 400
+            allocate(v(n))
+            call ties_fixture(v)
+            call force_merge_segments(1_int64)   ! every pair segments, however small
+        call force_parallel_threshold(1000000000_int64)  ! above the size -> serial reference
+            call pf_argsort(v, ser)
+            call force_parallel_threshold(2_int64)           ! below the size -> parallel
+            do t = 2, 8
+                call pf_argsort(v, par, threads=t)
+                call check(error, size(par) == n .and. all(par == ser), &
+                    "a co-ranked merge must equal the serial permutation at n="//itoa(n)// &
+                    " threads="//itoa(t))
+                if (allocated(error)) exit
+            end do
+            deallocate(v)
+            if (allocated(error)) exit
+        end do
+        if (allocated(error)) then
+            call force_merge_segments(0_int64)
+        call force_parallel_threshold(0_int64)
+            return
+        end if
+        do k = 1, nbig
+            allocate(v(big(k)))
+            call ties_fixture(v)
+            call force_parallel_threshold(1000000000_int64)
+            call pf_argsort(v, ser)
+            call force_parallel_threshold(2_int64)
+            do t = 2, 8
+                call pf_argsort(v, par, threads=t)
+                call check(error, size(par) == big(k) .and. all(par == ser), &
+                    "a co-ranked merge must equal the serial permutation at n="//itoa(big(k))// &
+                    " threads="//itoa(t))
+                if (allocated(error)) exit
+            end do
+            deallocate(v)
+            if (allocated(error)) exit
+        end do
+        call force_merge_segments(0_int64)
+        call force_parallel_threshold(0_int64)
+    end subroutine test_merge_size_sweep
+    !
+    !> **Not redundant with the sweep above**, and the sharper of the two where a segment goes wrong.
+    !!
+    !! The co-ranked segments are a partition of both input runs only because each boundary satisfies
+    !! `i + j == k`. A boundary that drifts makes two segments overlap or leave a gap, so some row
+    !! index is written twice and another not at all -- and the result stops being a permutation.
+    !! **Nothing on the raw path would notice**: `pf_argsort` hands its answer straight to the caller,
+    !! and `pf_permute(..., assume_valid=.true.)` is documented as the way to skip validation for
+    !! exactly such a permutation. (`%sort_by` would be caught, by the one remaining `%reindex`
+    !! validation -- `feature_risks.md` Risk-46 -- but that is the other path.)
+    !!
+    !! So this asserts the property directly rather than through the oracle: every index in 1..n
+    !! appears exactly once.
+    subroutine test_merge_sweep_is_permutation(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64), allocatable :: v(:)
+        integer(int32), allocatable :: perm(:)
+        logical, allocatable :: seen(:)
+        integer :: n, t, k
+
+        call force_merge_segments(1_int64)   ! every pair segments, however small
+        call force_parallel_threshold(2_int64)
+        do n = 2, 400
+            allocate(v(n), seen(n))
+            call ties_fixture(v)
+            do t = 2, 8
+                call pf_argsort(v, perm, threads=t)
+                seen = .false.
+                do k = 1, n
+                    if (perm(k) < 1 .or. perm(k) > n) exit
+                    if (seen(perm(k))) exit
+                    seen(perm(k)) = .true.
+                end do
+                call check(error, all(seen), &
+                    "a co-ranked merge must return each index exactly once at n="//itoa(n)// &
+                    " threads="//itoa(t))
+                if (allocated(error)) exit
+            end do
+            deallocate(v, seen)
+            if (allocated(error)) exit
+        end do
+        call force_merge_segments(0_int64)
+        call force_parallel_threshold(0_int64)
+    end subroutine test_merge_sweep_is_permutation
+    !
+    !> **Without this the co-ranked merge is untestable, exactly as `threads=` itself was.** A merge
+    !! that quietly stopped splitting its final round would still return the identical permutation --
+    !! that identity is what makes every thread count safe -- so every assertion above passes just as
+    !! happily against the old single-threaded tail. `feature_risks.md` Risk-49.
+    !!
+    !! The final round is asked about specifically, not the maximum over rounds: a merge that
+    !! co-ranked only its first round would report a high maximum while leaving the whole O(n) tail
+    !! in place, which is the thing this work exists to remove.
+    !!
+    !! `merge_threads_used` is a different counter from `threads_used`, which still means phase 1's
+    !! chunk-sort thread count. Both are asserted here, so a future change that collapsed them into
+    !! one would fail rather than silently answer the wrong question.
+    subroutine test_merge_round_threads_used(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: n = 200000
+        real(real64), allocatable :: v(:)
+        integer(int32), allocatable :: perm(:)
+
+        allocate(v(n))
+        call ties_fixture(v)
+        ! Segments have a minimum size, so the array has to be big enough for the final round to be
+        ! worth splitting at all -- a 2000-element fixture would legitimately report one thread.
+        call force_parallel_threshold(4_int64)
+        call pf_argsort(v, perm, threads=4)
+        call check(error, threads_used() == 4_int64, "phase 1 must still put 4 threads to work")
+        if (allocated(error)) then
+            call force_parallel_threshold(0_int64)
+            return
+        end if
+        call check(error, merge_threads_used() > 1_int64, &
+            "the final merge round must be co-ranked across more than one thread")
+        if (allocated(error)) then
+            call force_parallel_threshold(0_int64)
+            return
+        end if
+        ! Two negative controls, because a hook that always answered "4" would pass the assertion
+        ! above. Below the minimum-work threshold nothing threads at all...
+        call force_parallel_threshold(1000000000_int64)
+        call pf_argsort(v, perm, threads=4)
+        call check(error, merge_threads_used() == 1_int64, &
+            "an array below the minimum-work threshold must report no co-ranked merge")
+        if (allocated(error)) then
+            call force_parallel_threshold(0_int64)
+            return
+        end if
+        ! ...and threads=1 is serial however large the array is.
+        call force_parallel_threshold(4_int64)
+        call pf_argsort(v, perm, threads=1)
+        call check(error, merge_threads_used() == 1_int64, &
+            "threads=1 must report no co-ranked merge")
+        call force_parallel_threshold(0_int64)
+    end subroutine test_merge_round_threads_used
+    !
+    !> The inputs that drive co-ranking to its ends, where a binary search that is one step out
+    !! stops being harmless.
+    !!
+    !! * **Already sorted**: every merge consumes its whole left run before touching the right, so
+    !!   each boundary sits at `j == 0` or `i == nA`.
+    !! * **Reverse sorted**: the mirror image, every boundary at the other extreme.
+    !! * **All values equal**: every comparison is a tie in the user's key, resolved only by the row
+    !!   index. This is the fixture that pins the left-wins-ties rule inside the co-rank predicate --
+    !!   with ties everywhere, taking from the wrong side reorders equal rows and the permutation
+    !!   stops matching the serial one.
+    !! * **One extreme at each end**: a single value that must travel the whole way across.
+    subroutine test_merge_corank_extremes(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: n = 5000
+        real(real64) :: v(n)
+        integer(int32), allocatable :: ser(:), par(:)
+        integer :: shape_id, k, t
+
+        do shape_id = 1, 4
+            select case (shape_id)
+            case (1)
+                do k = 1, n
+                    v(k) = real(k, real64)                      ! already sorted
+                end do
+            case (2)
+                do k = 1, n
+                    v(k) = real(n - k, real64)                  ! reverse sorted
+                end do
+            case (3)
+                v = 1.0_real64                                  ! every comparison a tie
+            case (4)
+                v = 5.0_real64
+                v(1) = 9.0_real64                               ! must travel to the end
+                v(n) = -9.0_real64                              ! must travel to the front
+            end select
+            call force_merge_segments(1_int64)   ! every pair segments, however small
+        call force_parallel_threshold(1000000000_int64)
+            call pf_argsort(v, ser)
+            call force_parallel_threshold(2_int64)
+            do t = 2, 8
+                call pf_argsort(v, par, threads=t)
+                call check(error, all(par == ser), &
+                    "co-ranking must equal the serial permutation on extreme shape "// &
+                    itoa(shape_id)//" at threads="//itoa(t))
+                if (allocated(error)) exit
+            end do
+            if (allocated(error)) exit
+        end do
+        call force_merge_segments(0_int64)
+        call force_parallel_threshold(0_int64)
+    end subroutine test_merge_corank_extremes
+    !
+    !> The merge is generic over key family, but only one of the three is arithmetic. A `character`
+    !! key compares through `std::string_view::compare` and a multi-key walks several keys per
+    !! comparison, so both reach `sort_compare_key` differently from a `real(real64)` -- and the
+    !! co-rank predicate calls the very same comparator, so a family that broke it would break here
+    !! and nowhere in the sweep above.
+    subroutine test_merge_key_families(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: n = 4000
+        character(len=8) :: s(n)
+        real(real64) :: a(n)
+        integer(int32) :: b(n)
+        type(pf_sort_keys) :: keys
+        integer(int32), allocatable :: ser(:), par(:)
+        integer :: k, t
+
+        do k = 1, n
+            write(s(k), '(i8.8)') mod(k * 7919, 137)   ! heavy ties, lexicographic order
+            a(k) = real(mod(k * 7919, 53), real64)
+            b(k) = int(mod(k * 104729, 17), int32)
+        end do
+        call force_merge_segments(1_int64)   ! every pair segments, however small
+        call force_parallel_threshold(1000000000_int64)
+        call pf_argsort(s, ser)
+        call force_parallel_threshold(2_int64)
+        do t = 2, 8
+            call pf_argsort(s, par, threads=t)
+            call check(error, all(par == ser), &
+                "a co-ranked merge over a character key must equal the serial one at threads="//itoa(t))
+            if (allocated(error)) exit
+        end do
+        if (allocated(error)) then
+            call force_merge_segments(0_int64)
+        call force_parallel_threshold(0_int64)
+            return
+        end if
+        call keys%add(a)
+        call keys%add(b, descending=.true.)
+        call force_parallel_threshold(1000000000_int64)
+        call pf_argsort(keys, ser)
+        call force_parallel_threshold(2_int64)
+        do t = 2, 8
+            call pf_argsort(keys, par, threads=t)
+            call check(error, all(par == ser), &
+                "a co-ranked merge over two keys must equal the serial one at threads="//itoa(t))
+            if (allocated(error)) exit
+        end do
+        call force_merge_segments(0_int64)
+        call force_parallel_threshold(0_int64)
+    end subroutine test_merge_key_families
+    !
+    !> Nulls and NaNs sit in tiers of their own, and a tier boundary is exactly where two merged runs
+    !! meet: the left run may end in values while the right begins in NaNs, so a co-rank probe lands
+    !! on a comparison between tiers rather than between numbers. Both null placements are covered,
+    !! because `nulls_first` moves the tier the probe straddles.
+    subroutine test_merge_tiers(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: n = 6000
+        real(real64) :: v(n)
+        logical :: mask(n)
+        integer(int32), allocatable :: ser(:), par(:)
+        integer :: k, t, variant
+        logical :: nf
+
+        do k = 1, n
+            v(k) = real(mod(k * 7919, 41), real64)
+            if (mod(k, 7) == 0) v(k) = ieee_value(1.0_real64, ieee_quiet_nan)
+            mask(k) = mod(k, 11) /= 0
+        end do
+        do variant = 1, 2
+            nf = (variant == 2)
+            call force_merge_segments(1_int64)   ! every pair segments, however small
+        call force_parallel_threshold(1000000000_int64)
+            call pf_argsort(v, ser, is_valid=mask, nulls_first=nf)
+            call force_parallel_threshold(2_int64)
+            do t = 2, 8
+                call pf_argsort(v, par, is_valid=mask, nulls_first=nf, threads=t)
+                call check(error, all(par == ser), &
+                    "a co-ranked merge must equal the serial one across null/NaN tiers, "// &
+                    "nulls_first variant "//itoa(variant)//" at threads="//itoa(t))
+                if (allocated(error)) exit
+            end do
+            if (allocated(error)) exit
+        end do
+        call force_merge_segments(0_int64)
+        call force_parallel_threshold(0_int64)
+    end subroutine test_merge_tiers
+    !
+    !> Decimal text for a small integer, so a sweep's failure message can name the size and thread
+    !! count that actually failed -- without one, a dense sweep reports a line number and nothing else.
+    function itoa(k) result(s)
+        integer, intent(in) :: k           !! value to render.
+        character(len=:), allocatable :: s !! decimal text.
+        character(len=16) :: buf
+        write(buf, '(i0)') k
+        s = trim(buf)
+    end function itoa
     !
     !> `pf_permute` over a `parquet_column` HONOURS `assume_valid`, routing to `%reindex_trusted`.
     !!

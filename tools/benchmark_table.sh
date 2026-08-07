@@ -22,6 +22,10 @@
 #                              file fixture, so it is sized independently of TARGET_FILE_SIZE_GB --
 #                              the cost it measures grows with rows AND with columns, and the
 #                              default file size is too small to separate the two.
+#   ARGSORT_NROWS="1000000 20000000"
+#                             Row counts the argsort thread sweep runs at. Also file-free.
+#   ARGSORT_THREADS="1 2 4 8" Thread counts the argsort sweep runs at. 1 is the serial baseline
+#                              every speedup below is measured against, so keep it first.
 #   TEST_FILE                 Path for the synthetic test file. Default: a fresh mktemp -d
 #                              directory, deleted automatically when the script exits. Set this
 #                              to keep the file around afterward -- it is NOT deleted when
@@ -37,6 +41,8 @@ TOUCH="${TOUCH:-2}"
 SLICES="${SLICES:-4}"
 NULLFRAC="${NULLFRAC:-0.1}"
 SORT_SIZE_GB="${SORT_SIZE_GB:-1}"
+ARGSORT_NROWS="${ARGSORT_NROWS:-1000000 20000000}"
+ARGSORT_THREADS="${ARGSORT_THREADS:-1 2 4 8}"
 TEST_FILE="${TEST_FILE:-}"
 
 cleanup_dir=""
@@ -91,3 +97,19 @@ echo
 # the cost of REORDERING a resident table (%sort_by's permutation build against its per-column
 # reindex), and reading a fixture first would only add a decode to both sides.
 fpm run benchmark_table --profile release -- --mode=sort --size="$SORT_SIZE_GB" --ncols="$NCOLS"
+echo
+
+# The run above measures %sort_by, where the permutation build is a minority of the cost. This one
+# measures the permutation build ALONE -- which is the whole operation for a caller of raw-array
+# pf_sort/pf_argsort -- and splits it into the per-chunk sorts and the pairwise merge that follows
+# them. The merge is done in log2(T) rounds with T/2, T/4, ..., 1 threads, so its LAST round is a
+# single-threaded pass over the whole array whose share does not shrink as threads are added. That
+# share is what a co-ranked parallel merge would remove, and reading it off is why this sweep
+# exists (feature_sort_merge.md step 0). Also file-free: it sorts an array it generates itself.
+echo "=== pf_argsort thread sweep (permutation build, by phase) ==="
+for nr in $ARGSORT_NROWS; do
+    for t in $ARGSORT_THREADS; do
+        fpm run benchmark_table --profile release -- --mode=argsort --nrows="$nr" --threads="$t"
+        echo
+    done
+done

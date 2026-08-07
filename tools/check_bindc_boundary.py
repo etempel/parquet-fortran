@@ -20,12 +20,17 @@ regex misses one or both (see CLAUDE.md's "Why the earlier check found only 113 
   2. Every one of the 20 functions writes `result(...)` *after* `bind(C, name="...")`, not before
      -- `function NAME(args) &\n    bind(C, name="...") result(r)`.
 
-Also scans test/error_scenarios.f90 and test/test_temporal.f90: these declare their own local
-`bind(C)` debug-hook interfaces (hand-written per scenario, duplicated across several call sites),
-declared far from parquet_bindings.f90 and so, per CLAUDE.md, the most likely place for a future
-mismatch to slip in unnoticed. A handful of those bind to the C RUNTIME rather than to this
-project's own C++ (see LIBC_SYMBOLS below); they are allow-listed by name, not by "ignore anything
-unmatched", so a typo'd parquet_* binding still fails.
+Also scans test/error_scenarios.f90, test/test_temporal.f90, test/test_sorting.f90 and
+app/benchmark_table.f90: these declare their own local `bind(C)` debug-hook interfaces (hand-written
+per scenario, duplicated across several call sites), declared far from parquet_bindings.f90 and so,
+per CLAUDE.md, the most likely place for a future mismatch to slip in unnoticed. A handful of those
+bind to the C RUNTIME rather than to this project's own C++ (see LIBC_SYMBOLS below); they are
+allow-listed by name, not by "ignore anything unmatched", so a typo'd parquet_* binding still fails.
+
+**Add a file here whenever one starts declaring its own `bind(C)` interface.** Nothing detects a
+file that is missing from this list -- it simply goes unchecked, silently and indefinitely, which is
+the failure mode CLAUDE.md's "A static check that enumerates names goes stale silently" warns about.
+The last two entries were added only when the co-ranked merge work put three more hooks in them.
 
 What this does NOT check (see CLAUDE.md's "What this check does not cover" note): length/ownership
 contracts (does the C++ side write exactly as many elements as Fortran allocated?), array
@@ -48,6 +53,8 @@ FORTRAN_FILES = [
     REPO_ROOT / "src" / "parquet_bindings.f90",
     REPO_ROOT / "test" / "error_scenarios.f90",
     REPO_ROOT / "test" / "test_temporal.f90",
+    REPO_ROOT / "test" / "test_sorting.f90",
+    REPO_ROOT / "app" / "benchmark_table.f90",
 ]
 CPP_FILE = REPO_ROOT / "src" / "parquet_wrapper.cpp"
 
@@ -90,7 +97,7 @@ CPP_BASE_MAP = {
 #: `setenv`/`unsetenv` are used only by the settings tests: Fortran cannot set an environment
 #: variable, and parquet_settings_from_env has to be driven with one. They are test-only, so no
 #: src/ file gains a POSIX dependency.
-LIBC_SYMBOLS = {"setenv", "unsetenv"}
+LIBC_SYMBOLS = {"setenv", "unsetenv", "getpid"}
 
 
 def strip_fortran_comments(text):

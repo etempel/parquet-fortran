@@ -2213,6 +2213,13 @@ Three things about doing it *here* specifically:
   constructed expectation rather than a second call into the same machinery, and where a fast path
   exists, force the slow one (`parquet_debug_set_disable_sort_counting_path` and friends) or pick a
   fixture the fast path declines. See `feature_risks.md` Risk-35.
+  **A SIZE THRESHOLD is the same trap wearing different clothes, and is easier to miss** because
+  nothing about it looks like a fast path. The co-ranked merge only splits a run past a
+  16384-element floor, so an entire dense sweep over arrays of 2-8192 elements exercised the
+  unsegmented path — the very code the feature replaced — and two deliberate co-rank defects
+  survived it. Whenever a new constant gates behaviour on input size, give it a
+  `parquet_debug_set_*` override and have the tests lower it, exactly as
+  `parquet_debug_set_sort_merge_min_segment` now does. See `feature_risks.md` Risk-49.
 - **A surviving mutation is not automatically a coverage gap.** It may be *masked*: by a redundant
   sibling guard (removing either alone changes nothing — see `column_has_nulls_from_footer`'s
   `is_stats_set()`/`HasNullCount()` pair, where removing both segfaults), or by a later check that

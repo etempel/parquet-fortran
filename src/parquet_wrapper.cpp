@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -3666,6 +3667,40 @@ extern "C"
 	// calling thread. 1 means the sort ran serially, whatever was asked for.
 	static int64_t g_debug_sort_threads_used = 1;
 
+	// Maintainer diagnostic: where the last threaded build spent its time, in nanoseconds.
+	//   [0] phase 1 -- the per-chunk std::sorts.
+	//   [1] phase 2 -- every merge round EXCEPT the last.
+	//   [2] phase 2 -- the last round alone, which merges two runs on ONE thread and is the O(n)
+	//       serial tail that caps the achievable speedup (see the phase 2 comment below).
+	// Split that way because [2] is the quantity that decides whether a co-ranked parallel merge is
+	// worth building: it is the only part of the sort that does not get faster as threads are added.
+	//
+	// Recorded unconditionally -- a handful of clock reads per sort, at ROUND granularity, never per
+	// element -- so there is no arming flag to forget. Zeroed on entry, so a serial or counting-path
+	// sort reports zeros and cannot be mistaken for a threaded one. Read via
+	// parquet_debug_get_sort_phase_ns; process-global and non-atomic, like every counter here, so it
+	// is only meaningful from a suite excluded from test-drive's per-test parallelism.
+	static int64_t g_debug_sort_phase_ns[3] = {0, 0, 0};
+
+	// Test-only: how many threads worked the FINAL merge round -- the round with two runs left -- the
+	// calling thread included. 1 means that round ran on one thread, i.e. the serial tail is back.
+	//
+	// **The final round specifically, not a maximum over rounds.** A co-ranked merge that silently
+	// degraded to one segment per pair everywhere except the first round would still report a high
+	// maximum while leaving the whole tail in place -- and it would return the correct permutation
+	// while doing so, because every thread count returns the same answer. This is Risk-39's shape one
+	// level deeper: without an assertion on this counter, a merge that co-ranks nothing passes every
+	// correctness test ever written for it. g_debug_sort_threads_used is NOT reused for this; it
+	// keeps its own meaning (phase 1's count), which four existing tests assert against.
+	static int64_t g_debug_sort_merge_threads_used = 1;
+
+	// Nanoseconds since an arbitrary origin, for the phase timers above.
+	static inline int64_t sort_now_ns()
+	{
+		return std::chrono::duration_cast<std::chrono::nanoseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+	}
+
 	// Spawns f(k) for k in [lo, hi), returning the first index it could NOT spawn so the caller runs
 	// the remainder on its own thread.
 	//
@@ -3695,6 +3730,162 @@ extern "C"
 	}
 	}
 
+	// ---- Co-ranked merge partitioning ----
+	//
+	// What lets a round's TWO runs be merged by many threads at once instead of one. Co-ranking asks:
+	// for an output offset k, how many elements of the merged run came from the left run and how many
+	// from the right? Answer that at T+1 offsets and the merge splits into T independent segments
+	// writing disjoint output ranges.
+	//
+	// Everything below is about the LEFT-WINS-TIES rule, which is the only thing here that is easy to
+	// get subtly wrong. See sort_corank's own comment.
+
+	// One merge segment: two half-open source ranges in `from`, and where their merge starts in `to`.
+	// Absolute indices, so the body needs no base to add.
+	struct SortMergeSeg
+	{
+		int64_t li, le; //!< Left source range [li, le) in `from`.
+		int64_t ri, re; //!< Right source range [ri, re) in `from`.
+		int64_t out;    //!< First output position in `to`.
+	};
+
+	// Splits the merge of A = f[a, m) and B = f[m, b) at output offset k, returning i (elements taken
+	// from A) via `i_out`; j is k - i by construction. 0 <= k <= (m - a) + (b - m).
+	//
+	// **The characterisation.** Writing nA = m - a and nB = b - m, the split (i, j = k - i) is the one
+	// where merging A[0, i) with B[0, j) yields exactly the first k merged elements, i.e.
+	//
+	//   (1)  i == 0 || j == nB || !less(B[j],   A[i-1])     -- A[i-1] is not preceded by B[j]
+	//   (2)  j == 0 || i == nA ||  less(B[j-1], A[i])       -- B[j-1] does precede A[i]
+	//
+	// **(1) is the tie rule in disguise, and is the line to read twice.** The merge emits A[i-1]
+	// before B[j] exactly when `!less(B[j], A[i-1])` -- NOT when `less(A[i-1], B[j])`, which would
+	// hand ties to the right run and break the stability rule the whole engine rests on. Under
+	// SortRowLess the two forms happen to coincide, because its index tiebreaker makes it a total
+	// order in which no two rows compare equal, so the wrong form would pass every test written here.
+	// The correct form is written anyway, so this is right by derivation rather than by accident --
+	// and so that anyone reusing it for pf_merge (which has real ties, and takes from the first input
+	// on equal) starts from the right expression. See feature_risks.md Risk-37.
+	//
+	// **The search.** P(i) := "condition (1) holds at i" is monotone decreasing in i, and the answer
+	// is the LARGEST i in [max(0, k - nB), min(k, nA)] with P(i) true. Two facts make that exact:
+	//
+	//   * P at the lower bound always holds -- there either i == 0 or j == nB, and (1) is trivial --
+	//     so the search never returns an i that fails (1).
+	//   * The maximal i satisfies (2) for free. If i < hi then P(i+1) is false, which unpacks to
+	//     `less(B[k-i-1], A[i])`, i.e. (2) with j = k - i. If i == hi then i == nA or j == 0, and (2)
+	//     is trivial.
+	//
+	// O(log min(nA, nB)) comparisons, and no allocation, so it is safe to call from a worker -- though
+	// sort_merge_boundaries below calls it only on the spawning thread.
+	static inline void sort_corank(const std::vector<int64_t> &f, int64_t a, int64_t m, int64_t b,
+		int64_t k, const SortRowLess &less, int64_t &i_out)
+	{
+		int64_t nA = m - a, nB = b - m;
+		int64_t lo = k - nB > 0 ? k - nB : 0;
+		int64_t hi = k < nA ? k : nA;
+		while (lo < hi)
+		{
+			// Upper mid, so a passing probe can keep `lo` without the loop standing still.
+			int64_t i = lo + (hi - lo + 1) / 2;
+			int64_t j = k - i;
+			if (i > 0 && j < nB && less(f[static_cast<size_t>(m + j)], f[static_cast<size_t>(a + i - 1)]))
+			{
+				hi = i - 1; // too many taken from A: B[j] belongs before A[i-1]
+			}
+			else
+			{
+				lo = i;
+			}
+		}
+		i_out = lo;
+	}
+
+	// Smallest output range worth giving a thread of its own. A merge step is far cheaper per element
+	// than a sort comparison, so this floor has to be well above phase 1's own min_chunk
+	// (g_sort_parallel_min_rows / 4, i.e. 2048 by default -- a 16 KB segment, less work than creating
+	// the thread to run it).
+	//
+	// **Measured basis**, so this is a number someone can argue with rather than a magic one: one
+	// merge pass over 20 M elements costs 0.575 s on an 8-core M1 Pro, i.e. ~29 ns per element -- the
+	// comparator's scattered `reals_ptr[perm[i]]` read, one cache miss per output element, not
+	// bandwidth on the permutation stream (which is ~1% of it). So 16384 elements is ~0.5 ms of work
+	// against a std::thread construction of perhaps 20-50 us: comfortably worth spawning, with room
+	// to lower the floor if a workload ever wants finer segments. Deliberately NOT a setting -- it
+	// has no meaning a caller can reason about, and sort_parallel_min_rows already owns the
+	// user-facing "does this sort thread at all" question.
+	static constexpr int64_t kSortMergeMinSegment = 1 << 14;
+
+	// Test-only override of the floor above. <= 0 restores the real one.
+	//
+	// **Without this the co-rank is untestable at test sizes, and the gap is invisible.** A pair
+	// shorter than 2 * 16384 is never split, so every array a unit test can afford to sort in a
+	// dense sweep would take the unsegmented path and call sort_corank ZERO times -- while passing,
+	// because an unsegmented merge is exactly the old correct one. Found by mutation: two deliberate
+	// co-rank defects survived the entire suite until the sweep was made to lower this. Same
+	// process-global, subprocess-free convention as parquet_debug_set_col_size_limit and the other
+	// ceiling overrides, and the same reason the `sorting` suite is excluded from test-drive's
+	// per-test parallelism. See feature_risks.md Risk-49.
+	static int64_t g_debug_sort_merge_min_segment = -1;
+
+	// The floor actually in force: the debug override when one is set, otherwise the real constant.
+	static inline int64_t sort_merge_min_segment()
+	{
+		return g_debug_sort_merge_min_segment > 0 ? g_debug_sort_merge_min_segment : kSortMergeMinSegment;
+	}
+
+	// How many segments to split one pair's merge into. `len` is the pair's output length, `n` the
+	// round's total, `threads` what phase 1 was given -- so segments are handed out in proportion to
+	// how much of the round each pair actually is, and the round's task count lands near `threads`.
+	//
+	// Proportional rather than one-size-fits-all because a round's runs are only near-equal: phase 1's
+	// bounds differ by at most one element, but an odd-run carry propagates a shorter run through
+	// every later round. In the LAST round there is one pair and it takes all `threads` segments,
+	// which is precisely the serial tail this work exists to remove.
+	static inline int64_t sort_merge_segments(int64_t len, int64_t n, int64_t threads)
+	{
+		int64_t floor_len = sort_merge_min_segment();
+		if (len < 2 * floor_len) return 1;
+		int64_t want = (threads * len + n / 2) / n;   // round(threads * len / n)
+		int64_t cap = len / floor_len;
+		if (want > cap) want = cap;
+		return want < 1 ? 1 : want;
+	}
+
+	// Appends `nseg` segments covering the merge of f[a, m) with f[m, b) into `to` starting at `a`.
+	// `nseg >= 1`; nseg == 1 appends the whole pair as one segment and calls sort_corank not at all,
+	// which is what makes an unsegmented pair cost exactly what it did before.
+	//
+	// Boundaries are computed HERE, on the spawning thread, rather than by each worker for its own two
+	// ends. That is one co-rank per boundary instead of two, it removes any question of two threads
+	// deriving different splits for the same k, and it leaves the partition inspectable -- which is
+	// what the check below can then be written against.
+	static void sort_merge_boundaries(const std::vector<int64_t> &f, int64_t a, int64_t m, int64_t b,
+		int64_t nseg, const SortRowLess &less, std::vector<SortMergeSeg> &segs)
+	{
+		int64_t total = b - a;
+		int64_t i_prev = 0, k_prev = 0;
+		for (int64_t s = 1; s <= nseg; ++s)
+		{
+			int64_t k = total * s / nseg;
+			int64_t i = m - a;
+			if (s < nseg) sort_corank(f, a, m, b, k, less, i);
+			// The invariant every later reader depends on: i and j = k - i are each non-decreasing
+			// across s, i + j == k exactly, and the last boundary is (nA, nB). Break any of those and
+			// the segments stop being a partition -- some rows are merged twice and others not at all,
+			// and the result is silently no longer a permutation (feature_risks.md Risk-50). O(nseg)
+			// against the round's O(n), so this costs nothing worth measuring.
+			if (i < i_prev || i > m - a || k - i < k_prev - i_prev || k - i > b - m)
+			{
+				report_fatal_error("sort_merge_boundaries",             // GCOVR_EXCL_LINE
+					"internal error: co-ranked merge boundaries are not a partition"); // GCOVR_EXCL_LINE
+			}
+			segs.push_back(SortMergeSeg{a + i_prev, a + i, m + (k_prev - i_prev), m + (k - i), a + k_prev});
+			i_prev = i;
+			k_prev = k;
+		}
+	}
+
 	// 0-based permutation of [0, n), using up to `threads` threads. Identical to
 	// sort_build_permutation's result in every case.
 	static std::vector<int64_t> sort_build_permutation_threaded(const std::vector<SortKeyData> &keys,
@@ -3702,6 +3893,8 @@ extern "C"
 	{
 		sort_check_keys_finalized(keys, n, "sort_build_permutation_threaded");
 		g_debug_sort_threads_used = 1;
+		g_debug_sort_merge_threads_used = 1;
+		g_debug_sort_phase_ns[0] = g_debug_sort_phase_ns[1] = g_debug_sort_phase_ns[2] = 0;
 		// The counting path is already O(n) and already produces this exact permutation, so it wins
 		// over any number of threads: `threads` is a hint, not a command.
 		int64_t lo = 0, hi = 0;
@@ -3737,6 +3930,7 @@ extern "C"
 		// three key families (std::string_view::compare cannot throw), so nothing here can. A future
 		// key family whose comparison allocates would break that and must add its own guard.
 		{
+			int64_t t_phase1 = sort_now_ns();
 			auto sort_chunk = [&perm, &bounds, less](int64_t k) {
 				std::sort(perm.begin() + static_cast<ptrdiff_t>(bounds[static_cast<size_t>(k)]),
 					perm.begin() + static_cast<ptrdiff_t>(bounds[static_cast<size_t>(k) + 1]), less);
@@ -3747,6 +3941,7 @@ extern "C"
 			for (int64_t k = unspawned; k < nchunks; ++k) sort_chunk(k); // GCOVR_EXCL_LINE -- only after a refusal
 			for (auto &w : workers) w.join();
 			g_debug_sort_threads_used = static_cast<int64_t>(workers.size()) + 1;
+			g_debug_sort_phase_ns[0] = sort_now_ns() - t_phase1;
 		}
 
 		// Phase 2: merge the runs pairwise, ping-ponging between `perm` and one scratch buffer. This
@@ -3754,41 +3949,69 @@ extern "C"
 		// explicit rather than std::inplace_merge's internal allocation, whose failure mode is a
 		// silent O(n log n) degradation.
 		//
-		// The last round merges two runs on ONE thread, which is the O(n) serial tail that caps the
-		// achievable speedup. Replacing it with a co-ranked parallel merge is the documented
-		// follow-up if measurement justifies it.
+		// **Every round is CO-RANKED, so no round is limited by how many pairs it happens to have.**
+		// A pairwise round has T/2, T/4, ..., 1 pairs, so the last one merged two runs on a single
+		// thread: an O(n) pass whose cost does not fall as threads are added, and which measured 29.5%
+		// of a 20 M-row sort at 8 threads (0.57 s, the SAME 0.57 s at 2, 4 and 8 threads). Co-ranking
+		// splits each pair's output into segments instead, so a round's whole n elements are shared
+		// over all T threads however few pairs it has. The phase goes from ~2n wall time, independent
+		// of T, to n*log2(T)/T.
+		//
+		// The ANSWER is untouched: every segment merges disjoint source ranges into a disjoint output
+		// range with the same left-wins-ties rule, so the permutation is bit-identical to the serial
+		// one at every thread count, as it has always been.
 		std::vector<int64_t> scratch(static_cast<size_t>(n));
 		std::vector<int64_t> *from = &perm, *to = &scratch;
+		std::vector<SortMergeSeg> segs;
 		while (bounds.size() > 2)
 		{
+			int64_t t_round = sort_now_ns();
 			size_t nruns = bounds.size() - 1;
 			int64_t npairs = static_cast<int64_t>(nruns / 2);
-			auto merge_pair = [&from, &to, &bounds, less](int64_t p) {
+			// An odd run count leaves one run unpaired. It becomes a pair whose RIGHT run is empty
+			// rather than a special case: the merge body below then runs its "drain the left run" loop
+			// and copies it through, never calling `less` at all, so there is no ordering decision to
+			// get wrong and the carry can be segmented like any other pair.
+			int64_t ntasks = static_cast<int64_t>((nruns + 1) / 2);
+			segs.clear();
+			for (int64_t p = 0; p < ntasks; ++p)
+			{
 				size_t pi = static_cast<size_t>(p);
-				int64_t a = bounds[2 * pi], m = bounds[2 * pi + 1], b = bounds[2 * pi + 2];
+				bool carry = (2 * pi + 2 > nruns);
+				int64_t a = bounds[2 * pi];
+				int64_t m = carry ? bounds[nruns] : bounds[2 * pi + 1];
+				int64_t b = carry ? bounds[nruns] : bounds[2 * pi + 2];
+				sort_merge_boundaries(*from, a, m, b,
+					sort_merge_segments(b - a, n, nchunks), less, segs);
+			}
+			int64_t nseg = static_cast<int64_t>(segs.size());
+			// One merge segment. The body is what merge_pair always was, with the pair's own bounds
+			// replaced by the segment's -- which is the entire behavioural change in this phase.
+			//
+			// A worker body must not throw, for the reason phase 1 states; a segment allocates
+			// nothing and neither does SortRowLess, and the boundaries it works from were computed
+			// and checked before any thread was spawned.
+			auto merge_seg = [&from, &to, &segs, less](int64_t s) {
+				const SortMergeSeg &g = segs[static_cast<size_t>(s)];
 				const std::vector<int64_t> &f = *from;
 				std::vector<int64_t> &t = *to;
-				int64_t i = a, j = m, k = a;
+				int64_t i = g.li, j = g.ri, k = g.out;
 				// `less(f[j], f[i]) ? right : left` takes from the LEFT run unless the right is
 				// strictly smaller -- std::merge's stability rule, under a total order.
-				while (i < m && j < b) t[static_cast<size_t>(k++)] = less(f[static_cast<size_t>(j)], f[static_cast<size_t>(i)])
+				while (i < g.le && j < g.re) t[static_cast<size_t>(k++)] = less(f[static_cast<size_t>(j)], f[static_cast<size_t>(i)])
 					? f[static_cast<size_t>(j++)] : f[static_cast<size_t>(i++)];
-				while (i < m) t[static_cast<size_t>(k++)] = f[static_cast<size_t>(i++)];
-				while (j < b) t[static_cast<size_t>(k++)] = f[static_cast<size_t>(j++)];
+				while (i < g.le) t[static_cast<size_t>(k++)] = f[static_cast<size_t>(i++)];
+				while (j < g.re) t[static_cast<size_t>(k++)] = f[static_cast<size_t>(j++)];
 			};
 			std::vector<std::thread> workers;
-			int64_t unspawned = sort_spawn(workers, 1, npairs, merge_pair);
-			merge_pair(0);
-			for (int64_t p = unspawned; p < npairs; ++p) merge_pair(p); // GCOVR_EXCL_LINE -- only after a refusal
+			int64_t unspawned = sort_spawn(workers, 1, nseg, merge_seg);
+			merge_seg(0);
+			for (int64_t s = unspawned; s < nseg; ++s) merge_seg(s); // GCOVR_EXCL_LINE -- only after a refusal
 			for (auto &w : workers) w.join();
-			// An odd run count leaves one run unpaired; it is copied through so the next round sees
-			// every element in `to`.
-			if (nruns % 2 == 1)
-			{
-				int64_t a = bounds[nruns - 1], b = bounds[nruns];
-				std::copy(from->begin() + static_cast<ptrdiff_t>(a), from->begin() + static_cast<ptrdiff_t>(b),
-					to->begin() + static_cast<ptrdiff_t>(a));
-			}
+			// The last round is always the one with exactly two runs left, whatever odd-run carries
+			// happened earlier, so it needs no separate bookkeeping to recognize.
+			if (nruns == 2) g_debug_sort_merge_threads_used = static_cast<int64_t>(workers.size()) + 1;
+			g_debug_sort_phase_ns[nruns == 2 ? 2 : 1] += sort_now_ns() - t_round;
 			std::vector<int64_t> next;
 			next.reserve(static_cast<size_t>(npairs) + 2);
 			for (int64_t p = 0; p <= npairs; ++p) next.push_back(bounds[static_cast<size_t>(2 * p)]);
@@ -10441,6 +10664,44 @@ extern "C"
 	int64_t parquet_debug_get_sort_threads_used(void)
 	{
 		return g_debug_sort_threads_used;
+	}
+
+	// Test-only: shrinks the smallest output range the co-ranked merge will give its own thread, so a
+	// test-sized array reaches the co-rank at all. Pass 0 (or less) to restore the real floor.
+	//
+	// **This is what makes the merge testable, and its absence hid two real defects.** At the real
+	// floor no pair below 32768 elements is ever segmented, so a dense small-size sweep exercises the
+	// unsegmented path -- which is the old, correct, pairwise merge -- and passes while calling
+	// sort_corank zero times. Two deliberate co-rank mutations survived the whole suite before this
+	// existed. Same reasoning as parquet_debug_set_col_size_limit: a constant that only a
+	// prohibitively large input can cross needs a way down for tests.
+	void parquet_debug_set_sort_merge_min_segment(int64_t n)
+	{
+		g_debug_sort_merge_min_segment = (n > 0) ? n : -1;
+	}
+
+	// Test-only: how many threads worked the last threaded sort's FINAL merge round, the calling
+	// thread included. 1 means that round ran serially.
+	//
+	// **This is the only thing that can tell a co-ranked merge from a decorative one.** Every thread
+	// count returns the same permutation -- that identity is what makes `threads=` safe -- so a merge
+	// that silently stopped splitting its final round would pass every correctness assertion in the
+	// suite while putting the O(n) serial tail straight back. See g_debug_sort_merge_threads_used,
+	// and feature_risks.md Risk-49.
+	int64_t parquet_debug_get_sort_merge_threads_used(void)
+	{
+		return g_debug_sort_merge_threads_used;
+	}
+
+	// Maintainer diagnostic: nanoseconds the last threaded sort spent in phase 0 (the per-chunk
+	// std::sorts), phase 1 (every merge round but the last) and phase 2 (the last round alone).
+	// Anything else answers 0. See g_debug_sort_phase_ns for why the last round is split out: it is
+	// the single-threaded tail whose share decides whether a co-ranked parallel merge earns its
+	// complexity, and app/benchmark_table.f90's --mode=argsort is what reads it.
+	int64_t parquet_debug_get_sort_phase_ns(int phase)
+	{
+		if (phase < 0 || phase > 2) return 0;
+		return g_debug_sort_phase_ns[phase];
 	}
 
 	// Test-only: how many row groups the most recent screen ruled out, in this process. Without it

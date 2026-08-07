@@ -51,9 +51,10 @@ program benchmark_table
 
     character(len=:), allocatable :: mode, file
     real(real64) :: size_gb, nullfrac
-    integer :: ncols, touch, slices
+    integer :: ncols, touch, slices, threads
+    integer(int64) :: nrows_arg
 
-    call parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac)
+    call parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg)
 
     select case (mode)
     case ("write_fixture")
@@ -74,6 +75,8 @@ program benchmark_table
         call bench_write_nulls(file, nullfrac)
     case ("sort")
         call bench_sort(size_gb, ncols)
+    case ("argsort")
+        call bench_argsort(nrows_arg, threads)
     case default
         write(error_unit, '(a)') "benchmark_table: unknown --mode '"//mode//"'"
         error stop 1
@@ -83,7 +86,7 @@ contains
 
     subroutine print_usage()
         write(output_unit, '(a)') "Usage: benchmark_table --mode=<write_fixture|read_raw|read_table|" // &
-            "read_lazy|read_slice|access|write|write_nulls|sort>"
+            "read_lazy|read_slice|access|write|write_nulls|sort|argsort>"
         write(output_unit, '(a)') "                       [--size=<GB>] [--file=<path>] [--ncols=<n>]"
         write(output_unit, '(a)') ""
         write(output_unit, '(a)') "  --mode=write_fixture  generate the synthetic input file"
@@ -95,6 +98,9 @@ contains
         write(output_unit, '(a)') "  --mode=write          time parquet_write_table vs. a hand-written loop"
         write(output_unit, '(a)') "  --mode=write_nulls    the same, on a table with nulls (three ways)"
         write(output_unit, '(a)') "  --mode=sort           what %sort_by spends re-validating one permutation"
+        write(output_unit, '(a)') "  --mode=argsort        pf_argsort at one thread count, split by sort phase"
+        write(output_unit, '(a)') "  --nrows=<n>           rows for argsort mode (default 20000000)"
+        write(output_unit, '(a)') "  --threads=<n>         sort threads for argsort mode (1 = serial; default 1)"
         write(output_unit, '(a)') "  --size=<GB>           approximate uncompressed size (write_fixture)"
         write(output_unit, '(a)') "  --ncols=<n>           float64 columns in the fixture (default 8)"
         write(output_unit, '(a)') "  --touch=<n>           columns to read in read_lazy (default 2)"
@@ -102,7 +108,7 @@ contains
         write(output_unit, '(a)') "  --nullfrac=<f>        fraction of rows to null in write_nulls (default 0.1)"
     end subroutine print_usage
 
-    subroutine parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac)
+    subroutine parse_arguments(mode, size_gb, file, ncols, touch, slices, nullfrac, threads, nrows_arg)
         character(len=:), allocatable, intent(out) :: mode !! which measurement to run.
         real(real64), intent(out) :: size_gb               !! target fixture size in GB.
         character(len=:), allocatable, intent(out) :: file !! fixture path.
@@ -110,6 +116,8 @@ contains
         integer, intent(out) :: touch                      !! columns to read in read_lazy mode.
         integer, intent(out) :: slices                     !! slices to divide the file into.
         real(real64), intent(out) :: nullfrac              !! fraction of rows to null in write_nulls.
+        integer, intent(out) :: threads                    !! sort threads in argsort mode.
+        integer(int64), intent(out) :: nrows_arg           !! rows in argsort mode.
 
         integer :: i, nargs, eq_pos, ios
         character(len=512) :: arg, key, val
@@ -121,6 +129,8 @@ contains
         touch = 2
         slices = 4
         nullfrac = 0.1_real64
+        threads = 1
+        nrows_arg = 20000000_int64
 
         nargs = command_argument_count()
         if (nargs == 0) then
@@ -170,6 +180,18 @@ contains
                 read(val, *, iostat=ios) slices
                 if (ios /= 0) then
                     write(error_unit, '(a)') "benchmark_table: --slices must be an integer"
+                    error stop 1
+                end if
+            case ("--threads")
+                read(val, *, iostat=ios) threads
+                if (ios /= 0) then
+                    write(error_unit, '(a)') "benchmark_table: --threads must be an integer"
+                    error stop 1
+                end if
+            case ("--nrows")
+                read(val, *, iostat=ios) nrows_arg
+                if (ios /= 0) then
+                    write(error_unit, '(a)') "benchmark_table: --nrows must be an integer"
                     error stop 1
                 end if
             case default
@@ -1032,6 +1054,165 @@ contains
             max((nrows + 7_int64) / 8_int64 / 1048576_int64, 0_int64), " MiB live at a time"
         write(output_unit, '(a,i0,a,f0.1)') "(sink ", sink, ", checksum ", acc
     end subroutine bench_sort
+
+    !> **How `pf_argsort` divides its time between sorting chunks and merging them**, at one thread
+    !! count -- the measurement that decides whether a co-ranked parallel merge is worth building
+    !! (`feature_sort_merge.md` step 0). Driven one data point at a time by
+    !! `tools/benchmark_table.sh`'s argsort sweep.
+    !!
+    !! The engine sorts `T` contiguous chunks concurrently and then merges them **pairwise** in
+    !! `log2(T)` rounds with `T/2, T/4, ..., 1` threads, so the last round merges two runs on ONE
+    !! thread. That round is an O(n) pass that does not get faster as threads are added, and its
+    !! share of wall time is the whole question here -- which is why the C++ side reports it
+    !! separately from the earlier rounds (`parquet_debug_get_sort_phase_ns`).
+    !!
+    !! Three CLAUDE.md benchmarking rules apply and are all observed below: the key array and the
+    !! result array are both warmed before anything is timed (a freshly allocated result pays
+    !! first-touch page faults on its first pass and never again, which is enough to reverse a
+    !! comparison); the best of several rounds is kept, because single rounds swing wider than the
+    !! effect being measured; and the wrapper builds with `--profile release`, never with
+    !! `FPM_FFLAGS`, which would replace the profile flags rather than add to them and measure -O0.
+    !!
+    !! `pf_argsort` does not modify its input, so unlike `bench_sort` there is nothing to re-scatter
+    !! between rounds -- every round sorts the identical scattered array and does identical work.
+    subroutine bench_argsort(nrows, threads)
+        integer(int64), intent(in) :: nrows !! rows in the key array.
+        integer, intent(in) :: threads      !! sort threads; 1 is the serial baseline.
+        integer, parameter :: nround = 5    !! timed rounds; the best of them is kept.
+        real(real64), allocatable :: v(:)
+        integer(int64), allocatable :: perm(:)
+        real(real64) :: pair_total, pair_chunk, pair_early, pair_final
+        real(real64) :: cor_total, cor_chunk, cor_early, cor_final
+        integer(int64) :: used, sink
+
+        if (nrows < 2_int64) error stop "benchmark_table: --mode=argsort needs --nrows >= 2"
+        allocate(v(nrows))
+        call scatter_key(v)
+        write(output_unit, '(a,i0,a,i0,a,i0,a)') "argsort: ", nrows, " rows x float64, threads=", &
+            threads, " (best of ", nround, ")"
+
+        ! Warm-up, untimed: touches every page of `v` a second time and, more importantly, allocates
+        ! and first-touches `perm`, so no timed round pays its page faults. Without this the first
+        ! round measured is systematically the slowest and the thread sweep reads as noise.
+        call pf_argsort(v, perm, threads=threads)
+        sink = perm(1) + perm(nrows)
+
+        ! Both merges, in ONE process, back to back. Forcing the minimum segment size above the whole
+        ! array makes every pair unsegmented, which IS the pairwise merge this feature replaced -- so
+        ! the comparison below is a real measurement rather than a model, and it is immune to the
+        ! machine drifting between two runs. It has to be: an earlier attempt compared a co-ranked
+        ! build against a pairwise one measured on another day, and the serial baseline alone had
+        ! moved 15% in between, which is larger than some of the effects being reported.
+        call force_merge_segments(huge(1_int64) / 4_int64)
+        call time_argsort(v, perm, threads, nround, pair_total, pair_chunk, pair_early, pair_final, used)
+        call force_merge_segments(0_int64)
+        call time_argsort(v, perm, threads, nround, cor_total, cor_chunk, cor_early, cor_final, used)
+
+        write(output_unit, '(a)') ""
+        if (used <= 1_int64) then
+            write(output_unit, '(a,f9.4,a,f8.1,a)') "total                 : ", cor_total, " s   ", &
+                cor_total * 1.0e9_real64 / real(nrows, real64), " ns/row"
+            write(output_unit, '(a)') "(serial: the engine took the plain std::sort path, so there are no phases)"
+        else
+            write(output_unit, '(a)') "                          pairwise    co-ranked      change"
+            call print_phase_pair("phase 1, chunk sorts ", pair_chunk, cor_chunk)
+            call print_phase_pair("phase 2, early rounds", pair_early, cor_early)
+            call print_phase_pair("phase 2, FINAL round ", pair_final, cor_final)
+            call print_phase_pair("phase 2, all merging ", pair_early + pair_final, cor_early + cor_final)
+            call print_phase_pair("whole argsort        ", pair_total, cor_total)
+            write(output_unit, '(a,i0,a,f8.1,a,f8.1,a)') "threads used (phase 1): ", used, &
+                "        ", pair_total * 1.0e9_real64 / real(nrows, real64), " ns/row  ", &
+                cor_total * 1.0e9_real64 / real(nrows, real64), " ns/row"
+        end if
+        write(output_unit, '(a,i0,a,i0,a,f0.6,a,f0.6,a,f0.6,a,f0.6,a,f0.6,a,i0)') &
+            "RESULT mode=argsort threads=", threads, " nrows=", nrows, &
+            " elapsed_s=", cor_total, " chunk_s=", cor_chunk, " earlymerge_s=", cor_early, &
+            " finalmerge_s=", cor_final, " pairwise_s=", pair_total, " threads_used=", used
+        write(output_unit, '(a,i0,a)') "(sink ", sink, ")"
+    end subroutine bench_argsort
+
+    !> `nround` timed `pf_argsort`s, keeping the best total and that round's own phase breakdown.
+    !!
+    !! The breakdown comes from the round that produced the best total rather than being averaged:
+    !! the fastest round is the one least disturbed by everything else on the machine, and mixing its
+    !! total with another round's phases would not add up.
+    subroutine time_argsort(v, perm, threads, nround, total, chunk, early, final, used)
+        real(real64), intent(in) :: v(:)                    !! the key array.
+        integer(int64), allocatable, intent(inout) :: perm(:) !! reused result array.
+        integer, intent(in) :: threads                      !! sort threads.
+        integer, intent(in) :: nround                        !! timed rounds; the best is kept.
+        real(real64), intent(out) :: total                  !! best wall time, seconds.
+        real(real64), intent(out) :: chunk                  !! phase 1 in that round, seconds.
+        real(real64), intent(out) :: early                  !! merge rounds but the last, seconds.
+        real(real64), intent(out) :: final                  !! the last merge round, seconds.
+        integer(int64), intent(out) :: used                 !! threads phase 1 put to work.
+        !> Where the last threaded sort spent its time. Declared locally rather than in
+        !! src/parquet_bindings.f90 because it is a maintainer diagnostic, not public API -- the
+        !! same convention every parquet_debug_* hook follows.
+        interface
+            function parquet_debug_get_sort_phase_ns(phase) &
+                    bind(C, name="parquet_debug_get_sort_phase_ns") result(ns)
+                import :: c_int, c_int64_t
+                integer(c_int), value :: phase !! 0 = chunk sorts, 1 = merge rounds but the last, 2 = the last round.
+                integer(c_int64_t) :: ns       !! nanoseconds in that phase, or 0 if it did not run.
+            end function parquet_debug_get_sort_phase_ns
+            function parquet_debug_get_sort_threads_used() &
+                    bind(C, name="parquet_debug_get_sort_threads_used") result(n)
+                import :: c_int64_t
+                integer(c_int64_t) :: n !! threads the last threaded build put to work, caller included.
+            end function parquet_debug_get_sort_threads_used
+        end interface
+        integer :: round
+        real(real64) :: t0, dt
+
+        total = huge(1.0_real64)
+        chunk = 0.0_real64
+        early = 0.0_real64
+        final = 0.0_real64
+        used = 1_int64
+        do round = 1, nround
+            t0 = now()
+            call pf_argsort(v, perm, threads=threads)
+            dt = now() - t0
+            if (dt < total) then
+                total = dt
+                chunk = real(parquet_debug_get_sort_phase_ns(0_c_int), real64) * 1.0e-9_real64
+                early = real(parquet_debug_get_sort_phase_ns(1_c_int), real64) * 1.0e-9_real64
+                final = real(parquet_debug_get_sort_phase_ns(2_c_int), real64) * 1.0e-9_real64
+                used = int(parquet_debug_get_sort_threads_used(), int64)
+            end if
+        end do
+    end subroutine time_argsort
+
+    !> Forces the smallest output range the co-ranked merge will give a thread of its own. A value
+    !! larger than the whole array leaves every pair unsegmented, which is exactly the pairwise merge
+    !! that preceded co-ranking -- so this is how one process measures both. 0 restores the real floor.
+    subroutine force_merge_segments(min_segment)
+        integer(int64), intent(in) :: min_segment !! floor in elements; 0 restores the built-in one.
+        interface
+            subroutine set_min_seg(n) bind(C, name="parquet_debug_set_sort_merge_min_segment")
+                import :: c_int64_t
+                integer(c_int64_t), value :: n !! elements; <= 0 restores the real floor.
+            end subroutine set_min_seg
+        end interface
+        call set_min_seg(int(min_segment, c_int64_t))
+    end subroutine force_merge_segments
+
+    !> One `phase: pairwise co-ranked change` row, so the five of them cannot drift apart in
+    !! formatting. A phase neither version spends time in prints a dash rather than a meaningless
+    !! ratio.
+    subroutine print_phase_pair(label, pairwise, coranked)
+        character(len=*), intent(in) :: label  !! what the row is measuring.
+        real(real64), intent(in) :: pairwise   !! seconds with every pair unsegmented.
+        real(real64), intent(in) :: coranked   !! seconds with co-ranking in force.
+
+        if (pairwise <= 0.0_real64 .or. coranked <= 0.0_real64) then
+            write(output_unit, '(a,f9.4,a,f9.4,a)') label//": ", pairwise, " s ", coranked, " s        --"
+        else
+            write(output_unit, '(a,f9.4,a,f9.4,a,f7.2,a)') label//": ", pairwise, " s ", coranked, &
+                " s   ", pairwise / coranked, "x"
+        end if
+    end subroutine print_phase_pair
 
     !> Builds `ncols` float64 columns plus one string column, each `nrows` rows, for the reindex
     !! measurement. Rebuilt before every timed round because `reindex` consumes its input ordering.

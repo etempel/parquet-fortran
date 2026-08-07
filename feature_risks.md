@@ -113,6 +113,8 @@ something a reader is expected to have.
 | [Risk-46](#risk-46--one-validation-stands-between-the-sort-engine-and-silently-duplicated-rows) | One validation stands between the sort engine and silently duplicated rows | 4 — covered |
 | [Risk-47](#risk-47--a-per-element-string-fill-is-quadratic-and-no-test-fails-when-it-comes-back) | A per-element string fill is quadratic, and no test fails when it comes back | 3 — not testable |
 | [Risk-48](#risk-48--a-row-permutation-handed-to-a-caller-goes-stale-with-nothing-to-notice) | A row permutation handed to a caller goes stale, with nothing to notice | 3 — not testable |
+| [Risk-49](#risk-49--a-co-ranked-merge-that-never-co-ranks-is-invisible) | A co-ranked merge that never co-ranks is invisible | 4 — covered |
+| [Risk-50](#risk-50--a-co-rank-off-by-one-produces-a-non-permutation-that-nothing-on-the-raw-path-validates) | A co-rank off-by-one produces a non-permutation that nothing on the raw path validates | 4 — covered |
 
 ---
 
@@ -120,7 +122,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-49**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-51**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1856,3 +1858,87 @@ length check has its own scenario (`reindex_trusted_length_mismatch`), and
 `assume_valid really skips the scan for a column` (`test/test_sorting.f90`), which passes a
 **duplicate-bearing** index array — the only observation that separates "skips the scan" from "still
 validates", since a valid permutation behaves identically either way.
+
+---
+
+### Risk-49 — A co-ranked merge that never co-ranks is invisible
+
+The threaded sort merges its per-thread chunks with a **co-ranked** merge: each round is partitioned
+by binary search so every thread merges a disjoint slice of the output, instead of merging pairwise
+and ending in a single-threaded pass over the whole array. It is purely a wall-time change — the
+permutation is bit-identical to the serial one, as it must be.
+
+**That identity is exactly what makes the feature invisible to testing**, one level deeper than
+Risk-39. A merge that silently stopped splitting — a budgeting formula that always answers one
+segment, a floor raised past every real input, a refactor that drops the segment loop — returns the
+*correct* permutation, and puts the O(n) serial tail straight back. Every ordering, null, NaN,
+stability and identity assertion in the suite passes against it. It also keeps reporting a healthy
+`parquet_debug_get_sort_threads_used`, because that counter means **phase 1's** chunk-sort threads
+and knows nothing about the merge.
+
+**The trap that actually bit, and the reason this entry exists at all: a floor of 16384 elements
+means no pair below 32768 is ever segmented, so every array small enough for a unit-test sweep takes
+the unsegmented path and calls the co-rank ZERO times.** Two deliberate co-rank defects (a boundary
+off by one; the values ignored in favour of an even split) survived the entire suite before this was
+noticed — the sweep was exercising the pairwise merge it had been written to replace. Zero
+invocations is a passing test, exactly as zero comparisons was for the partial sort (Risk-35).
+
+**Covered by** `the final merge round is really co-ranked` (`test/test_sorting.f90`), which asserts
+`parquet_debug_get_sort_merge_threads_used() > 1` — the **final** round specifically, since a merge
+that co-ranked only its first round would report a healthy maximum while leaving the whole tail in
+place — plus two negative controls (below the minimum-work threshold, and `threads=1`, both of which
+must report 1). Every other merge test lowers the floor with
+`parquet_debug_set_sort_merge_min_segment` first.
+
+**What this still forbids.**
+
+- **Never assert a threaded merge only through its answer**, and never through phase 1's thread
+  counter. Those two counters mean different things and must not be collapsed into one.
+- **Never write a merge test without lowering the segment floor**, and never raise the floor without
+  re-checking that the tests still reach the co-rank. A sweep that silently stops segmenting looks
+  identical to one that passes.
+- **Mutation-test this area against the sweep, not against the suite as a whole**, and confirm each
+  mutation actually fails something. The two that survived here failed nothing at all, which reads
+  like strong tests and meant the opposite.
+
+---
+
+### Risk-50 — A co-rank off-by-one produces a non-permutation that nothing on the raw path validates
+
+The co-ranked segments are a partition of both input runs only because every boundary satisfies
+`i + j == k` and is non-decreasing in both `i` and `j`. A boundary that drifts by one makes two
+segments overlap or leaves a gap between them, so some row index is written twice and another never
+written — and the result stops being a permutation at all.
+
+**Nothing on the raw-array path would notice.** `pf_argsort` hands its answer straight to the caller,
+and `pf_permute(..., assume_valid=.true.)` is documented as the way to skip validation for exactly
+such a permutation, so the corruption propagates into whatever the caller reorders with it.
+`parquet_table%sort_by` is protected — by the single remaining `%reindex` validation, Risk-46 — but
+that is the other path, and it is not the one a `pf_argsort` user is on.
+
+This is also the classic place for a defect that **shows up at one array size and nowhere else**: a
+boundary landing one element early only matters when a run happens to end there.
+
+**Covered by** three things, and each catches a different shape:
+
+- `every size from 2 to 400 threads identically` and `a threaded sort is still a permutation at every
+  size` (`test/test_sorting.f90`) — a *dense* sweep, every size 2..400 at every thread count 2..8,
+  plus awkward larger sizes. The density is the test.
+- `co-ranking survives its extreme inputs`, which drives every boundary to `i == nA` or `j == 0`
+  (already-sorted, reverse-sorted, all-equal, one extreme at each end).
+- **An always-on invariant check in `sort_merge_boundaries`** (`src/parquet_wrapper.cpp`), which
+  verifies monotonicity and `i + j == k` on the spawning thread before anything is merged, and aborts
+  through `report_fatal_error`. It costs O(segments) against the round's O(n). Mutation-confirmed:
+  a boundary perturbed by +1 is caught by *this*, not by an assertion.
+
+**What this still forbids.**
+
+- **Do not remove the invariant check** on the grounds that the co-rank is tested. It is what turns
+  a silent wrong answer into a named abort, and it is the only thing that catches the perturbation
+  class at all.
+- **Do not narrow the dense sweep** to a handful of round numbers to save runtime. That was decided
+  explicitly, and this is the risk it was decided against.
+- **Do not reuse `sort_corank` for `pf_merge`** without re-deriving its predicate. `SortRowLess` is a
+  total order with no ties, so the co-rank's tie condition is unobservable there — every formulation
+  of it agrees, mutation-confirmed. `pf_merge` has real ties and the opposite convention (Risk-37),
+  so a helper that is provably correct here can be quietly wrong there.

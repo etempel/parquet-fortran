@@ -212,10 +212,11 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
 writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`
-through eight runs: a raw reader baseline, a table open+`materialize_all`, a lazy open that reads
-only `TOUCH` of the columns, a slice-regime open covering one of `SLICES` equal row ranges, an
-access comparison, `parquet_write_table` against a hand-written per-column write loop — once on
-a null-free table and once on one where `NULLFRAC` of the rows are null — and a sort run.
+through eight runs plus a sweep: a raw reader baseline, a table open+`materialize_all`, a lazy open
+that reads only `TOUCH` of the columns, a slice-regime open covering one of `SLICES` equal row
+ranges, an access comparison, `parquet_write_table` against a hand-written per-column write loop —
+once on a null-free table and once on one where `NULLFRAC` of the rows are null — a sort run, and
+an argsort thread sweep.
 
 The **access** run needs a fixture with at least two columns (`NCOLS=2` or more) and reports two
 separate things. First, on already-materialized columns, what `%get` and `%col` themselves cost —
@@ -264,6 +265,23 @@ coincide, with every test still passing. The trailing "reference" block prices t
 representations against each other; `logical` is what `reindex` used before the bit-packed set
 replaced it, so those lines say what that change was worth rather than what is still available.
 
+The **argsort** run is also file-free, and answers a different question from `sort`: there the
+permutation build is a minority of `%sort_by`, but for a caller of raw-array `pf_sort`/`pf_argsort`
+it *is* the whole operation. It runs `pf_argsort` at each of `ARGSORT_THREADS` over each of
+`ARGSORT_NROWS`, splitting the result into the per-chunk `std::sort`s and the merge that follows,
+and reporting **the merge's last round separately** — that round is where a pairwise merge collapsed
+to a single thread, so it is the one the co-ranked merge exists to fix.
+
+Each run measures **both merges, back to back in one process**: once with the minimum segment size
+forced above the whole array, which leaves every pair unsegmented and so reproduces the pairwise
+merge exactly, and once with co-ranking in force. That is deliberate rather than convenient — an
+earlier version compared a co-ranked build against a pairwise one measured on a different day, and
+the serial baseline alone had drifted 15% in between, which is larger than some of the effects being
+reported. Any before/after claim about this phase should come from one process, not two runs.
+
+Keep `1` first in `ARGSORT_THREADS`: it is the serial baseline, and it reports no phases at all,
+because the engine takes the plain `std::sort` path rather than chunking.
+
 The lazy and slice runs are the ones to read against `read_table`: the open figure shows what an
 open costs when it reads nothing, and the two partial modes show that a program pays only for the
 columns and rows it asks for. A slice cannot be cheaper than one row group, so a fixture written
@@ -292,6 +310,8 @@ NCOLS=32 TOUCH=2 SLICES=8 tools/benchmark_table.sh
 TEST_FILE=/tmp/bench_table.parquet tools/benchmark_table.sh
 # The sort run is sized on its own, since it builds its table in memory:
 SORT_SIZE_GB=3 NCOLS=24 tools/benchmark_table.sh
+# A wider argsort sweep (also file-free), on a machine with more cores:
+ARGSORT_NROWS="1000000 20000000" ARGSORT_THREADS="1 2 4 8 16 32 64" tools/benchmark_table.sh
 ```
 
 **Use `--profile release`, never `FPM_FFLAGS`, for any measurement here.** `FPM_FFLAGS` *replaces*

@@ -590,22 +590,33 @@ how many distinct values there are.
 
 ### What it actually buys
 
-Measured on an 8-core arm64 laptop, `pf_argsort` over random `real(real64)`, best of several rounds:
+Measured on an 8-core arm64 laptop, `pf_argsort` over scattered `real(real64)`, best of several
+rounds:
 
 | rows | serial | 8 threads | speedup |
 |---|---|---|---|
 | 2 000 | 0.18 ms | 0.20 ms | 0.86x — threading *loses* |
-| 8 000 | 0.85 ms | 0.57 ms | 1.48x |
-| 32 000 | 3.9 ms | 1.6 ms | 2.50x |
-| 1 000 000 | 180 ms | 56 ms | 3.23x |
-| 20 000 000 | 5.63 s | 2.10 s | 2.68x |
+| 32 000 | 3.7 ms | 1.6 ms | 2.3x |
+| 1 000 000 | 172 ms | 40 ms | 4.3x |
+| 20 000 000 | 5.98 s | 1.36 s | 4.4x |
 
-**The speedup is capped well below the thread count, and that is a property of the algorithm, not a
-tuning failure.** The chunks are merged pairwise, so the last merge is always a single-threaded pass
-over the whole array — Amdahl's law with a serial fraction that grows as threads are added. Expect
-roughly 2–3x, not 8x. Thread counts that are powers of two merge more evenly than others.
+**The speedup still falls short of the thread count, but it is no longer capped by a serial pass.**
+The array is sorted in chunks and the chunks are then merged; the merge is *co-ranked*, meaning each
+round is partitioned by binary search so every thread merges its own disjoint slice of the output.
+Before that, the merge was pairwise — halving the thread count each round and ending in a
+single-threaded pass over the whole array, which cost the same 0.6 s at 2, 4 and 8 threads and held
+the whole operation to roughly 2–3x. Co-ranking makes that last round **3.5x** faster at 8 threads
+and the merge phase as a whole **2.4x** faster, which is where the table's improvement comes from.
 
-The 2 000-row row is why the minimum-work threshold exists: below it, `threads=` is ignored.
+What remains is ordinary: the per-chunk sorts do not scale perfectly, and the merge is dominated by
+one cache miss per element — it chases a scattered key for every comparison — so it is bound by
+memory latency rather than by how many threads are available. Thread counts that are powers of two
+still merge more evenly than others.
+
+The 2 000-row row is why the minimum-work threshold exists: below it, `threads=` is ignored. The
+32 000-row row is close behind it for a related reason — there is also a **minimum segment size**,
+so a merge too small to be worth splitting is simply run in one piece, and at that size co-ranking
+correctly declines to do anything.
 
 ### Cost
 
@@ -614,8 +625,6 @@ roughly **twice** a serial sort's — 16 bytes per row instead of 8. On a billio
 16 GB instead of 8. Pass `threads=1` where that matters more than the time.
 
 ## What is not here yet
-
-A co-ranked parallel merge, which would remove the serial-final-merge cap described above.
 
 `pf_partial_sort` and `pf_partial_argsort` are not defined for `parquet_string_column` or
 `parquet_column`, for the same reason `pf_sort` is not. `pf_nth_element` and `pf_nth_quantile` are

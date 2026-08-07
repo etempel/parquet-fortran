@@ -380,10 +380,28 @@ call t%materialize_all()      ! reads the columns in parallel, internally
 ```
 
 Each thread drives its own reader, so nothing is shared and nothing needs a lock. This happens only
-when it is both safe and worth it: at least two columns to read, more than one thread available, no
-read-time transform (a `filter=`/`sort=`/`qc=`/`sample_fraction=` table falls back to the ordinary
-serial read, since a second reader would have to redo that work — and for an unseeded sample would
-select different rows). Measured at **3.9x** on a 24-column, 900k-row file with 8 threads.
+when it is both safe and worth it: at least two columns to read, and more than one thread available.
+Measured at **3.9x** on a 24-column, 900k-row file with 8 threads.
+
+A **read-time transform** is carried by every one of those readers, so `%prefetch` and
+`%materialize_all` return exactly what a serial read would — but two of the four fall back to the
+serial read anyway, because rebuilding them per reader costs more than the parallel read saves:
+
+| opened with | prefetches in parallel? | why |
+|---|---|---|
+| `qc=` | **yes** | the rules are installed per reader but checked per column, and each column is read by one thread — nothing is checked twice. Measured **3.3x** |
+| `sample_fraction=` | **yes**, seeded or not | the table settles one seed at open, so every reader draws the same rows (see [`%clone` keeps it](#filtering-sorting-and-checking-rows-as-the-file-is-opened)). Measured **3.5x** |
+| `filter=` | no | every reader would re-decode the filter's key columns and rebuild the row mask. Measured **0.94x** at the automatic thread count (it peaks at ~1.2x around 3–5 threads, then goes negative as the per-reader cost outgrows the saving) |
+| `sort=` | no | every reader would rebuild the whole sort permutation, serially |
+
+Both fallbacks are about cost, not correctness, and both are transparent: the answer is identical
+either way, only slower than an untransformed read of the same file would be.
+
+**Qc warnings are not duplicated by this** — with one exception. A `qc_soft=.true.` violation prints
+at most once per column per reader, and each column is read by exactly one thread, so the parallel
+read prints exactly what the serial read prints. The exception is a column that a `filter=` also
+touches while evaluating its own clauses, which every reader evaluates; that combination stays on
+the serial path today, so it does not arise in practice.
 
 ### Growing one table from several threads
 

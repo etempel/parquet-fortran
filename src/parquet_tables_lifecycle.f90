@@ -156,7 +156,7 @@ contains
         end if
         !
         allocate(table%cache%reader)
-        call table_open_reader_with_transform(table, trim(filename), use_threads)
+        call table_open_reader_with_transform(table%cache, trim(filename), use_threads=use_threads)
         call parquet_get_nrows(table%cache%reader, file_rows)
         if (sliced) then
             table%regime = REGIME_SLICE
@@ -374,23 +374,34 @@ contains
         logical, allocatable :: pass_qc_soft
         logical :: masked
         integer(int64) :: rg_lo, rg_hi
+        ! Which reader this call is opening, resolved once so that every statement below drives the
+        ! same one. A pointer rather than two written-out arms (the shape `table_materialize` uses
+        ! for the same choice): there are three reader statements here, not one, and three pairs of
+        ! near-identical arms is exactly the drift this helper exists to remove. Both dummies carry
+        ! `target` so the association is standard-conforming; neither pointer outlives the call.
+        type(parquet_reader), pointer :: r
         !
-        masked = table_slice_is_masked(table%cache)
+        if (present(rdr)) then
+            r => rdr
+        else
+            r => cache%reader
+        end if
+        masked = table_slice_is_masked(cache)
         ! On the masked path the filter is attached after the open instead, because only
         ! parquet_reader_set_filter can carry the slice's row range with it -- see below.
-        if (allocated(table%cache%read_filter) .and. .not. masked) pass_filter = table%cache%read_filter
-        if (allocated(table%cache%read_sort)) pass_sort = table%cache%read_sort
+        if (allocated(cache%read_filter) .and. .not. masked) pass_filter = cache%read_filter
+        if (allocated(cache%read_sort)) pass_sort = cache%read_sort
         ! qc_soft only ever matters when a qc schema is actually attached, and passing it on its
         ! own would be a no-op the reader still has to reason about -- so it travels with the
         ! schema or not at all.
-        if (allocated(table%cache%read_qc_schema)) then
-            pass_schema = table%cache%read_qc_schema
-            pass_qc_soft = table%cache%read_qc_soft
+        if (allocated(cache%read_qc_schema)) then
+            pass_schema = cache%read_qc_schema
+            pass_qc_soft = cache%read_qc_soft
         end if
-        call parquet_open_reader(table%cache%reader, filename, filter=pass_filter, &
+        call parquet_open_reader(r, filename, filter=pass_filter, &
             sort_by=pass_sort, schema=pass_schema, qc_soft=pass_qc_soft, use_threads=use_threads, &
-            sample_fraction=table%cache%read_sample_fraction, &
-            sample_seed=table%cache%read_sample_seed)
+            sample_fraction=cache%read_sample_fraction, &
+            sample_seed=cache%read_sample_seed)
         if (.not. masked) return
         !
         ! The slice's own row range becomes part of the reader's mask, so that everything the
@@ -406,19 +417,23 @@ contains
         ! deliberate rather than a missing branch: a rule-less filter carrying a row range installs
         ! an all-true-within-range mask, which is exactly what that case needs, and folds the
         ! already-installed sample draw into it.
-        call rg_covering_range(table%cache%rg_bounds_physical, table%cache%slice_row_lo, &
-            table%cache%slice_row_hi, rg_lo, rg_hi)
+        call rg_covering_range(cache%rg_bounds_physical, cache%slice_row_lo, &
+            cache%slice_row_hi, rg_lo, rg_hi)
         block
             type(parquet_filter) :: attach
-            if (allocated(table%cache%read_filter)) attach = table%cache%read_filter
-            call parquet_reader_set_filter(table%cache%reader, attach, rg_lo, rg_hi, &
-                table%cache%slice_row_lo, table%cache%slice_row_hi)
+            if (allocated(cache%read_filter)) attach = cache%read_filter
+            call parquet_reader_set_filter(r, attach, rg_lo, rg_hi, &
+                cache%slice_row_lo, cache%slice_row_hi)
         end block
         ! Rebuilt from the reader now that it is masked, so these count each row group's SURVIVING
         ! rows within the slice -- the table's own coordinates. Row groups outside the slice
         ! contribute nothing and come back as empty ranges, which materialize_slice's existing
         ! skip test steps over unchanged.
-        call reader_row_group_bounds(table%cache%reader, table%cache%rg_bounds)
+        !
+        ! ONLY for the cache's own reader. `rg_bounds` describes that reader, it is already correct
+        ! by the time any other reader over the same file is opened, and it is shared state that
+        ! several threads would otherwise write at once -- see this procedure's own doc-comment.
+        if (.not. present(rdr)) call reader_row_group_bounds(r, cache%rg_bounds)
     end procedure table_open_reader_with_transform
     !
     module procedure parquet_new_table

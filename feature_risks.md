@@ -120,6 +120,7 @@ something a reader is expected to have.
 | [Risk-53](#risk-53--a-parallel-mutation-gate-that-never-engages-passes-every-correctness-test) | A parallel mutation gate that never engages passes every correctness test | 4 — covered |
 | [Risk-54](#risk-54--the-parallel-rewrites-memory-cost-is-bounded-by-documentation-and-nothing-else) | The parallel rewrite's memory cost is bounded by documentation and nothing else | 3 — not testable |
 | [Risk-55](#risk-55--two-readers-of-one-table-can-sample-different-rows-and-only-a-count-mismatch-shows-it) | Two readers of one table can sample different rows, and only a count mismatch shows it | 4 — covered |
+| [Risk-56](#risk-56--a-per-thread-reader-that-writes-shared-cache-state-races-silently) | A per-thread reader that writes shared cache state races silently | 3 — not testable |
 
 ---
 
@@ -127,7 +128,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-56**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-57**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -437,6 +438,40 @@ and all three had to discard it. And "touching" a column with `size(ptr)` faults
 all, so an identical build reported 2828 MiB once and 5423 MiB the next time; the touch has to sum.
 
 ---
+
+### Risk-56 — A per-thread reader that writes shared cache state races silently
+
+`materialize_marked_parallel` (`src/parquet_tables_read.f90`) opens one `parquet_reader` per thread
+through `table_open_reader_with_transform`, and that helper ends its **masked-slice** path by writing
+`cache%rg_bounds` — a component of the shared cache that every read path consults. Exactly one open
+may do that: the one that creates `cache%reader`. Several threads writing it concurrently is a data
+race on the array the slice's own arithmetic indexes.
+
+The guard is one line, `if (.not. present(rdr))`, and it is deliberately **derived** rather than
+passed as a `set_bounds` argument: those bounds describe the cache's own reader, so "which open may
+write them" and "which open created that reader" are the same question, and a separate flag would
+only have created a way for the two to disagree.
+
+**Test.** Not testable, in the way races generally are not: eight threads writing the same values
+into the same array produce the correct array almost every time, so a test that removed the guard
+would pass. There is nothing to assert — the failure is a torn write under a scheduler this suite
+cannot force, and the values being written are identical, so even ThreadSanitizer would report it
+only while the region is live rather than through a wrong answer afterwards.
+
+**How to avoid it instead.**
+
+- **A new statement in `table_open_reader_with_transform` that writes through `cache` must ask
+  whether `rdr` is present**, exactly as the `reader_row_group_bounds` call does. Reading `cache` is
+  free; writing it is not.
+- **`cache` is `intent(inout)` there only because the one write needs it.** If a future change makes
+  that write conditional in some other way, the intent is the signal to re-check this — an
+  `intent(in)` dummy would make the whole class of mistake impossible, and is worth reaching for if
+  the write ever moves out.
+- **The sibling rule is already documented and is the one people meet first**: a per-thread reader
+  must *attach* the slice's row range and must *not* rebuild the bounds. The attach half IS testable
+  and is covered — `a masked slice prefetches in parallel with every column on one row set`
+  (`test/test_table_parallel.f90`), mutation-confirmed by making the helper skip its masked branch
+  when `rdr` is present, which aborts with `nrows mismatch for column: e`.
 
 ## 4. Risks already covered, kept for what they still forbid
 

@@ -482,13 +482,45 @@ contains
     !! That is only sound when a freshly opened reader would see *exactly* what the table's own
     !! reader sees, and only worth doing when opening those readers does not duplicate real work:
     !!
-    !!   * **No read-time transform.** A per-thread reader would have to reproduce the table's
-    !!     filter/sort/sample/qc, and each of the four fails differently. An UNSEEDED
-    !!     `sample_fraction=` is the dangerous one: every reader would draw its own subset, so
-    !!     columns read by different threads would hold different rows -- a silent wrong answer,
-    !!     not a crash. A sort would rebuild the whole permutation per thread, a filter would
-    !!     re-evaluate its clauses per thread, and a qc schema would re-run (and re-warn) per
-    !!     thread. All four therefore fall back to the serial reader.
+    !!   * **A `sample_fraction=` and a `qc=` are CARRIED by every per-thread reader**, because
+    !!     `table_open_reader_with_transform` opens them rather than a bare `parquet_open_reader`.
+    !!     The sample is reproduced from `cache%read_sample_seed`, which `parquet_open_table`
+    !!     settles before any reader exists (feature_risks.md Risk-55) -- so there is deliberately
+    !!     **no** seed test here, and adding one back would read as though that invariant were in
+    !!     doubt. A qc schema installs its rules per reader but runs its checks per COLUMN, and
+    !!     each column is read by exactly one thread, so nothing is checked or warned twice.
+    !!     Measured on a 16-column x 2 M-row file, 8 threads, best of 5, four rounds: **3.5x** for
+    !!     the sample and **3.3x** for qc, against 4.5x with no transform at all.
+    !!   * **A `sort=` and a `filter=` still fall back to the serial reader -- both on COST, and
+    !!     both as a DEFERRAL rather than a property of the problem.** Each per-thread reader would
+    !!     redo the transform's own derived state, which is the "does not duplicate real work"
+    !!     clause of the principle above:
+    !!       - a **sort** rebuilds the whole permutation, serially (`pf_sort_threads` stands down
+    !!         inside a region) -- 5.88 s at 20.8 M rows on one measured machine, against a
+    !!         prefetch saving of a couple of seconds on the same file;
+    !!       - a **filter** re-decodes its key columns, re-runs the statistics screen and rebuilds
+    !!         the row mask -- a cost that grows with the thread count while the read saving decays
+    !!         with it, so the curve peaks early and then goes negative. Measured on the same file,
+    !!         three rounds, speedup against a forced-serial read by thread cap: **2 -> 1.06x,
+    !!         3 -> 1.22x, 4 -> 1.19x, 5 -> 1.21x, 6 -> 1.04x, 7 -> 0.94x, 8 -> 0.94x**, against
+    !!         4.0-4.7x for the same file with no filter. So it is refused **at the automatic
+    !!         thread count, which is what a caller actually gets** -- the peak is real but is worth
+    !!         a fifth of what the untransformed case wins, and capturing it would mean inventing a
+    !!         thread-count heuristic from one machine's numbers. Correctness is not the issue at
+    !!         all (a filter is a pure function of the file, so every reader computes the same mask,
+    !!         and that path is implemented and tested); only the cost is.
+    !!
+    !!         **More filter columns makes this monotonically worse, not better** -- the natural
+    !!         next question, and the answer is the opposite of the intuition. The per-reader cost
+    !!         is proportional to how many key columns the filter decodes, so the optimum thread
+    !!         count falls as sqrt(columns read / columns filtered on). Same file, best speedup over
+    !!         every thread count tried: **1 key column -> 1.29x, 2 -> 1.02x, 4 -> 0.77x,
+    !!         8 -> 0.65x.** From two key columns on there is NO thread count at which this wins.
+    !!     **Both are fixable the same way, and by the same milestone.** The permutation is an
+    !!     immutable `shared_ptr<arrow::Array>` and the mask is likewise derived once and never
+    !!     mutated, so each could be *shared* with a per-thread reader for a refcount increment
+    !!     instead of rebuilt. That is milestone P9, which these two clauses both wait on. Do not
+    !!     read either line as "this cannot be parallelised".
     !!   * **Not detached, and file-backed**, or there is no file to open a second reader on.
     !!   * **At least two top-level names to read.** One column cannot be split, and the release
     !!     policy groups a struct's leaves under their top-level name (see `materialize_marked`),
@@ -512,10 +544,11 @@ contains
         if (sc%detached) return
         if (.not. cache%file_backed) return
         if (.not. allocated(cache%reader)) return
-        if (allocated(cache%read_filter)) return
+        ! The two transforms still refused, both on measured COST and both only until P9 rebuilds
+        ! them as shared state -- see this function's doc-comment for the numbers. A sample= or a
+        ! qc= is deliberately NOT tested here; both are carried by every per-thread reader.
         if (allocated(cache%read_sort)) return
-        if (allocated(cache%read_qc_schema)) return
-        if (allocated(cache%read_sample_fraction)) return
+        if (allocated(cache%read_filter)) return
         call count_top_level_groups(cache, want, ngroups)
         if (ngroups < 2) return
         parallel_prefetch_ok = .true.
@@ -695,7 +728,14 @@ contains
                     ! threading on, 0.046-0.047 s with use_threads=.false. Nesting the two is
                     ! faster, not slower, so the obvious "one level of parallelism only" instinct
                     ! is wrong here. Re-measure before changing it.
-                    call parquet_open_reader(readers(t), cache%source_file)
+                    !
+                    ! THROUGH THE SAME HELPER `parquet_open_table` USES, never a bare
+                    ! parquet_open_reader: that is what makes this thread's reader carry the
+                    ! table's filter/qc/sample -- and carry them identically, by construction
+                    ! rather than by a second copy of the plumbing that has to be kept in step.
+                    ! Passing `readers(t)` is also what keeps `cache%rg_bounds` unwritten here;
+                    ! see the helper's own doc-comment.
+                    call table_open_reader_with_transform(cache, cache%source_file, readers(t))
                     reader_open(t) = .true.
                 end if
                 do k = g_lo(g), g_hi(g)

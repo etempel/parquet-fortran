@@ -289,7 +289,7 @@ contains
         class(parquet_table), intent(inout) :: out  !! the destination table.
         !
         allocate(out%cache%reader)
-        call table_open_reader_with_transform(out, out%cache%source_file)
+        call table_open_reader_with_transform(out%cache, out%cache%source_file)
         out%cache%file_backed = .true.
     end subroutine clone_reopen_reader
     !

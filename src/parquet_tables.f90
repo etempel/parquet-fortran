@@ -925,9 +925,26 @@ module parquet_tables
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
             integer(int32), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
         end subroutine open_table_slice_i64
-        !> Opens `table%cache%reader` on `filename` with whatever read-time transform the table
-        !! carries in its `read_*` components already attached. One helper rather than two open
-        !! calls, so that %clone's reopen cannot drift from parquet_open_table's own.
+        !> Opens a reader on `filename` with whatever read-time transform the table carries in its
+        !! `read_*` components already attached -- `cache%reader` itself, or, when `rdr` is given,
+        !! some other reader over the same file. One helper rather than several open calls, so that
+        !! %clone's reopen and the parallel prefetch's per-thread readers cannot drift from
+        !! parquet_open_table's own. That is what makes the prefetch gate's central claim -- *a
+        !! freshly opened reader sees exactly what the table's reader sees* -- true by construction
+        !! rather than by argument.
+        !!
+        !! **`rdr` is optional rather than required, and that is forced rather than chosen.**
+        !! Passing `t%cache` and `t%cache%reader` to one call would associate two dummy arguments
+        !! with overlapping storage, which Fortran forbids as soon as either is defined. So the
+        !! cache's own reader is reached through the cache, and `rdr` names any OTHER reader.
+        !!
+        !! **`cache%rg_bounds` is written only when `rdr` is absent**, and the two conditions are
+        !! deliberately the same one rather than a separate argument. Those bounds describe the
+        !! cache's own reader, so only the open that creates that reader may write them; a
+        !! per-thread open must not, both because the bounds are already correct and because
+        !! several threads writing one component of a shared cache is a data race. Deriving it from
+        !! `present(rdr)` rather than taking a `set_bounds` flag removes the only way to get it
+        !! wrong.
         !!
         !! Each half is passed through an ALLOCATABLE local left unallocated when that half is
         !! empty: an unallocated allocatable actual makes an optional dummy absent (F2018
@@ -942,9 +959,10 @@ module parquet_tables
         !! Requires `cache%slice_row_lo`/`slice_row_hi` and `cache%rg_bounds_physical` to be set
         !! already, and leaves `cache%rg_bounds` holding the resulting per-row-group survivor
         !! counts.
-        module subroutine table_open_reader_with_transform(table, filename, use_threads)
-            type(parquet_table), intent(inout) :: table !! table whose (allocated) reader is opened.
+        module subroutine table_open_reader_with_transform(cache, filename, rdr, use_threads)
+            type(parquet_table_cache), intent(inout), target :: cache !! the table's store, holding the transform.
             character(len=*), intent(in) :: filename    !! parquet file to open.
+            type(parquet_reader), intent(inout), optional, target :: rdr !! reader to open instead of cache%reader.
             logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         end subroutine table_open_reader_with_transform
         !> The inclusive 1-based row-group range covering rows `row_lo..row_hi` of `bounds`, or

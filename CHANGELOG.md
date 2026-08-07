@@ -321,9 +321,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a parallel producer region needs no `!$omp critical` of its own: each thread analyses its own
   slice and appends its results to one destination. `%prefetch`/`%materialize_all` now read a wide
   file's columns **in parallel internally**, with no OpenMP in the calling code at all — measured at
-  3.9x on a 24-column, 900k-row file with 8 threads (it falls back to the ordinary serial read when
-  there is a read-time `filter=`/`sort=`/`qc=`/`sample_fraction=`, since a second reader would have
-  to repeat that work). New `%ensure_validity([name])` materializes a column's validity storage up
+  3.9x on a 24-column, 900k-row file with 8 threads. A read-time `qc=` or `sample_fraction=` (seeded
+  or not) keeps that parallelism and returns exactly what a serial read would, at a measured 3.3x
+  and 3.5x; a `filter=` or a `sort=` falls back to the ordinary serial read, because every reader
+  would have to rebuild the row mask or the sort permutation, and measuring that made a filtered
+  read *slower* than reading serially once all cores are used. A soft `qc=` violation still warns at most once per column either way.
+  New `%ensure_validity([name])` materializes a column's validity storage up
   front, which is what makes nulling elements of one column from several threads safe — validity is
   allocated lazily, so the *first* null would otherwise allocate, and two threads doing that race.
   `parquet_string_column` gains the matching `has_validity`/`reserve_validity` pair.

@@ -71,6 +71,14 @@ them wrong — but two consequences are worth knowing:
   business, not the library's: without that rule, *T* of your threads would each ask for *T* more,
   and the oversubscription is slower than not threading at all. So the per-thread-slice pattern
   below loses nothing — each thread's own table is small and there are already *T* of them running.
+- **A read-time transform is carried by every per-thread reader, and two of the four decline the
+  parallel read on cost.** A `qc=` or a `sample_fraction=` table (seeded or not — the table settles
+  one seed when it is opened, so every reader draws the same rows) prefetches in parallel and
+  returns exactly what a serial read would; a `filter=` or a `sort=` falls back to the serial
+  reader, because every reader would otherwise rebuild the mask or the permutation, which measured
+  slower than the parallel read saves. Nothing about the *answer* changes either way. One
+  consequence worth stating because it is the question people ask: **a soft qc violation still
+  warns at most once per column**, since each column is read by exactly one thread.
 - **A parallel rewrite holds one transient column copy per thread**, where a serial one holds one in
   total. The thread count never exceeds the column count, so those copies come to at most one extra
   copy of the table: a `%sort_by` can double the table's peak memory for the duration of the call.

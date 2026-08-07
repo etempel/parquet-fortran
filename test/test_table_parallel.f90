@@ -79,6 +79,18 @@ module test_table_parallel
             import :: c_int64_t
             integer(c_int64_t), value :: n !! new minimum, or 0 to restore.
         end subroutine parquet_debug_set_colwork_min_columns
+        !> Threads the last internally-parallel PREFETCH was given; 0 when it ran serially.
+        function parquet_debug_get_prefetch_threads_used() result(res) &
+            bind(C, name="parquet_debug_get_prefetch_threads_used")
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! resolved thread count of the last prefetch.
+        end function parquet_debug_get_prefetch_threads_used
+        !> Clears the prefetch counter, so a test observes its own prefetch rather than an earlier one.
+        subroutine parquet_debug_set_prefetch_threads_used(n) &
+            bind(C, name="parquet_debug_set_prefetch_threads_used")
+            import :: c_int64_t
+            integer(c_int64_t), value :: n !! new counter value; tests use 0.
+        end subroutine parquet_debug_set_prefetch_threads_used
     end interface
     !
 contains
@@ -101,7 +113,21 @@ contains
             new_unittest("clone gives the same table on many threads as on one", &
                 test_clone_parallel_equals_serial), &
             new_unittest("clone leaves an unread column unread, on either path", &
-                test_clone_keeps_lazy_columns_unread) &
+                test_clone_keeps_lazy_columns_unread), &
+            new_unittest("a filtered table still prefetches serially, pending P9", &
+                test_prefetch_filter_still_serial), &
+            new_unittest("an UNSEEDED sample prefetches in parallel with every column on one sample", &
+                test_prefetch_sample_unseeded_columns_agree), &
+            new_unittest("sample_seed=0 is treated as unseeded and is equally safe in parallel", &
+                test_prefetch_sample_seed_zero_columns_agree), &
+            new_unittest("a masked slice prefetches in parallel with every column on one row set", &
+                test_prefetch_masked_slice_columns_agree), &
+            new_unittest("a qc schema prefetches in parallel and agrees with the serial read", &
+                test_prefetch_qc_parallel_equals_serial), &
+            new_unittest("a soft qc violation warns once per column, on either path", &
+                test_prefetch_qc_soft_warns_per_column), &
+            new_unittest("a sorted table still prefetches serially, pending P9", &
+                test_prefetch_sort_still_serial) &
             ]
     end subroutine collect_tests_table_parallel
     !
@@ -338,6 +364,346 @@ contains
         call check(error, size(got) == FROWS .and. abs(got(FROWS) - 4.0_real64 * real(FROWS, real64)) &
             < 1.0e-12_real64, "a clone must still be able to read the columns it left unread")
     end subroutine test_clone_keeps_lazy_columns_unread
+    !
+    ! ==================================================================================
+    ! P4 -- the widened prefetch gate
+    ! ==================================================================================
+    !
+    !> A `filter=` table still prefetches serially, and this asserts the refusal.
+    !>
+    !> **The reason is cost, not correctness, and that distinction is the whole point of this
+    !> test.** A filter is a pure function of the file, so every per-thread reader computes the same
+    !> mask, and `table_open_reader_with_transform` would carry it correctly -- the machinery is
+    !> there and is exercised by the sample and qc tests below. But each reader also re-decodes the
+    !> filter's key columns, re-runs the statistics screen and rebuilds the row mask -- a cost that
+    !> grows with the thread count while the saving decays with it. Measured on a 16-column x 2 M-row
+    !> file over three rounds, the speedup peaks at ~1.2x around 3-5 threads and falls to **0.94x at
+    !> the automatic count**, which is what a caller actually gets; the same file with no filter is
+    !> 4.0-4.7x. So the clause was closed again on the evidence, not left open on the argument.
+    !>
+    !> **When P9 lands, this becomes an equality test, not a deletion.** Sharing the mask makes the
+    !> per-reader cost a refcount increment, at which point the clause goes and what needs asserting
+    !> is that the shared mask kept the answer.
+    !>
+    !> The serial answer still has to be right, so this also checks it -- a refusal that returned
+    !> wrong rows would pass a thread-count assertion on its own.
+    subroutine test_prefetch_filter_still_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_prefetch_filter.parquet"
+        type(parquet_table) :: t
+        type(parquet_filter) :: filt
+        real(real64), allocatable :: a(:), e(:)
+        integer :: used
+        !
+        call write_wide_fixture(f)
+        call filt%add("a > 100000")
+        !
+        call parquet_reset_settings()
+        call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f, filter=filt)
+        call t%materialize_all()
+        used = int(parquet_debug_get_prefetch_threads_used())
+        call check(error, used == 0, &
+            "a filtered table must still prefetch serially: every per-thread reader would " // &
+            "re-evaluate the filter, which measured slower than the serial read (deferred to P9)")
+        if (allocated(error)) return
+        !
+        call t%get("a", a)
+        call t%get("e", e)
+        call check(error, size(a) == FROWS / 2 .and. abs(a(1) - real(FROWS / 2 + 1, real64)) &
+            < 1.0e-9_real64, "the serial read of a filtered table returned the wrong rows")
+        if (allocated(error)) return
+        call check(error, all(abs(e - 5.0_real64 * a) < 1.0e-9_real64), &
+            "two columns of a filtered table came from different row sets")
+    end subroutine test_prefetch_filter_still_serial
+    !
+    !> **The load-bearing test of P4.**
+    !>
+    !> A table opened with `sample_fraction=` and NO `sample_seed=` now prefetches in parallel. That
+    !> is only safe because `parquet_open_table` settles a seed before any reader exists
+    !> (`feature_risks.md` Risk-55), so every per-thread reader draws the identical rows. A
+    !> per-thread reader opened without that seed -- a bare `parquet_open_reader`, as this path used
+    !> to do -- gives each column its own random subset, and every column still looks perfectly
+    !> ordinary on its own.
+    !>
+    !> **The assertion is that the columns are in step with EACH OTHER**, not a row count and not an
+    !> A/B equality. The fixture writes column *c* as `c*i`, so `e == 5*a` holds for any set of rows
+    !> and fails the moment two columns come from two different draws.
+    !>
+    !> Honest about what usually catches it: a redraw normally makes two columns differ in LENGTH,
+    !> and `parquet_check_read_row_count` aborts on that first -- confirmed by mutation, where five
+    !> per-thread readers reported 100191/99806/100031/99689/99728 rows. The identity above is the
+    !> defence for the remaining case, two draws that coincide in count while holding different
+    !> rows, which is the one that would otherwise pass in silence. Its own teeth were confirmed
+    !> separately, by perturbing the fixture so `e /= 5*a` and watching this test fail.
+    subroutine test_prefetch_sample_unseeded_columns_agree(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_prefetch_sample.parquet"
+        !
+        call check_sampled_prefetch_agrees(error, f, use_zero_seed=.false.)
+    end subroutine test_prefetch_sample_unseeded_columns_agree
+    !
+    !> `sample_seed=0` is `parquet_open_reader`'s own spelling of "draw a fresh seed", so it is the
+    !> unseeded case wearing an explicit argument -- and it is the one a gate written to test
+    !> `allocated(read_sample_seed)` alone would have admitted while every reader drew separately.
+    !> N4 resolves it to a real positive seed at open, so it is exactly as safe as the test above;
+    !> this asserts that rather than assuming the two spellings travel the same path.
+    subroutine test_prefetch_sample_seed_zero_columns_agree(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_prefetch_seed0.parquet"
+        !
+        call check_sampled_prefetch_agrees(error, f, use_zero_seed=.true.)
+    end subroutine test_prefetch_sample_seed_zero_columns_agree
+    !
+    !> Shared body of the two sampled-prefetch tests; `use_zero_seed` picks which spelling of
+    !> "unseeded" the table is opened with. Its own fixture file per caller, since the suite's
+    !> siblings may run concurrently with other suites.
+    subroutine check_sampled_prefetch_agrees(error, f, use_zero_seed)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        character(len=*), intent(in) :: f                   !! fixture path, one per caller.
+        logical, intent(in) :: use_zero_seed                !! .true. passes sample_seed=0 explicitly.
+        type(parquet_table) :: t
+        real(real64), allocatable :: a(:), c(:), e(:)
+        integer :: used
+        !
+        call write_wide_fixture(f)
+        call parquet_reset_settings()
+        call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
+        if (use_zero_seed) then
+            call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=0_int32)
+        else
+            call parquet_open_table(t, f, sample_fraction=0.5_real64)
+        end if
+        call t%materialize_all()
+        used = int(parquet_debug_get_prefetch_threads_used())
+        call check_prefetch_really_parallel(error, used, "a sampled table")
+        if (allocated(error)) return
+        !
+        call check(error, t%nrows() > 0_int64 .and. t%nrows() < int(FROWS, int64), &
+            "sample_fraction=0.5 should keep some but not all of the rows")
+        if (allocated(error)) return
+        call t%get("a", a)
+        call t%get("c", c)
+        call t%get("e", e)
+        call check(error, size(a) == size(c) .and. size(a) == size(e), &
+            "three columns of one sampled table came back with different lengths")
+        if (allocated(error)) return
+        ! The whole point: column c is 3*i and column e is 5*i over the SAME original rows, so
+        ! these two identities hold for any sample and for no pair of different samples. Columns
+        ! a, c and e are far enough apart in the slot order to land on different threads.
+        call check(error, all(abs(c - 3.0_real64 * a) < 1.0e-9_real64), &
+            "two columns of a sampled table came from different draws; every per-thread reader " // &
+            "must sample with the seed the table settled at open")
+        if (allocated(error)) return
+        call check(error, all(abs(e - 5.0_real64 * a) < 1.0e-9_real64), &
+            "the last column of a sampled table came from a different draw than the first")
+    end subroutine check_sampled_prefetch_agrees
+    !
+    !> A **masked slice** -- a slice whose transform narrows it, so the reader carries the slice's
+    !> own row range as part of its mask -- prefetches in parallel too.
+    !>
+    !> This is the one branch a per-thread reader takes *differently* from the table's own, and the
+    !> only place P4 needed a rule rather than a refactor. `table_open_reader_with_transform`'s
+    !> masked path ends by attaching the slice's row range with `parquet_reader_set_filter` and then
+    !> rebuilding `cache%rg_bounds` from the resulting reader. The attach must happen on every
+    !> reader; the rebuild must happen on exactly one, because `rg_bounds` is shared cache state and
+    !> several threads writing it at once is a data race on a component every read path consults.
+    !>
+    !> A per-thread reader that skipped the attach would return the covering row groups' survivors
+    !> in full, so a column read on a worker thread would be longer than one read on the main
+    !> thread; the cross-column identities below are what catch that, and the row-range assertion is
+    !> what catches a reader that was scoped to the wrong rows entirely.
+    subroutine test_prefetch_masked_slice_columns_agree(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_prefetch_maskslice.parquet"
+        integer(int64), parameter :: LO = 50000_int64, HI = 150000_int64
+        type(parquet_table) :: t
+        real(real64), allocatable :: a(:), c(:), e(:)
+        integer :: used
+        !
+        call write_wide_fixture(f)
+        call parquet_reset_settings()
+        call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
+        ! Slice PLUS a narrowing transform is what makes the slice masked; a slice on its own is
+        ! trimmed in memory and never reaches this path.
+        call parquet_open_table(t, f, LO, HI, sample_fraction=0.5_real64)
+        call t%materialize_all()
+        used = int(parquet_debug_get_prefetch_threads_used())
+        call check_prefetch_really_parallel(error, used, "a masked slice")
+        if (allocated(error)) return
+        !
+        call check(error, t%nrows() > 0_int64 .and. t%nrows() < HI - LO + 1_int64, &
+            "a sampled slice should keep some but not all of its rows")
+        if (allocated(error)) return
+        call t%get("a", a)
+        call t%get("c", c)
+        call t%get("e", e)
+        call check(error, size(a) == size(c) .and. size(a) == size(e), &
+            "three columns of one masked slice came back with different lengths")
+        if (allocated(error)) return
+        call check(error, all(abs(c - 3.0_real64 * a) < 1.0e-9_real64) .and. &
+            all(abs(e - 5.0_real64 * a) < 1.0e-9_real64), &
+            "two columns of a masked slice came from different row sets")
+        if (allocated(error)) return
+        ! Column a is written as 1*i, so its value IS the original file row number -- which makes
+        ! the slice's own bounds directly assertable rather than inferred from a count.
+        call check(error, all(a >= real(LO, real64)) .and. all(a <= real(HI, real64)), &
+            "a masked slice returned rows from outside its own row range")
+    end subroutine test_prefetch_masked_slice_columns_agree
+    !
+    !> A `qc=` table now prefetches in parallel, each thread's reader carrying the same rules. The
+    !> rules are installed per reader but the checks run per column read, and each column is read by
+    !> exactly one thread -- so nothing is checked twice and the values are untouched either way.
+    subroutine test_prefetch_qc_parallel_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_prefetch_qc.parquet"
+        type(parquet_table) :: par, ser
+        type(parquet_read_qc) :: qc
+        real(real64), allocatable :: pe(:), se(:)
+        integer :: used
+        !
+        call write_wide_fixture(f)
+        ! Satisfied by the fixture (every value is positive), so this exercises the qc machinery
+        ! without provoking a violation -- the violation case is the soft test below.
+        call qc%add("a, >=1")
+        call qc%add("e, >=1")
+        !
+        call parquet_reset_settings()
+        call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
+        call parquet_open_table(par, f, qc=qc)
+        call par%materialize_all()
+        used = int(parquet_debug_get_prefetch_threads_used())
+        call check_prefetch_really_parallel(error, used, "a qc-checked table")
+        if (allocated(error)) return
+        !
+        call parquet_set_prefetch_threads(1)
+        call parquet_open_table(ser, f, qc=qc)
+        call ser%materialize_all()
+        call parquet_reset_settings()
+        !
+        call par%get("e", pe)
+        call ser%get("e", se)
+        call check(error, size(pe) == size(se) .and. size(pe) == FROWS, &
+            "a qc-checked table's row count differed between the parallel and serial prefetch")
+        if (allocated(error)) return
+        call check(error, all(abs(pe - se) < 1.0e-9_real64), &
+            "a qc-checked table's values differed between the parallel and serial prefetch")
+    end subroutine test_prefetch_qc_parallel_equals_serial
+    !
+    !> A qc bound the data VIOLATES, with `qc_soft=.true.`: the read must complete on both paths and
+    !> hand back the same values, with the violation reported rather than enforced.
+    !>
+    !> **What this does not assert, and why.** The number of warnings printed is not observable from
+    !> inside the process -- they go to the library's output channel, not to a counter -- so the
+    !> assertion here is that a soft violation changes *nothing* about the answer on the parallel
+    !> path. Which warnings duplicate was established separately, by running this shape and reading
+    !> the output; the finding is recorded in `doc/pages/quality-control.md` and
+    !> `doc/pages/thread-safety.md`. A HARD violation is deliberately not tested here: it aborts,
+    !> which needs an out-of-process error scenario rather than an in-process test.
+    subroutine test_prefetch_qc_soft_warns_per_column(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_prefetch_qcsoft.parquet"
+        type(parquet_table) :: par, ser
+        type(parquet_read_qc) :: qc
+        real(real64), allocatable :: pa(:), sa(:), pe(:), se(:)
+        integer :: used
+        !
+        call write_wide_fixture(f)
+        ! Violated by construction: column a runs 1..FROWS and column e runs 5..5*FROWS, so both
+        ! upper bounds are exceeded and both columns have something to warn about. The lower bound
+        ! is satisfied and is there only because a rule's first bound is its `min:`, which accepts
+        ! `>=`/`>` alone -- an upper bound cannot be given on its own.
+        call qc%add("a, >=1, <=10")
+        call qc%add("e, >=1, <=10")
+        !
+        call parquet_reset_settings()
+        call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
+        call parquet_open_table(par, f, qc=qc, qc_soft=.true.)
+        call par%materialize_all()
+        used = int(parquet_debug_get_prefetch_threads_used())
+        call check_prefetch_really_parallel(error, used, "a soft-qc table")
+        if (allocated(error)) return
+        !
+        call parquet_set_prefetch_threads(1)
+        call parquet_open_table(ser, f, qc=qc, qc_soft=.true.)
+        call ser%materialize_all()
+        call parquet_reset_settings()
+        !
+        call par%get("a", pa)
+        call ser%get("a", sa)
+        call par%get("e", pe)
+        call ser%get("e", se)
+        call check(error, size(pa) == FROWS .and. size(pe) == FROWS, &
+            "a soft qc violation must not change how many rows are read")
+        if (allocated(error)) return
+        call check(error, all(abs(pa - sa) < 1.0e-9_real64) .and. all(abs(pe - se) < 1.0e-9_real64), &
+            "a soft qc violation gave different values on the parallel and serial prefetch")
+    end subroutine test_prefetch_qc_soft_warns_per_column
+    !
+    !> `sort=` is the one read-time transform the gate still refuses, and this asserts the refusal
+    !> rather than trusting the comment.
+    !>
+    !> **It is a deferral, not a verdict** -- each per-thread reader would rebuild the whole
+    !> permutation serially, which the permutation being an immutable shared object makes avoidable
+    !> (milestone P9). When P9 lands, this test is the one to rewrite into an equality test, not the
+    !> one to delete: what it asserts today is that the refusal is real, and what it should assert
+    !> afterwards is that sharing the permutation kept the answer.
+    !>
+    !> The counter is written only on the parallel path, so `0` is the refusal and any positive
+    !> value is the gate having opened. The sibling tests above are the positive control that the
+    !> counter is wired up at all -- without them, `0` would pass against a hook that never fires.
+    subroutine test_prefetch_sort_still_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_prefetch_sort.parquet"
+        type(parquet_table) :: t
+        type(parquet_sortkey) :: srt
+        real(real64), allocatable :: a(:), e(:)
+        integer :: used
+        !
+        call write_wide_fixture(f)
+        call srt%add("-a")
+        !
+        call parquet_reset_settings()
+        call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f, sort=srt)
+        call t%materialize_all()
+        used = int(parquet_debug_get_prefetch_threads_used())
+        call check(error, used == 0, &
+            "a sorted table must still prefetch serially: a per-thread reader would rebuild the " // &
+            "whole sort permutation (deferred until P9, not impossible)")
+        if (allocated(error)) return
+        !
+        ! The serial path still has to be right, and descending on column a puts the last row first.
+        call t%get("a", a)
+        call t%get("e", e)
+        call check(error, size(a) == FROWS .and. abs(a(1) - real(FROWS, real64)) < 1.0e-9_real64, &
+            "the serial read of a sorted table lost its sort order")
+        if (allocated(error)) return
+        call check(error, all(abs(e - 5.0_real64 * a) < 1.0e-9_real64), &
+            "two columns of a sorted table came back in different orders")
+    end subroutine test_prefetch_sort_still_serial
+    !
+    !> The prefetch counterpart of `check_really_parallel`: asserts the internally-parallel prefetch
+    !> actually engaged, and says nothing on a single-threaded OpenMP build where declining is
+    !> correct.
+    !>
+    !> Without this, every equality assertion in the tests above passes against a gate that quietly
+    !> kept refusing -- which is exactly what those clauses did before P4, so the vacuous version of
+    !> each test is the one that would have passed on the previous commit.
+    subroutine check_prefetch_really_parallel(error, used, what)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer, intent(in) :: used                         !! threads the prefetch reported.
+        character(len=*), intent(in) :: what                !! what was opened, for the message.
+        integer :: avail
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        if (avail <= 1) return
+        call check(error, used > 1, &
+            what // " must prefetch in parallel here, or the comparison below tests nothing")
+    end subroutine check_prefetch_really_parallel
     !
     !> Five float64 columns, wide enough that three of them clear the parallel gate's work floor.
     subroutine write_wide_fixture(fname)

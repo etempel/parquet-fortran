@@ -4716,6 +4716,18 @@ extern "C"
 		return seed_dist(rd);
 	}
 
+	// The same draw, without a reader: a caller that needs a sample seed BEFORE any reader exists.
+	// parquet_table is the one caller -- it settles the seed at open time so that its own reader,
+	// a %clone's reader and every per-thread reader all sample the identical rows (an unseeded
+	// clone used to redraw, which is a wrong answer whenever the two draws happen to keep the same
+	// number of rows). Doing it here rather than with Fortran's RANDOM_NUMBER is what keeps that
+	// path thread-safe, for the reason resolve_sample_seed's own comment gives. Always positive,
+	// so the result round-trips back through sample_seed= as a real seed rather than as "no seed".
+	int32_t parquet_draw_sample_seed(void)
+	{
+		return resolve_sample_seed(0, false);
+	}
+
 	// One Bernoulli(sample_fraction) trial per PHYSICAL row of the file, streamed rather than
 	// materialized: the caller walks the file's rows in order and calls next() exactly once per
 	// row, storing the answer only where it has somewhere to put it.

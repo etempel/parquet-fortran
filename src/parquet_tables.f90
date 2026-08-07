@@ -72,6 +72,11 @@ module parquet_tables
     ! library's output channels rather than printing directly, so verbosity/message_stream apply
     ! here as everywhere -- see tools/check_source_conventions.py's `no direct printing` check.
     use parquet_settings, only : parquet_emit_warning, parquet_output_is_suppressed
+    ! The one binding this layer reaches for directly, and it needs no reader: the seed for a
+    ! sample_fraction= open is settled BEFORE the table's reader is created, so that reader and
+    ! every later one (a clone's, a per-thread one) draw the identical rows. It stays out of the
+    ! `use parquet` namespace via this module's default-private accessibility.
+    use parquet_bindings, only : parquet_draw_sample_seed
     !
     implicit none
     private
@@ -315,7 +320,12 @@ module parquet_tables
         type(parquet_schema), allocatable :: read_qc_schema !! merged qc schema, file names.
         logical :: read_qc_soft = .false.                   !! qc_soft as given at open.
         real(real64), allocatable :: read_sample_fraction   !! sample_fraction as given at open.
-        integer(int32), allocatable :: read_sample_seed     !! sample_seed as given at open.
+        !> The seed every reader this table opens will sample with. Allocated and POSITIVE whenever
+        !! `read_sample_fraction` is allocated -- an unseeded open draws one at open time
+        !! (`parquet_draw_sample_seed`) rather than leaving each reader to draw its own. That
+        !! invariant is what makes a `%clone`, a reopen and a per-thread reader all keep the same
+        !! rows; before it existed, an unseeded clone redrew and silently held a different sample.
+        integer(int32), allocatable :: read_sample_seed
     end type parquet_table_cache
     !
     !> Which rows to pick out of a column: `1:`, `1:10`, `1:10:2` or an explicit list.

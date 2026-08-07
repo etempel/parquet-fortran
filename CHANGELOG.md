@@ -505,6 +505,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `parquet_table` opened with an unseeded `sample_fraction=` now keeps one sample for its
+  whole lifetime.** The seed is drawn once, at `parquet_open_table`, instead of being left to each
+  reader the table opens — so a `%clone` (which reopens the file for every column the source had
+  not already read) samples the *same* rows as its source rather than drawing a fresh subset of its
+  own. Two columns of one table could otherwise come from two different random samples; that
+  usually aborted with a row-count mismatch, but two draws keeping the same *number* of rows would
+  have passed silently with different rows. Unaffected: two separate `parquet_open_table` calls
+  with no `sample_seed=` still draw independently, an explicit `sample_seed=` still reproduces
+  exactly, and `parquet_open_reader` is unchanged — a bare reader has no second reader to agree
+  with.
 - **Filling a string column from a `character` array is no longer quadratic.** `%add_column`,
   `%set`, `%set_slice` and `parquet_column%set_all` wrote one element at a time, and each write
   rewrote every later offset in the packed store — so building an *n*-row string column cost

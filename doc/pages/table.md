@@ -893,7 +893,7 @@ Three consequences worth stating plainly:
 
 - **Every column inherits it, including ones read much later.** A column touched for the first time long after the open still comes back with the same rows in the same order — the transform lives on the table's reader, not on any one column.
 - **`%nrows()` is the post-filter count.** With a filter or a sample active it is *not* the file's row count, and nothing on the table reports that count directly — `call t%row_group_bounds(b, physical=.true.)` gives the file's own row groups, whose last entry ends at the file's last row, and `parquet_table_row_group_bounds(file, b)` answers the same without a table at all.
-- **`%clone` keeps it.** A clone reopens the file for its own lazy reads, and reattaches the identical transform — otherwise a column the source never touched would come back with rows the source had filtered away.
+- **`%clone` keeps it.** A clone reopens the file for its own lazy reads, and reattaches the identical transform — otherwise a column the source never touched would come back with rows the source had filtered away. This holds for `sample_fraction=` **with no `sample_seed=`** as well: the table settles a seed once, when it is opened, so a clone samples the same rows rather than drawing its own. Two separate `parquet_open_table` calls with no seed still draw independently of each other, exactly as `parquet_open_reader` does — what a table guarantees is that *it* has one sample, not that an unseeded sample is reproducible across runs.
 
 A **slice** takes all of this too, applied within its own row range, with `sort=` the one exception — see [A slice with a filter, a sample or qc](#a-slice-with-a-filter-a-sample-or-qc).
 

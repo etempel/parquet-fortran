@@ -119,6 +119,7 @@ something a reader is expected to have.
 | [Risk-52](#risk-52--an-ab-equality-cannot-see-a-defect-the-two-paths-share) | An A/B equality cannot see a defect the two paths share | 4 — covered |
 | [Risk-53](#risk-53--a-parallel-mutation-gate-that-never-engages-passes-every-correctness-test) | A parallel mutation gate that never engages passes every correctness test | 4 — covered |
 | [Risk-54](#risk-54--the-parallel-rewrites-memory-cost-is-bounded-by-documentation-and-nothing-else) | The parallel rewrite's memory cost is bounded by documentation and nothing else | 3 — not testable |
+| [Risk-55](#risk-55--two-readers-of-one-table-can-sample-different-rows-and-only-a-count-mismatch-shows-it) | Two readers of one table can sample different rows, and only a count mismatch shows it | 4 — covered |
 
 ---
 
@@ -126,7 +127,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-55**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-56**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2120,3 +2121,54 @@ reached the loop at all" — and the tests reset it to 0, a value the mutation i
 caller's-own-region test in the same file, and `table_threads caps the parallel per-column rewrite`
 in `test/test_settings.f90`. Mutation-confirmed: a gate hard-wired to return 1 fails all three
 equality tests through their thread-count assertion.
+
+### Risk-55 — Two readers of one table can sample different rows, and only a count mismatch shows it
+
+A `parquet_table` opened with `sample_fraction=` will open **more than one reader over its lifetime**
+— `%clone` reopens the file for every column the source had not already read, and P4's parallel
+prefetch gives each thread its own. Every one of them has to draw the *same* rows, or one table ends
+up holding columns from two different random samples.
+
+Nothing in the sampling machinery enforces that. `parquet_reader_set_sample` honours a seed only when
+`has_seed && seed > 0` and otherwise draws fresh entropy, and `parquet_open_reader` documents
+`sample_seed <= 0` as *"draw a fresh seed"* — so a reader given no seed, or given `0`, quietly
+samples for itself. The single invariant standing against that is stated on
+`parquet_table_cache%read_sample_seed` and established in `open_table_impl`
+(`src/parquet_tables_lifecycle.f90`):
+
+> `read_sample_seed` is allocated and **positive** whenever `read_sample_fraction` is.
+
+**Why the failure is quiet.** `parquet_check_read_row_count` (`src/parquet_read.f90`) compares the
+caller's array length against the reader's row count, so *most* disagreements abort — that is how the
+original defect was found, at `sample_fraction=0.5` over 20000 rows where the two draws differed by
+75 rows. But that guard is about **counts, not membership**. Two Bernoulli draws that happen to keep
+the same number of rows pass it while holding entirely different rows, and the table then answers
+every query with two columns that do not describe the same objects. Nothing reports it, ever. At
+0.5 over 2000 rows the counts coincide roughly once in fifty.
+
+**What this forbids, for the next change here.**
+
+- **A new site that opens a reader for an existing table must pass `cache%read_sample_seed`** — it
+  is not optional plumbing, and a site that forgets it fails exactly as `%clone` did.
+- **The draw stays in C++** (`parquet_draw_sample_seed` → `resolve_sample_seed`,
+  `src/parquet_wrapper.cpp`). `parquet_open_table` is reachable from several threads at once — the
+  documented per-thread-slice shape — and gfortran's `RANDOM_NUMBER`/`RANDOM_SEED` state is not
+  thread-safe. `resolve_sample_seed`'s own comment records that this is why the draw lives there.
+- **The seed is settled BEFORE the table's reader is created**, not read back off the handle
+  afterwards. Reading it back would work, and would put an ordering obligation on every site that
+  opens a reader — the same obligation whose omission is this risk.
+- **Do not narrow the draw to the fractions that actually sample.** It fires for any
+  `sample_fraction=` at all, including `>= 1.0` (no draw installed) and negative/NaN (rejected by
+  the reader). A seed is inert in those cases, and the invariant is worth more with no exceptions
+  than the entropy call is worth saving — a conditional invariant is one P4's gate would have to
+  re-examine.
+- **A count-only assertion does not test this.** See below.
+
+**Covered by** `a clone keeps an UNSEEDED sample_fraction's own rows` (`test/test_table.f90`), whose
+*shape* is the part to preserve rather than merely keep passing. It prefetches `k` (so the clone
+receives it as deep-copied values), reads `x` through the clone's own reader, and asserts
+`x == 1.5*k` **row for row** — a count comparison would pass against the defect one time in fifty.
+Its second half is a negative control: two separate unseeded opens must still differ, so a "fix"
+that settled on a constant seed fails. Mutation-confirmed both ways — removing the draw aborts with
+`row count mismatch for column x: file has 1037 rows but the values array implies 979`, and a
+hard-wired constant seed fails the control.

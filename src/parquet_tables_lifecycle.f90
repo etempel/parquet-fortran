@@ -110,6 +110,30 @@ contains
         if (n_qc > 0) table%cache%read_qc_schema = comp_qc
         if (present(sample_fraction)) table%cache%read_sample_fraction = sample_fraction
         if (present(sample_seed)) table%cache%read_sample_seed = sample_seed
+        ! THE SEED IS SETTLED HERE, BEFORE ANY READER EXISTS -- see parquet_table_cache's own note
+        ! on read_sample_seed. An unseeded sample_fraction= used to leave every reader this table
+        ! opens to draw its own subset, so a %clone (whose reader is reopened from these same
+        ! fields) held DIFFERENT rows from its source. That surfaces as an abort only when the two
+        ! draws happen to keep a different number of rows; when the counts coincide it is a silent
+        ! wrong answer, since parquet_check_read_row_count compares counts and not membership.
+        !
+        ! Drawn in C++ rather than with RANDOM_NUMBER because parquet_open_table is reachable from
+        ! several threads at once (the documented per-thread-slice shape) and gfortran's RNG state
+        ! is not thread-safe -- resolve_sample_seed (parquet_wrapper.cpp) uses a stack-local engine
+        ! for exactly that reason, and this is the same draw without a reader attached.
+        !
+        ! Unconditional whenever a fraction was given, including for a fraction the reader will
+        ! install no draw for (>= 1.0) and one it will reject (negative/NaN): a seed is inert in
+        ! both cases, and the invariant is worth more as one sentence with no exceptions than as a
+        ! saved entropy draw. `sample_seed <= 0` is parquet_open_reader's own spelling of "draw a
+        ! fresh one", so it counts as unseeded here too.
+        if (present(sample_fraction)) then
+            if (.not. allocated(table%cache%read_sample_seed)) then
+                table%cache%read_sample_seed = parquet_draw_sample_seed()
+            else if (table%cache%read_sample_seed <= 0_int32) then
+                table%cache%read_sample_seed = parquet_draw_sample_seed()
+            end if
+        end if
         if (sliced) then
             table%cache%slice_row_lo = row_lo
             table%cache%slice_row_hi = row_hi

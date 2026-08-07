@@ -70,6 +70,7 @@ module parquet_bindings
     public :: parquet_sort_argsort_int64, parquet_sort_argsort_double, parquet_sort_argsort_string
     public :: parquet_sort_is_sorted_int64, parquet_sort_is_sorted_double, parquet_sort_is_sorted_string
     public :: parquet_reader_set_sample
+    public :: parquet_draw_sample_seed
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
     public :: parquet_read_float32_column, parquet_read_float64_column
@@ -1035,6 +1036,17 @@ module parquet_bindings
             character(kind=c_char) :: err_out(*)
             integer(c_long_long), value :: err_cap
             integer(c_long_long) :: status
+        end function
+
+        !> Draws one fresh sample seed from entropy, with no reader involved -- the same draw
+        !> parquet_reader_set_sample makes for itself when given no seed, exposed for a caller that
+        !> needs the seed settled BEFORE any reader is opened (parquet_open_table, so that every
+        !> reader the table ever opens samples the identical rows). Always in [1, huge(int32)], so
+        !> it reads back as a real seed rather than as "draw a fresh one".
+        function parquet_draw_sample_seed() &
+                bind(C, name="parquet_draw_sample_seed") result(seed)
+            import
+            integer(c_int32_t) :: seed !! a fresh, positive, entropy-drawn sample seed.
         end function
 
         !> Installs packed per-column qc: min/max/miss rules on `reader`.

@@ -205,13 +205,35 @@ reasons, and both are easy to get wrong in the direction of "add the flag to be 
   which still aborts (exit 134) because several threads really do enter the reader at once. An
   earlier version of this section prescribed `FPM_FFLAGS="-fopenmp" fpm test`; that was redundant,
   and `.gitlab-ci.yml` has had the same redundant flag removed.
-- **Anything you put in `FPM_FFLAGS` REPLACES, it does not add.** It replaces two things at once:
-  whatever the environment already exports (a dev machine typically puts Arrow-adjacent `-I` paths
-  there — clobbering those is the Fortran-side twin of the `fatal error: 'arrow/api.h' file not
-  found` failure below), **and** fpm's whole profile flag set. With `FPM_FFLAGS` set and no
-  `--profile`, the model is just `-cpp <includes>` — no `-O`, no `-g`, no `-Wall`, **no
-  `-fcheck=bounds`**. So on any machine that exports `FPM_FFLAGS` at all, a plain `fpm test`
-  already has no bounds checking, and `fpm test --profile debug` is what turns it back on.
+- **`FPM_FFLAGS` clobbers what the environment exported, but it does NOT suppress fpm's profile
+  flags — the missing `-O`/`-fcheck=bounds` comes from omitting `--profile`.** Setting it on a
+  command line replaces whatever the environment already exports (a dev machine typically puts
+  Arrow-adjacent `-I` paths there — clobbering those is the Fortran-side twin of the
+  `fatal error: 'arrow/api.h' file not found` failure below), and that half is worth avoiding. But
+  the profile half is a **separate mechanism**: fpm applies profile flags only when `--profile` is
+  given, and appends `FPM_FFLAGS` to them rather than instead of them.
+
+  Verified on fpm **0.13.0 alpha** by reading the compile line
+  `fpm build --verbose` actually emits, in a throwaway two-file project, all four ways
+  (independently reproduced on two machines):
+
+  | invocation | Fortran compile line gets |
+  |---|---|
+  | `--profile release`, `FPM_FFLAGS` **set** | `-I<env> -O3 -Wimplicit-interface …` — **additive** |
+  | `--profile debug`, `FPM_FFLAGS` **set** | `-I<env> -Wall -Wextra -g -fcheck=bounds …` — **additive** |
+  | no `--profile`, `FPM_FFLAGS` set | `-I<env>` and nothing else |
+  | no `--profile`, `FPM_FFLAGS` unset | **nothing else either** |
+
+  The last row is what identifies the real cause: with no `--profile` there is no `-O` *whether or
+  not* `FPM_FFLAGS` is set. **So a plain `fpm test` has no bounds checking on ANY machine, not only
+  on one that exports `FPM_FFLAGS`, and `fpm test --profile debug` is what turns it on — including
+  on a machine that exports `FPM_FFLAGS`, which does not lose the debug flags.**
+
+  An earlier version of this section said `FPM_FFLAGS` "REPLACES, it does not add" and attributed
+  the missing flags to it. The advice that followed was right and is unchanged; the reason was
+  wrong, and wrong in a way that matters — it implied a `--profile release` measurement taken on a
+  machine that exports `FPM_FFLAGS` was built at `-O0` and should be discarded. It was not. Re-check
+  the table above against a newer fpm before assuming it still holds.
 
 Setting `FPM_CXXFLAGS`/`FPM_LDFLAGS` to CI's values has the same replacing behaviour on the C++
 half, which on a dev machine is where Arrow's include and library paths come from — the build then
@@ -2085,10 +2107,13 @@ before being noticed:**
   faults on its first pass and never again, so whichever variant runs first absorbs them. This is
   strong enough to reverse a comparison: the `%col` pointer form measured *25% faster* than plain
   arrays purely by running second. Write the result once through every path before the timed loop.
-- **Measure with `--profile release`, NEVER with `FPM_FFLAGS`.** `FPM_FFLAGS` *replaces* fpm's
-  profile flags rather than adding to them, so `FPM_FFLAGS="-fopenmp" fpm run` builds at **-O0**
-  (and note the `-fopenmp` there is redundant anyway — see "Don't run the GitLab CI pipeline
-  yourself"), and `FPM_FFLAGS="-O3" fpm run` optimizes the Fortran half while leaving the C++ half at whatever
+- **Always pass `--profile release`; never try to get optimisation out of `FPM_FFLAGS` instead.**
+  fpm applies profile flags only when `--profile` is given, so `FPM_FFLAGS="-fopenmp" fpm run` with
+  no profile builds at **-O0** — not because `FPM_FFLAGS` suppressed anything (it does not; see
+  "Don't run the GitLab CI pipeline yourself" for the four-way table), but because no profile was
+  asked for. A bare `fpm run` with `FPM_FFLAGS` unset is equally unoptimised. And the `-fopenmp`
+  there is redundant anyway. Reaching for `FPM_FFLAGS="-O3" fpm run` instead optimizes the Fortran
+  half while leaving the C++ half at whatever
   the environment supplies — which on a dev machine may be nothing. Measured 5.7x on `pf_argsort`
   alone between the two, which is enough to invert a comparison and did: an early run of the sort
   benchmark showed bit-packing *losing* below 2M rows, an artifact that vanished under `-O3`. The

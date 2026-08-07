@@ -228,6 +228,8 @@ contains
             new_unittest("filter=/sort=/qc= are translated through extra: remap:", test_transform_with_remap), &
             new_unittest("open with sample_fraction= keeps a subset, reproducibly by seed", test_open_sample), &
             new_unittest("a clone of a transformed table reattaches the same transform", test_clone_keeps_transform), &
+            new_unittest("a clone keeps an UNSEEDED sample_fraction's own rows", &
+                test_clone_keeps_unseeded_sample), &
             new_unittest("a detached table's clone keeps its values and stays detached", &
                 test_clone_of_detached), &
             new_unittest("an unfiltered slice cutting through row groups installs no mask", &
@@ -6038,6 +6040,66 @@ contains
         call check(error, abs(f64(1) - 13.5_real64) < 1.0e-12_real64, &
             "the clone's lazily-read column did not line up with its sorted key column")
     end subroutine test_clone_keeps_transform
+    !
+    !> An UNSEEDED `sample_fraction=` is settled once, at table open, so every reader the table
+    !! opens afterwards draws the identical rows. `%clone` is where that becomes observable: a
+    !! clone deep-copies whatever the source had already read and reopens the file for everything
+    !! else, so a column read lazily through the clone's own reader has to line up, row for row,
+    !! with a column carried over as values.
+    !!
+    !! Before the seed was settled at open, it was not carried at all -- `read_sample_seed` stayed
+    !! unallocated and the clone's reader drew a fresh subset of its own.
+    !!
+    !! Both halves of this test are load-bearing, and the second is the one that would be dropped
+    !! as redundant. It is the negative control: an unseeded open must still be a FRESH draw per
+    !! `parquet_open_table` call, so a "fix" that settled on a constant seed -- which would satisfy
+    !! the first half perfectly -- fails here.
+    subroutine test_clone_keeps_unseeded_sample(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, c, t2
+        integer(int32), allocatable :: k(:), k2(:)
+        real(real64), allocatable :: x(:)
+        logical :: same
+        integer, parameter :: N = 2000
+        character(len=*), parameter :: f = "test_run/table_unseeded_sample_clone.parquet"
+        !
+        ! Large enough that two independent Bernoulli(0.5) draws agreeing on every row has
+        ! probability 2**-2000 -- this test's determinism rests on the fixture size, not on luck.
+        call write_slice_xform_fixture(f, N, 500)
+        call parquet_open_table(t, f, sample_fraction=0.5_real64)
+        call check(error, t%nrows() > 0_int64 .and. t%nrows() < int(N, int64), &
+            "sample_fraction=0.5 should keep some but not all of the rows")
+        if (allocated(error)) return
+        call t%prefetch("k")            ! resident, so the clone gets it as deep-copied VALUES
+        call t%clone(c)
+        call c%get("k", k)              ! the source's sample, carried across as values
+        call c%get("x", x)              ! read lazily through the CLONE'S OWN reader
+        call check(error, size(x) == size(k), &
+            "the clone's own reader drew a different number of rows from the source's sample")
+        if (allocated(error)) return
+        ! Row for row, not merely the same count. Two independent draws can agree on HOW MANY rows
+        ! they keep while keeping different ones, and parquet_check_read_row_count -- the guard
+        ! that made this bug abort rather than pass silently -- compares only counts. A
+        ! count-only assertion here would pass against exactly the defect this test exists for.
+        call check(error, all(abs(x - 1.5_real64 * real(k, real64)) < 1.0e-9_real64), &
+            "a column read through the clone's own reader came from different rows than the " // &
+            "source's sample")
+        if (allocated(error)) return
+        !
+        ! Negative control: unseeded still means a fresh draw per open. Compared by membership
+        ! rather than by count, because two draws coinciding in count is perfectly ordinary
+        ! (about 1 open in 50 here) while two draws coinciding in every row is not.
+        call parquet_open_table(t2, f, sample_fraction=0.5_real64)
+        call t2%get("k", k2)
+        ! Nested rather than `size(...) == size(...) .and. all(...)`: Fortran does not guarantee
+        ! short-circuit evaluation, so the combined form compares two differently-sized arrays --
+        ! which is the ordinary outcome here and aborts under -fcheck=bounds.
+        same = .false.
+        if (size(k2) == size(k)) same = all(k2 == k)
+        call check(error, .not. same, &
+            "two unseeded sample_fraction= opens produced the identical sample; an unseeded " // &
+            "open must still draw fresh entropy, not settle on a fixed seed")
+    end subroutine test_clone_keeps_unseeded_sample
     !
     !> Three plain columns over several row groups, with no nulls anywhere: the slice-regime
     !! transform tests below are about which ROWS come back, so every expectation should be

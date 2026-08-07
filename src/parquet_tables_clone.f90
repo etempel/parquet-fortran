@@ -23,20 +23,39 @@ submodule (parquet_tables) parquet_tables_clone
 contains
     !
     module procedure table_clone
-        integer :: i
+        integer :: i, n
+        integer, allocatable :: resident(:)
         !
         call table_check_open(self, "clone")
         call clone_check_same_type(self, out, "clone")
         call clone_new_cache(self, out)
+        ! Two passes rather than one. The descriptors are copied SERIALLY: they are cheap, and they
+        ! carry allocatable `character` components, which is the shape CLAUDE.md records two separate
+        ! compiler bugs against for a deep copy through a pointer-reached component. Only the value
+        ! copies -- the part that is actually large -- go to the parallel worker.
+        allocate(resident(self%cache%ncols))
+        n = 0
         do i = 1, self%cache%ncols
             call clone_copy_descriptor(self%cache%cols(i), out%cache%cols(i))
             ! A column that was never read stays unread in the clone: a clone costs what the
             ! source actually holds, not what its file contains. The clone's own reader (below)
             ! is what lets it read those columns later.
+            !
+            ! This filter is an OPTIMISATION, not a correctness rule, and mutation testing says so:
+            ! removing it leaves every test passing, because deep-copying an unread source column
+            ! into the freshly allocated (and therefore already empty) destination slot changes
+            ! nothing, and `clone_copy_descriptor` has already carried RES_EMPTY across. What it
+            ! buys is not dispatching empty copies and not inflating the worker's thread count with
+            ! slots that have no work in them. Do not add an assertion that "proves" it.
             if (self%cache%cols(i)%residency == RES_FULL) then
-                call self%cache%cols(i)%values%deep_copy(out%cache%cols(i)%values)
+                n = n + 1
+                resident(n) = i
             end if
         end do
+        ! Trimmed the way table_mutable_slots trims, so `size()` is the count and the worker can
+        ! loop over the whole array.
+        resident = resident(1:n)
+        if (n > 0) call table_colwork_clone(self%cache, out%cache, resident)
         out%cache%ncols = self%cache%ncols
         out%detached = self%detached
         out%regime = self%regime

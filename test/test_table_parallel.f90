@@ -47,6 +47,9 @@ module test_table_parallel
     !
     integer, parameter :: NROW = 20000 !! rows in every fixture; with VW below, clears the work floor.
     integer, parameter :: VW = 8       !! width of the vector column: 8*20000 = 160000 elements.
+    !> Rows in the on-disk fixture. Scalar float64 columns, so the row count alone has to clear the
+    !! work floor (131072 elements) -- a lazy clone has no vector column to lean on.
+    integer, parameter :: FROWS = 200000
     !
     !> The test-only observation hook (`src/parquet_wrapper.cpp`). Declared locally here rather than
     !> in `src/parquet_bindings.f90` -- the same convention every other `parquet_debug_*` hook
@@ -94,7 +97,11 @@ contains
             new_unittest("a mutation inside the caller's own parallel region stays serial", &
                 test_mutation_in_caller_region_is_serial), &
             new_unittest("each gate limit can be overridden, and each one alone closes the gate", &
-                test_gate_limit_overrides) &
+                test_gate_limit_overrides), &
+            new_unittest("clone gives the same table on many threads as on one", &
+                test_clone_parallel_equals_serial), &
+            new_unittest("clone leaves an unread column unread, on either path", &
+                test_clone_keeps_lazy_columns_unread) &
             ]
     end subroutine collect_tests_table_parallel
     !
@@ -239,6 +246,116 @@ contains
         call check(error, used == 1, &
             "a mutation inside the caller's own parallel region must rewrite its columns serially")
     end subroutine test_mutation_in_caller_region_is_serial
+    !
+    !> `%clone`, which reaches the same machinery by a different route: it is the only caller that
+    !> copies BETWEEN two column stores, so it has its own worker (`table_colwork_clone`) rather than
+    !> a `PCW_*` op code.
+    !>
+    !> A clone's failure mode is the mirror of a mutation's. A mutation that skipped a column leaves
+    !> that column out of step with its neighbours; a clone that skipped one leaves the destination
+    !> holding a column the source does not have — or, worse, leaves the two stores' slots crossed,
+    !> which `check_rows_consistent` is what catches.
+    subroutine test_clone_parallel_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: src, par, ser
+        integer :: used
+        !
+        call build_fixture(src)
+        !
+        call parquet_set_table_threads(1)
+        call src%clone(ser)
+        call parquet_reset_settings()
+        !
+        call parquet_debug_set_table_threads_used(0_c_int64_t)
+        call src%clone(par)
+        used = int(parquet_debug_get_table_threads_used())
+        !
+        call check_really_parallel(error, used, "clone")
+        if (allocated(error)) return
+        call check_tables_identical(error, par, ser, "clone")
+        if (allocated(error)) return
+        ! The independent oracle -- see check_rows_consistent for why the A/B above is not
+        ! enough on its own.
+        call check_rows_consistent(error, par, "clone")
+        if (allocated(error)) return
+        ! The source must be untouched: the worker reads it and writes only the destination, which
+        ! is what makes cloning a shared table safe to thread at all (colwork_threads' own note).
+        call check_rows_consistent(error, src, "clone (source)")
+    end subroutine test_clone_parallel_equals_serial
+    !
+    !> A clone copies what the source actually HOLDS, not what its file contains — so a column that
+    !> was never read must stay unread in the clone, and the parallel path must not quietly read it.
+    !>
+    !> **This is the clone-specific failure the equality test cannot see, and the reason the
+    !> prefetched columns are the ODD-NUMBERED ones.** With every column resident the slot list is
+    !> `1..n`, so `dst%cols(j)` and `dst%cols(slots(j))` are the same thing and a worker that
+    !> indexed the destination by loop counter instead of by slot would be indistinguishable from a
+    !> correct one — in the equality test *and* here. Reading columns `a`, `c`, `e` makes the slot
+    !> list `[1, 3, 5]`, so the two indexings disagree from the second iteration onward, and a
+    !> crossed pairing lands column `e`'s values in column `c`.
+    subroutine test_clone_keeps_lazy_columns_unread(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_clone_lazy.parquet"
+        type(parquet_table) :: t, c
+        real(real64), allocatable :: got(:)
+        integer :: used
+        !
+        call write_wide_fixture(f)
+        call parquet_open_table(t, f)
+        ! Slots 1, 3, 5 of 5: enough resident columns to clear the gate's minimum, two left unread
+        ! for the residency assertions, and a non-contiguous slot list per the note above.
+        call t%prefetch("a")
+        call t%prefetch("c")
+        call t%prefetch("e")
+        !
+        call parquet_debug_set_table_threads_used(0_c_int64_t)
+        call t%clone(c)
+        used = int(parquet_debug_get_table_threads_used())
+        call check_really_parallel(error, used, "clone of a lazy table")
+        if (allocated(error)) return
+        !
+        call check(error, c%residency("a") == RES_FULL .and. c%residency("c") == RES_FULL .and. &
+            c%residency("e") == RES_FULL, "a clone must hold every column the source held")
+        if (allocated(error)) return
+        call check(error, c%residency("b") == RES_EMPTY .and. c%residency("d") == RES_EMPTY, &
+            "a clone must leave unread what the source had not read")
+        if (allocated(error)) return
+        ! Values, not just presence: column c is written as 3*i, so a crossed slot pairing shows up
+        ! here as column e's 5*i.
+        call c%get("c", got)
+        call check(error, size(got) == FROWS, "the clone's copied column must keep its row count")
+        if (allocated(error)) return
+        call check(error, abs(got(1) - 3.0_real64) < 1.0e-12_real64 .and. &
+            abs(got(FROWS) - 3.0_real64 * real(FROWS, real64)) < 1.0e-12_real64, &
+            "the clone's copied column must hold ITS OWN values, not another slot's")
+        if (allocated(error)) return
+        call c%get("e", got)
+        call check(error, abs(got(FROWS) - 5.0_real64 * real(FROWS, real64)) < 1.0e-12_real64, &
+            "the clone's last copied column must hold its own values")
+        if (allocated(error)) return
+        ! An unread column must still be readable afterwards, through the clone's own reader.
+        call c%get("d", got)
+        call check(error, size(got) == FROWS .and. abs(got(FROWS) - 4.0_real64 * real(FROWS, real64)) &
+            < 1.0e-12_real64, "a clone must still be able to read the columns it left unread")
+    end subroutine test_clone_keeps_lazy_columns_unread
+    !
+    !> Five float64 columns, wide enough that three of them clear the parallel gate's work floor.
+    subroutine write_wide_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        type(parquet_writer) :: w
+        real(real64) :: v(FROWS)
+        integer :: c, i
+        character(len=1), parameter :: names(5) = ["a", "b", "c", "d", "e"]
+        !
+        call parquet_open_writer(w, fname)
+        do c = 1, 5
+            do i = 1, FROWS
+                v(i) = real(c, real64) * real(i, real64)
+            end do
+            call parquet_write_column(w, names(c), v)
+        end do
+        call parquet_close_writer(w)
+    end subroutine write_wide_fixture
     !
     !> The two test-only overrides of the gate's tuning constants (`colwork_gate_limits`,
     !> `src/parquet_tables_parallel.f90`).

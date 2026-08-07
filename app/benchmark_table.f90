@@ -57,6 +57,16 @@ program benchmark_table
             import :: c_int64_t
             integer(c_int64_t) :: res !! resolved thread count of the last mutation.
         end function parquet_debug_get_table_threads_used
+        !> The resolved `use_threads` the most recently opened reader or writer was given.
+        !!
+        !! Used by `--mode=read_one` as its NEGATIVE CONTROL. That mode's whole result is "the two
+        !! arms take the same time", and without this there is no way to tell that finding from the
+        !! flag never having reached the reader at all -- which would produce an identical output.
+        function parquet_debug_get_last_use_threads() &
+                bind(C, name="parquet_debug_get_last_use_threads") result(res)
+            import :: c_int
+            integer(c_int) :: res !! 1 or 0 as resolved; -1 if nothing has been opened.
+        end function parquet_debug_get_last_use_threads
     end interface
 
     character(len=:), allocatable :: mode, file
@@ -87,6 +97,8 @@ program benchmark_table
         call bench_sort(size_gb, ncols)
     case ("peakmem")
         call bench_peakmem(size_gb, ncols, threads)
+    case ("read_one")
+        call bench_read_one(file)
     case ("argsort")
         call bench_argsort(nrows_arg, threads)
     case default
@@ -112,6 +124,7 @@ contains
         write(output_unit, '(a)') "  --mode=sort           what %sort_by spends re-validating one permutation"
         write(output_unit, '(a)') "  --mode=argsort        pf_argsort at one thread count, split by sort phase"
         write(output_unit, '(a)') "  --mode=peakmem        build a table and sort it ONCE, for external peak-RSS"
+        write(output_unit, '(a)') "  --mode=read_one       time ONE column's read with Arrow's use_threads on/off"
         write(output_unit, '(a)') "  --nrows=<n>           rows for argsort mode (default 20000000)"
         write(output_unit, '(a)') "  --threads=<n>         sort threads for argsort mode (1 = serial; default 1);"
         write(output_unit, '(a)') "                        in peakmem mode, the table-mutation thread cap"
@@ -904,6 +917,95 @@ contains
     !! sort of an already-sorted column would either return early or measure a reversal
     !! permutation -- a perfectly regular access pattern, unlike the scattered one a real sort
     !! walks.
+    !> Times reading ONE whole column with Arrow's own `use_threads` on and off.
+    !!
+    !! **This measurement decides whether a milestone gets built at all**, and the decision rule runs
+    !! the opposite way from the intuitive reading, so it is spelled out in the output rather than
+    !! left to whoever runs it:
+    !!
+    !!   * `use_threads=.true.` clearly **faster** -> Arrow already parallelises a single
+    !!     whole-column read -> there is nothing left for the library to win, and the idea of
+    !!     splitting one column's read across row groups ourselves should be dropped.
+    !!   * the two **within noise** -> Arrow does not parallelise it -> splitting it ourselves has
+    !!     something to win.
+    !!
+    !! Three things about the method, each of which would otherwise produce a confident wrong answer:
+    !!
+    !!   * **A fresh reader per timed read.** A reader caches the decoded column, so reading the same
+    !!     column twice on one reader times a cache hit the second time.
+    !!   * **One untimed warm-up read first**, so the OS page cache holds the file for both arms.
+    !!     Without it the first arm measured pays for the disk and the comparison is meaningless.
+    !!   * **The arms alternate within each round** rather than running as two blocks, so a machine
+    !!     that gets busier partway through disturbs both equally.
+    !!
+    !! The row-group count is reported because it is the ceiling on what the alternative could ever
+    !! achieve: a single-row-group file has nothing to divide, and a result from one says nothing.
+    subroutine bench_read_one(file)
+        character(len=*), intent(in) :: file !! fixture to read.
+        integer, parameter :: nround = 5     !! timed rounds; the best of each arm is kept.
+        type(parquet_reader) :: rdr
+        real(real64), allocatable :: v(:)
+        integer(int64) :: nrows, ngroups
+        real(real64) :: t0, dt, best_on, best_off
+        integer :: r, saw_on, saw_off
+
+        ! Warm-up, untimed: pulls the file into the OS page cache so neither arm pays for the disk.
+        call parquet_open_reader(rdr, file)
+        call parquet_get_nrows(rdr, nrows)
+        call parquet_get_num_row_groups(rdr, ngroups)
+        allocate(v(nrows))
+        call parquet_read_column(rdr, "c1", v)
+        call parquet_close_reader(rdr)
+        write(output_unit, '(a,i0,a,i0,a)') "one column: ", nrows, " rows in ", ngroups, " row group(s)"
+        if (ngroups < 2_int64) then
+            write(output_unit, '(a)') "WARNING: a single row group -- neither Arrow nor a row-group split"
+            write(output_unit, '(a)') "has anything to divide here, so this run cannot answer the question."
+        end if
+
+        best_on = huge(1.0_real64)
+        best_off = huge(1.0_real64)
+        saw_on = -1
+        saw_off = -1
+        do r = 1, nround
+            call parquet_open_reader(rdr, file, use_threads=.true.)
+            saw_on = parquet_debug_get_last_use_threads()
+            t0 = now()
+            call parquet_read_column(rdr, "c1", v)
+            dt = now() - t0
+            call parquet_close_reader(rdr)
+            if (dt < best_on) best_on = dt
+
+            call parquet_open_reader(rdr, file, use_threads=.false.)
+            saw_off = parquet_debug_get_last_use_threads()
+            t0 = now()
+            call parquet_read_column(rdr, "c1", v)
+            dt = now() - t0
+            call parquet_close_reader(rdr)
+            if (dt < best_off) best_off = dt
+        end do
+
+        ! The negative control. Without it "the two arms are equal" is indistinguishable from "both
+        ! arms opened the same reader", which is the same output for a completely different reason.
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,i0,a,i0)') "control: use_threads as the reader resolved it -- on arm: ", &
+            saw_on, ", off arm: ", saw_off
+        if (saw_on == saw_off) then
+            write(output_unit, '(a)') "FAILED CONTROL: both arms resolved to the same value, so the"
+            write(output_unit, '(a)') "timings below compare one configuration against itself and say"
+            write(output_unit, '(a)') "NOTHING about whether Arrow threads a single-column read."
+        end if
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,f10.4,a)') "read one column, use_threads=.true.  : ", best_on, " s"
+        write(output_unit, '(a,f10.4,a)') "read one column, use_threads=.false. : ", best_off, " s"
+        write(output_unit, '(a,f7.2,a)')  "  ratio (off/on)                     : ", best_off / best_on, "x"
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a)') "Reading the result: a ratio near 1.00 means Arrow does NOT thread a"
+        write(output_unit, '(a)') "single whole-column read, so splitting it across row groups ourselves"
+        write(output_unit, '(a)') "has something to win. A ratio clearly above 1.00 means Arrow already"
+        write(output_unit, '(a)') "does it, and there is nothing left to win."
+        write(output_unit, '(a,es22.15)') "(sink, checksum ", sum(v)
+    end subroutine bench_read_one
+
     !> Builds one table and sorts it exactly ONCE, so an external tool's peak-RSS figure describes
     !! `%sort_by` and nothing else.
     !!

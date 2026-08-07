@@ -405,9 +405,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all eleven element types. Both are internal plumbing, public only because Fortran offers no
   narrower visibility: a permutation that is not one silently duplicates and drops rows.
 
-- **A `parquet_table`'s row-structural mutations now rewrite their columns on several threads.**
-  `%sort_by`, `%filter_rows`, `%top_n`, `%delete_rows` and `%truncate` all replay their permutation
-  or mask across every resident column, and each column is independent of every other, so the loop
+- **A `parquet_table`'s per-column work now runs on several threads.** `%sort_by`, `%filter_rows`,
+  `%top_n`, `%delete_rows` and `%truncate` all replay their permutation
+  or mask across every resident column, and `%clone` copies every resident column; each column is
+  independent of every other, so the loop
   now runs in parallel. You do not ask for it and there is no new argument: it engages
   automatically on a table with at least two rewritable columns and enough data to be worth a thread
   team, and stands down inside a parallel region of your own, since a nested region is the caller's
@@ -421,7 +422,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never exceeds the column count, so the transient copies come to at most one extra copy of the
   table. A program working near its memory ceiling should cap the threads, which caps the copies
   with them. `%filter_rows` and `%top_n` are proportionally cheaper, since their new storage is
-  sized by the rows they keep.
+  sized by the rows they keep, and **`%clone` adds no transient at all** — a clone allocates a
+  second copy of the table by definition, so there is nothing beyond the copy you asked for.
 
 - **`parquet_set_threads(n)` now sets four thread counts, not three** — Arrow's pool, the sort cap,
   the table prefetch cap and the new table mutation cap. A program that called it and then

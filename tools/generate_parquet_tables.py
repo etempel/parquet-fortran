@@ -1757,6 +1757,21 @@ def gen_spec_interfaces():
             integer(int64), intent(in), optional :: rows(:)        !! permutation or selection, per `op`.
             logical, intent(in), optional :: keep(:)               !! per-row keep mask, per `op`.
         end subroutine table_colwork
+        !> Deep-copies `slots` from one column store into another, on several threads when that is
+        !! worth doing and serially otherwise. `%clone`'s counterpart to `table_colwork`.
+        !!
+        !! **A separate entry point rather than another `PCW_*` op, because a clone has TWO stores
+        !! and every other operation has one.** Adding an optional destination to `table_colwork`
+        !! would put an argument on an op-code dispatcher that exactly one op uses, and a future op
+        !! that ignored it would be a silent wrong answer rather than a compile error.
+        !!
+        !! The caller has already copied every descriptor and is responsible for deciding which
+        !! slots are resident; this copies values and nothing else.
+        module subroutine table_colwork_clone(src, dst, slots)
+            type(parquet_table_cache), intent(in) :: src           !! the source column store.
+            type(parquet_table_cache), intent(inout) :: dst        !! the destination column store.
+            integer, intent(in) :: slots(:)                        !! resident slots to copy, in order.
+        end subroutine table_colwork_clone
         !> Resolves a `width_pending` column's kind and width, then clears the flag. A no-op for
         !! every other column, so callers can invoke it unconditionally.
         !!

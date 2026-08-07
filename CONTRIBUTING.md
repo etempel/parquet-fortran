@@ -214,7 +214,7 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
 writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`
-through eight runs plus two sweeps: a raw reader baseline, a table open+`materialize_all`, a lazy
+through eight runs plus two sweeps (and a ninth, read_one, run on its own): a raw reader baseline, a table open+`materialize_all`, a lazy
 open that reads only `TOUCH` of the columns, a slice-regime open covering one of `SLICES` equal row
 ranges, an access comparison, `parquet_write_table` against a hand-written per-column write loop —
 once on a null-free table and once on one where `NULLFRAC` of the rows are null — a sort run, a
@@ -334,6 +334,27 @@ TEST_FILE=/tmp/bench_table.parquet tools/benchmark_table.sh
 SORT_SIZE_GB=3 NCOLS=24 tools/benchmark_table.sh
 # A wider argsort sweep (also file-free), on a machine with more cores:
 ARGSORT_NROWS="1000000 20000000" ARGSORT_THREADS="1 2 4 8 16 32 64" tools/benchmark_table.sh
+```
+
+The **read_one** mode is not part of the script's sequence and is run on its own. It times reading a
+single whole column with Arrow's own `use_threads` on and off, which answers a question no other mode
+does: whether Arrow already parallelises a single-column decode internally. On an 8-core machine it
+does not — 0.96x–1.02x across two column sizes — which is why splitting one column's read across row
+groups is still worth doing.
+
+**Its most important line is the control, not the timings.** "The two arms take the same time" and
+"the flag never reached the reader" produce identical output, so the mode prints the `use_threads`
+value each arm's reader actually resolved to (`1` and `0`) and says outright that the timings mean
+nothing if those match. Copy that shape for any future A/B benchmark whose expected result is *no
+difference*: without a control, such a benchmark passes just as happily when it is measuring one
+configuration against itself. The mode also uses a fresh reader per timed read (a reader caches its
+decoded column, so a second read on one reader times a cache hit), one untimed warm-up read so both
+arms see the same page-cache state, and alternating arms within each round.
+
+```sh
+fpm run benchmark_table --profile release -- \
+    --mode=write_fixture --file=/tmp/pf_bench.parquet --size=4.0 --ncols=24
+fpm run benchmark_table --profile release -- --mode=read_one --file=/tmp/pf_bench.parquet
 ```
 
 The peak-memory pair can also be run on its own, which is usually what you want — it is the only

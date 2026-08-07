@@ -280,6 +280,37 @@ contains
         end select
     end subroutine colwork_one
     !
+    module procedure table_colwork_clone
+        integer :: j, nt
+        !
+        ! Gated by the same rule as a mutation, measured on the SOURCE: the destination slots do not
+        ! exist yet, and the work is one full copy of each source column.
+        nt = colwork_threads(src, slots)
+        ! The same counter table_colwork writes, on both paths, for the same reason -- a clone is a
+        ! per-column table operation under the same gate, so a test observes it the same way.
+        call parquet_debug_note_table_threads(int(nt, int64))
+        if (nt <= 1) then
+            do j = 1, size(slots)
+                call src%cols(slots(j))%values%deep_copy(dst%cols(slots(j))%values)
+            end do
+            return
+        end if
+        ! Each iteration reads one source column and writes one destination column, both indexed by
+        ! the same distinct slot, so no two iterations touch the same allocation in either store.
+        ! The source is only read -- `deep_copy` takes `self` intent(in) -- which is what makes it
+        ! safe for this to run while the source table is shared with another thread. See
+        ! colwork_threads' own note on why %clone's safety argument differs from a mutation's.
+        !
+        ! `schedule(dynamic)` for the reason table_colwork uses it: a PK_STRING column's copy is a
+        ! whole packed payload where a float64 column's is a memcpy, so a static split would leave
+        ! threads idle behind the string columns.
+        !$omp parallel do default(shared) private(j) schedule(dynamic) num_threads(nt)
+        do j = 1, size(slots)
+            call src%cols(slots(j))%values%deep_copy(dst%cols(slots(j))%values)
+        end do
+        !$omp end parallel do
+    end procedure table_colwork_clone
+    !
     !> How many threads this mutation may use: 1 (serial) or more.
     !!
     !! **Deliberately conservative, and it picks a DEFAULT rather than refusing anything** -- the
@@ -299,9 +330,15 @@ contains
     !!
     !! The cap only ever reduces: the answer is never more than OpenMP offers and never more than
     !! there are columns, so `T` transient column copies are at most one extra copy of the table.
-    !! No ownership guard is needed or wanted here -- every caller has already run
-    !! `table_check_not_shared`, so the table is provably not shared and the threads spawned are
-    !! its own, exactly as `%prefetch`'s are.
+    !!
+    !! **No ownership guard is needed here, but the reason differs between the two callers and both
+    !! halves have to hold.** Every *mutation* caller has already run `table_check_not_shared`, so
+    !! the table is provably not shared and the threads spawned are its own, exactly as
+    !! `%prefetch`'s are. **`table_colwork_clone` does NOT run that guard** -- `%clone` checks only
+    !! that the table is open -- and is safe for a different reason: it only ever READS the source
+    !! (`deep_copy` takes `self` intent(in)) and writes a destination the caller has just created
+    !! and nobody else can reach. Do not "unify" these into one sentence: a future caller that
+    !! mutated a possibly-shared source would satisfy the second argument while breaking the first.
     integer function colwork_threads(cache, slots) result(n)
         use parquet_settings, only : parquet_get_table_threads
 #ifdef _OPENMP

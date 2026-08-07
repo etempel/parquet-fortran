@@ -984,15 +984,23 @@ contains
             if (dt < best_off) best_off = dt
         end do
 
-        ! The negative control. Without it "the two arms are equal" is indistinguishable from "both
-        ! arms opened the same reader", which is the same output for a completely different reason.
+        ! Two controls. Without them "the two arms are equal" is indistinguishable from "both arms
+        ! opened the same reader" and from "Arrow had one thread to work with" -- three different
+        ! findings with identical output, and only one of them is an answer.
         write(output_unit, '(a)') ""
-        write(output_unit, '(a,i0,a,i0)') "control: use_threads as the reader resolved it -- on arm: ", &
+        write(output_unit, '(a,i0,a,i0)') "control 1: use_threads as the reader resolved it -- on arm: ", &
             saw_on, ", off arm: ", saw_off
+        write(output_unit, '(a,i0)') "control 2: Arrow's CPU thread pool capacity              : ", &
+            parquet_get_arrow_threads()
         if (saw_on == saw_off) then
-            write(output_unit, '(a)') "FAILED CONTROL: both arms resolved to the same value, so the"
+            write(output_unit, '(a)') "FAILED CONTROL 1: both arms resolved to the same value, so the"
             write(output_unit, '(a)') "timings below compare one configuration against itself and say"
             write(output_unit, '(a)') "NOTHING about whether Arrow threads a single-column read."
+        end if
+        if (parquet_get_arrow_threads() < 2) then
+            write(output_unit, '(a)') "FAILED CONTROL 2: Arrow has fewer than two threads available, so"
+            write(output_unit, '(a)') "use_threads=.true. has nothing to thread WITH. That is a property"
+            write(output_unit, '(a)') "of this machine's Arrow build, not an answer about Arrow's reader."
         end if
         write(output_unit, '(a)') ""
         write(output_unit, '(a,f10.4,a)') "read one column, use_threads=.true.  : ", best_on, " s"

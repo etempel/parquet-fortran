@@ -84,7 +84,7 @@ contains
     end procedure table_mutable_column
     !
     module procedure table_apply_keep
-        integer :: i
+        integer, allocatable :: slots(:)
         !
         ! Keeping every row removes none, so there is nothing to rewrite and nothing to detach
         ! for: `delete_by_mask` would reallocate every column's storage to the same contents,
@@ -92,10 +92,8 @@ contains
         ! not change a single row. This covers %filter_rows with an all-.true. mask,
         ! %delete_rows() with no indices, and a filter of a zero-row table.
         if (all(keep)) return
-        do i = 1, self%cache%ncols
-            if (.not. table_mutable_column(self, i)) cycle
-            call self%cache%cols(i)%values%delete_by_mask(keep)
-        end do
+        call table_mutable_slots(self, slots)
+        call table_colwork(self%cache, PCW_DELETE_MASK, slots, keep=keep)
         self%row_count = count(keep, kind=int64)
         self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
@@ -174,9 +172,7 @@ contains
     !
     module procedure table_sort_by
         integer(int64), allocatable :: perm(:)
-        integer :: i
-        logical :: validated
-        character(len=32) :: got, want
+        integer, allocatable :: slots(:)
         !
         call table_check_not_shared(self, "sort_by")
         ! The open check and the key/flag-count validation live in sort_collect_keys
@@ -201,25 +197,29 @@ contains
         ! check_row_permutation in parquet_columns_structural.f90). The one validation is what stands
         ! between a defective sort engine and silently duplicated rows -- an invalid permutation is
         ! not reachable from user input here, only from a library bug, but that is exactly the class
-        ! of failure this project refuses to leave undetected. Anything that later parallelizes this
-        ! loop must keep exactly one column on the validating path.
-        validated = .false.
-        do i = 1, self%cache%ncols
-            if (.not. table_mutable_column(self, i)) cycle
-            if (validated) then
-                call self%cache%cols(i)%values%reindex_trusted(perm(1:self%row_count))
-            else
-                call self%cache%cols(i)%values%reindex(perm(1:self%row_count))
-                validated = .true.
+        ! of failure this project refuses to leave undetected (feature_risks.md Risk-46).
+        !
+        ! **The validating column is HOISTED OUT of the parallel path, not selected inside it.** A
+        ! `validated` flag read and written by every thread would be a race, and a needless one --
+        ! taking the first slot serially preserves the invariant by construction, with no shared
+        ! state at all, and it keeps the one reachable abort in this loop (an invalid permutation)
+        ! on a single thread with its ordinary behaviour. It costs one column's serial time, which
+        ! a dynamic schedule would have had to absorb anyway.
+        call table_mutable_slots(self, slots)
+        if (size(slots) > 0) then
+            call self%cache%cols(slots(1))%values%reindex(perm(1:self%row_count))
+            if (size(slots) > 1) then
+                call table_colwork(self%cache, PCW_REINDEX_TRUSTED, slots(2:), &
+                    rows=perm(1:self%row_count))
             end if
-        end do
+        end if
         self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)
     end procedure table_sort_by
     !
     module procedure table_top_n
         integer(int64), allocatable :: sel(:)
-        integer :: i
+        integer, allocatable :: slots(:)
         !
         call table_check_not_shared(self, "top_n")
         ! Called here rather than left to sort_collect_keys, because the delegation below reads
@@ -237,10 +237,12 @@ contains
         ! negative n.
         call table_build_top_n_permutation(self, keys, n, descending, nulls_first, sel)
         call check_selection(sel, self%row_count)
-        do i = 1, self%cache%ncols
-            if (.not. table_mutable_column(self, i)) cycle
-            call self%cache%cols(i)%values%gather(sel)
-        end do
+        ! No hoist here, unlike %sort_by: `%gather` does its own range check on every column and
+        ! there is no trusted variant to skip it with, so every column is on the same path and the
+        ! whole list goes to the worker. `check_selection` above is what stands in for the sort's
+        ! one validating column -- it is the duplicate scan `%gather` deliberately does not do.
+        call table_mutable_slots(self, slots)
+        call table_colwork(self%cache, PCW_GATHER, slots, rows=sel)
         self%row_count = int(n, int64)
         self%cache%generation = self%cache%generation + 1_int64
         call table_detach(self)

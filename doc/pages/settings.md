@@ -124,6 +124,27 @@ than a request, read per call, with `0` meaning automatic.
 fails the same applicability test that a single-threaded OpenMP environment already fails, and the
 ordinary serial path takes over.
 
+## Threads for mutating a table
+
+`parquet_set_table_threads(n)` caps the threads a table's row-structural mutation uses to rewrite
+its columns concurrently — `%sort_by`, `%filter_rows`, `%top_n`, and `%delete_rows` and `%truncate`,
+which go through the same loop. Every column is rewritten independently of every other, so the work
+divides cleanly; the parallelism is bounded by the **column count**, which means a wide table gains
+a great deal and a two-column table almost nothing.
+
+Like the other two it is a cap rather than a request, read per call, with `0` meaning automatic.
+`1` makes the rewrite serial, which is also what happens on its own inside your own OpenMP parallel
+region, on a table with fewer than two rewritable columns, and on a table too small to be worth a
+thread team.
+
+**This is also the memory control, and it is the one thing to know before leaving it automatic.**
+Each thread rewriting a column holds a transient second copy of that column, so `n` threads hold `n`
+copies where a serial rewrite holds one. Since the count never exceeds the column count, those
+copies come to at most one extra copy of the table — so a whole-column rewrite (`%sort_by`) can
+**double the table's peak memory for the duration of the call**. `%filter_rows` and `%top_n` are
+proportionally cheaper, since their new storage is sized by the rows they keep. A program working
+near its memory ceiling caps the threads here, which caps the copies with them.
+
 ## Writer defaults
 
 `parquet_set_default_compression(name)` and `parquet_set_default_compression_level(n)` supply what
@@ -357,6 +378,7 @@ parquet-fortran settings
   arrow_threads                    8
   sort_threads                     0
   prefetch_threads                 0
+  table_threads                    0
   sort_parallel_min_rows           8192
   sort_counting_path               true
   sort_counting_bucket_limit       4194304

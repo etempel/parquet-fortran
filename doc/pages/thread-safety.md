@@ -34,6 +34,7 @@ disturbing that.
 | First read of a column not yet resident, on a table **another** thread opened | no | hard error; `%prefetch` before the region |
 | First read of a column, on a table **this** thread opened inside the region | **yes** | — (this is the per-thread slice pattern) |
 | `%prefetch` / `%materialize_all` called from one thread | **yes, internally** — the library reads the columns on several threads for you | — |
+| `%sort_by` / `%filter_rows` / `%top_n` / `%delete_rows` / `%truncate` called from one thread | **yes, internally** — the library rewrites the columns on several threads for you | — |
 | Write values into **different** resident columns | **yes** | — |
 | Write values into **disjoint row ranges** of one resident fixed-width column | **yes** | — |
 | Write values into a **string** column | no | hard error — its rows share one packed store, so a write can move the whole payload |
@@ -58,6 +59,21 @@ Three things the library cannot see, which stay your responsibility:
 
 **Appended row order is not deterministic** — it depends on which thread got the lock first. Sort
 in memory afterwards (`%sort_by`) if you need a reproducible result.
+
+**Two operations thread internally, and both stand down inside your own parallel region.**
+`%prefetch`/`%materialize_all` read several columns at once, each on its own reader; `%sort_by`,
+`%filter_rows`, `%top_n`, `%delete_rows` and `%truncate` rewrite several columns at once. You do not
+ask for either and cannot get them wrong — but two consequences are worth knowing:
+
+- **Called from inside a parallel region of your own, both run serially.** A nested region is your
+  business, not the library's: without that rule, *T* of your threads would each ask for *T* more,
+  and the oversubscription is slower than not threading at all. So the per-thread-slice pattern
+  below loses nothing — each thread's own table is small and there are already *T* of them running.
+- **A parallel rewrite holds one transient column copy per thread**, where a serial one holds one in
+  total. The thread count never exceeds the column count, so those copies come to at most one extra
+  copy of the table: a `%sort_by` can double the table's peak memory for the duration of the call.
+  `parquet_set_table_threads(n)` caps the threads and so caps the copies — see
+  [Settings](settings.html#threads-for-mutating-a-table).
 
 ## Practical cases
 

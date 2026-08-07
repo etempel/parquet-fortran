@@ -116,6 +116,9 @@ something a reader is expected to have.
 | [Risk-49](#risk-49--a-co-ranked-merge-that-never-co-ranks-is-invisible) | A co-ranked merge that never co-ranks is invisible | 4 — covered |
 | [Risk-50](#risk-50--a-co-rank-off-by-one-produces-a-non-permutation-that-nothing-on-the-raw-path-validates) | A co-rank off-by-one produces a non-permutation that nothing on the raw path validates | 4 — covered |
 | [Risk-51](#risk-51--a-pre-run-error-scenario-result-can-be-consumed-as-this-runs-answer) | A pre-run error-scenario result can be consumed as this run's answer | 3 — not testable |
+| [Risk-52](#risk-52--an-ab-equality-cannot-see-a-defect-the-two-paths-share) | An A/B equality cannot see a defect the two paths share | 4 — covered |
+| [Risk-53](#risk-53--a-parallel-mutation-gate-that-never-engages-passes-every-correctness-test) | A parallel mutation gate that never engages passes every correctness test | 4 — covered |
+| [Risk-54](#risk-54--the-parallel-rewrites-memory-cost-is-bounded-by-documentation-and-nothing-else) | The parallel rewrite's memory cost is bounded by documentation and nothing else | 3 — not testable |
 
 ---
 
@@ -123,7 +126,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-52**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-55**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -382,6 +385,40 @@ help either: it would have to drive `run_tester`, not `error_scenarios`.
   is what keeps a missing or unreadable capture a performance question instead of a correctness
   one, and it is why `run_error_scenario` falls through rather than failing when a triple is
   incomplete.
+
+### Risk-54 — The parallel rewrite's memory cost is bounded by documentation and nothing else
+
+Each thread rewriting a column allocates a full new copy of it before releasing the old one
+(`gather_storage` and friends reallocate **exact-fit**, with no headroom), so `T` concurrent columns
+hold `T` transient copies where the serial loop held one. There is **no memory cap and no memory
+budget knob**: that was decided deliberately, in favour of documenting the cost.
+
+What makes the cost statable is that `colwork_threads` never returns more than the number of columns
+being rewritten. So the transient copies come to at most one extra copy of the table, and the claim
+in `doc/pages/settings.md`, `doc/pages/thread-safety.md` and `CHANGELOG.md` — *a whole-column rewrite
+can double the table's peak memory for the duration of the call* — is exactly true rather than
+approximately.
+
+**What this forbids.**
+
+- **Do not remove or weaken that documented paragraph without reinstating a cap.** It is the entire
+  mitigation. A user near their memory ceiling is expected to have read it and to cap the threads
+  with `parquet_set_table_threads(n)`, which caps the copies with them.
+- **Do not add an operation to `table_colwork` whose transient is not bounded by the column count.**
+  The "at most doubles" claim rests on that bound, not on any property of the three operations that
+  are there today — an op that allocated per row, or that held two copies per column, would make the
+  documented figure quietly wrong.
+- **Do not raise the thread count above the column count** as a "why not use the spare cores"
+  optimisation. There is no work for them, and it would break the bound the claim rests on.
+
+**Test.** Not testable as a unit test, for the reason CLAUDE.md gives about measuring Arrow memory
+in reverse: peak RSS is the right instrument here (these are ordinary Fortran allocations, so the
+question is the live high-water mark rather than what was returned to the OS), but a peak-memory
+assertion in a test suite that runs other tests concurrently measures the whole process, not this
+call. It belongs in the post-implementation benchmark instead, where the mutation runs in its own
+process at `T = 1` and `T = max`.
+
+---
 
 ## 4. Risks already covered, kept for what they still forbid
 
@@ -1880,8 +1917,21 @@ it, and the rows still look plausible.
 - **Do not remove the remaining validation** on the grounds that the engine is tested. It is the
   only check left, and it costs one bit-packed pass (~50 ms at 20 M rows) against the ~2 s the
   reindex phase takes at that size.
-- **Do not collapse the loop to all-trusted** when parallelizing it (`feature_table.md` §2.5).
-  Exactly one column must stay on the validating path; which one does not matter.
+- **Do not collapse the loop to all-trusted.** Exactly one column must stay on the validating path;
+  which one does not matter.
+- **The mechanism is a HOIST, not a flag, now that the loop is parallel.** `table_sort_by` rewrites
+  `slots(1)` serially through the validating `%reindex` and hands `slots(2:)` to `table_colwork`,
+  which only ever calls `%reindex_trusted`. A `validated` flag read and written inside the parallel
+  region would be a race, and a needless one — the hoist preserves the invariant by construction,
+  with no shared state, and it keeps the one reachable abort here (an invalid permutation) on a
+  single thread with its ordinary behaviour. **Do not restore a flag, and do not pass `slots` where
+  `slots(2:)` is meant** — the latter permutes the first column twice, which is Risk-52's blind spot
+  and is caught only by `check_rows_consistent`.
+- **Removing the remaining validation is not caught by any test, and cannot be.** For a *valid*
+  permutation `%reindex` and `%reindex_trusted` compute the same result, so substituting one for the
+  other is semantically a no-op — mutation-confirmed. That is a property of the design, not a gap in
+  the suite: the check exists for a permutation the sort engine got wrong, which is not constructible
+  from user input.
 - **Do not add a fourth copy of the check.** There are three — `check_row_permutation`
   (`src/parquet_columns_structural.f90`), `parquet_string_column%reindex` (`src/parquet_strings.f90`)
   and `check_permutation` (`src/parquet_sorting_keys.f90`) — and a table-layer validator was
@@ -1982,3 +2032,74 @@ boundary landing one element early only matters when a run happens to end there.
   total order with no ties, so the co-rank's tie condition is unobservable there — every formulation
   of it agrees, mutation-confirmed. `pf_merge` has real ties and the opposite convention (Risk-37),
   so a helper that is provably correct here can be quietly wrong there.
+
+---
+
+### Risk-52 — An A/B equality cannot see a defect the two paths share
+
+`parquet_table`'s row-structural mutations (`%sort_by`, `%filter_rows`, `%top_n`, and `%delete_rows`
+and `%truncate` through `table_apply_keep`) rewrite their columns on several threads. The natural
+test is an **A/B equality**: mutate a table in parallel, mutate an independent clone with
+`parquet_set_table_threads(1)`, assert the two are identical. It is the right test and it catches a
+great deal — a column skipped in the parallel loop, a schedule that loses work, a race on the store.
+
+**It also has a blind spot that is easy to miss, because the test looks thorough.** It compares two
+runs of the same procedure, so anything wrong *above* the point where the two paths diverge breaks
+them **identically** and the comparison still holds. This is not hypothetical: replacing
+`table_colwork(..., slots(2:), ...)` with `table_colwork(..., slots, ...)` in `table_sort_by` — so
+the hoisted first column is reindexed a second time, permuting the sort key twice while every other
+column is permuted once — **passed every A/B assertion in `test/test_table_parallel.f90`** before the
+oracle below existed. Every column had been rewritten by a table whose rows were, jointly, wrong.
+
+**What this forbids.**
+
+- **Never let an A/B equality be the only correctness assertion for a parallel path.** Pair it with
+  an oracle that does not go through the machinery under test.
+- **Keep `test_table_parallel.f90`'s fixture self-checking.** Every column of it is a pure function
+  of `n`, the original row number — values *and* nulls — so `check_rows_consistent` can verify each
+  surviving row against the fixture's own construction, whatever the mutation did to the row set. A
+  column out of step with its neighbours cannot satisfy that, however both paths were broken. The
+  fixture and the oracle share one formula (`key_for`) precisely so they cannot drift apart.
+- **A new operation added to `table_colwork` needs both halves**, not just the A/B one.
+
+**Covered by** the three equality tests in `test/test_table_parallel.f90`, each of which now runs
+`check_rows_consistent` after `check_tables_identical`. Mutation-confirmed in both directions: the
+skipped-column mutation fails all three A/B assertions, and the double-reindex mutation above fails
+only the oracle.
+
+---
+
+### Risk-53 — A parallel mutation gate that never engages passes every correctness test
+
+`colwork_threads` (`src/parquet_tables_parallel.f90`) decides whether a mutation rewrites its
+columns on several threads. It answers **1** — serial — for four separate reasons: fewer than two
+rewritable columns, already inside a parallel region, less work than `colwork_min_elements`, or
+`parquet_set_table_threads(1)`. Every one of those is correct behaviour, and every one of them makes
+the whole feature disappear while every assertion about values, order and nulls keeps passing.
+Zero parallelism is a passing test, exactly as zero comparisons was for the partial sort (Risk-35)
+and a silently serial `threads=` was for the sort (Risk-39).
+
+**Three things a test here has to get right, all found by getting them wrong first.**
+
+- **The suite must run its tests sequentially.** test-drive runs a suite inside its own
+  `!$omp parallel do`, and `omp_in_parallel()` is therefore `.true.` inside every test — so the
+  mutation resolves to one thread and an equality test compares the serial path against itself.
+  This is why `table_parallel` is its own suite and why `run_tester.f90` excludes it. Putting these
+  tests in `table` instead would make all of them vacuous, silently.
+- **The fixture must clear the work floor.** `colwork_min_elements` is 131072 *elements*
+  (`rows * width`), which no ordinary test fixture reaches by accident. `test_table_parallel.f90`
+  gets there with a width-8 vector column at 20000 rows rather than by making the table long.
+- **The thread count must be asserted, with a negative control.** `check_really_parallel` asserts
+  `> 1` on a fixture proven to reach the parallel path; `test_table_threads_effect`
+  (`test/test_settings.f90`) asserts `1` with the cap set to 1 *and* `1` below the work floor, on
+  the same machinery. Either half alone passes against a hook that always answers the same number.
+
+**The counter is written on BOTH paths**, serial included, which is a deliberate difference from
+`parquet_debug_get_prefetch_threads_used` (written only on its parallel path, so its negative
+control asserts 0). Writing it always is what separates "the gate declined" from "the mutation never
+reached the loop at all" — and the tests reset it to 0, a value the mutation itself never writes.
+
+**Covered by** `check_really_parallel` in all three tests of `test/test_table_parallel.f90`, the
+caller's-own-region test in the same file, and `table_threads caps the parallel per-column rewrite`
+in `test/test_settings.f90`. Mutation-confirmed: a gate hard-wired to return 1 fails all three
+equality tests through their thread-count assertion.

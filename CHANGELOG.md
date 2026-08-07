@@ -405,6 +405,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all eleven element types. Both are internal plumbing, public only because Fortran offers no
   narrower visibility: a permutation that is not one silently duplicates and drops rows.
 
+- **A `parquet_table`'s row-structural mutations now rewrite their columns on several threads.**
+  `%sort_by`, `%filter_rows`, `%top_n`, `%delete_rows` and `%truncate` all replay their permutation
+  or mask across every resident column, and each column is independent of every other, so the loop
+  now runs in parallel. You do not ask for it and there is no new argument: it engages
+  automatically on a table with at least two rewritable columns and enough data to be worth a thread
+  team, and stands down inside a parallel region of your own, since a nested region is the caller's
+  business. The answer is identical either way — the parallel and serial paths produce the same
+  table, which is what makes it safe to do silently. On a 20.8-million-row table the per-column loop
+  was measured at 67% of `%sort_by` at 24 columns and 80% at 48, so the gain grows with the column
+  count; a two-column table gains nothing and does not try. **Two things to know:** the new
+  `parquet_set_table_threads(n)` caps it (`1` forces the old serial behaviour, `0` is automatic),
+  and because each thread holds a transient copy of the column it is rewriting, a parallel
+  `%sort_by` can **double the table's peak memory for the duration of the call** — the thread count
+  never exceeds the column count, so the transient copies come to at most one extra copy of the
+  table. A program working near its memory ceiling should cap the threads, which caps the copies
+  with them. `%filter_rows` and `%top_n` are proportionally cheaper, since their new storage is
+  sized by the rows they keep.
+
+- **`parquet_set_threads(n)` now sets four thread counts, not three** — Arrow's pool, the sort cap,
+  the table prefetch cap and the new table mutation cap. A program that called it and then
+  deliberately left the mutation cap alone will now find that cap set too; set
+  `parquet_set_table_threads` afterwards to override just that one, exactly as with the other three.
+
 - **`parquet_table%get_valid_mask` and `%get`/`%col`/`%get_slice`'s `is_valid=` are faster on a
   large column**, in both ranks. They used to build the mask with one `%is_null(i)` call per row;
   they now go through the column's own bulk builder, which walks the validity bitmap a 64-bit word

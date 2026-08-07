@@ -135,6 +135,14 @@ module parquet_tables
     !! string, and so a collision test has something to compare against.
     character(len=*), parameter :: PARQUET_ROW_INDEX = "parquet_row_index"
     !
+    ! ---- Per-column work a row-structural mutation hands to `table_colwork` ----
+    ! Private: an op code is how one parallel region serves three operations without an abstract
+    ! interface in this spec and an indirect call inside the region. One branch per column.
+    integer, parameter :: PCW_REINDEX_TRUSTED = 1 !! %reindex_trusted(rows) -- the sort's replay.
+    integer, parameter :: PCW_DELETE_MASK = 2     !! %delete_by_mask(keep) -- filter/delete/truncate.
+    integer, parameter :: PCW_GATHER = 3          !! %gather(rows) -- %top_n's selection.
+    private :: PCW_REINDEX_TRUSTED, PCW_DELETE_MASK, PCW_GATHER
+    !
     ! ---- Column residency (D14/RF20) ----
     integer, parameter :: RES_EMPTY = 0   !! no values held (never read, or an unsupported type).
     integer, parameter :: RES_PARTIAL = 1 !! reserved: some row groups resident (a later milestone).
@@ -1707,6 +1715,34 @@ module parquet_tables
             class(parquet_table), intent(in) :: self !! the table being changed.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_check_not_shared
+        !> Collects the slots a row-structural mutation will actually rewrite, in slot order.
+        !!
+        !! Exists so the serial loop, the parallel loop and the caller that hoists the first column
+        !! out of it cannot disagree about which columns are touched -- the same reason
+        !! `materialize_wanted` is factored out of the prefetch paths. The predicate is
+        !! `table_mutable_column` and nothing else.
+        module subroutine table_mutable_slots(self, slots)
+            class(parquet_table), intent(in) :: self          !! the table.
+            integer, allocatable, intent(out) :: slots(:)     !! the rewritable slot indices, in order.
+        end subroutine table_mutable_slots
+        !> Runs one row-structural operation over `slots`, on several threads when that is worth
+        !! doing and serially otherwise. The single entry point for the whole parallel-mutation
+        !! path: the caller never sees the gate and there is no second copy of the serial loop.
+        !!
+        !! `op` selects the operation (`PCW_*`), and the two optional arrays carry its argument:
+        !! `rows` for `PCW_REINDEX_TRUSTED` (a permutation) and `PCW_GATHER` (a selection), `keep`
+        !! for `PCW_DELETE_MASK`. Exactly one is expected per op.
+        !!
+        !! **Every column in `slots` is rewritten, and nothing else is touched** -- no counter, no
+        !! flag, no cache-level field. The `generation` bump and the detach stay with the caller,
+        !! after this returns, exactly as they were around the serial loop.
+        module subroutine table_colwork(cache, op, slots, rows, keep)
+            type(parquet_table_cache), intent(inout) :: cache      !! the column store.
+            integer, intent(in) :: op                              !! which operation; a PCW_* constant.
+            integer, intent(in) :: slots(:)                        !! slots to rewrite, from table_mutable_slots.
+            integer(int64), intent(in), optional :: rows(:)        !! permutation or selection, per `op`.
+            logical, intent(in), optional :: keep(:)               !! per-row keep mask, per `op`.
+        end subroutine table_colwork
         !> Resolves a `width_pending` column's kind and width, then clears the flag. A no-op for
         !! every other column, so callers can invoke it unconditionally.
         !!

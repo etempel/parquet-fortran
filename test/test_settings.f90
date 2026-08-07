@@ -84,6 +84,7 @@ contains
             new_unittest("sort_threads caps the automatic thread count", test_sort_threads_effect), &
             new_unittest("sort_threads never lifts the in-parallel serial answer", test_sort_threads_respects_region), &
             new_unittest("prefetch_threads caps the parallel prefetch", test_prefetch_threads_effect), &
+            new_unittest("table_threads caps the parallel per-column rewrite", test_table_threads_effect), &
             new_unittest("default_compression changes the bytes written", test_default_compression_effect), &
             new_unittest("default_compression_level changes the bytes written", test_default_compression_level_effect), &
             new_unittest("naming a codec default drops the zstd-tuned level", test_default_compression_decouples_level), &
@@ -109,7 +110,7 @@ contains
             new_unittest("a variable overrides an earlier explicit set", test_env_overrides_explicit), &
             new_unittest("integers accept blanks and a sign, booleans fold case", test_env_value_forms), &
             new_unittest("a codec and its level both arrive", test_env_codec_and_level), &
-            new_unittest("set_threads moves all three thread counts", test_set_threads), &
+            new_unittest("set_threads moves all four thread counts", test_set_threads), &
             new_unittest("PARQUET_FORTRAN_THREADS is overridden by the specific variables", &
                 test_env_threads_then_specific) &
             ]
@@ -426,6 +427,130 @@ contains
             "prefetch_threads=1 must not run the internally-parallel prefetch")
     end subroutine test_prefetch_threads_effect
 
+    !> `table_threads` decides how many threads a row-structural mutation rewrites columns on.
+    !>
+    !> **This knob has no observable in the answer at all**, by design: the parallel and serial
+    !> paths produce an identical table, which is the property that makes the feature safe and
+    !> simultaneously makes it untestable by ordinary means (`feature_risks.md` Risk-39's shape). So
+    !> the assertion is on the thread count the mutation resolved to, read back through a C++ debug
+    !> hook, and it needs all three of the observations below to mean anything:
+    !>
+    !>   * **automatic, above the work floor** -- the positive control. Without it, the capped
+    !>     assertion below is satisfied by an implementation that never threads at all.
+    !>   * **capped at 1** -- the knob's own effect, on the identical fixture.
+    !>   * **below the work floor** -- the gate's other reason to decline, so a floor that was
+    !>     removed or set to zero does not pass unnoticed.
+    !>
+    !> The counter is written on BOTH paths (1 when serial), so "declined" and "never reached the
+    !> code at all" are distinguishable -- unlike the prefetch counter above, which is only written
+    !> on its parallel path and is therefore asserted against 0.
+    subroutine test_table_threads_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! Above colwork_min_elements (131072) with room to spare, and small enough to build in
+        ! milliseconds: 4 int32 columns of this length is under 3 MB.
+        integer, parameter :: BIG = 150000
+        integer, parameter :: SMALL = 64
+        integer(int32), allocatable :: k(:), a(:), b(:), c(:)
+        integer :: i, auto_used, capped, tiny, avail
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        allocate(k(BIG), a(BIG), b(BIG), c(BIG))
+        do i = 1, BIG
+            ! A scattered key, so the permutation actually moves rows -- %sort_by returns early
+            ! without touching a column when the rows are already in order, which would leave the
+            ! counter reporting the previous call.
+            k(i) = mod(i * 7919, BIG)
+            a(i) = i
+            b(i) = 2*i
+            c(i) = 3*i
+        end do
+        !
+        ! Automatic, above the floor: the positive control.
+        call parquet_reset_settings()
+        call parquet_debug_reset_table_threads()
+        call sort_four_columns(k, a, b, c)
+        auto_used = parquet_debug_table_threads()
+        if (avail > 1) then
+            call check(error, auto_used > 1, &
+                "with table_threads automatic and several large columns, %sort_by must rewrite them in parallel")
+            if (allocated(error)) return
+        end if
+        !
+        ! Capped at 1, same fixture: the knob's own effect.
+        call parquet_set_table_threads(1)
+        call parquet_debug_reset_table_threads()
+        call sort_four_columns(k, a, b, c)
+        capped = parquet_debug_table_threads()
+        call parquet_reset_settings()
+        call check(error, capped == 1, "table_threads=1 must make the per-column rewrite serial")
+        if (allocated(error)) return
+        !
+        ! Below the work floor, automatic: the gate's other reason to decline.
+        deallocate(k, a, b, c)
+        allocate(k(SMALL), a(SMALL), b(SMALL), c(SMALL))
+        do i = 1, SMALL
+            k(i) = mod(i * 7, SMALL)
+            a(i) = i
+            b(i) = 2*i
+            c(i) = 3*i
+        end do
+        call parquet_debug_reset_table_threads()
+        call sort_four_columns(k, a, b, c)
+        tiny = parquet_debug_table_threads()
+        call check(error, tiny == 1, &
+            "a table too small to be worth a thread team must rewrite its columns serially")
+    end subroutine test_table_threads_effect
+
+    !> Builds a four-column in-memory table from the arrays given and sorts it by the first.
+    !>
+    !> A fresh table per call, deliberately: `%sort_by` leaves the rows in key order, so sorting the
+    !> same table twice makes the second call a no-op that never reaches the per-column loop.
+    subroutine sort_four_columns(k, a, b, c)
+        integer(int32), intent(in) :: k(:) !! sort key.
+        integer(int32), intent(in) :: a(:) !! payload column.
+        integer(int32), intent(in) :: b(:) !! payload column.
+        integer(int32), intent(in) :: c(:) !! payload column.
+        type(parquet_table) :: t
+        !
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        call t%add_column("a", a)
+        call t%add_column("b", b)
+        call t%add_column("c", c)
+        call t%sort_by(["k"])
+    end subroutine sort_four_columns
+
+    !> Threads the last row-structural table mutation resolved to; 1 when it ran serially.
+    integer function parquet_debug_table_threads() result(n)
+        use iso_c_binding, only : c_int64_t
+        interface
+            function got() bind(C, name="parquet_debug_get_table_threads_used") result(kk)
+                import :: c_int64_t
+                integer(c_int64_t) :: kk
+            end function got
+        end interface
+        !
+        n = int(got())
+    end function parquet_debug_table_threads
+
+    !> Clears the mutation thread counter, so a test observes its own mutation rather than an
+    !> earlier one. Reset to 0, which the mutation itself never writes -- so a counter still reading
+    !> 0 afterwards means the mutation never reached the loop at all.
+    subroutine parquet_debug_reset_table_threads()
+        use iso_c_binding, only : c_int64_t
+        interface
+            subroutine put(kk) bind(C, name="parquet_debug_set_table_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: kk
+            end subroutine put
+        end interface
+        !
+        call put(0_c_int64_t)
+    end subroutine parquet_debug_reset_table_threads
+
     !> Two writes of the same data, differing only in the setting. Equal sizes mean the setting was
     !> ignored -- which is the whole failure this test exists for -- so the fixture is chosen to
     !> compress well enough that uncompressed and zstd cannot coincide.
@@ -722,6 +847,10 @@ contains
             "set_threads must set the sort cap")
         if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 3, &
             "set_threads must set the prefetch cap")
+        ! The fourth knob. A forgotten call here is invisible without its own assertion, since the
+        ! other three still work and the name says nothing about how many "all" is.
+        if (.not. allocated(error)) call check(error, parquet_get_table_threads() == 3, &
+            "set_threads must set the table mutation cap")
         ! A later individual setter overrides just its own knob, which is what makes the convenience
         ! composable rather than a mode you have to leave.
         if (.not. allocated(error)) then
@@ -769,6 +898,7 @@ contains
         call unset_env("PARQUET_FORTRAN_ARROW_THREADS")
         call unset_env("PARQUET_FORTRAN_SORT_THREADS")
         call unset_env("PARQUET_FORTRAN_PREFETCH_THREADS")
+        call unset_env("PARQUET_FORTRAN_TABLE_THREADS")
         call unset_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_PATH")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT")
@@ -781,7 +911,7 @@ contains
         call unset_env("PARQUET_FORTRAN_MESSAGE_STREAM")
     end subroutine unset_all_env
 
-    !> **The bulk test, and the one that catches a crossed pair.** Thirteen variables set to thirteen
+    !> **The bulk test, and the one that catches a crossed pair.** Fourteen variables set to fourteen
     !> distinguishable values in one call, each read back through its own getter -- so a variable
     !> wired to the wrong setter fails on both knobs at once, and a variable left out of
     !> parquet_settings_from_env's sequence fails on its own (feature_risks.md Risk-44).
@@ -799,6 +929,7 @@ contains
         call set_env("PARQUET_FORTRAN_ARROW_THREADS", "3")
         call set_env("PARQUET_FORTRAN_SORT_THREADS", "5")
         call set_env("PARQUET_FORTRAN_PREFETCH_THREADS", "2")
+        call set_env("PARQUET_FORTRAN_TABLE_THREADS", "7")
         call set_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", "64")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_PATH", "false")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", "128")
@@ -818,6 +949,8 @@ contains
             "PARQUET_FORTRAN_SORT_THREADS reaches sort_threads")
         if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 2, &
             "PARQUET_FORTRAN_PREFETCH_THREADS reaches prefetch_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_table_threads() == 7, &
+            "PARQUET_FORTRAN_TABLE_THREADS reaches table_threads")
         if (.not. allocated(error)) call check(error, parquet_get_sort_parallel_min_rows() == 64_int64, &
             "PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS reaches sort_parallel_min_rows")
         if (.not. allocated(error)) call check(error, .not. parquet_get_sort_counting_path(), &

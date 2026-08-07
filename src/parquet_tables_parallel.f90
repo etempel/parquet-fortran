@@ -29,6 +29,22 @@
 submodule (parquet_tables) parquet_tables_parallel
     implicit none
     !
+    !> Below this much work in the largest column a mutation would rewrite, the loop runs serially.
+    !!
+    !! Measured in ELEMENTS (`rows * width`) rather than bytes, because `parquet_column` exposes no
+    !! byte size and deriving one here would mean a second copy of the kind-to-size table that lives
+    !! in the generator. 131072 elements is 1 MiB of `float64`, the widest ordinary element, so the
+    !! floor is at most 1 MiB and less for narrower kinds.
+    !!
+    !! **The value is deliberately a wide margin rather than a tuned constant.** Spawning an OpenMP
+    !! team costs single-digit microseconds; gathering 1 MiB reads and writes 2 MiB, a few hundred
+    !! microseconds at ordinary memory bandwidth. The real break-even is one to two orders of
+    !! magnitude below this, so the floor errs toward serial and cannot plausibly be too small. It
+    !! is also low enough for an ordinary unit test to exceed it (131k `float64` rows is ~1 MB),
+    !! which is why it needs no setting and no debug override: a threshold the tests cannot cross
+    !! would mean they only ever exercise the serial path.
+    integer(int64), parameter :: colwork_min_elements = 131072_int64
+    !
 contains
     !
     module procedure unsafe_shared_mutation
@@ -173,6 +189,171 @@ contains
             call self%cache%cols(i)%values%ensure_validity()
         end do
     end procedure table_ensure_validity
+    !
+    module procedure table_mutable_slots
+        integer :: i, n
+        !
+        allocate(slots(self%cache%ncols))
+        n = 0
+        do i = 1, self%cache%ncols
+            if (.not. table_mutable_column(self, i)) cycle
+            n = n + 1
+            slots(n) = i
+        end do
+        ! Trimmed to what was actually collected, so every caller can loop over the whole array
+        ! and `size(slots)` is the count -- an unusable column left in it would be rewritten.
+        slots = slots(1:n)
+    end procedure table_mutable_slots
+    !
+    module procedure table_colwork
+        integer :: j, nt
+        !
+        nt = colwork_threads(cache, slots)
+        ! Noted on BOTH paths, serial included, so a test can tell "ran on one thread" from "the
+        ! gate declined and the counter was never written". A gate that always declines otherwise
+        ! passes every correctness test written for this feature.
+        call parquet_debug_note_table_threads(int(nt, int64))
+        if (nt <= 1) then
+            do j = 1, size(slots)
+                call colwork_one(cache, op, slots(j), rows, keep)
+            end do
+            return
+        end if
+        ! Each iteration rewrites `cache%cols(slots(j))%values` and nothing else: the slots are
+        ! distinct allocations, each written by exactly one thread, and the shared `rows`/`keep`
+        ! arrays are only read. Nothing here is written that another iteration reads.
+        !
+        ! `schedule(dynamic)` rather than static, because the work per column is wildly uneven: a
+        ! PK_STRING column's reindex rebuilds its whole packed payload (offsets, data and validity)
+        ! where a float64 column's is a gather, so a static split leaves threads idle behind the
+        ! string columns.
+        !
+        ! Nothing finalizable is declared inside this construct -- the body only references slots
+        ! that already exist. That is what keeps feature_risks.md Risk-45 (gfortran and ifx forbid
+        ! opposite shapes for a finalizable type in a parallel region) out of this region entirely;
+        ! a finalizable local inside a procedure CALLED from here is fine and is what
+        ! parquet_column's own procedures already do.
+        !$omp parallel do default(shared) private(j) schedule(dynamic) num_threads(nt)
+        do j = 1, size(slots)
+            call colwork_one(cache, op, slots(j), rows, keep)
+        end do
+        !$omp end parallel do
+    end procedure table_colwork
+    !
+    !> Applies one `PCW_*` operation to one column. The whole body of both loops above, so the two
+    !! paths cannot drift.
+    subroutine colwork_one(cache, op, idx, rows, keep)
+        type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        integer, intent(in) :: op                         !! which operation; a PCW_* constant.
+        integer, intent(in) :: idx                        !! slot to rewrite.
+        integer(int64), intent(in), optional :: rows(:)   !! permutation or selection, per `op`.
+        logical, intent(in), optional :: keep(:)          !! per-row keep mask, per `op`.
+        !
+        select case (op)
+        case (PCW_REINDEX_TRUSTED)
+            ! Trusted, never `%reindex`: the permutation is validated ONCE per sort, by the caller,
+            ! on a column it rewrites serially before handing the rest here (feature_risks.md
+            ! Risk-46). Collapsing this to all-trusted with no validating column anywhere, or
+            ! making this one validate too, both undo that.
+            call cache%cols(idx)%values%reindex_trusted(rows)
+        case (PCW_DELETE_MASK)
+            call cache%cols(idx)%values%delete_by_mask(keep)
+        case (PCW_GATHER)
+            call cache%cols(idx)%values%gather(rows)
+        case default
+            ! Not reachable: `op` comes from a PCW_* constant at each of the three call sites, all
+            ! in parquet_tables_rowmutate.f90, never from user input. Kept because a new op added
+            ! without a branch here would otherwise leave every column silently unrewritten --
+            ! which is the row-correspondence failure this whole path is guarded against.
+            error stop EP // "colwork: unknown per-column operation" ! GCOVR_EXCL_LINE
+        end select
+    end subroutine colwork_one
+    !
+    !> How many threads this mutation may use: 1 (serial) or more.
+    !!
+    !! **Deliberately conservative, and it picks a DEFAULT rather than refusing anything** -- the
+    !! same shape as `parallel_prefetch_ok` (src/parquet_tables_read.f90) and `pf_sort_threads`
+    !! (src/parquet_sorting_keys.f90), for the same reasons. Four things make it answer 1:
+    !!
+    !!   * **Fewer than two columns to rewrite.** The parallelism is bounded by the column count,
+    !!     so a one-column table can use nothing and a thread team would be pure overhead. This is
+    !!     the opposite bound from `%prefetch`'s, which is bounded by I/O.
+    !!   * **Already inside a parallel region.** Nested regions are the caller's business; without
+    !!     this, T threads would each ask for T more, and T*T oversubscription is slower than not
+    !!     threading at all. `omp_get_max_threads()` reads an ICV, not the current team size, so
+    !!     inside an 8-thread region it still answers 8.
+    !!   * **Too little work.** See `colwork_min_elements`.
+    !!   * **`parquet_set_table_threads(1)`**, which is how a caller -- and every equality test in
+    !!     the suite -- forces the serial path through the public API rather than a debug hook.
+    !!
+    !! The cap only ever reduces: the answer is never more than OpenMP offers and never more than
+    !! there are columns, so `T` transient column copies are at most one extra copy of the table.
+    !! No ownership guard is needed or wanted here -- every caller has already run
+    !! `table_check_not_shared`, so the table is provably not shared and the threads spawned are
+    !! its own, exactly as `%prefetch`'s are.
+    integer function colwork_threads(cache, slots) result(n)
+        use parquet_settings, only : parquet_get_table_threads
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_max_threads, omp_in_parallel
+#endif
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        integer, intent(in) :: slots(:)                !! slots the mutation will rewrite.
+        integer :: cap
+        !
+        n = 1
+#ifdef _OPENMP
+        if (size(slots) < 2) return
+        if (omp_in_parallel()) return
+        if (largest_column_elements(cache, slots) < colwork_min_elements) return
+        n = omp_get_max_threads()
+        cap = parquet_get_table_threads()
+        if (cap > 0 .and. cap < n) n = cap
+        if (n > size(slots)) n = size(slots)
+        if (n < 1) n = 1
+#endif
+    end function colwork_threads
+    !
+    !> Elements (`rows * width`) in the largest column the mutation will rewrite.
+    !!
+    !! The largest rather than the total, because the floor asks "is one column's worth of work
+    !! big enough to be worth a thread", and every column of a table has the same row count -- so
+    !! this reduces to the row count times the widest column.
+    integer(int64) function largest_column_elements(cache, slots) result(biggest)
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        integer, intent(in) :: slots(:)                !! slots the mutation will rewrite.
+        integer :: j
+        integer(int64) :: here
+        !
+        biggest = 0_int64
+        do j = 1, size(slots)
+            here = cache%cols(slots(j))%values%length() * &
+                int(max(cache%cols(slots(j))%values%colwidth(), 1), int64)
+            if (here > biggest) biggest = here
+        end do
+    end function largest_column_elements
+    !
+    !> Records, for the test suite only, how many threads the last row-structural mutation used.
+    !!
+    !! Pushed to a C++ global for the reason CLAUDE.md gives ("A Fortran-side debug hook has to be
+    !! PUBLIC, so prefer a C++ one"): the number is a local of `table_colwork`, and a Fortran hook
+    !! for it would have to be a public procedure in this module, visible to every `use parquet`.
+    !! The same shape as `parquet_debug_note_prefetch_threads` (src/parquet_tables_read.f90).
+    !!
+    !! Called once per mutation, on a path about to rewrite every column of a table, so the cost is
+    !! unmeasurable. **That ratio is the rule**: a debug hook may sit on a coarse operation like
+    !! this one, never on a per-row or per-element path.
+    subroutine parquet_debug_note_table_threads(n)
+        use iso_c_binding, only : c_int64_t
+        integer(int64), intent(in) :: n !! threads the mutation resolved to; 1 when it ran serially.
+        interface
+            subroutine set_used(k) bind(C, name="parquet_debug_set_table_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: k
+            end subroutine set_used
+        end interface
+        !
+        call set_used(int(n, c_int64_t))
+    end subroutine parquet_debug_note_table_threads
     !
     module procedure table_check_not_shared
         character(len=:), allocatable :: sfx

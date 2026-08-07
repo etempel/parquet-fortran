@@ -3285,6 +3285,25 @@ extern "C"
 		return g_debug_prefetch_threads_used;
 	}
 
+	// Test-only: how many threads the last parquet_table row-structural mutation (%sort_by,
+	// %filter_rows, %top_n) resolved to. Written from Fortran (parquet_debug_note_table_threads,
+	// src/parquet_tables_parallel.f90) for the same reason the prefetch counter above is: the number
+	// is Fortran-side state, and keeping the hook here rather than in a public Fortran procedure
+	// keeps it out of the library's own interface. Always written, including the value 1 for a
+	// mutation that ran serially -- a gate that silently declines is exactly what the negative
+	// control in test/test_settings.f90 exists to catch, and it needs to see the 1.
+	static int64_t g_debug_table_threads_used = 0;
+
+	void parquet_debug_set_table_threads_used(int64_t n)
+	{
+		g_debug_table_threads_used = n;
+	}
+
+	int64_t parquet_debug_get_table_threads_used(void)
+	{
+		return g_debug_table_threads_used;
+	}
+
 	void parquet_set_writer_options(void *handle, const char *compression_name, int compression_level, int64_t chunk_size, int use_threads)
 	{
 		g_debug_last_use_threads = use_threads;

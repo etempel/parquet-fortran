@@ -16,7 +16,7 @@ program tester
     use test_writing, only : collect_tests_parquet_writing
     use test_reading, only : collect_tests_parquet_reading
     use test_maml, only : collect_tests_parquet_maml
-    use test_errors, only : collect_tests_parquet_errors
+    use test_errors, only : collect_tests_parquet_errors, prime_error_scenarios
     use test_examples, only : collect_tests_parquet_examples
     use test_metadata, only : collect_tests_parquet_metadata
     use test_openmp, only : collect_tests_parquet_openmp_write, collect_tests_parquet_openmp
@@ -85,6 +85,25 @@ program tester
     ! command line argument for a specific testsuite and test
     call get_argument(1, suite_name)
     call get_argument(2, test_name)
+    !
+    ! Pre-run every error scenario once, in parallel, before any suite starts -- see
+    ! prime_error_scenarios in test_errors.f90 for what this buys and why it is safe here and
+    ! nowhere else (exactly one fork, with no OpenMP team active).
+    !
+    ! Two gates, and both exist to keep an interactive single-test run fast rather than to
+    ! protect correctness -- priming is a pure optimisation, and a suite that is not primed
+    ! simply spawns its scenarios on demand exactly as it always did:
+    !   * a named single test never primes, since it would pay for ~690 scenarios to run one;
+    !   * a named suite primes only if it actually drives scenarios.
+    ! suite_drives_error_scenarios is therefore allowed to go stale in the safe direction: a
+    ! missing name costs that suite its speedup, nothing more.
+    if (.not. allocated(test_name)) then
+        if (.not. allocated(suite_name)) then
+            call prime_error_scenarios()
+        else if (suite_drives_error_scenarios(suite_name)) then
+            call prime_error_scenarios()
+        end if
+    end if
     !
     call init_color_output(.true.)
     !
@@ -184,5 +203,15 @@ contains
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sort" .or. name == "settings")
     end function suite_is_safe_to_parallelize
+
+    !> Whether running just this suite is worth pre-running the whole scenario set for. Purely a
+    !> cost question -- see the gate at the top of this program. Note the overlap with the four
+    !> subprocess-driving suites excluded above is not exact: "reading" drives four scenarios of
+    !> its own while still running its tests concurrently, so it belongs here but not there.
+    logical function suite_drives_error_scenarios(name) result(drives)
+        character(len=*), intent(in) :: name
+        drives = (name == "writing" .or. name == "errors" .or. name == "metadata" &
+            .or. name == "maml" .or. name == "reading")
+    end function suite_drives_error_scenarios
 
 end program tester

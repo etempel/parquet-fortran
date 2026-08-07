@@ -8,7 +8,7 @@ module test_writing
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     use test_errors, only : check_scenario_exit_status, check_scenario_exit_status_and_stderr, &
-        check_scenario_exit_status_and_no_output, run_error_scenario
+        check_scenario_exit_status_and_no_output, run_error_scenario, scenario_capture_contains
     !
     implicit none
     private
@@ -961,10 +961,10 @@ contains
     subroutine test_qc_warning_printed_for_fractional_bound(error)
         type(error_type), allocatable, intent(out) :: error
         integer :: exitstat, cmdstat
-        character(len=*), parameter :: out_file = "test_run/qc_warning_fractional_bound_output.txt"
+        character(len=:), allocatable :: out_file, err_file
         logical :: found_bound_text
 
-        call run_error_scenario("qc_warning_fractional_bound", "> " // out_file // " 2>&1", exitstat, cmdstat)
+        call run_error_scenario("qc_warning_fractional_bound", exitstat, cmdstat, out_file, err_file)
 
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
@@ -972,7 +972,7 @@ contains
             "qc=.true. with an out-of-range fractional-bound value should not error stop (warning only)")
         if (allocated(error)) return
 
-        call file_contains(out_file, "0.5", found_bound_text)
+        call scenario_capture_contains(out_file, err_file, "0.5", found_bound_text)
         call check(error, found_bound_text, &
             "expected the qc violation WARNING to include the fractionally-formatted bound '0.5'")
     end subroutine test_qc_warning_printed_for_fractional_bound
@@ -993,17 +993,17 @@ contains
     subroutine test_qc_silently_ignored_for_boolean(error)
         type(error_type), allocatable, intent(out) :: error
         integer :: exitstat, cmdstat
-        character(len=*), parameter :: out_file = "test_run/qc_boolean_output.txt"
+        character(len=:), allocatable :: out_file, err_file
         logical :: found_warning
 
-        call run_error_scenario("qc_silently_ignored_for_boolean", "> " // out_file // " 2>&1", exitstat, cmdstat)
+        call run_error_scenario("qc_silently_ignored_for_boolean", exitstat, cmdstat, out_file, err_file)
 
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
         call check(error, exitstat == 0, "qc: on a boolean field should never be enforced (no error expected)")
         if (allocated(error)) return
 
-        call file_contains(out_file, "WARNING", found_warning)
+        call scenario_capture_contains(out_file, err_file, "WARNING", found_warning)
         call check(error, .not. found_warning, "qc: on a boolean field must never print a WARNING")
     end subroutine test_qc_silently_ignored_for_boolean
 
@@ -1050,22 +1050,27 @@ contains
             required_stderr="WARNING: qc violation for column 'ra'")
     end subroutine test_add_field_qc_drives_reader_enforcement
 
-    !> Runs error_scenarios' `scenario_name` as a subprocess (its stdout
-    !> captured to test_run/<scenario_name>_output.txt) and asserts the
-    !> captured output contains a WARNING mentioning `column_name`.
+    !> Runs error_scenarios' `scenario_name` (via run_error_scenario, so either from
+    !> prime_error_scenarios' pre-run capture or from a fresh spawn) and asserts its output
+    !> contains a WARNING mentioning `column_name`.
     subroutine check_qc_scenario_warns(error, scenario_name, column_name, exitstat, cmdstat)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), intent(in) :: scenario_name, column_name
         integer, intent(out) :: exitstat, cmdstat
-        character(len=:), allocatable :: out_file
-        logical :: found_warning
+        character(len=:), allocatable :: out_file, err_file
+        logical :: found_warning, found_on_err
 
-        out_file = "test_run/" // trim(scenario_name) // "_output.txt"
-
-        call run_error_scenario(scenario_name, "> " // out_file // " 2>&1", exitstat, cmdstat)
+        call run_error_scenario(scenario_name, exitstat, cmdstat, out_file, err_file)
         if (cmdstat /= 0) return
 
+        ! Both streams, for the same reason check_scenario_exit_status_and_stderr searches both:
+        ! the capture is no longer merged, and this assertion only cares that the WARNING was
+        ! printed somewhere.
         call file_contains_warning_for_column(out_file, column_name, found_warning)
+        if (.not. found_warning) then
+            call file_contains_warning_for_column(err_file, column_name, found_on_err)
+            found_warning = found_on_err
+        end if
         call check(error, found_warning, &
             "expected a WARNING message mentioning column '" // trim(column_name) // "' in stdout")
     end subroutine check_qc_scenario_warns
@@ -1086,23 +1091,6 @@ contains
         end do
         close(unit)
     end subroutine file_contains_warning_for_column
-
-    subroutine file_contains(filename, needle, found)
-        character(len=*), intent(in) :: filename, needle
-        logical, intent(out) :: found
-        integer :: unit, ios
-        character(len=512) :: line
-
-        found = .false.
-        open(newunit=unit, file=filename, status="old", action="read", iostat=ios)
-        if (ios /= 0) return
-        do
-            read(unit, '(a)', iostat=ios) line
-            if (ios /= 0) exit
-            if (index(line, needle) > 0) found = .true.
-        end do
-        close(unit)
-    end subroutine file_contains
 
     subroutine test_compression_gzip_round_trip(error)
         type(error_type), allocatable, intent(out) :: error

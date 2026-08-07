@@ -92,6 +92,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
+TEST = REPO_ROOT / "test"
+TOOLS = REPO_ROOT / "tools"
 
 #: The type whose body must stay free of allocatable components, and the file it is declared in.
 FINALIZABLE_TYPE = ("parquet_table", SRC / "parquet_tables.f90")
@@ -679,6 +681,75 @@ def check_single_cpp_translation_unit():
     ]
 
 
+def check_scenario_list_is_complete():
+    """Every scenario error_scenarios.f90 dispatches on must be named in run_error_scenarios.sh.
+
+    The shell runner's `scenarios=(...)` array is documented as a complete, independently
+    maintained mirror of that `select case`, and two things now depend on it being one:
+
+      * CI runs the script, which is what proves each *listed* name is still recognized (an
+        unrecognized one exits with the 97 sentinel);
+      * test_errors.f90's prime_error_scenarios reads the same array to decide what to pre-run in
+        parallel, which is where a full `fpm test`'s speedup comes from.
+
+    Neither covers the other direction. A scenario added to error_scenarios.f90 and driven from a
+    test, but never added to the array, is invisible to the script and silently forfeits priming --
+    it just falls back to spawning on demand, so nothing fails and nothing says anything. That is
+    the drift this check closes.
+
+    The names are derived by SHAPE rather than from a list kept here: the `select case
+    (trim(scenario))` block is located and its `case ("...")` labels read until `case default`, so
+    a new scenario is picked up with no edit (CLAUDE.md, "A static check that enumerates names goes
+    stale silently"). An empty result is treated as a failure for the same reason -- it means the
+    dispatch moved, not that the invariant holds.
+
+    `concurrency_scenarios=(...)` counts as listed too: those genuinely need a real OpenMP race and
+    are deliberately excluded from priming, but they are still named in the script and still run.
+    """
+    dispatch_file = TEST / "error_scenarios.f90"
+    runner = TOOLS / "run_error_scenarios.sh"
+    for path in (dispatch_file, runner):
+        if not path.is_file():
+            return ["%s: not found -- this check needs updating" % path.relative_to(REPO_ROOT)]
+
+    lines = dispatch_file.read_text(encoding="utf-8").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"\s*select case\s*\(\s*trim\(\s*scenario\s*\)\s*\)\s*$", line):
+            start = i
+            break
+    if start is None:
+        return [
+            "test/error_scenarios.f90: no `select case (trim(scenario))` dispatch found -- the "
+            "scenario dispatch moved or was renamed, so this check can no longer see it"
+        ]
+
+    dispatched = []
+    for line in lines[start + 1:]:
+        if re.match(r"\s*case\s+default\s*$", line):
+            break
+        found = re.match(r'\s*case\s*\(\s*"([a-z0-9_]+)"\s*\)\s*$', line)
+        if found:
+            dispatched.append(found.group(1))
+    if not dispatched:
+        return [
+            "test/error_scenarios.f90: the `select case (trim(scenario))` dispatch yielded no "
+            "`case (\"...\")` labels -- its shape changed, so this check is now blind"
+        ]
+
+    listed = set(re.findall(r'"([a-z0-9_]+):[01]"', runner.read_text(encoding="utf-8")))
+    listed |= set(re.findall(r'^\s*"([a-z0-9_]+)"\s*$', runner.read_text(encoding="utf-8"), re.M))
+    missing = [name for name in dispatched if name not in listed]
+    if not missing:
+        return []
+    return [
+        "tools/run_error_scenarios.sh: %d scenario(s) dispatched by test/error_scenarios.f90 are "
+        "not named in its scenarios=() or concurrency_scenarios=() arrays, so the script does not "
+        "run them and test_errors.f90's prime_error_scenarios cannot pre-run them: %s"
+        % (len(missing), ", ".join(missing))
+    ]
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -692,6 +763,7 @@ CHECKS = (
     ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
     ("every setting has an environment variable", check_env_covers_every_setting),
+    ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
 )
 
 

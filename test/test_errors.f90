@@ -29,11 +29,34 @@ module test_errors
     ! Exposed for test_writing.f90's own qc-warning scenario helpers -- see
     ! run_error_scenario below.
     public :: run_error_scenario
+    public :: scenario_capture_contains
+    ! Exposed for run_tester.f90, which is the only place that knows whether
+    ! this run is worth pre-running the whole scenario set for -- see
+    ! prime_error_scenarios below.
+    public :: prime_error_scenarios
     !
     ! Cached path to the built error_scenarios helper binary -- see
-    ! error_scenarios_bin below.
+    ! get_error_scenarios_bin below.
     character(len=:), allocatable, save :: g_error_scenarios_bin
     logical, save :: g_error_scenarios_bin_ready = .false.
+    !
+    ! Priming state -- see prime_error_scenarios below. g_prime_ok is the only
+    ! one run_error_scenario consults, and it is set by THIS process only after
+    ! it has wiped and repopulated prime_dir, so a directory left behind by an
+    ! earlier run (a different binary, different expectations) can never be
+    ! mistaken for this run's results.
+    logical, save :: g_prime_done = .false.
+    logical, save :: g_prime_ok = .false.
+    ! Where prime_error_scenarios writes one .out/.err/.status triple per scenario.
+    character(len=*), parameter :: prime_dir = "test_run/.primed"
+    ! The file prime_error_scenarios reads the scenario list out of. It is the
+    ! shell runner's own `scenarios=(...)` array rather than a second copy of
+    ! the names here: that array is already maintained as the complete mirror
+    ! of error_scenarios.f90's `select case` (tools/check_source_conventions.py
+    ! now fails when it drifts), and a second list would be one more thing to
+    ! forget. Its `concurrency_scenarios=(...)` array is deliberately NOT read
+    ! -- those need a real OpenMP race and are left to run one at a time.
+    character(len=*), parameter :: scenario_list_file = "tools/run_error_scenarios.sh"
     !
 contains
     !
@@ -4616,60 +4639,193 @@ contains
             required_stderr="concurrent access to a single parquet_writer detected")
     end subroutine test_concurrent_calls_into_shared_writer_aborts
 
-    !> Resolves the path to the built error_scenarios helper binary, building
-    !> it (via `fpm build --tests`, which builds every test executable
-    !> including run_tester itself, so this is a fast up-to-date check on the
-    !> common path) on first use and caching the result for the rest of this
-    !> process. This suite and test_writing.f90's qc-warning scenario tests
-    !> together spawn well over a hundred scenario subprocesses; going
-    !> through a full `fpm test error_scenarios -- ...` invocation for each
-    !> one (as this used to do) re-parses the manifest and re-checks
-    !> dependencies every single time -- about 2s of pure fpm overhead per
-    !> call, dwarfing the ~0.05s the scenario itself takes to run. Resolving
-    !> the binary path once and invoking it directly cuts that to a single
-    !> ~1.5s build check for the whole suite. `find` is scoped to
-    !> $FPM_BUILD_DIR (defaulting to "build", fpm's own default) rather than
-    !> a bare "build" -- tools/coverage.sh builds under build/gcov via its
-    !> own FPM_BUILD_DIR, and searching the whole build/ tree regardless of
-    !> that would risk picking up whichever of the two happens to sort
-    !> first, not the one actually requested for this run.
-    function error_scenarios_bin() result(bin)
-        character(len=:), allocatable :: bin
+    !> Resolves the path to the built error_scenarios helper binary once and caches it for the
+    !> rest of this process.
+    !>
+    !> **The fast path is argument 0.** fpm launches a test target through a project-root-relative
+    !> path (`build/gfortran_<hash>/test/run_tester` -- confirm with
+    !> `fpm test run_tester --runner echo`), and the sibling `error_scenarios` target sits in that
+    !> same directory. fpm builds every test target before running any of them, so that binary is
+    !> always exactly as fresh as the one asking for it -- which is what makes the `fpm build
+    !> --tests` this used to run on every startup (measured 1.8-2.1s even fully up to date) pure
+    !> waste. Nothing in test/ chdirs, so the relative path stays valid for the whole run, and a
+    !> coverage build under its own FPM_BUILD_DIR is tracked for free: argument 0 names whichever
+    !> tree this process was actually launched from.
+    !>
+    !> **The fallback is the old build-and-find**, kept for when argument 0 cannot answer --
+    !> someone running the built run_tester directly rather than through fpm, or an unusual
+    !> runner. Note what it costs: `find ... | head -n 1` picks whichever `build/gfortran_<hash>/`
+    !> tree the filesystem returns first, which is a guess as soon as more than one exists (see
+    !> CLAUDE.md's "Stale `fpm` build cache"). Avoiding that guess is half the reason the
+    !> argument-0 path is primary -- do not demote it back.
+    !>
+    !> Written as a subroutine with an allocatable `character` argument rather than a function
+    !> returning one, per CLAUDE.md's "Build & compiler notes": gfortran's codegen for receiving
+    !> such a function result is not reliably thread-safe, and this is reachable from suites that
+    !> test-drive runs concurrently.
+    subroutine get_error_scenarios_bin(bin)
+        character(len=:), allocatable, intent(out) :: bin
         character(len=*), parameter :: path_file = "test_run/.error_scenarios_bin_path"
-        integer :: unit, ios, cstat
+        character(len=:), allocatable :: cand
+        integer :: unit, ios, cstat, arglen, argstat, slash
+        character(len=4096) :: arg0
         character(len=1024) :: line
+        logical :: exists
 
         if (.not. g_error_scenarios_bin_ready) then
-            ! Every call below passes cmdstat= even though its value is never
-            ! inspected: a processor is required to initiate ERROR TERMINATION
-            ! when a condition that would set cmdstat nonzero occurs and the
-            ! argument is absent, and flang classifies "the command exited
-            ! nonzero" as exactly such a condition. Without cmdstat=, a
-            ! non-clean `fpm build` here would kill the whole test binary with
-            ! an opaque runtime message instead of failing a check.
-            call execute_command_line("mkdir -p test_run", wait=.true., cmdstat=cstat)
-            call execute_command_line("fpm build --tests > /dev/null 2>&1", wait=.true., cmdstat=cstat)
-            call execute_command_line( &
-                "find ""${FPM_BUILD_DIR:-build}"" -type f -name error_scenarios 2>/dev/null | head -n 1 > "// &
-                path_file, &
-                wait=.true., cmdstat=cstat)
-            line = ""
-            open(newunit=unit, file=path_file, status="old", action="read", iostat=ios)
-            if (ios == 0) then
-                read(unit, '(a)', iostat=ios) line
-                close(unit)
+            g_error_scenarios_bin = ""
+
+            arg0 = ""
+            call get_command_argument(0, arg0, arglen, argstat)
+            if (argstat == 0 .and. arglen > 0 .and. arglen <= len(arg0)) then
+                slash = index(arg0(1:arglen), "/", back=.true.)
+                if (slash > 0) then
+                    cand = arg0(1:slash) // "error_scenarios"
+                    inquire(file=cand, exist=exists)
+                    if (exists) g_error_scenarios_bin = cand
+                end if
             end if
-            g_error_scenarios_bin = trim(adjustl(line))
+
+            if (len_trim(g_error_scenarios_bin) == 0) then
+                ! Every call below passes cmdstat= even though its value is never
+                ! inspected: a processor is required to initiate ERROR TERMINATION
+                ! when a condition that would set cmdstat nonzero occurs and the
+                ! argument is absent, and flang classifies "the command exited
+                ! nonzero" as exactly such a condition. Without cmdstat=, a
+                ! non-clean `fpm build` here would kill the whole test binary with
+                ! an opaque runtime message instead of failing a check.
+                call execute_command_line("mkdir -p test_run", wait=.true., cmdstat=cstat)
+                call execute_command_line("fpm build --tests > /dev/null 2>&1", wait=.true., cmdstat=cstat)
+                call execute_command_line( &
+                    "find ""${FPM_BUILD_DIR:-build}"" -type f -name error_scenarios 2>/dev/null | head -n 1 > "// &
+                    path_file, &
+                    wait=.true., cmdstat=cstat)
+                line = ""
+                open(newunit=unit, file=path_file, status="old", action="read", iostat=ios)
+                if (ios == 0) then
+                    read(unit, '(a)', iostat=ios) line
+                    close(unit)
+                end if
+                g_error_scenarios_bin = trim(adjustl(line))
+            end if
             g_error_scenarios_bin_ready = .true.
         end if
         bin = g_error_scenarios_bin
-    end function error_scenarios_bin
+    end subroutine get_error_scenarios_bin
 
-    !> Runs the error_scenarios helper binary as `<binary> <scenario>
-    !> <redirect>`, resolving/building it via error_scenarios_bin on first
-    !> use. Centralizes what used to be six near-identical
-    !> `execute_command_line("fpm test error_scenarios -- ...")` call sites
-    !> (three here, three in test_writing.f90's qc-warning scenario tests).
+    !> Runs every scenario named in tools/run_error_scenarios.sh's `scenarios=(...)` array ONCE,
+    !> up front and in parallel, capturing each one's exit status and its two output streams under
+    !> prime_dir. run_error_scenario then answers from those files instead of spawning.
+    !>
+    !> **Why this exists.** Measured on an 8-core machine: the ~630 scenario subprocesses a full
+    !> `fpm test` drives account for ~60s of its ~72s, and they run strictly one at a time --
+    !> the four suites that drive them are excluded from test-drive's own parallelism (see
+    !> run_tester.f90's suite_is_safe_to_parallelize; forking from inside a live OpenMP region is
+    !> unsafe under libiomp5). The same 686 scenarios through `xargs -P8` take 15.5s. This routine
+    !> buys that without touching the exclusion: it makes exactly ONE execute_command_line call,
+    !> from run_tester before any suite starts, i.e. with no OpenMP team active at all. The
+    !> parallelism happens in the shell, outside this process entirely.
+    !>
+    !> **Every failure here degrades to the old behaviour, never to a wrong answer.** A scenario
+    !> absent from the list, a shell that could not run, a missing capture file -- each simply
+    !> leaves run_error_scenario spawning that scenario itself. That is what keeps a stale list
+    !> costing speed rather than coverage. `PARQUET_TEST_NO_PRIME=1` disables priming entirely
+    !> (for debugging one scenario without 686 others running first);
+    !> `PARQUET_TEST_PRIME_JOBS=<n>` overrides the concurrency, which defaults to one per CPU.
+    !>
+    !> **prime_dir is wiped here, not reused.** A triple left behind by an earlier run would
+    !> otherwise be consumed as this run's result: every affected test would then pass while
+    !> asserting against a binary that no longer exists -- a vacuous pass, the failure mode this
+    !> project treats as the worst kind. g_prime_ok is likewise per-process and set only after
+    !> this routine has repopulated the directory itself.
+    subroutine prime_error_scenarios()
+        character(len=*), parameter :: dq = '"'
+        character(len=:), allocatable :: bin, cmd
+        character(len=8) :: off
+        integer :: cstat, length, status
+        logical :: exists
+
+        if (g_prime_done) return
+        g_prime_done = .true.
+
+        off = ""
+        call get_environment_variable("PARQUET_TEST_NO_PRIME", off, length, status)
+        if (length > 0) return
+
+        inquire(file=scenario_list_file, exist=exists)
+        if (.not. exists) return
+
+        call get_error_scenarios_bin(bin)
+        if (len_trim(bin) == 0) return
+
+        call execute_command_line("rm -rf " // prime_dir // " && mkdir -p " // prime_dir, &
+            wait=.true., cmdstat=cstat)
+        if (cstat /= 0) return
+
+        ! `xargs -n 1 sh -c '<script>'` puts the one scenario name in the inner shell's $0 -- the
+        ! `-I` replacement form is deliberately avoided, since BSD xargs caps a constructed
+        ! argument at 255 bytes and this script plus a long scenario name substituted four times
+        ! would cross it (on CI's GNU xargs it would not, so the failure would be macOS-only).
+        ! `exit 0` is equally load-bearing: most scenarios die by SIGABRT, and BSD xargs stops
+        ! dispatching entirely the moment a child is killed by a signal.
+        cmd = "sed -n '/^scenarios=(/,/^)/p' " // scenario_list_file // &
+            " | grep -oE '" // dq // "[a-z0-9_]+:[01]" // dq // "' | tr -d '" // dq // "' | cut -d: -f1" // &
+            " | xargs -P " // dq // "${PARQUET_TEST_PRIME_JOBS:-" // &
+            "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}" // dq // " -n 1 sh -c '" // &
+            trim(bin) // " " // dq // "$0" // dq // " > " // prime_dir // "/" // dq // "$0" // dq // ".out" // &
+            " 2> " // prime_dir // "/" // dq // "$0" // dq // ".err" // &
+            " ; echo $? > " // prime_dir // "/" // dq // "$0" // dq // ".status ; exit 0'"
+        call execute_command_line(cmd, wait=.true., cmdstat=cstat)
+        if (cstat /= 0) return
+
+        g_prime_ok = .true.
+    end subroutine prime_error_scenarios
+
+    !> Reads back the `echo $?` status file written by prime_error_scenarios or by
+    !> run_error_scenario's own spawn. Reports -1 when the file is absent or unreadable, which
+    !> both callers treat as "this run did not happen" rather than as an exit status.
+    subroutine read_scenario_status(path, status_value)
+        character(len=*), intent(in) :: path
+        integer, intent(out) :: status_value
+        integer :: unit, ios
+
+        status_value = -1
+        open(newunit=unit, file=path, status="old", action="read", iostat=ios)
+        if (ios /= 0) return
+        read(unit, *, iostat=ios) status_value
+        close(unit)
+        if (ios /= 0) status_value = -1
+    end subroutine read_scenario_status
+
+    !> Searches BOTH captured streams for `text`.
+    !>
+    !> This replaces the old `2>&1` merge. Both streams are now always captured separately --
+    !> priming has to, and keeping the primed and spawned paths byte-identical in shape is what
+    !> stops the two drifting -- so a caller wanting the old "appeared somewhere" semantics asks
+    !> about both files instead of one merged one. Line-oriented searching makes the two
+    !> equivalent: every line comes from exactly one stream either way.
+    subroutine scenario_capture_contains(out_file, err_file, text, found)
+        character(len=*), intent(in) :: out_file, err_file, text
+        logical, intent(out) :: found
+        logical :: on_err
+
+        call file_contains(out_file, text, found)
+        if (found) return
+        call file_contains(err_file, text, on_err)
+        found = on_err
+    end subroutine scenario_capture_contains
+
+    !> Reports `scenario`'s exit status and the paths its stdout and stderr were captured to.
+    !>
+    !> **Answers from prime_error_scenarios' pre-run results when this process primed them**, and
+    !> otherwise spawns the helper binary itself exactly as it always did. A caller cannot tell
+    !> the two apart and must not try to: the fallback is what keeps a scenario missing from the
+    !> prime list working rather than failing.
+    !>
+    !> `out_file`/`err_file` are OUT arguments rather than something the caller names, because the
+    !> two paths differ -- a primed capture lives under prime_dir and must not be rewritten. Both
+    !> streams are always captured separately; a caller wanting the old merged `2>&1` view
+    !> searches both with scenario_capture_contains.
     !>
     !> **The child's status is captured through the shell (`; echo $? > file`)
     !> rather than read from execute_command_line's own EXITSTAT/CMDSTAT,
@@ -4696,28 +4852,52 @@ contains
     !> 0, so cmdstat is 0 everywhere and this subroutine's reported cmdstat
     !> goes back to meaning only what its callers actually test it for -- "the
     !> helper binary could not be invoked". No new dependency on a POSIX shell
-    !> is introduced: `redirect`, the `${FPM_BUILD_DIR:-build}` expansion and
-    !> the `find | head` pipeline above are already shell syntax.
+    !> is introduced: the redirections, the `${FPM_BUILD_DIR:-build}` expansion
+    !> and the `find | head` pipeline above are already shell syntax.
     !>
-    !> The status file is keyed on the scenario name, which is unique across
+    !> Every file this touches is keyed on the scenario name, which is unique across
     !> every call site (the same assumption check_scenario_exit_status_and_stderr
-    !> already makes for its own `<scenario>_stderr.txt` capture) -- so this
+    !> already makes for its own capture) -- so this
     !> stays safe under test-drive's concurrent execution of a suite.
-    subroutine run_error_scenario(scenario, redirect, exitstat, cmdstat)
-        character(len=*), intent(in) :: scenario, redirect
+    subroutine run_error_scenario(scenario, exitstat, cmdstat, out_file, err_file)
+        character(len=*), intent(in) :: scenario
         integer, intent(out) :: exitstat, cmdstat
+        character(len=:), allocatable, intent(out) :: out_file, err_file
         character(len=:), allocatable :: bin, status_file
         integer :: unit, ios, ecl_exit, ecl_cmd, status_value
+        logical :: have_out, have_err, have_status
 
         ! Default to "could not invoke": every success path below has to say so
         ! explicitly, so a new early return can't accidentally report a pass.
         exitstat = -1
         cmdstat = 1
 
-        bin = error_scenarios_bin()
-        if (len_trim(bin) == 0) return
+        ! Primed result, if this process produced one for this scenario. Anything missing or
+        ! unreadable falls through to the spawn below rather than failing -- see
+        ! prime_error_scenarios for why that direction is the only safe one.
+        if (g_prime_ok) then
+            out_file = prime_dir // "/" // trim(scenario) // ".out"
+            err_file = prime_dir // "/" // trim(scenario) // ".err"
+            status_file = prime_dir // "/" // trim(scenario) // ".status"
+            inquire(file=out_file, exist=have_out)
+            inquire(file=err_file, exist=have_err)
+            inquire(file=status_file, exist=have_status)
+            if (have_out .and. have_err .and. have_status) then
+                call read_scenario_status(status_file, status_value)
+                if (status_value >= 0 .and. status_value /= 127) then
+                    exitstat = status_value
+                    cmdstat = 0
+                    return
+                end if
+            end if
+        end if
 
+        out_file = "test_run/" // trim(scenario) // "_o.txt"
+        err_file = "test_run/" // trim(scenario) // "_e.txt"
         status_file = "test_run/." // trim(scenario) // "_status.txt"
+
+        call get_error_scenarios_bin(bin)
+        if (len_trim(bin) == 0) return
 
         ! Drop any status file left behind by an earlier run: if the command
         ! below fails to execute at all, a stale file would otherwise be read
@@ -4726,16 +4906,11 @@ contains
         if (ios == 0) close(unit, status="delete")
 
         call execute_command_line( &
-            trim(bin)//" "//trim(scenario)//" "//redirect//" ; echo $? > "//status_file, &
+            trim(bin)//" "//trim(scenario)//" > "//out_file//" 2> "//err_file// &
+            " ; echo $? > "//status_file, &
             wait=.true., exitstat=ecl_exit, cmdstat=ecl_cmd)
 
-        status_value = -1
-        open(newunit=unit, file=status_file, status="old", action="read", iostat=ios)
-        if (ios == 0) then
-            read(unit, *, iostat=ios) status_value
-            close(unit)
-            if (ios /= 0) status_value = -1
-        end if
+        call read_scenario_status(status_file, status_value)
 
         ! No status written -> the shell itself never ran the command.
         if (status_value < 0) return
@@ -4753,10 +4928,11 @@ contains
         type(error_type), allocatable, intent(out) :: error
         character(len=*), intent(in) :: scenario, failure_message
         logical, intent(in) :: expect_abort
+        character(len=:), allocatable :: out_file, err_file
         integer :: exitstat, cmdstat
         logical :: aborted
 
-        call run_error_scenario(scenario, "> /dev/null 2>&1", exitstat, cmdstat)
+        call run_error_scenario(scenario, exitstat, cmdstat, out_file, err_file)
 
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
@@ -4786,19 +4962,16 @@ contains
         type(error_type), allocatable, intent(out) :: error
         character(len=*), intent(in) :: scenario, failure_message, required_stderr
         logical, intent(in) :: expect_abort
-        character(len=:), allocatable :: out_file
-        integer :: exitstat, cmdstat, unit, ios
-        character(len=512) :: line
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
         logical :: aborted, found
 
-        out_file = "test_run/" // trim(scenario) // "_stderr.txt"
-
-        ! `2>&1` MERGES stdout into stderr and the assertion below runs over the combined capture,
-        ! despite this procedure's name. That is deliberate and is what ~390 call sites want ("this
-        ! text appeared somewhere"), but it means this helper cannot tell the two streams apart --
-        ! a message moved from one to the other looks identical to it. Anything asserting about a
-        ! specific stream needs check_scenario_streams below instead.
-        call run_error_scenario(scenario, "> " // out_file // " 2>&1", exitstat, cmdstat)
+        ! The assertion below runs over BOTH captured streams, despite this procedure's name.
+        ! That is deliberate and is what ~390 call sites want ("this text appeared somewhere"),
+        ! but it means this helper cannot tell the two streams apart -- a message moved from one
+        ! to the other looks identical to it. Anything asserting about a specific stream needs
+        ! check_scenario_streams below instead.
+        call run_error_scenario(scenario, exitstat, cmdstat, out_file, err_file)
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
 
@@ -4812,16 +4985,7 @@ contains
         call check(error, aborted .eqv. expect_abort, failure_message)
         if (allocated(error)) return
 
-        found = .false.
-        open(newunit=unit, file=out_file, status="old", action="read", iostat=ios)
-        if (ios == 0) then
-            do
-                read(unit, '(a)', iostat=ios) line
-                if (ios /= 0) exit
-                if (index(line, required_stderr) > 0) found = .true.
-            end do
-            close(unit)
-        end if
+        call scenario_capture_contains(out_file, err_file, required_stderr, found)
 
         call check(error, found, &
             "expected stderr to contain '" // trim(required_stderr) // "' for scenario '" // trim(scenario) // "'")
@@ -4843,10 +5007,7 @@ contains
         integer :: exitstat, cmdstat
         logical :: on_out, on_err, wanted, unwanted
 
-        out_file = "test_run/" // trim(scenario) // "_o.txt"
-        err_file = "test_run/" // trim(scenario) // "_e.txt"
-
-        call run_error_scenario(scenario, "> " // out_file // " 2> " // err_file, exitstat, cmdstat)
+        call run_error_scenario(scenario, exitstat, cmdstat, out_file, err_file)
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
         call check(error, exitstat /= 97, &
@@ -4898,14 +5059,11 @@ contains
         type(error_type), allocatable, intent(out) :: error
         character(len=*), intent(in) :: scenario, failure_message, forbidden_text
         logical, intent(in) :: expect_abort
-        character(len=:), allocatable :: out_file
-        integer :: exitstat, cmdstat, unit, ios
-        character(len=512) :: line
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
         logical :: aborted, found
 
-        out_file = "test_run/" // trim(scenario) // "_stdout.txt"
-
-        call run_error_scenario(scenario, "> " // out_file // " 2>&1", exitstat, cmdstat)
+        call run_error_scenario(scenario, exitstat, cmdstat, out_file, err_file)
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
 
@@ -4917,16 +5075,7 @@ contains
         call check(error, aborted .eqv. expect_abort, failure_message)
         if (allocated(error)) return
 
-        found = .false.
-        open(newunit=unit, file=out_file, status="old", action="read", iostat=ios)
-        if (ios == 0) then
-            do
-                read(unit, '(a)', iostat=ios) line
-                if (ios /= 0) exit
-                if (index(line, forbidden_text) > 0) found = .true.
-            end do
-            close(unit)
-        end if
+        call scenario_capture_contains(out_file, err_file, forbidden_text, found)
 
         call check(error, .not. found, &
             "expected output to NOT contain '" // trim(forbidden_text) // "' for scenario '" // trim(scenario) // "'")

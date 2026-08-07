@@ -115,6 +115,7 @@ something a reader is expected to have.
 | [Risk-48](#risk-48--a-row-permutation-handed-to-a-caller-goes-stale-with-nothing-to-notice) | A row permutation handed to a caller goes stale, with nothing to notice | 3 — not testable |
 | [Risk-49](#risk-49--a-co-ranked-merge-that-never-co-ranks-is-invisible) | A co-ranked merge that never co-ranks is invisible | 4 — covered |
 | [Risk-50](#risk-50--a-co-rank-off-by-one-produces-a-non-permutation-that-nothing-on-the-raw-path-validates) | A co-rank off-by-one produces a non-permutation that nothing on the raw path validates | 4 — covered |
+| [Risk-51](#risk-51--a-pre-run-error-scenario-result-can-be-consumed-as-this-runs-answer) | A pre-run error-scenario result can be consumed as this run's answer | 3 — not testable |
 
 ---
 
@@ -122,7 +123,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-51**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-52**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -134,9 +135,9 @@ only for as long as that is true.
 
 ## 3. Risks not testable
 
-Each of these says how to check or avoid the risk instead. Three of the four are not gaps at all —
-they are a cost, a caveat about the input, or a property of a process that has already aborted — and
-writing a test for them would freeze the wrong thing as a contract.
+Each of these says how to check or avoid the risk instead. Most are not gaps at all — they are a
+cost, a caveat about the input, a property of a process that has already aborted, or a pre-state no
+test can arrange — and writing a test for them would freeze the wrong thing as a contract.
 
 ### Risk-7 — A half-applied mutation is unrecoverable
 
@@ -342,6 +343,45 @@ returns row indices must carry the same paragraph. Do not add a `sort=`-style co
 applies a caller-supplied permutation to a table: that is the arbitrary-permutation operation
 Risk-33's neighbourhood already rules out, and handing it a stale array is exactly how the silent
 row-correspondence loss described there happens.
+
+### Risk-51 — A pre-run error-scenario result can be consumed as this run's answer
+
+`prime_error_scenarios` (`test/test_errors.f90`) runs every error scenario once, up front and in
+parallel, into `test_run/.primed/<scenario>.{out,err,status}`; `run_error_scenario` then answers
+from those files instead of spawning. The whole ~630-subprocess cost of `fpm test` collapses onto
+that one pre-run, and so does its trustworthiness: **a triple left behind by an earlier run is
+byte-indistinguishable from one this run produced.** Consuming a stale one makes every test that
+depends on it assert against a binary that no longer exists — and they *pass*, because the recorded
+status is whatever the old code did. That is a vacuous green suite, not a failure, which is why it
+is worth writing down rather than leaving to the code.
+
+Two things stand between the design and that outcome, and both must survive any future edit:
+
+- `prime_error_scenarios` **wipes `prime_dir` itself** (`rm -rf` then `mkdir -p`) before writing
+  anything, so no file in it predates this process.
+- `g_prime_ok` is a **per-process** flag set only after that wipe-and-repopulate has completed,
+  and it is the *only* thing `run_error_scenario` consults before reading a primed triple. A
+  directory on disk is never sufficient on its own.
+
+**Test.** Not testable from inside the suite, and the reason is structural rather than
+accidental: the prime runs in `run_tester` *before the first test exists*, so no test can arrange
+the pre-state the risk needs (a populated `prime_dir` that this process did not create). Planting
+files from a test is too late — they are already wiped — and disabling priming to plant them
+clears `g_prime_ok`, which is the very guard under examination. An out-of-process scenario cannot
+help either: it would have to drive `run_tester`, not `error_scenarios`.
+
+**How to avoid it instead.**
+
+- Never read anything under `prime_dir` without `g_prime_ok`. A future helper that "just checks
+  whether the capture exists" is exactly the shape that reintroduces this.
+- Never make `g_prime_ok` settable from anywhere but `prime_error_scenarios`' own tail, and never
+  persist it across processes (an environment variable saying "already primed", say).
+- Keep the wipe and the repopulate in that one routine, in that order. Splitting them — a wipe at
+  exit, or a "reuse if fresh enough" check — turns a structural guarantee into a heuristic.
+- **Every failure path in the prime must fall back to spawning, never to a primed answer.** That
+  is what keeps a missing or unreadable capture a performance question instead of a correctness
+  one, and it is why `run_error_scenario` falls through rather than failing when a triple is
+  incomplete.
 
 ## 4. Risks already covered, kept for what they still forbid
 

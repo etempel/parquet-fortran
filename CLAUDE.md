@@ -77,6 +77,7 @@ working rules).
   - [Measuring whether Arrow memory was actually freed](#measuring-whether-arrow-memory-was-actually-freed-rss-cannot-answer-the-pool-counter-can)
 - [Testing & coverage](#testing--coverage)
   - [Running a single test suite/test](#running-a-single-test-suitetest)
+  - [Error scenarios are pre-run in parallel](#error-scenarios-are-pre-run-in-parallel)
   - [Tests run concurrently: never share a fixture file path between two tests](#tests-run-concurrently-never-share-a-fixture-file-path-between-two-tests)
   - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
   - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
@@ -193,15 +194,36 @@ The user runs `.gitlab-ci.yml` on their own GitLab server — don't attempt to e
 locally instead (`fpm build`/`fpm test` with the same `FPM_FFLAGS`/`FPM_CXXFLAGS`/
 `FPM_LDFLAGS` the CI job sets, minus anything CI-environment-specific like the apt installs).
 
-**In practice that means `FPM_FFLAGS` only.** Setting `FPM_CXXFLAGS`/`FPM_LDFLAGS` to CI's values
-*replaces* whatever the local environment supplies for the C++ half, which on a dev machine is
-where Arrow's include and library paths come from — the build then fails with
-`fatal error: 'arrow/api.h' file not found`, which looks like a missing dependency rather than a
-flag problem. CI can set them because its own image puts Arrow on the default search path. So
-locally run `FPM_FFLAGS="-fopenmp" fpm test` (adding `--coverage` only when measuring coverage, and
-preferring `tools/coverage.sh` for that) and leave the C++ flags to the environment. **Run the
-OpenMP form at least once** before declaring a change verified: it is a genuinely different build
-(see "Tests run concurrently" for a guard that only exists under it), and CI runs only that one.
+**In practice that means running plain `fpm test` and setting nothing at all.** Two separate
+reasons, and both are easy to get wrong in the direction of "add the flag to be safe":
+
+- **`-fopenmp` is not needed and never was.** `fpm.toml`'s `openmp = "*"` metapackage injects it
+  into the compile *and* link flags, for this package and its dependencies alike. Confirm with
+  `fpm build --show-model | grep -o 'fortran_compile_flags="[^"]*"'`, which shows `-fopenmp` even
+  when `FPM_FFLAGS` carries nothing but `-I` paths; confirm end-to-end by running
+  `error_scenarios concurrent_calls_into_shared_reader` from a build with no `-fopenmp` anywhere,
+  which still aborts (exit 134) because several threads really do enter the reader at once. An
+  earlier version of this section prescribed `FPM_FFLAGS="-fopenmp" fpm test`; that was redundant,
+  and `.gitlab-ci.yml` has had the same redundant flag removed.
+- **Anything you put in `FPM_FFLAGS` REPLACES, it does not add.** It replaces two things at once:
+  whatever the environment already exports (a dev machine typically puts Arrow-adjacent `-I` paths
+  there — clobbering those is the Fortran-side twin of the `fatal error: 'arrow/api.h' file not
+  found` failure below), **and** fpm's whole profile flag set. With `FPM_FFLAGS` set and no
+  `--profile`, the model is just `-cpp <includes>` — no `-O`, no `-g`, no `-Wall`, **no
+  `-fcheck=bounds`**. So on any machine that exports `FPM_FFLAGS` at all, a plain `fpm test`
+  already has no bounds checking, and `fpm test --profile debug` is what turns it back on.
+
+Setting `FPM_CXXFLAGS`/`FPM_LDFLAGS` to CI's values has the same replacing behaviour on the C++
+half, which on a dev machine is where Arrow's include and library paths come from — the build then
+fails with `fatal error: 'arrow/api.h' file not found`, which looks like a missing dependency
+rather than a flag problem. CI can set them because its own image puts Arrow on the default search
+path.
+
+So: **`fpm test`** for the ordinary check, **`fpm test --profile debug`** when you want the
+bounds/`-Wall` checks (worth doing at least once for anything touching allocation or array
+shapes — see the `clone_new_cache` note under "Compiler & language gotchas" for a bug only that
+build could see), and `tools/coverage.sh` rather than a hand-rolled `--coverage` when measuring
+coverage.
 
 ### The CI-environment Docker image: ask for it, never build it
 
@@ -276,6 +298,13 @@ asks for a cleanup:
   entry. Fold whatever the reader needs to know into that feature's own `### Added` bullet
   instead, and drop the rest. This is the rule that keeps the section from filling up with the
   history of how an unreleased feature was built.
+
+  Stated the other way round, because that is the form it is usually needed in: **a feature
+  implemented after 1.0.0 never earns a `### Changed`/`### Fixed` entry for its own subsequent
+  changes and fixes**, however many rounds it goes through before it ships. It has exactly one
+  bullet — under `### Added` — and that bullet is kept current instead. `### Changed`/`### Fixed`
+  are reserved for the behaviour a reader of 1.0.0 (or of whatever the newest published section
+  becomes) can actually observe changing under them.
 - **`### Added` records overall features, not each part of one.** A sub-feature, a new
   type-bound procedure, or a helper that exists to serve a feature already listed belongs *in
   that feature's bullet*, not as a bullet of its own. Several closely related additions that
@@ -1950,11 +1979,14 @@ If `fpm test` behaves unexpectedly after source changes (e.g. a test target seem
 code), try `fpm clean --skip` to force a clean rebuild before spending time debugging — fpm's
 build cache can serve a stale binary. `--skip` avoids rebuilding external (non-project)
 dependencies, which are never the source of this problem, so it's faster than `--all` here.
-Building with several different `FPM_FFLAGS` creates multiple `build/gfortran_<hash>/` dirs, and
-`test/test_errors.f90`'s `error_scenarios_bin` does `find build -name error_scenarios | head -1`,
-which can pick a *stale* binary from an old hash dir — symptom: tests pass when run scoped but
-fail under a full `fpm test`. `tools/coverage.sh` runs `fpm clean` up front to avoid this; for a
-plain `fpm test`, `fpm clean --skip` fixes it.
+Building with several different `FPM_FFLAGS` creates multiple `build/gfortran_<hash>/` dirs, which
+a `find build -name error_scenarios | head -1` lookup resolves by guessing — symptom: tests pass
+when run scoped but fail under a full `fpm test`. `test/test_errors.f90` no longer guesses:
+`get_error_scenarios_bin` derives the sibling binary from **argument 0**, which names the exact
+tree fpm launched this run_tester from, and only falls back to build-and-`find` when argument 0
+cannot answer (someone running the built binary directly). `tools/run_error_scenarios.sh` is
+standalone and still has to `find`, so the hazard remains there. `tools/coverage.sh` runs
+`fpm clean` up front to avoid it; for a plain `fpm test`, `fpm clean --skip` fixes it.
 
 **A restored `src/parquet_wrapper.cpp` is the case fpm most reliably misses, and it bites hardest
 during mutation testing.** Reverting that file (`cp backup src/parquet_wrapper.cpp`, `git checkout`,
@@ -2054,8 +2086,9 @@ before being noticed:**
   strong enough to reverse a comparison: the `%col` pointer form measured *25% faster* than plain
   arrays purely by running second. Write the result once through every path before the timed loop.
 - **Measure with `--profile release`, NEVER with `FPM_FFLAGS`.** `FPM_FFLAGS` *replaces* fpm's
-  profile flags rather than adding to them, so `FPM_FFLAGS="-fopenmp" fpm run` builds at **-O0**,
-  and `FPM_FFLAGS="-O3 -fopenmp"` optimizes the Fortran half while leaving the C++ half at whatever
+  profile flags rather than adding to them, so `FPM_FFLAGS="-fopenmp" fpm run` builds at **-O0**
+  (and note the `-fopenmp` there is redundant anyway — see "Don't run the GitLab CI pipeline
+  yourself"), and `FPM_FFLAGS="-O3" fpm run` optimizes the Fortran half while leaving the C++ half at whatever
   the environment supplies — which on a dev machine may be nothing. Measured 5.7x on `pf_argsort`
   alone between the two, which is enough to invert a comparison and did: an early run of the sort
   benchmark showed bit-packing *losing* below 2M rows, an artifact that vanished under `-O3`. The
@@ -2108,6 +2141,38 @@ run_tester -- reading`), or `fpm test run_tester -- <suite> "<test name>"` to ru
 named test within it. Prefer this over a full `fpm test` while iterating — the full suite
 (including OpenMP/error-scenario subprocess tests) takes much longer than the one suite
 relevant to a given change.
+
+### Error scenarios are pre-run in parallel
+
+`run_tester` calls `prime_error_scenarios` (`test/test_errors.f90`) before any suite starts: one
+`execute_command_line` runs every scenario named in `tools/run_error_scenarios.sh`'s
+`scenarios=(...)` array through `xargs -P`, capturing each one's exit status and its two streams
+under `test_run/.primed/`. `run_error_scenario` then answers from those files. This is what takes a
+full `fpm test` from ~72 s to ~25 s here — the ~630 scenario subprocesses were ~60 s of it, run
+strictly one at a time because the suites driving them are excluded from test-drive's parallelism.
+
+Four things to know before touching this area:
+
+- **The parallelism is deliberately in the shell, not in the test process.** Exactly one fork
+  happens, from `run_tester` with no OpenMP team active, so the libiomp5 fork hazard that forces
+  `suite_is_safe_to_parallelize`'s exclusions is never approached. Do not "simplify" this into
+  per-test spawning from a parallel suite; that is the thing the exclusion exists to prevent.
+- **A new scenario must be added to `tools/run_error_scenarios.sh`'s array**, which
+  `tools/check_source_conventions.py`'s `check_scenario_list_is_complete` now enforces (it derives
+  the names by shape from `error_scenarios.f90`'s `select case`, so it does not go stale). Forget
+  it and nothing fails — the scenario just falls back to spawning on demand — which is precisely
+  why the check exists.
+- **Every failure path degrades to the old on-demand spawn, never to a wrong answer.** That is
+  load-bearing: it is what makes a missing list entry cost speed instead of coverage.
+  `test_run/.primed/` is wiped by the prime itself and `g_prime_ok` is per-process, so a directory
+  from an earlier run can never be consumed as this run's result — a vacuous pass against a binary
+  that no longer exists is the failure mode this design is shaped around.
+- **`PARQUET_TEST_NO_PRIME=1` turns priming off** (debug one scenario without 686 others running
+  first); `PARQUET_TEST_PRIME_JOBS=<n>` sets the concurrency. A named single test never primes.
+
+Both streams are now always captured **separately** — the old `2>&1` merge is gone, because the
+primed and spawned paths have to produce the same shape. A helper wanting the old "appeared
+somewhere" semantics calls `scenario_capture_contains`, which searches both.
 
 ### Tests run concurrently: never share a fixture file path between two tests
 
@@ -2166,9 +2231,7 @@ graph, so `_OPENMP` is defined and every `#ifdef _OPENMP` guard is compiled in e
 `fpm build` with `FPM_FFLAGS` unset entirely (verified directly with a minimal standalone fpm
 project). An earlier version of this note claimed the opposite — that a plain `fpm test` compiles
 such a check out, so the suite would pass locally and fail only in CI — and that has not been true
-since the metapackage was adopted. Two rules follow anyway:
-run any change to such a guard under `FPM_FFLAGS="-fopenmp" fpm test`, since that is the build CI
-runs; and
+since the metapackage was adopted. The rule that follows is simply to
 prefer a guard keyed on something more precise than "am I in a parallel region" — see
 `unsafe_first_touch` (`parquet_tables_read.f90`), which records at open time *which thread* created
 an object and refuses only when the object could actually be shared, so a thread-private object used

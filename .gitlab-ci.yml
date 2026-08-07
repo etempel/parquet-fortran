@@ -138,9 +138,20 @@ test:
   script:
     # Source is kept within the standard 132-column free-form limit, so no
     # -ffree-line-length-none override is needed; FPM_FFLAGS only adds the
-    # coverage/OpenMP flags fpm test itself needs. Note it still replaces
-    # fpm's default profile flags, same as before.
-    - FPM_FFLAGS="--coverage -fopenmp" fpm test --verbose
+    # coverage flag fpm test itself needs.
+    #
+    # There is deliberately no -fopenmp here: fpm.toml's `openmp = "*"`
+    # metapackage already injects it into both the compile and the link flags,
+    # for this package and its dependencies alike (verify with
+    # `fpm build --show-model | grep -o 'fortran_compile_flags="[^"]*"'`, which
+    # shows -fopenmp even with FPM_FFLAGS carrying nothing but -I paths). It was
+    # passed here for a long time and was redundant the whole time.
+    #
+    # Note FPM_FFLAGS REPLACES fpm's profile flags rather than adding to them,
+    # so this build has no -O, no -g and no -fcheck=bounds -- which is why the
+    # spurious-bounds-check bug recorded in CLAUDE.md could never have surfaced
+    # in this job. That is unchanged by dropping -fopenmp.
+    - FPM_FFLAGS="--coverage" fpm test --verbose
     # Runs tools/run_error_scenarios.sh's own scenario list too, so it can't silently drift out
     # of parity with test/error_scenarios.f90's `select case` (see run_error_scenarios.sh's own
     # header comment) -- fpm test above already exercises every scenario via test_errors.f90, but

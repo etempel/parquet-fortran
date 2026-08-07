@@ -321,7 +321,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a parallel producer region needs no `!$omp critical` of its own: each thread analyses its own
   slice and appends its results to one destination. `%prefetch`/`%materialize_all` now read a wide
   file's columns **in parallel internally**, with no OpenMP in the calling code at all — measured at
-  3.9x on a 24-column, 900k-row file with 8 threads. A read-time `qc=` or `sample_fraction=` (seeded
+  3.9x on a 24-column, 900k-row file with 8 threads. Reading a **single** large column is parallel
+  too, split across its row groups rather than its columns, so a `%get` or `%prefetch` of one name
+  is no longer serial however large the column is — measured at **3.5–3.8x** on a 30 M-row `float64`
+  column over 16 row groups. String columns keep the serial read (their packed store has no fixed
+  row slots to write into), as do columns too small for the split to pay for itself. A read-time `qc=` or `sample_fraction=` (seeded
   or not) keeps that parallelism and returns exactly what a serial read would, at a measured 3.3x
   and 3.5x; a `filter=` or a `sort=` falls back to the ordinary serial read, because every reader
   would have to rebuild the row mask or the sort permutation, and measuring that made a filtered

@@ -18,6 +18,25 @@
 submodule (parquet_tables) parquet_tables_read
     implicit none
     !
+    !> Below this much work in ONE column, its read stays a single whole-column call rather than
+    !! being split across its row groups (`parallel_colread_ok`).
+    !!
+    !! Measured in ELEMENTS (`rows * width`), matching `colwork_min_elements`
+    !! (`src/parquet_tables_parallel.f90`) and for the same reason: `parquet_column` exposes no byte
+    !! size, and deriving one here would duplicate the kind-to-size table that lives in the
+    !! generator. The two floors are deliberately the same number -- both guard "is one column's
+    !! worth of work big enough to be worth a thread team" -- but they are separate constants
+    !! because they gate different operations and a future measurement could reasonably move one
+    !! without the other.
+    !!
+    !! **This one is charged with more than a team spawn**, which is why it is not smaller: each
+    !! thread also opens its own `parquet_reader`, and that parses the file footer. Below roughly a
+    !! megabyte of column that is the dominant cost and the split loses.
+    !!
+    !! **Not a public setting** -- `parquet_set_prefetch_threads` is already the user-facing control
+    !! over this read. It IS overridable through a test-only hook; see `colread_gate_limit`.
+    integer(int64), parameter :: colread_min_elements = 131072_int64
+    !
 contains
     !
     module procedure table_kind_from_type
@@ -152,9 +171,13 @@ contains
                     call materialize_slice(cache, sc, idx)
                 end if
             else if (present(rdr)) then
+                ! `rdr` present means this call is ALREADY inside the parallel-over-columns region,
+                ! so the row-group split below must not even be considered -- that is what makes
+                ! the two parallel read paths mutually exclusive by construction rather than by a
+                ! flag someone has to remember to pass.
                 call table_materialize_kind(slot%declared_kind, rdr, slot%file_name, &
                     slot%values, sc%nrows, int(slot%width, int32), "")
-            else
+            else if (.not. materialize_column_parallel(cache, sc, idx)) then
                 call table_materialize_kind(slot%declared_kind, cache%reader, slot%file_name, &
                     slot%values, sc%nrows, int(slot%width, int32), "")
             end if
@@ -169,6 +192,112 @@ contains
         end associate
         cache%reads_started = .true.
     end procedure table_materialize
+    !
+    !> Reads ONE column by splitting its row groups across threads, each with its own reader.
+    !! Answers `.false.` without touching anything when the gate declines, so the caller falls
+    !! through to the ordinary whole-column read.
+    !!
+    !! **The full regime only.** A slice already assembles its column from row-group pieces
+    !! (`materialize_slice`), and giving that a second, parallel shape would double the surface where
+    !! the slice's own trimming arithmetic has to be right. `materialize_slice`'s pieces are already
+    !! a natural place to parallelise later; it is deliberately not done here.
+    !!
+    !! **The bounds are built locally, not cached.** `cache%rg_bounds` is a slice-regime object --
+    !! `%row_group_bounds` branches on whether it is allocated -- so filling it in for a full table
+    !! would change a public answer as a side effect of an internal optimisation. Building them here
+    !! is a footer walk (`parquet_get_num_row_groups` plus one `parquet_get_chunk_size` per group)
+    !! against a read this gate has already judged large enough to be worth splitting.
+    !!
+    !! **The column is sized ONCE and every row group pastes into its own disjoint range.** That is
+    !! what makes the region safe with no lock and no per-thread staging: `grow_storage` reallocates
+    !! exact-fit, so growing per row group would be quadratic *and* would make the threads contend
+    !! over one allocation. Sizing up front removes both problems at once.
+    logical function materialize_column_parallel(cache, sc, idx) result(did)
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_thread_num
+#endif
+        type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        type(table_scope), intent(in) :: sc               !! rows this table covers.
+        integer, intent(in) :: idx                        !! slot to fill.
+        integer(int64) :: nrg
+#ifdef _OPENMP
+        integer(int64), allocatable :: bounds(:,:)
+        integer :: nslots, t
+        integer(int64) :: rg
+        type(parquet_reader), allocatable :: readers(:)
+        logical, allocatable :: reader_open(:)
+#endif
+        !
+        did = .false.
+#ifdef _OPENMP
+        ! Cheapest first: the row-group count is one footer field, and every other clause is free
+        ! once it is known. Asking it before per_thread_readers_ok would invert that.
+        if (.not. per_thread_readers_ok(cache, sc)) return
+        call parquet_get_num_row_groups(cache%reader, nrg)
+        if (.not. parallel_colread_ok(cache, sc, idx, nrg)) return
+        call reader_row_group_bounds(cache%reader, bounds)
+        !
+        nslots = prefetch_thread_count()
+        allocate(readers(nslots))
+        allocate(reader_open(nslots))
+        reader_open = .false.
+        call parquet_debug_note_colread_threads(int(min(int(nslots, int64), nrg), int64))
+        associate (slot => cache%cols(idx))
+            call slot%values%init(slot%declared_kind, sc%nrows, int(slot%width, int32), "")
+            ! VALIDITY IS ALLOCATED LAZILY, SO THE FIRST NULL WOULD RACE. `%paste` calls
+            ! `ensure_bitmap` whenever its source chunk carries a null, and that allocates on first
+            ! use -- so two threads pasting null-carrying row groups would both find the bitmap
+            ! unallocated and both allocate it. This is the hazard `%ensure_validity` exists for,
+            ! reached from inside the library rather than left to the caller, who never asked for
+            ! this parallelism and cannot see it. No test can catch its absence -- the window is a
+            ! few instructions wide and the mutation passes every time here -- so see
+            ! feature_risks.md Risk-57 before removing it.
+            !
+            ! Asked of the FOOTER first (`parquet_column_has_nulls`, the same query the ordinary
+            ! whole-column read uses to skip building a mask at all), so a null-free column -- the
+            ! common case, and the one this path is fastest on -- still allocates nothing. "Might
+            ! have nulls" is that query's uncertain answer, which is the safe direction here too:
+            ! a bitmap nobody needed costs one bit per row.
+            if (parquet_column_has_nulls(cache%reader, slot%file_name, 0_int64, 0_int64)) &
+                call slot%values%ensure_validity()
+            !$omp parallel do default(shared) private(rg, t) schedule(dynamic) num_threads(nslots)
+            do rg = 1_int64, nrg
+                block
+                    ! Plain locals ONLY -- a finalizable derived type declared in a block lexically
+                    ! inside a parallel region segfaults ifx at -O1+ (feature_risks.md Risk-45),
+                    ! which is why `readers` is an array allocated before the region instead.
+                    type(parquet_column) :: chunk
+                    integer(int64) :: rows_rg
+                    !
+                    rows_rg = bounds(2, rg) - bounds(1, rg) + 1_int64
+                    ! A row group a filter or sample emptied contributes nothing and must be
+                    ! stepped over -- pasting a zero-row chunk is not merely wasteful, it would
+                    ! ask %paste for an empty range at a valid position.
+                    if (rows_rg > 0_int64) then
+                        t = omp_get_thread_num() + 1
+                        if (.not. reader_open(t)) then
+                            ! Through the same helper parquet_open_table uses, so this thread's
+                            ! reader carries the table's qc/sample exactly as the table's own does.
+                            call table_open_reader_with_transform(cache, cache%source_file, readers(t))
+                            reader_open(t) = .true.
+                        end if
+                        call table_materialize_chunk_kind(slot%declared_kind, readers(t), &
+                            slot%file_name, rg, chunk, rows_rg, int(slot%width, int32), "")
+                        ! Disjoint by construction: row group rg owns table rows
+                        ! bounds(1,rg)..bounds(2,rg) and no other row group owns any of them.
+                        call slot%values%paste(chunk, bounds(1, rg))
+                        call chunk%clear()
+                    end if
+                end block
+            end do
+            !$omp end parallel do
+        end associate
+        do t = 1, nslots
+            if (reader_open(t)) call parquet_close_reader(readers(t))
+        end do
+        did = .true.
+#endif
+    end function materialize_column_parallel
     !
     !> Assembles one column from just the row groups covering the table's slice.
     !!
@@ -529,9 +658,6 @@ contains
     !!     a table reached from inside one is exactly the shared-store case the first-touch guard
     !!     refuses anyway.
     logical function parallel_prefetch_ok(cache, sc, want)
-#ifdef _OPENMP
-        use omp_lib, only : omp_get_max_threads, omp_in_parallel
-#endif
         type(parquet_table_cache), intent(in) :: cache !! the column store.
         type(table_scope), intent(in) :: sc            !! rows this table covers.
         logical, intent(in) :: want(:)                 !! .true. for each slot to read.
@@ -539,21 +665,133 @@ contains
         !
         parallel_prefetch_ok = .false.
 #ifdef _OPENMP
+        if (.not. per_thread_readers_ok(cache, sc)) return
+        call count_top_level_groups(cache, want, ngroups)
+        if (ngroups < 2) return
+        parallel_prefetch_ok = .true.
+#endif
+    end function parallel_prefetch_ok
+    !
+    !> Whether this table may be read through SEVERAL readers of its own at once, at all -- the
+    !! clauses both parallel read paths share, asked in one place so the two cannot drift.
+    !!
+    !! Everything specific to a path stays in that path's own gate: how many top-level names there
+    !! are to read (`parallel_prefetch_ok`), or how many row groups and how much work one column is
+    !! (`parallel_colread_ok`). What is shared is the question *may a second reader exist and would
+    !! it see the same rows*, and the answer is the same for both by construction, because both open
+    !! their readers through `table_open_reader_with_transform`.
+    !!
+    !! Splitting this out is not tidiness: the two gates disagreeing would not fail anything. The
+    !! looser one would simply parallelise a case the stricter one had judged unsafe, silently.
+    logical function per_thread_readers_ok(cache, sc)
+#ifdef _OPENMP
+        use omp_lib, only : omp_in_parallel
+#endif
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        type(table_scope), intent(in) :: sc            !! rows this table covers.
+        !
+        per_thread_readers_ok = .false.
+#ifdef _OPENMP
         if (prefetch_thread_count() <= 1) return
         if (omp_in_parallel()) return
         if (sc%detached) return
         if (.not. cache%file_backed) return
         if (.not. allocated(cache%reader)) return
         ! The two transforms still refused, both on measured COST and both only until P9 rebuilds
-        ! them as shared state -- see this function's doc-comment for the numbers. A sample= or a
-        ! qc= is deliberately NOT tested here; both are carried by every per-thread reader.
+        ! them as shared state -- see parallel_prefetch_ok's doc-comment for the numbers. A sample=
+        ! or a qc= is deliberately NOT tested here; both are carried by every per-thread reader.
         if (allocated(cache%read_sort)) return
         if (allocated(cache%read_filter)) return
-        call count_top_level_groups(cache, want, ngroups)
-        if (ngroups < 2) return
-        parallel_prefetch_ok = .true.
+        per_thread_readers_ok = .true.
 #endif
-    end function parallel_prefetch_ok
+    end function per_thread_readers_ok
+    !
+    !> Whether ONE column's whole-column read may be spread across its row groups.
+    !!
+    !! The complement of `parallel_prefetch_ok`: that one splits a read by column and needs at least
+    !! two of them, so a single column's first touch -- a `%get` of one name, a `%prefetch` of one
+    !! name, a `%reload` -- has always been serial no matter how large the column was. This splits
+    !! the same read by ROW GROUP instead, so the two together cover both shapes.
+    !!
+    !! **Arrow does not already do this, which had to be measured rather than assumed.** Reading one
+    !! whole column with Arrow's own `use_threads` on and off came out within noise of itself
+    !! (0.96x-1.02x over five runs at two column sizes, reproduced independently on three machines),
+    !! so the decode of a single column really is serial inside Arrow and there is something here to
+    !! win. Expect 2-3x rather than the thread count: a column decode is memory-bandwidth work, and
+    !! every other parallel path in this library hit that ceiling well short of its team size.
+    !!
+    !! Its own clauses, on top of `per_thread_readers_ok`'s shared ones:
+    !!
+    !!   * **At least two row groups.** One row group cannot be split, and a file written in one
+    !!     chunk is common.
+    !!   * **Enough work to pay for the readers.** Each thread opens its own `parquet_reader`, which
+    !!     parses the footer; below `colread_min_elements` (rows x width) that costs more than the
+    !!     split saves. The floor is in ELEMENTS, not rows, so a narrow long column and a wide short
+    !!     one are judged by the same measure -- and it is overridable, because no fixture a test can
+    !!     afford reaches the real one (`feature_risks.md` Risk-49's lesson).
+    !!   * **Not a string column.** `%paste` is what puts each row group's chunk into its place
+    !!     without reallocating, and a `parquet_string_column` is a packed variable-length store with
+    !!     no fixed row slots, so it cannot be overwritten in place. The serial grow-and-append shape
+    !!     stays, and costs those two kinds nothing, because their buffers grow geometrically.
+    logical function parallel_colread_ok(cache, sc, idx, nrg)
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        type(table_scope), intent(in) :: sc            !! rows this table covers.
+        integer, intent(in) :: idx                     !! slot about to be read.
+        integer(int64), intent(in) :: nrg              !! row groups this read would span.
+        integer(int64) :: floor_elems
+        !
+        parallel_colread_ok = .false.
+#ifdef _OPENMP
+        if (.not. per_thread_readers_ok(cache, sc)) return
+        if (nrg < 2_int64) return
+        if (cache%cols(idx)%declared_kind == PK_STRING) return
+        if (cache%cols(idx)%declared_kind == PK_STRING_VEC) return
+        call colread_gate_limit(floor_elems)
+        if (sc%nrows * int(max(cache%cols(idx)%width, 1), int64) < floor_elems) return
+        parallel_colread_ok = .true.
+#endif
+    end function parallel_colread_ok
+    !
+    !> The work floor `parallel_colread_ok` gates on, with its test-only override applied.
+    !!
+    !! Same shape and same reason as `colwork_gate_limits` (`src/parquet_tables_parallel.f90`): the
+    !! real constant sits far above anything a test fixture can reach, so the only way to exercise
+    !! both sides of the gate is to move the floor rather than the input.
+    subroutine colread_gate_limit(floor_elems)
+        use iso_c_binding, only : c_int64_t
+        integer(int64), intent(out) :: floor_elems !! elements below which the read stays serial.
+        interface
+            function get_elems() result(res) bind(C, name="parquet_debug_get_colread_min_elements")
+                import :: c_int64_t
+                integer(c_int64_t) :: res
+            end function get_elems
+        end interface
+        integer(int64) :: v
+        !
+        floor_elems = colread_min_elements
+        v = int(get_elems(), int64)
+        if (v > 0_int64) floor_elems = v
+    end subroutine colread_gate_limit
+    !
+    !> Records, for the test suite only, how many threads the last single-column row-group-parallel
+    !! read was given. Zero means that read took the ordinary whole-column path.
+    !!
+    !! A separate counter from `parquet_debug_note_prefetch_threads` because the two paths are
+    !! alternatives: one counter could report that *a* parallel read happened but never which, and
+    !! "the row-group path ran when the column path should have" is exactly the confusion worth being
+    !! able to detect.
+    subroutine parquet_debug_note_colread_threads(n)
+        use iso_c_binding, only : c_int64_t
+        integer(int64), intent(in) :: n !! threads the region was given.
+        interface
+            subroutine set_used(k) bind(C, name="parquet_debug_set_colread_threads_used")
+                import :: c_int64_t
+                integer(c_int64_t), value :: k
+            end subroutine set_used
+        end interface
+        !
+        call set_used(int(n, c_int64_t))
+    end subroutine parquet_debug_note_colread_threads
     !
     !> How many threads a parallel prefetch may use: as many as OpenMP offers, capped by
     !> parquet_set_prefetch_threads when that was set. A CAP only -- the setting can never ask for

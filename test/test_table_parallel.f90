@@ -91,6 +91,24 @@ module test_table_parallel
             import :: c_int64_t
             integer(c_int64_t), value :: n !! new counter value; tests use 0.
         end subroutine parquet_debug_set_prefetch_threads_used
+        !> Threads the last SINGLE-COLUMN row-group-split read was given; 0 when it stayed whole.
+        function parquet_debug_get_colread_threads_used() result(res) &
+            bind(C, name="parquet_debug_get_colread_threads_used")
+            import :: c_int64_t
+            integer(c_int64_t) :: res !! resolved thread count of the last single-column read.
+        end function parquet_debug_get_colread_threads_used
+        !> Clears that counter, so a test observes its own read rather than an earlier one.
+        subroutine parquet_debug_set_colread_threads_used(n) &
+            bind(C, name="parquet_debug_set_colread_threads_used")
+            import :: c_int64_t
+            integer(c_int64_t), value :: n !! new counter value; tests use 0.
+        end subroutine parquet_debug_set_colread_threads_used
+        !> Overrides that read's work floor, in elements. 0 or less restores the real one.
+        subroutine parquet_debug_set_colread_min_elements(n) &
+            bind(C, name="parquet_debug_set_colread_min_elements")
+            import :: c_int64_t
+            integer(c_int64_t), value :: n !! new floor, or 0 to restore.
+        end subroutine parquet_debug_set_colread_min_elements
     end interface
     !
 contains
@@ -127,7 +145,19 @@ contains
             new_unittest("a soft qc violation warns once per column, on either path", &
                 test_prefetch_qc_soft_warns_per_column), &
             new_unittest("a sorted table still prefetches serially, pending P9", &
-                test_prefetch_sort_still_serial) &
+                test_prefetch_sort_still_serial), &
+            new_unittest("one column's read splits across row groups and matches the whole read", &
+                test_colread_split_equals_whole), &
+            new_unittest("nulls land in the right rows when one column's read is split", &
+                test_colread_nulls_survive_the_split), &
+            new_unittest("a vector column's read splits with every element in place", &
+                test_colread_vector_column_splits), &
+            new_unittest("a string column's read is not split, and is still correct", &
+                test_colread_string_stays_whole), &
+            new_unittest("the single-column work floor opens and closes the split", &
+                test_colread_floor_override), &
+            new_unittest("a sampled single-column read splits onto one sample", &
+                test_colread_sampled_agrees) &
             ]
     end subroutine collect_tests_table_parallel
     !
@@ -704,6 +734,313 @@ contains
         call check(error, used > 1, &
             what // " must prefetch in parallel here, or the comparison below tests nothing")
     end subroutine check_prefetch_really_parallel
+    !
+    ! ==================================================================================
+    ! P5 -- one column's read, split across its row groups
+    ! ==================================================================================
+    !
+    !> The base case: a single column, several row groups, read once on many threads and once with
+    !> `parquet_set_prefetch_threads(1)`, compared value for value.
+    !>
+    !> **This is the shape the over-columns prefetch could never help with.** That gate needs two
+    !> top-level names and declines at one, so a `%get` or `%prefetch` of a single name has always
+    !> been serial however large the column was. Splitting by row group is the complement, and the
+    !> two are mutually exclusive by construction -- the row-group split is only ever considered
+    !> where no reader was passed in, which is exactly "not already inside the over-columns region".
+    !>
+    !> The fixture's values are a pure function of the row number, so a chunk pasted at the wrong
+    !> offset -- the characteristic failure of a row-group split, and one that leaves a
+    !> perfectly-sized column full of plausible numbers -- shows up as a value in the wrong place
+    !> rather than as a length or a crash.
+    subroutine test_colread_split_equals_whole(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_colread_split.parquet"
+        type(parquet_table) :: t
+        real(real64), allocatable :: got(:)
+        integer :: used, i
+        !
+        call write_rowgroup_fixture(f)
+        call parquet_reset_settings()
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f)
+        call t%get("v", got)
+        used = int(parquet_debug_get_colread_threads_used())
+        call check_colread_really_parallel(error, used, "a multi-row-group single column")
+        if (allocated(error)) return
+        !
+        call check(error, size(got) == FROWS, "the split read returned the wrong number of rows")
+        if (allocated(error)) return
+        ! Every row, not a sample of them: a wrong paste offset moves a whole row group, so
+        ! checking only the ends would miss a swap of two interior groups entirely.
+        call check(error, all(abs(got - [(1.5_real64 * real(i, real64), i = 1, FROWS)]) &
+            < 1.0e-9_real64), "the split read put at least one row group's values in the wrong rows")
+    end subroutine test_colread_split_equals_whole
+    !
+    !> Nulls, spread across every row group.
+    !>
+    !> **Validity is allocated lazily, so this is the one place the split could race rather than
+    !> merely be wrong.** Two threads pasting row groups that each contain a null would both find the
+    !> bitmap unallocated and both allocate it. The read asks the file footer whether the column has
+    !> any nulls and allocates the bitmap up front when it does — so this test needs nulls in more
+    !> than one row group to exercise it at all, which is why they are strewn rather than clustered.
+    !>
+    !> A race is not reliably reproducible, so what this asserts is the observable consequence: every
+    !> null in its own row and no others. `%paste` REPLACES a range's validity rather than merging
+    !> it, which is what makes disjoint row-group pastes correct here.
+    subroutine test_colread_nulls_survive_the_split(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_colread_nulls.parquet"
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        real(real64) :: v(FROWS)
+        logical :: valid(FROWS)
+        logical, allocatable :: mask(:)
+        integer :: used, i, nbad
+        !
+        do i = 1, FROWS
+            v(i) = 1.5_real64 * real(i, real64)
+            valid(i) = mod(i, 7) /= 0        ! every 7th row null, so every row group has some
+        end do
+        call parquet_open_writer(w, f, chunk_size=FROWS / 8)
+        call parquet_write_column(w, "v", v, is_valid=valid)
+        call parquet_close_writer(w)
+        !
+        call parquet_reset_settings()
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f)
+        call t%get_valid_mask("v", mask)
+        used = int(parquet_debug_get_colread_threads_used())
+        call check_colread_really_parallel(error, used, "a null-carrying single column")
+        if (allocated(error)) return
+        !
+        call check(error, size(mask) == FROWS, "the split read lost rows from a null-carrying column")
+        if (allocated(error)) return
+        nbad = 0
+        do i = 1, FROWS
+            if (mask(i) .neqv. valid(i)) nbad = nbad + 1
+        end do
+        call check(error, nbad == 0, "the split read placed nulls in the wrong rows")
+    end subroutine test_colread_nulls_survive_the_split
+    !
+    !> A vector column: the work floor is in ELEMENTS (`rows * width`), and `%paste` addresses rows,
+    !> so a width greater than one is where a confusion between the two units would show.
+    subroutine test_colread_vector_column_splits(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_colread_vec.parquet"
+        ! WID, not W: Fortran is case-insensitive, so a `W` parameter and the `w` writer below
+        ! would be one symbol.
+        integer, parameter :: N = 40000, WID = 4
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        real(real64) :: v(WID, N)
+        real(real64), allocatable :: got(:,:)
+        integer :: used, i, e, nbad
+        !
+        do i = 1, N
+            do e = 1, WID
+                v(e, i) = real(i, real64) + 0.25_real64 * real(e, real64)
+            end do
+        end do
+        call parquet_open_writer(w, f, chunk_size=N / 8)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        !
+        call parquet_reset_settings()
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f)
+        call t%get("v", got)
+        used = int(parquet_debug_get_colread_threads_used())
+        call check_colread_really_parallel(error, used, "a vector single column")
+        if (allocated(error)) return
+        !
+        call check(error, size(got, 1) == WID .and. size(got, 2) == N, &
+            "the split read changed a vector column's shape")
+        if (allocated(error)) return
+        nbad = 0
+        do i = 1, N
+            do e = 1, WID
+                if (abs(got(e, i) - v(e, i)) > 1.0e-9_real64) nbad = nbad + 1
+            end do
+        end do
+        call check(error, nbad == 0, "the split read misplaced elements of a vector column")
+    end subroutine test_colread_vector_column_splits
+    !
+    !> A string column must NOT be split, and must still read correctly.
+    !>
+    !> `%paste` is what puts each row group in its place without reallocating, and a
+    !> `parquet_string_column` is a packed variable-length store with no fixed row slots, so it
+    !> cannot be overwritten in place. The refusal is therefore structural, not a tuning choice --
+    !> and it costs nothing, because those buffers grow geometrically rather than exact-fit.
+    !>
+    !> Both halves matter: a thread count of 0 alone would pass against a read that returned
+    !> nonsense, and correct values alone would pass against a split that had somehow been allowed.
+    subroutine test_colread_string_stays_whole(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_colread_string.parquet"
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        character(len=12) :: s(FROWS)
+        character(len=:), allocatable :: got(:)
+        integer :: used, i
+        !
+        do i = 1, FROWS
+            write(s(i), '(a,i0)') "r", i
+        end do
+        s(1) = "a"                      ! shortest first, per CLAUDE.md's string-fixture rule
+        call parquet_open_writer(w, f, chunk_size=FROWS / 8)
+        call parquet_write_column(w, "s", s)
+        call parquet_close_writer(w)
+        !
+        call parquet_reset_settings()
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f)
+        call t%get("s", got)
+        used = int(parquet_debug_get_colread_threads_used())
+        call check(error, used == 0, &
+            "a string column must not be split across row groups: its packed store has no fixed " // &
+            "row slots, so %paste cannot address them")
+        if (allocated(error)) return
+        call check(error, size(got) == FROWS, "the unsplit string read returned the wrong row count")
+        if (allocated(error)) return
+        call check(error, trim(got(1)) == "a" .and. trim(got(FROWS)) == "r200000", &
+            "the unsplit string read returned the wrong values")
+    end subroutine test_colread_string_stays_whole
+    !
+    !> The work floor, in both directions.
+    !>
+    !> **A round trip proves nothing here** -- the override has no getter, and its only observable is
+    !> whether the gate changes its mind. So the same three-step shape the mutation gate's own limits
+    !> use: confirm the split happens at the real constant, close it with a floor above the fixture,
+    !> and confirm it opens again when the override is cleared. Without the first and third steps, a
+    !> hook that did nothing (or one that never restored) would pass.
+    !>
+    !> The floor exists at all because each thread opens its own reader, which parses the footer;
+    !> below roughly a megabyte of column that dominates and the split loses. No fixture a test can
+    !> afford sits near the real break-even, which is why the override exists rather than a sweep
+    !> over fixture sizes (`feature_risks.md` Risk-49).
+    subroutine test_colread_floor_override(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_colread_floor.parquet"
+        type(parquet_table) :: t
+        real(real64), allocatable :: got(:)
+        integer :: used_before, used_closed, used_after
+        !
+        call write_rowgroup_fixture(f)
+        call parquet_reset_settings()
+        !
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f)
+        call t%get("v", got)
+        used_before = int(parquet_debug_get_colread_threads_used())
+        !
+        ! One element above what this fixture offers, so the gate closes on size alone.
+        call parquet_debug_set_colread_min_elements(int(FROWS, c_int64_t) + 1_c_int64_t)
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f)
+        call t%get("v", got)
+        used_closed = int(parquet_debug_get_colread_threads_used())
+        !
+        call parquet_debug_set_colread_min_elements(0_c_int64_t)
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f)
+        call t%get("v", got)
+        used_after = int(parquet_debug_get_colread_threads_used())
+        !
+        call check(error, used_closed == 0, &
+            "raising the single-column work floor above the fixture must close the split")
+        if (allocated(error)) return
+        call check_colread_really_parallel(error, used_before, "the fixture at the real floor")
+        if (allocated(error)) return
+        call check_colread_really_parallel(error, used_after, "the fixture after clearing the override")
+        if (allocated(error)) return
+        ! The answer must be right on BOTH sides of the gate, or the floor would be hiding a defect
+        ! rather than choosing a path.
+        call check(error, size(got) == FROWS .and. abs(got(FROWS) - 1.5_real64 * real(FROWS, real64)) &
+            < 1.0e-9_real64, "the read was wrong after the floor override was cleared")
+    end subroutine test_colread_floor_override
+    !
+    !> A sampled table's single-column split: each row group is read by a different thread through a
+    !> different reader, and every one of them must have drawn the SAME sample.
+    !>
+    !> This is the row-group counterpart of the unseeded-sample test above, and it is sharper in one
+    !> way: there, two columns disagreeing showed up as two different row sets; here the disagreement
+    !> is *within one column*, between row groups, and the column still comes back exactly as long as
+    !> the table says it should be. So the assertion has to be on the values themselves.
+    !>
+    !> The fixture's value is `1.5 * row`, so every surviving value must be a multiple of 1.5 whose
+    !> row number is in range, and the sequence must be strictly increasing — a row group drawn from
+    !> a different sample breaks the ordering even when it does not break the length.
+    subroutine test_colread_sampled_agrees(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_colread_sample.parquet"
+        type(parquet_table) :: t
+        real(real64), allocatable :: got(:)
+        integer :: used, i, nbad
+        !
+        call write_rowgroup_fixture(f)
+        call parquet_reset_settings()
+        ! The floor is lowered because the SAMPLE puts this fixture under it: the gate measures the
+        ! rows it will actually materialize, and half of FROWS is below the real constant. That is
+        ! correct behaviour, and it is not what this test is about -- so the floor is moved out of
+        ! the way rather than the fixture grown, which would make the whole suite slower to protect
+        ! an assertion about sampling.
+        call parquet_debug_set_colread_min_elements(1000_c_int64_t)
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f, sample_fraction=0.5_real64)
+        call t%get("v", got)
+        used = int(parquet_debug_get_colread_threads_used())
+        call parquet_debug_set_colread_min_elements(0_c_int64_t)
+        call check_colread_really_parallel(error, used, "a sampled single column")
+        if (allocated(error)) return
+        !
+        call check(error, size(got) == int(t%nrows()), &
+            "a sampled split read disagreed with the table's own row count")
+        if (allocated(error)) return
+        call check(error, size(got) > 0 .and. size(got) < FROWS, &
+            "sample_fraction=0.5 should keep some but not all of the rows")
+        if (allocated(error)) return
+        nbad = 0
+        do i = 2, size(got)
+            if (got(i) <= got(i - 1)) nbad = nbad + 1
+        end do
+        call check(error, nbad == 0, &
+            "a sampled split read returned rows out of order; the row groups did not all draw " // &
+            "the same sample")
+    end subroutine test_colread_sampled_agrees
+    !
+    !> The single-column counterpart of `check_prefetch_really_parallel`.
+    subroutine check_colread_really_parallel(error, used, what)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer, intent(in) :: used                         !! threads the read reported.
+        character(len=*), intent(in) :: what                !! what was read, for the message.
+        integer :: avail
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        if (avail <= 1) return
+        call check(error, used > 1, &
+            what // " must have its read split across row groups here, or the assertions below " // &
+            "test the serial path against itself")
+    end subroutine check_colread_really_parallel
+    !
+    !> One float64 column over eight row groups, its value a pure function of the row number.
+    subroutine write_rowgroup_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write (one per test).
+        type(parquet_writer) :: w
+        real(real64) :: v(FROWS)
+        integer :: i
+        !
+        do i = 1, FROWS
+            v(i) = 1.5_real64 * real(i, real64)
+        end do
+        ! Eight row groups, so the split has something to split even on a modest machine, and so
+        ! that an off-by-one in the paste offset moves a whole group rather than a single row.
+        call parquet_open_writer(w, fname, chunk_size=FROWS / 8)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+    end subroutine write_rowgroup_fixture
     !
     !> Five float64 columns, wide enough that three of them clear the parallel gate's work floor.
     subroutine write_wide_fixture(fname)

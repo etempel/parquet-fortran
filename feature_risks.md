@@ -121,6 +121,7 @@ something a reader is expected to have.
 | [Risk-54](#risk-54--the-parallel-rewrites-memory-cost-is-bounded-by-documentation-and-nothing-else) | The parallel rewrite's memory cost is bounded by documentation and nothing else | 3 — not testable |
 | [Risk-55](#risk-55--two-readers-of-one-table-can-sample-different-rows-and-only-a-count-mismatch-shows-it) | Two readers of one table can sample different rows, and only a count mismatch shows it | 4 — covered |
 | [Risk-56](#risk-56--a-per-thread-reader-that-writes-shared-cache-state-races-silently) | A per-thread reader that writes shared cache state races silently | 3 — not testable |
+| [Risk-57](#risk-57--a-row-group-split-column-read-allocates-its-validity-bitmap-on-first-null-from-any-thread) | A row-group-split column read allocates its validity bitmap on first null, from any thread | 3 — not testable |
 
 ---
 
@@ -128,7 +129,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-57**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-58**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -472,6 +473,59 @@ only while the region is live rather than through a wrong answer afterwards.
   and is covered — `a masked slice prefetches in parallel with every column on one row set`
   (`test/test_table_parallel.f90`), mutation-confirmed by making the helper skip its masked branch
   when `rdr` is present, which aborts with `nrows mismatch for column: e`.
+
+### Risk-57 — A row-group-split column read allocates its validity bitmap on first null, from any thread
+
+`materialize_column_parallel` (`src/parquet_tables_read.f90`) reads one column by giving each thread
+a row group and a reader of its own, pasting each chunk into a column sized up front. The pastes are
+disjoint by construction, so nothing there needs a lock — **except the validity bitmap, which is not
+part of that column until something needs it.**
+
+`%paste` calls `ensure_bitmap` whenever its source chunk carries a null, and `ensure_bitmap`
+(`src/parquet_columns_util.f90`) allocates on first use. So two threads pasting null-carrying row
+groups both take the `.not. allocated(self%validity)` branch and both `allocate` it: one allocation
+leaks, every null written into it is lost, and the two writes to `self%has_nulls` and to the
+descriptor race with each other. Nothing about the result announces itself — the column is the right
+length and full of plausible values, with some nulls silently missing.
+
+The guard is one line, before the region:
+
+```fortran
+if (parquet_column_has_nulls(cache%reader, slot%file_name, 0_int64, 0_int64)) &
+    call slot%values%ensure_validity()
+```
+
+It asks the **footer**, so a null-free column — the common case, and the one this path is fastest on
+— still allocates nothing, and the query's uncertain answer ("might have nulls") is the safe
+direction.
+
+**Test.** Not testable. Removing the guard and running the null fixture — 200 000 rows, every
+seventh null, eight row groups, eight threads — passed **five times out of five**. The window is a
+few instructions between the `allocated` test and the `allocate`, and OpenMP hands the row groups out
+fast enough that two threads rarely reach it together. A test that passes against the broken code is
+worse than no test, because the next person deletes the guard and the suite agrees with them.
+
+**How to avoid it instead.**
+
+- **Any new parallel path that writes into one `parquet_column` from several threads must ensure
+  validity before the region**, not inside it. The rule generalises past this one procedure: the
+  column's *storage* is allocated by `init` and is safe to write disjointly; its *validity* is
+  allocated on demand and is not.
+- **The footer query is the right shape to copy** rather than allocating unconditionally.
+  `parquet_column_has_nulls` is already the query the ordinary whole-column read uses to decide
+  whether to build a mask at all, so this costs nothing new and keeps the null-free fast path free.
+- **A residual benign race is left behind, and it is worth knowing before a ThreadSanitizer run
+  reports it.** With the bitmap pre-sized, `paste`'s own `ensure_bitmap` call still runs per thread
+  and still writes `self%has_nulls = .true.` — the value it already holds. Harmless in practice
+  (a same-value store), but it is a genuine write race and would be the FIRST thing TSan names in
+  this region. Do not let that report send anyone hunting for a different bug; and note that
+  CLAUDE.md's own warning applies in reverse here — fixing the reported race would change nothing,
+  because it is not the one that matters.
+- **The disjointness of the pastes is what the rest of the safety rests on**, and it comes from
+  `reader_row_group_bounds`: row group *rg* owns table rows `bounds(1,rg)..bounds(2,rg)` and no
+  other row group owns any of them. A future change that made two row groups' ranges overlap —
+  or that pasted at anything other than `bounds(1, rg)` — breaks the whole argument, not just the
+  bitmap. That half IS testable and is covered (see `feature_table_parallel.md` section 17.8).
 
 ## 4. Risks already covered, kept for what they still forbid
 

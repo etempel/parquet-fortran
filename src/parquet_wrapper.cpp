@@ -3285,6 +3285,38 @@ extern "C"
 		return g_debug_prefetch_threads_used;
 	}
 
+	// Test-only: how many threads the last parquet_table SINGLE-COLUMN read was spread across, by
+	// row group (materialize_column_parallel, src/parquet_tables_read.f90); 0 when that read took
+	// the ordinary whole-column path. A separate counter from the prefetch one above on purpose --
+	// the two paths are alternatives, so one counter could never say which of them ran.
+	static int64_t g_debug_colread_threads_used = 0;
+
+	void parquet_debug_set_colread_threads_used(int64_t n)
+	{
+		g_debug_colread_threads_used = n;
+	}
+
+	int64_t parquet_debug_get_colread_threads_used(void)
+	{
+		return g_debug_colread_threads_used;
+	}
+
+	// Test-only override of the work floor that same read is gated on, in elements (rows * width);
+	// <= 0 restores the real one. Same reason as the colwork pair below: no fixture a test suite can
+	// afford reaches a floor set where the parallel path starts paying for itself, so the only way
+	// to exercise both sides of it is to move the floor rather than the input.
+	static int64_t g_debug_colread_min_elements = -1;
+
+	void parquet_debug_set_colread_min_elements(int64_t n)
+	{
+		g_debug_colread_min_elements = (n > 0) ? n : -1;
+	}
+
+	int64_t parquet_debug_get_colread_min_elements(void)
+	{
+		return g_debug_colread_min_elements;
+	}
+
 	// Test-only: how many threads the last parquet_table row-structural mutation (%sort_by,
 	// %filter_rows, %top_n) resolved to. Written from Fortran (parquet_debug_note_table_threads,
 	// src/parquet_tables_parallel.f90) for the same reason the prefetch counter above is: the number

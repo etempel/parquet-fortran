@@ -34,6 +34,7 @@ disturbing that.
 | First read of a column not yet resident, on a table **another** thread opened | no | hard error; `%prefetch` before the region |
 | First read of a column, on a table **this** thread opened inside the region | **yes** | — (this is the per-thread slice pattern) |
 | `%prefetch` / `%materialize_all` called from one thread | **yes, internally** — the library reads the columns on several threads for you | — |
+| A single large column's first read (`%get`, `%prefetch` of one name) | **yes, internally** — split across the column's row groups instead | — |
 | `%sort_by` / `%filter_rows` / `%top_n` / `%delete_rows` / `%truncate` called from one thread | **yes, internally** — the library rewrites the columns on several threads for you | — |
 | `%clone` called from one thread | **yes, internally** — the library copies the columns on several threads for you | — |
 | Write values into **different** resident columns | **yes** | — |

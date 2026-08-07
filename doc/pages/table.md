@@ -383,6 +383,22 @@ Each thread drives its own reader, so nothing is shared and nothing needs a lock
 when it is both safe and worth it: at least two columns to read, and more than one thread available.
 Measured at **3.9x** on a 24-column, 900k-row file with 8 threads.
 
+**One large column is parallel too**, split across its **row groups** instead of its columns — so a
+`%get` or `%prefetch` of a single name is not serial just because there is only one of it:
+
+```fortran
+call parquet_open_table(t, "one-wide.parquet")
+call t%get("flux", flux)      ! read on several threads, by row group
+```
+
+Measured at **3.5–3.8x** on a 30-million-row `float64` column stored in 16 row groups. The two splits
+are alternatives — a read is divided by column when there is more than one to read, and by row group
+otherwise — and both need the same things: more than one thread, a file to open a second reader on,
+and no `filter=`/`sort=` (see the table below). The row-group split additionally needs **more than one
+row group**, **enough work to pay for opening the extra readers** (a column of a few hundred kilobytes
+or less stays serial), and a **non-string** column: a string column's packed variable-length store has
+no fixed row slots to write row groups into, so it keeps the ordinary whole-column read.
+
 A **read-time transform** is carried by every one of those readers, so `%prefetch` and
 `%materialize_all` return exactly what a serial read would — but two of the four fall back to the
 serial read anyway, because rebuilding them per reader costs more than the parallel read saves:

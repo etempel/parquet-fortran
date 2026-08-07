@@ -212,41 +212,76 @@ contains
     !
     module procedure table_get_valid_mask
         integer :: idx
-        integer(int64) :: i
         !
         call table_resolve(self, name, "get_valid_mask", idx, found)
         if (idx == 0) then
             allocate(mask(0))
             return
         end if
-        allocate(mask(self%cache%cols(idx)%values%length()))
-        ! Always filled, never left unallocated for a null-free column: a caller would then have
-        ! to test allocated() before every use, and the one thing this procedure exists to give
-        ! them is an array they can use directly.
-        do i = 1_int64, size(mask, kind=int64)
-            mask(i) = .not. self%cache%cols(idx)%values%is_null(i)
-        end do
+        call fill_row_mask(self%cache, idx, mask)
     end procedure table_get_valid_mask
     !
     module procedure table_get_valid_mask_elem
-        integer :: idx, wdt
-        integer(int64) :: i, e
+        integer :: idx
         !
         call table_resolve(self, name, "get_valid_mask", idx, found)
         if (idx == 0) then
             allocate(mask(0, 0))
             return
         end if
-        wdt = self%cache%cols(idx)%values%colwidth()
-        allocate(mask(wdt, self%cache%cols(idx)%values%length()))
-        ! Always filled, for the same reason the row form is: a caller should not have to test
-        ! allocated() before using what this hands back.
-        do i = 1_int64, size(mask, 2, kind=int64)
-            do e = 1_int64, int(wdt, int64)
-                mask(e, i) = .not. self%cache%cols(idx)%values%is_null(i, e)
-            end do
-        end do
+        call fill_elem_mask(self%cache, idx, mask)
     end procedure table_get_valid_mask_elem
+    !
+    !> Fills `mask` with slot `idx`'s per-ROW validity, always allocated.
+    !!
+    !! **The bulk builder, not a per-row `is_null` loop.** `parquet_column%row_validity` walks the
+    !! bitmap a 64-bit word at a time and iterates the SET bits within a nonzero word (`trailz` +
+    !! `ibclr`), so it costs a pass proportional to the NUMBER OF NULLS rather than one call per
+    !! row -- and a zero word is 64 valid rows skipped whole. A loop here can only ask one row at a
+    !! time, through a call the compiler cannot inline.
+    !!
+    !! **The one thing that has to be translated is the contract**, and it is inverted between the
+    !! two: the bulk builder deliberately hands back an UNALLOCATED mask for a null-free column, so
+    !! that passing it straight on as an `optional` `is_valid=` makes the argument absent (F2018
+    !! 15.5.2.12) and costs nothing. `%get_valid_mask` promises the opposite -- always allocated,
+    !! always filled -- because the whole point of it is an array the caller can use without
+    !! testing `allocated()` first. So the unallocated answer becomes an all-`.true.` mask here,
+    !! and that fallback branch is the null-free case, i.e. the common one.
+    !!
+    !! Shared by the public `%get_valid_mask` and by `table_valid_mask_of`, which differ only in
+    !! whether they resolve the name themselves.
+    subroutine fill_row_mask(cache, idx, mask)
+        type(parquet_table_cache), intent(inout) :: cache !! the table's store.
+        integer, intent(in) :: idx                        !! slot index.
+        logical, allocatable, intent(out) :: mask(:)      !! one entry per row; .true. = value.
+        logical, allocatable :: got(:)
+        !
+        call cache%cols(idx)%values%row_validity(got)
+        if (allocated(got)) then
+            call move_alloc(got, mask)
+            return
+        end if
+        allocate(mask(cache%cols(idx)%values%length()))
+        mask = .true.
+    end subroutine fill_row_mask
+    !
+    !> Fills `mask` with slot `idx`'s per-ELEMENT validity, shaped (width, nrows), always
+    !! allocated. The rank-2 counterpart of `fill_row_mask`, with the same reasoning and the same
+    !! contract translation -- see its doc-comment.
+    subroutine fill_elem_mask(cache, idx, mask)
+        type(parquet_table_cache), intent(inout) :: cache !! the table's store.
+        integer, intent(in) :: idx                        !! slot index.
+        logical, allocatable, intent(out) :: mask(:,:)    !! (element, row); .true. = value.
+        logical, allocatable :: got(:,:)
+        !
+        call cache%cols(idx)%values%element_validity(got)
+        if (allocated(got)) then
+            call move_alloc(got, mask)
+            return
+        end if
+        allocate(mask(cache%cols(idx)%values%colwidth(), cache%cols(idx)%values%length()))
+        mask = .true.
+    end subroutine fill_elem_mask
     !
     module procedure table_is_detached
         call table_check_open(self, "is_detached")
@@ -519,12 +554,7 @@ contains
     end function pad
     !
     module procedure table_valid_mask_of
-        integer(int64) :: i
-        !
-        allocate(mask(cache%cols(idx)%values%length()))
-        do i = 1_int64, size(mask, kind=int64)
-            mask(i) = .not. cache%cols(idx)%values%is_null(i)
-        end do
+        call fill_row_mask(cache, idx, mask)
     end procedure table_valid_mask_of
     !
     module procedure table_valid_mask_rows
@@ -571,21 +601,7 @@ contains
     end procedure table_apply_valid_rows
     !
     module procedure table_valid_mask_of_elem
-        integer(int64) :: i, e
-        integer :: wdt
-        !
-        ! Per-element queries rather than `element_validity`, for the same reason
-        ! table_valid_mask_of uses `is_null` rather than `row_validity`: `cache` is intent(in)
-        ! here, and the bulk builders take the column as intent(inout) so a temporal kind can
-        ! refresh its cached null flag. The contract also differs -- this one always allocates,
-        ! where the bulk builders deliberately leave a null-free column's mask unallocated.
-        wdt = cache%cols(idx)%values%colwidth()
-        allocate(mask(wdt, cache%cols(idx)%values%length()))
-        do i = 1_int64, size(mask, 2, kind=int64)
-            do e = 1_int64, int(wdt, int64)
-                mask(e, i) = .not. cache%cols(idx)%values%is_null(i, e)
-            end do
-        end do
+        call fill_elem_mask(cache, idx, mask)
     end procedure table_valid_mask_of_elem
     !
     module procedure table_valid_mask_rows_elem

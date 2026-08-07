@@ -405,6 +405,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all eleven element types. Both are internal plumbing, public only because Fortran offers no
   narrower visibility: a permutation that is not one silently duplicates and drops rows.
 
+- **`parquet_table%get_valid_mask` and `%get`/`%col`/`%get_slice`'s `is_valid=` are faster on a
+  large column**, in both ranks. They used to build the mask with one `%is_null(i)` call per row;
+  they now go through the column's own bulk builder, which walks the validity bitmap a 64-bit word
+  at a time, skips a null-free word whole, and visits only the set bits inside the rest — so the
+  cost follows the *number of nulls* rather than the row count, and a column with no nulls at all
+  is a single fill. The answers are unchanged, including the rules that a rank-1 mask over a
+  vector column is the row summary ("any element of this row is null") and that the mask always
+  comes back allocated, all `.true.` for a null-free column, so no caller has to test
+  `allocated()`.
+
 - **BREAKING: `parquet_set_max_threads` is renamed to `parquet_set_arrow_threads`.** The old name is
   removed rather than kept as an alias, so a call to it no longer compiles; the replacement takes the
   same argument, does the same thing, and aborts on the same values. The new name says *whose*

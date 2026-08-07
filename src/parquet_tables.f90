@@ -1301,8 +1301,11 @@ module parquet_tables
         !> Fills `mask` with slot `idx`'s per-ROW validity: one entry per row, .true. where the
         !! row holds a value. Always allocated, even for a column with no nulls at all, so a
         !! caller never has to test allocated() before using it.
+        !!
+        !! `cache` is intent(inout) only because `parquet_column%row_validity` is: a temporal
+        !! kind refreshes its cached null flag while answering. Nothing here changes the store.
         module subroutine table_valid_mask_of(cache, idx, mask)
-            type(parquet_table_cache), intent(in) :: cache !! the table's store.
+            type(parquet_table_cache), intent(inout) :: cache !! the table's store.
             integer, intent(in) :: idx                     !! slot index.
             logical, allocatable, intent(out) :: mask(:)   !! one entry per row.
         end subroutine table_valid_mask_of
@@ -1341,8 +1344,10 @@ module parquet_tables
         !! The rank-2 counterpart of `table_valid_mask_of`, and what a vector column's
         !! `%get`/`%col`/`%get_slice` hand back: a vector column's validity is per element, so
         !! summarising it to one bit per row would be a different (and lossier) answer.
+        !!
+        !! `cache` is intent(inout) for the same reason `table_valid_mask_of`'s is.
         module subroutine table_valid_mask_of_elem(cache, idx, mask)
-            type(parquet_table_cache), intent(in) :: cache  !! the table's store.
+            type(parquet_table_cache), intent(inout) :: cache !! the table's store.
             integer, intent(in) :: idx                      !! slot index.
             logical, allocatable, intent(out) :: mask(:,:)  !! (element, row).
         end subroutine table_valid_mask_of_elem

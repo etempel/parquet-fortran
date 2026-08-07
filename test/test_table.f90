@@ -252,6 +252,8 @@ contains
                 test_table_element_null_api), &
             new_unittest("a vector column's is_valid= is per element on get, col, set and slice", &
                 test_table_rank2_masks), &
+            new_unittest("get_valid_mask spans several bitmap words, both ranks and null-free", &
+                test_valid_mask_multiword), &
             new_unittest("parquet_write_table parses a schema the caller left unparsed", &
                 test_write_table_parses_schema), &
             new_unittest("release= leaves the table in the residency state the write found", &
@@ -1190,6 +1192,85 @@ contains
         call check(error, .not. t%is_null("fv", 4_int64, 2_int64), &
             "the rank-2 %set_null(mask) must not widen to the row")
     end subroutine test_table_element_null_api
+    !
+    !> Both `%get_valid_mask` ranks over a bitmap SEVERAL WORDS long, with nulls placed where a
+    !! word-at-a-time walk can lose them.
+    !!
+    !! The other validity tests here run on 4-6 rows, which is one 64-bit word and never exercises
+    !! the walk at all. `%get_valid_mask` and `%get(is_valid=)` are built by
+    !! `parquet_column%row_validity`/`%element_validity`, which skip a zero word whole and iterate
+    !! only the SET bits inside a nonzero one -- so the cases that can go wrong are a null on a word
+    !! boundary, a null in the final PARTIAL word, and a column with no nulls at all (the branch
+    !! that has to synthesise an all-`.true.` mask, because the bulk builders deliberately hand back
+    !! nothing there).
+    !!
+    !! 100 rows is chosen for being neither a multiple of 64 nor a single word: rows 64 and 65 sit
+    !! either side of a word boundary, and row 100 is in the last, partial word.
+    subroutine test_valid_mask_multiword(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: N = 100  !! rows: spans two words, and not a multiple of 64.
+        integer, parameter :: W = 3    !! elements per row of the vector column.
+        type(parquet_table) :: t
+        real(real64) :: v(N), fv(W, N)
+        real(real64), allocatable :: vg(:)
+        logical :: want(N), ewant(W, N)
+        logical, allocatable :: got(:), egot(:,:)
+        integer :: i, e
+        !
+        do i = 1, N
+            v(i) = real(i, real64)
+            do e = 1, W
+                fv(e, i) = real(10*i + e, real64)
+            end do
+        end do
+        want = .true.
+        want([1, 64, 65, N]) = .false.
+        ewant = .true.
+        ewant(2, N) = .false.
+        !
+        call parquet_new_table(t)
+        call t%add_column("v", v)
+        call t%add_column("w", v)
+        call t%add_column("fv", fv)
+        do i = 1, N
+            if (.not. want(i)) call t%set_null("v", int(i, int64))
+        end do
+        call t%set_null("fv", int(N, int64), 2_int64)
+        !
+        call t%get_valid_mask("v", got)
+        call check(error, size(got) == N, "the multi-word rank-1 mask must have one entry per row")
+        if (allocated(error)) return
+        call check(error, all(got .eqv. want), &
+            "the rank-1 mask must find the nulls either side of the word boundary and in the last word")
+        if (allocated(error)) return
+        !
+        ! The null-free branch, at the same size: the bulk builder hands back nothing at all here,
+        ! so this is the fallback that turns "nothing" into an all-.true. mask of the right length.
+        call t%get_valid_mask("w", got)
+        call check(error, size(got) == N .and. all(got), &
+            "a null-free multi-word column must come back allocated and all .true.")
+        if (allocated(error)) return
+        !
+        ! Rank-2, where the bitmap is W times longer and the one null sits in its final word.
+        call t%get_valid_mask("fv", egot)
+        call check(error, size(egot, 1) == W .and. size(egot, 2) == N, &
+            "the multi-word rank-2 mask must be shaped (width, nrows)")
+        if (allocated(error)) return
+        call check(error, all(egot .eqv. ewant), &
+            "the rank-2 mask must mark exactly the last row's second element")
+        if (allocated(error)) return
+        !
+        ! The rank-1 form of the same vector column is the row SUMMARY, so only that row is false.
+        call t%get_valid_mask("fv", got)
+        call check(error, count(.not. got) == 1 .and. .not. got(N), &
+            "the rank-1 summary of the vector column must mark exactly the last row")
+        if (allocated(error)) return
+        !
+        ! %get(is_valid=) goes through the same builder from a different entry point.
+        call t%get("v", vg, is_valid=got)
+        call check(error, all(got .eqv. want), &
+            "%get(is_valid=) must report the same multi-word mask")
+    end subroutine test_valid_mask_multiword
     !
     !> `is_valid=` on a vector column is rank-2 everywhere it appears -- the shape-must-match rule.
     !!

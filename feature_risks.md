@@ -126,6 +126,7 @@ something a reader is expected to have.
 | [Risk-59](#risk-59--a-shared_ptr-parameter-on-a-per-element-helper-costs-7x-and-fails-nothing) | A `shared_ptr` parameter on a per-element helper costs 7x and fails nothing | 3 — not testable |
 | [Risk-60](#risk-60--a-per-element-allocatable-character-round-trip-in-a-bulk-string-operation-costs-4x-and-fails-nothing) | A per-element allocatable-character round trip in a bulk string operation costs 4x and fails nothing | 3 — not testable |
 | [Risk-61](#risk-61--a-validity-split-that-is-not-byte-aligned-loses-nulls-and-no-end-to-end-test-can-be-relied-on-to-see-it) | A validity split that is not byte-aligned loses nulls, and no end-to-end test can be relied on to see it | 4 — covered |
+| [Risk-62](#risk-62--a-validity-run-copied-byte-wise-silently-mis-places-nulls-when-its-alignment-precondition-is-wrong) | A validity run copied byte-wise silently mis-places nulls when its alignment precondition is wrong | 4 — covered |
 
 ---
 
@@ -133,7 +134,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-62**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-63**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2454,3 +2455,39 @@ everything *except* it. Any new threaded phase must take its ranges from `thread
 than compute its own, and any change to that helper must keep the unit test passing — it is the only
 deterministic guard this risk has. A "simplification" that splits rows evenly is the exact defect, and
 it will look correct in every test run that does not happen to lose a write.
+
+### Risk-62 — A validity run copied byte-wise silently mis-places nulls when its alignment precondition is wrong
+
+Risk-61's sibling, and easy to mistake for it: same corruption, no threads involved. `copy_validity_run`
+and `fill_validity_valid` (`src/parquet_strings.f90`) move a contiguous run of validity bits **eight at a
+time as whole bytes**, which is what removed `%slice`'s and `%append_column`'s entire null penalty
+(0.0118 s to 0.0039 s, 0.0113 s to 0.0031 s on 4 M rows). The speed comes from a precondition, and if
+that precondition is wrong the bytes land at the wrong bit offset: some rows come back null that were
+not, `%validate()` still passes, `%size()` and the payload are untouched, and nothing aborts.
+
+Three specific ways to get it wrong, all of which look like tidying:
+
+- **The precondition is that BOTH sides start on a byte boundary — not that they share a bit phase.**
+  Two runs at the same non-zero phase could be copied byte-wise after a ragged head, and that is a
+  tempting generalisation. It must not be written: neither caller can produce it (`slice` always writes
+  a destination from bit 0, `append_column` always reads a source from bit 0), so the head would be a
+  branch **no test in this repository can reach**. The narrower condition costs a hypothetical future
+  caller nothing but the per-bit fallback, which is already correct.
+- **The null count comes from `popcnt` and must be masked to 8 bits.** `int8` is signed in Fortran, so
+  `int(byte, int32)` sign-extends a set high bit into 24 further ones and the count is wrong by exactly
+  that much — for a byte whose eighth row is valid, i.e. most of them.
+- **The ragged tail is not optional.** Any row count that is not a multiple of 8 has one, so dropping it
+  leaves the last few rows carrying whatever the destination's bitmap held before.
+
+**Test.** `slice copies validity correctly from every bit phase` and `append_column copies validity
+correctly onto every bit phase` (`test/test_parquet_string.f90`). **The shape is the point**: both sweep
+the *alignment* — `first = 1..17` for the slice, a destination of 0..17 rows for the append — and assert
+every element's null state and value against the original, element by element. A test that only ever
+slices from row 1 or appends onto an empty column exercises the byte path alone and passes against all
+three defects above. All four mutations (each bullet, plus removing the alignment guard entirely) are
+caught by these two tests and by nothing else in the suite.
+
+**What this forbids.** Do not widen the alignment precondition without a caller that needs it and a test
+that reaches it; do not drop the mask; and do not replace the phase sweep in either test with a single
+aligned case because "the loop is the same either way" — the fallback path is where two of the three
+defects hide.

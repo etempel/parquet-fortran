@@ -49,6 +49,10 @@ module parquet_strings
     integer(int8), parameter :: BIT_MASK(0:7) = [1_int8, 2_int8, 4_int8, 8_int8, &
         16_int8, 32_int8, 64_int8, ibset(0_int8, 7)]
     !
+    !> One validity byte with all eight rows valid -- the value `ensure_validity_cap` initialises
+    !! fresh bytes to, named here so a bulk fill and that initialisation cannot drift apart.
+    integer(int8), parameter :: ALL_VALID_BYTE = -1_int8
+    !
     !> Minimum initial row / character capacity for the first allocation from empty.
     integer(int64), parameter :: MIN_ROW_CAP = 16_int64
     integer(int64), parameter :: MIN_CHAR_CAP = 64_int64
@@ -559,6 +563,107 @@ contains
         b = k/8_int64 + 1_int64
         c%validity(b) = iand(c%validity(b), not(BIT_MASK(int(mod(k, 8_int64)))))
     end subroutine set_bit_null
+    !
+    !> Copies validity bits `k0..k1` (0-based offsets from `s_first`/`d_first`) one at a time,
+    !! **adding** the nulls it copied to `nn`. The slow shape, used for the ragged ends of a run and
+    !! for a run whose two sides do not share a bit phase.
+    subroutine copy_validity_bits(src, s_first, dst, d_first, k0, k1, nn)
+        type(parquet_string_column), intent(in) :: src    !! source column.
+        integer(int64), intent(in) :: s_first             !! 1-based first source element of the run.
+        type(parquet_string_column), intent(inout) :: dst !! destination column (bitmap allocated).
+        integer(int64), intent(in) :: d_first             !! 1-based first destination element.
+        integer(int64), intent(in) :: k0                  !! first 0-based offset within the run.
+        integer(int64), intent(in) :: k1                  !! last 0-based offset within the run.
+        integer(int64), intent(inout) :: nn               !! accumulates the nulls copied.
+        integer(int64) :: k
+        do k = k0, k1
+            if (bit_valid(src, s_first + k)) then
+                call set_bit_valid(dst, d_first + k)
+            else
+                call set_bit_null(dst, d_first + k)
+                nn = nn + 1_int64
+            end if
+        end do
+    end subroutine copy_validity_bits
+    !
+    !> Copies `m` validity bits from `src` (starting at 1-based element `s_first`) to `dst`
+    !! (starting at `d_first`), reporting how many of them were null.
+    !!
+    !! **The whole middle of the run moves as BYTES, not as eight bits each.** A validity bitmap
+    !! packs 8 rows per byte, so a run whose two sides share a bit phase -- which is what
+    !! `append_column` onto an 8-aligned column and `slice` from an 8-aligned row both give -- needs
+    !! one byte copy and one `popcnt` per eight rows instead of eight read-modify-writes and eight
+    !! branches. Measured at **6.6x** on `append_column` and **3.3x** on `slice` over 4 M rows, which
+    !! is why this is an algorithm change rather than the threading S5 originally scheduled: there is
+    !! no race surface left to get wrong, and it helps the single-threaded caller too.
+    !!
+    !! **The byte path requires BOTH sides to start on a byte boundary, not merely to agree on a bit
+    !! phase.** Two runs sharing a non-zero phase could in principle be copied byte-wise after a
+    !! ragged head, but neither caller can produce that -- `slice` always writes a destination from
+    !! bit 0, `append_column` always reads a source from bit 0 -- so the head would be a branch no
+    !! test could reach. The narrower condition costs those hypothetical callers nothing but a
+    !! fallback that is already correct, and it leaves no untestable code behind.
+    !!
+    !! The ragged TAIL and a misaligned run fall back to `copy_validity_bits`, and neither is a rare
+    !! corner: `slice(3, 900)` takes the fallback whole, and any row count not a multiple of 8 has a
+    !! tail. Both must stay correct rather than merely present.
+    subroutine copy_validity_run(src, s_first, dst, d_first, m, nn)
+        type(parquet_string_column), intent(in) :: src    !! source column.
+        integer(int64), intent(in) :: s_first             !! 1-based first source element of the run.
+        type(parquet_string_column), intent(inout) :: dst !! destination column (bitmap allocated).
+        integer(int64), intent(in) :: d_first             !! 1-based first destination element.
+        integer(int64), intent(in) :: m                   !! elements to copy.
+        integer(int64), intent(out) :: nn                 !! nulls among the copied elements.
+        integer(int64) :: k, nbytes, sb, db, sbyte, dbyte
+        nn = 0_int64
+        if (m <= 0_int64) return
+        sb = s_first - 1_int64
+        db = d_first - 1_int64
+        if (mod(sb, 8_int64) /= 0_int64 .or. mod(db, 8_int64) /= 0_int64) then
+            call copy_validity_bits(src, s_first, dst, d_first, 0_int64, m - 1_int64, nn)
+            return
+        end if
+        nbytes = m/8_int64
+        sbyte = sb/8_int64 + 1_int64
+        dbyte = db/8_int64 + 1_int64
+        do k = 0_int64, nbytes - 1_int64
+            dst%validity(dbyte + k) = src%validity(sbyte + k)
+            ! A set bit is a VALID row, so the nulls in this byte are its zeros. Masked to 8 bits
+            ! because int8 is signed and `int()` would sign-extend the high bit into 24 more ones.
+            nn = nn + int(8 - popcnt(iand(int(src%validity(sbyte + k), int32), 255)), int64)
+        end do
+        if (nbytes*8_int64 < m) then
+            call copy_validity_bits(src, s_first, dst, d_first, nbytes*8_int64, m - 1_int64, nn)
+        end if
+    end subroutine copy_validity_run
+    !
+    !> Marks `m` elements from `d_first` valid, whole bytes at a time. The counterpart of
+    !! `copy_validity_run` for a source that has no nulls at all: the destination still needs its
+    !! bits set, since its bitmap can carry stale nulls from rows that have since been removed.
+    !!
+    !! Same byte-alignment condition, and for the same reason -- see `copy_validity_run`.
+    subroutine fill_validity_valid(dst, d_first, m)
+        type(parquet_string_column), intent(inout) :: dst !! destination column (bitmap allocated).
+        integer(int64), intent(in) :: d_first             !! 1-based first destination element.
+        integer(int64), intent(in) :: m                   !! elements to mark valid.
+        integer(int64) :: k, nbytes, db, dbyte
+        if (m <= 0_int64) return
+        db = d_first - 1_int64
+        if (mod(db, 8_int64) /= 0_int64) then
+            do k = 0_int64, m - 1_int64
+                call set_bit_valid(dst, d_first + k)
+            end do
+            return
+        end if
+        nbytes = m/8_int64
+        dbyte = db/8_int64 + 1_int64
+        do k = 0_int64, nbytes - 1_int64
+            dst%validity(dbyte + k) = ALL_VALID_BYTE
+        end do
+        do k = nbytes*8_int64, m - 1_int64
+            call set_bit_valid(dst, d_first + k)
+        end do
+    end subroutine fill_validity_valid
     !
     !> Returns the 1-based payload bounds `a:b` of element `i` (b < a for a zero-length element).
     subroutine elem_bounds(c, i, a, b)
@@ -1112,7 +1217,7 @@ contains
     subroutine append_column(self, other)
         class(parquet_string_column), intent(inout) :: self !! the destination column.
         type(parquet_string_column), intent(in) :: other    !! the source column.
-        integer(int64) :: base, k
+        integer(int64) :: base, k, nn
         if (other%nrows == 0) return
         call ensure_offsets_cap(self, self%nrows + other%nrows)
         if (other%nchars > 0) then
@@ -1123,22 +1228,16 @@ contains
         do k = 1_int64, other%nrows
             self%offsets(self%nrows+1+k) = base + other%offsets(k+1)
         end do
+        ! Both arms move the bitmap in whole bytes wherever the two sides share a bit phase, which
+        ! appending to an 8-aligned (or empty) destination always does. See `copy_validity_run`.
         if (other%has_nulls) then
             self%has_nulls = .true.
             call ensure_validity_cap(self, self%nrows + other%nrows)
-            do k = 1_int64, other%nrows
-                if (bit_valid(other, k)) then
-                    call set_bit_valid(self, self%nrows + k)
-                else
-                    call set_bit_null(self, self%nrows + k)
-                    self%n_null = self%n_null + 1_int64
-                end if
-            end do
+            call copy_validity_run(other, 1_int64, self, self%nrows + 1_int64, other%nrows, nn)
+            self%n_null = self%n_null + nn
         else if (self%has_nulls) then
             call ensure_validity_cap(self, self%nrows + other%nrows)
-            do k = 1_int64, other%nrows
-                call set_bit_valid(self, self%nrows + k)
-            end do
+            call fill_validity_valid(self, self%nrows + 1_int64, other%nrows)
         end if
         self%nrows = self%nrows + other%nrows
         self%nchars = self%nchars + other%nchars
@@ -1154,7 +1253,9 @@ contains
     subroutine build_from(self, handles)
         class(parquet_string_column), intent(inout), target :: self !! cleared, then filled from handles.
         type(parquet_string), intent(in) :: handles(:)               !! source handles, in order.
-        integer(int64) :: k, m, want, pos, a, b, elen, idx
+        integer(int64) :: k, m, want, a, elen, idx, nnull
+        integer(int64), allocatable :: lo(:), hi(:)
+        integer :: nt, tix
         logical :: any_null
         m = size(handles, kind=int64)
         ! The validation pass SIZES the result as it goes. Both halves have to happen before `self`
@@ -1193,11 +1294,95 @@ contains
             ! null rows below need writing.
             call ensure_validity_cap(self, m)
         end if
-        ! Each element's bytes are copied straight out of its OWN column's payload -- the handles
-        ! may reference several different columns, so this is a contiguous copy per handle rather
-        ! than one bulk move. What it avoids is the pair `%to_string` + `%append_string` cost per
-        ! element: a deferred-length allocation and free, plus a capacity check on a destination
-        ! that grew incrementally. Do not reintroduce either; see `feature_risks.md` Risk-60.
+        nt = bulk_threads(m, want)
+        ! The serial fill is the ORIGINAL single-pass loop and is kept for the same reason
+        ! `reindex_apply_serial` is: the splittable shape below reads each handle's source column
+        ! twice (once for its length, once for its bytes), and those reads are scattered across
+        ! however many columns the handles came from. Running it on one thread would hand every
+        ! below-the-floor caller -- and every caller already inside a parallel region -- a slower
+        ! loop for nothing. The two must produce byte-identical columns.
+        if (nt <= 1) then
+            call build_from_fill_serial(self, handles, want)
+            return
+        end if
+        call thread_row_ranges(m, nt, lo, hi)
+        ! Three phases, for the reason `reindex_apply` documents at length: the single loop carries
+        ! a sequential dependence through the write cursor `pos`, and the prefix sum that removes it
+        ! IS `offsets`, so it costs no extra memory.
+        !
+        ! Phase 1: each element's LENGTH into its own slot, plus its validity bit and the null count.
+        ! **This is the phase the byte-aligned ranges exist for** -- the bitmap packs 8 rows per
+        ! byte, so two threads meeting inside one would lose each other's writes and leave a column
+        ! that still validates with the wrong rows null.
+        self%offsets(1) = 0_int64
+        nnull = 0_int64
+        !$omp parallel do default(shared) private(tix, k, idx) reduction(+:nnull) &
+        !$omp     schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = lo(tix), hi(tix)
+                if (handles(k)%is_null()) then
+                    ! A null occupies a zero-width slot at the current position, exactly as
+                    ! %append_null gave it.
+                    self%offsets(k+1_int64) = 0_int64
+                    call set_bit_null(self, k)
+                    nnull = nnull + 1_int64
+                else
+                    idx = handles(k)%idx
+                    self%offsets(k+1_int64) = handles(k)%col%offsets(idx+1_int64) - &
+                        handles(k)%col%offsets(idx)
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        self%n_null = nnull
+        ! Phase 2: the scan. Serial deliberately -- O(m) over int64 and bandwidth-light next to the
+        ! payload; measure before parallelising it.
+        do k = 1_int64, m
+            self%offsets(k+1_int64) = self%offsets(k+1_int64) + self%offsets(k)
+        end do
+        ! `data` was sized ONCE, from the validation pass, so a disagreement between that pass and
+        ! this one would write past its end -- silently, since nothing here grows it any more. The
+        ! serial fill has to check this per element because it discovers the overflow as it writes;
+        ! here the whole sum is known before a single byte moves, so one compare covers it, and it
+        ! catches an undersized sum too. Defensive by construction: no fixture this repository can
+        ! build makes the two passes disagree.
+        if (self%offsets(m+1_int64) /= want) then
+            error stop EP//"build_from: internal error, payload sum disagrees with the fill" ! GCOVR_EXCL_LINE
+        end if
+        ! Phase 3: the payload copy -- the expensive one, and the one that divides cleanly. Each
+        ! element's bytes are copied straight out of its OWN column's payload, since the handles may
+        ! reference several different columns, so this is a contiguous copy per handle rather than
+        ! one bulk move.
+        !$omp parallel do default(shared) private(tix, k, a, elen, idx) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = lo(tix), hi(tix)
+                elen = self%offsets(k+1_int64) - self%offsets(k)
+                if (elen > 0_int64) then
+                    idx = handles(k)%idx
+                    a = handles(k)%col%offsets(idx) + 1_int64
+                    self%data(self%offsets(k)+1_int64:self%offsets(k)+elen) = &
+                        handles(k)%col%data(a:a+elen-1_int64)
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        self%nrows = m
+        self%nchars = self%offsets(m+1_int64)
+    end subroutine build_from
+    !
+    !> `build_from`'s original single-pass fill, kept for the below-the-floor and in-a-parallel-
+    !! region cases. See `build_from` for why both shapes exist and what binds them together.
+    !!
+    !! Offsets, validity and the payload in one loop. What it avoids -- and what any rewrite here
+    !! must keep avoiding -- is the pair `%to_string` + `%append_string` per element: a
+    !! deferred-length allocation and free, plus a capacity check on a destination that grew
+    !! incrementally. See `feature_risks.md` Risk-60.
+    subroutine build_from_fill_serial(self, handles, want)
+        class(parquet_string_column), intent(inout) :: self !! sized and cleared; receives the fill.
+        type(parquet_string), intent(in) :: handles(:)      !! source handles, already validated.
+        integer(int64), intent(in) :: want                  !! payload bytes the validation pass summed.
+        integer(int64) :: k, m, pos, a, b, elen, idx
+        m = size(handles, kind=int64)
         pos = 0_int64
         do k = 1_int64, m
             if (handles(k)%is_null()) then
@@ -1208,7 +1393,7 @@ contains
                 a = handles(k)%col%offsets(idx) + 1_int64
                 b = handles(k)%col%offsets(idx+1_int64)
                 elen = b - a + 1_int64
-                ! The destination was sized ONCE, from the pass above, so this loop is the one
+                ! The destination was sized ONCE, from the validation pass, so this loop is the one
                 ! place where a disagreement between the two would write past the end of `data`
                 ! -- silently, since nothing here grows it any more. One integer compare converts
                 ! that into a clean abort. It cannot fire while both loops agree, and no fixture
@@ -1226,7 +1411,7 @@ contains
         end do
         self%nrows = m
         self%nchars = pos
-    end subroutine build_from
+    end subroutine build_from_fill_serial
     !
     !> int32 specific of set; see the set generic.
     subroutine set_i32(self, i, str, strip, trim)
@@ -1665,17 +1850,123 @@ contains
     subroutine gather_i64(self, idx)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: idx(:)                !! 1-based source index per destination element.
-        integer(int64) :: n, m, k, a, b, elen, pos, want, nn
+        integer(int64) :: n, m, k, a, elen, want, nn, est
         integer(int64), allocatable :: new_off(:)
         character(len=1), allocatable :: new_data(:)
         logical, allocatable :: sel_null(:)
+        integer(int64), allocatable :: lo(:), hi(:)
+        integer :: nt, tix
         n = self%nrows
         m = size(idx, kind=int64)
+        ! Serial deliberately: which index is out of range must not depend on which thread noticed.
         do k = 1_int64, m
             if (idx(k) < 1_int64 .or. idx(k) > n) then
                 error stop EP//"gather: index out of range"
             end if
         end do
+        ! The work measure has to be ESTIMATED, because the exact selected payload is only known
+        ! after phase 1, which is itself one of the phases being split. Mean element length times
+        ! the selection size is exact for a uniform column and cannot be far wrong for any column,
+        ! and it is only ever used to answer "is this worth splitting" -- never as a size.
+        est = 0_int64
+        if (n > 0_int64) est = (self%nchars/n)*m
+        nt = bulk_threads(m, est)
+        ! The serial twin is the original single-cursor shape, kept for the same reason
+        ! `reindex_apply_serial` is -- and here it was MEASURED rather than assumed, after the
+        ! phased form was written without one: 0.0140 s against 0.0094 s on 4 M elements, i.e. a
+        ! 1.5x penalty handed to every caller below the floor or already inside a parallel region.
+        ! The phased form pays a whole extra pass over `new_off` (write in phase 1, read in phase 2,
+        ! read again in phase 3) that the single cursor never touches, and that is not recovered
+        ! until there are threads to spread the payload copy across.
+        if (nt <= 1) then
+            call gather_apply_serial(self, idx)
+            return
+        end if
+        call thread_row_ranges(m, nt, lo, hi)
+        allocate(new_off(m + 1_int64))
+        new_off(1) = 0_int64
+        if (self%has_nulls) allocate(sel_null(max(m, 1_int64)))
+        ! Four phases, on the same prefix-sum plan `reindex_apply` documents. This shape is what the
+        ! serial version runs too -- there is no serial twin here, because it also removes a pass:
+        ! the old code walked `idx` four times (range, nulls, sizing, fill) and this walks it three,
+        ! with the length and null reads fused into one scattered visit per element.
+        !
+        ! Phase 1: each selected element's LENGTH into its own slot, and its null flag. Both have to
+        ! be read before any buffer is replaced. Writes are to disjoint slots of fresh arrays, so any
+        ! split would be safe here; the byte-aligned one is reused because it is already computed.
+        !$omp parallel do default(shared) private(tix, k) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = lo(tix), hi(tix)
+                new_off(k+1_int64) = self%offsets(idx(k)+1_int64) - self%offsets(idx(k))
+                if (self%has_nulls) sel_null(k) = .not. bit_valid(self, idx(k))
+            end do
+        end do
+        !$omp end parallel do
+        ! Phase 2: the scan. Serial deliberately, as in `reindex_apply`. It also *is* the sizing
+        ! pass: the payload is sized to the SELECTED characters rather than to `nchars`, and after
+        ! this `new_off(m+1)` is that total.
+        do k = 1_int64, m
+            new_off(k+1_int64) = new_off(k+1_int64) + new_off(k)
+        end do
+        want = new_off(m+1_int64)
+        allocate(new_data(max(want, 1_int64)))
+        ! Phase 3: the payload copy -- disjoint destinations by construction, since phase 2 made the
+        ! offsets sequential. Rebuilding into fresh buffers rather than compacting in place is not a
+        ! threading concession: a reordering write cursor can overtake its own read cursor, which is
+        ! why `delete_by_mask`, whose output order is its input order, may compact in place and this
+        ! may not.
+        !$omp parallel do default(shared) private(tix, k, a, elen) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = lo(tix), hi(tix)
+                elen = new_off(k+1_int64) - new_off(k)
+                if (elen > 0_int64) then
+                    a = self%offsets(idx(k)) + 1_int64
+                    new_data(new_off(k)+1_int64:new_off(k)+elen) = self%data(a:a+elen-1_int64)
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        call move_alloc(new_off, self%offsets)
+        call move_alloc(new_data, self%data)
+        self%nrows = m
+        self%nchars = want
+        ! Phase 4: validity. The null COUNT can change here -- an element may be dropped, or taken
+        ! twice -- so it is recounted, where a permutation lets reindex_apply carry it over. **This
+        ! is the phase the byte-aligned ranges exist for**: two threads meeting inside one validity
+        ! byte would lose each other's writes and leave a column that still validates.
+        if (self%has_nulls) then
+            call ensure_validity_cap(self, m)
+            nn = 0_int64
+            !$omp parallel do default(shared) private(tix, k) reduction(+:nn) &
+            !$omp     schedule(static) num_threads(nt) if (nt > 1)
+            do tix = 1, nt
+                do k = lo(tix), hi(tix)
+                    if (sel_null(k)) then
+                        call set_bit_null(self, k)
+                        nn = nn + 1_int64
+                    else
+                        call set_bit_valid(self, k)
+                    end if
+                end do
+            end do
+            !$omp end parallel do
+            self%n_null = nn
+        end if
+    end subroutine gather_i64
+    !
+    !> `gather`'s original single-cursor rebuild, kept for the serial case. See `gather_i64` for why
+    !! both shapes exist and for the measurement that put this one back.
+    !!
+    !! Assumes `idx` has already been range-checked. The two shapes must produce byte-identical
+    !! columns; `test_string_parallel` holds them to that.
+    subroutine gather_apply_serial(self, idx)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: idx(:)                !! 1-based source index per destination element.
+        integer(int64) :: m, k, a, b, elen, pos, want, nn
+        integer(int64), allocatable :: new_off(:)
+        character(len=1), allocatable :: new_data(:)
+        logical, allocatable :: sel_null(:)
+        m = size(idx, kind=int64)
         ! Both preparation passes are O(m), not O(size()): the selected elements' null flags have to
         ! be read before any buffer is replaced, and the payload is sized to what is selected.
         if (self%has_nulls) then
@@ -1719,7 +2010,7 @@ contains
             end do
             self%n_null = nn
         end if
-    end subroutine gather_i64
+    end subroutine gather_apply_serial
     !
     !> int32 specific of append_nulls; see the append_nulls generic.
     subroutine append_nulls_i32(self, n)
@@ -2023,7 +2314,7 @@ contains
     ! Conversion / ownership
     ! ==================================================================================
     !
-!> Orders element `i` against element `j`: -1 when i sorts first, +1 when j does, 0 when equal.
+    !> Orders element `i` against element `j`: -1 when i sorts first, +1 when j does, 0 when equal.
     !!
     !! **Exactly Fortran's own `<` on the two values**, blanks and all: the shorter element is
     !! compared as though padded with blanks, so `"ab"` and `"ab  "` are equal and `"ab"` sorts before
@@ -2091,7 +2382,7 @@ contains
         end if
     end function compare
     !
-        !> Materializes the whole column into a conventional Fortran character array `out`, each
+    !> Materializes the whole column into a conventional Fortran character array `out`, each
     !! element blank-padded to the longest element's length. A null element error stops by default;
     !! pass `null_value` to substitute a string for nulls.
     !!
@@ -2101,15 +2392,24 @@ contains
     !! 71 % of this procedure, not the copying it was there to do. Do not reintroduce a
     !! `character(len=:), allocatable` intermediate here, or in any other bulk operation over this
     !! type; see `feature_risks.md` Risk-60.
+    !!
+    !! **The fill loop threads with no restructure**, unlike `reindex_apply`: `out(i)` is `maxlen`
+    !! bytes at a fixed stride, so every element's destination is known from `i` alone and there is
+    !! no write cursor to carry. There is no serial twin here for that reason -- with `nt == 1` this
+    !! *is* the original loop, so nothing is slower for a caller that does not thread.
     subroutine to_character(self, out, null_value)
         class(parquet_string_column), intent(in) :: self          !! the column.
         character(len=:), allocatable, intent(out) :: out(:)      !! materialized, padded strings.
         character(len=*), intent(in), optional :: null_value      !! substitute for null elements.
         integer(int64) :: i, elen, maxlen, a, b
+        integer(int64), allocatable :: lo(:), hi(:)
+        integer :: nt, tix
         maxlen = 0_int64
         if (present(null_value)) maxlen = int(len(null_value), int64)
         ! First pass sizes the result AND is where a null aborts -- both before `out` is allocated,
         ! so a column that cannot be materialized never allocates the array it would have gone into.
+        ! Deliberately still serial: the abort must name the FIRST offending row whatever the machine
+        ! does, and this pass moves 8 bytes per row against the fill loop's `maxlen`. See S9.
         do i = 1_int64, self%nrows
             if (bit_valid(self, i)) then
                 elen = self%offsets(i+1) - self%offsets(i)
@@ -2119,19 +2419,33 @@ contains
             end if
         end do
         allocate(character(len=maxlen) :: out(self%nrows))
-        do i = 1_int64, self%nrows
-            if (.not. bit_valid(self, i)) then
-                out(i) = null_value
-            else
-                call elem_bounds(self, i, a, b)
-                elen = b - a + 1_int64
-                ! Left-justified and blank-padded to maxlen, exactly as the whole-element
-                ! assignment this replaced was: the payload bytes first, then the padding, which
-                ! together write each element's maxlen bytes exactly once.
-                if (elen > 0_int64) out(i)(1:elen) = transfer(self%data(a:b), out(i)(1:elen))
-                if (elen < maxlen) out(i)(elen+1_int64:) = ""
-            end if
+        ! The work measure is what this loop WRITES (`nrows * maxlen`), not the packed payload: a
+        ! column of short strings padded to a long `maxlen` moves several times its own
+        ! `character_size()` here, and asking about the payload would decline to thread exactly the
+        ! case that most needs it.
+        nt = bulk_threads(self%nrows, self%nrows*maxlen)
+        call thread_row_ranges(self%nrows, nt, lo, hi)
+        ! No validity is WRITTEN here -- `out` is a plain character array and the bitmap is only read
+        ! -- so any split would be safe. The byte-aligned one is reused because it is already
+        ! written, tested, and gives contiguous ranges, which is what keeps two threads off one cache
+        ! line at the boundary.
+        !$omp parallel do default(shared) private(tix, i, a, b, elen) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do i = lo(tix), hi(tix)
+                if (.not. bit_valid(self, i)) then
+                    out(i) = null_value
+                else
+                    call elem_bounds(self, i, a, b)
+                    elen = b - a + 1_int64
+                    ! Left-justified and blank-padded to maxlen, exactly as the whole-element
+                    ! assignment this replaced was: the payload bytes first, then the padding, which
+                    ! together write each element's maxlen bytes exactly once.
+                    if (elen > 0_int64) out(i)(1:elen) = transfer(self%data(a:b), out(i)(1:elen))
+                    if (elen < maxlen) out(i)(elen+1_int64:) = ""
+                end if
+            end do
         end do
+        !$omp end parallel do
     end subroutine to_character
     !
     !> Returns an independent deep copy of the column (shrunk to the current size). Mutating either
@@ -2197,14 +2511,9 @@ contains
         if (self%has_nulls) then
             dest%has_nulls = .true.
             call ensure_validity_cap(dest, n)
-            do k = 1_int64, n
-                if (bit_valid(self, first+k-1_int64)) then
-                    call set_bit_valid(dest, k)
-                else
-                    call set_bit_null(dest, k)
-                    dest%n_null = dest%n_null + 1_int64
-                end if
-            end do
+            ! `dest` was cleared, so its count starts at zero. The run moves in whole bytes when
+            ! `first` is 8-aligned and bit by bit otherwise; see `copy_validity_run`.
+            call copy_validity_run(self, first, dest, 1_int64, n, dest%n_null)
         end if
         dest%nrows = n
         dest%nchars = b - base

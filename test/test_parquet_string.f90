@@ -67,7 +67,11 @@ contains
             new_unittest("thread row ranges cover every row and never share a validity byte", &
                 test_thread_row_ranges), &
             new_unittest("compare orders elements exactly as Fortran does", &
-                test_compare_matches_fortran) &
+                test_compare_matches_fortran), &
+            new_unittest("slice copies validity correctly from every bit phase", &
+                test_slice_validity_alignment), &
+            new_unittest("append_column copies validity correctly onto every bit phase", &
+                test_append_column_validity_alignment) &
             ]
     end subroutine collect_tests_parquet_string
     !
@@ -1481,6 +1485,149 @@ contains
         if (allocated(error)) return
         call check(error, col%compare(2_int64, 2_int64) == 0, "an element compares equal to itself")
     end subroutine test_compare_matches_fortran
+    !
+    !> Builds a column of `n` deterministic elements, null at every `null_every`-th row.
+    !!
+    !! Lengths vary and the FIRST element is the shortest, per this project's standing rule for any
+    !! string fixture -- a fixture whose first element is longest passes even when a length is being
+    !! derived from element 1.
+    subroutine build_marked(c, n, null_every)
+        type(parquet_string_column), intent(inout) :: c !! receives the column.
+        integer(int64), intent(in) :: n                 !! element count.
+        integer(int64), intent(in) :: null_every        !! null stride; <= 0 for none.
+        integer(int64) :: k, l
+        character(len=32) :: buf
+        call c%clear()
+        do k = 1_int64, n
+            if (null_every > 0_int64) then
+                if (mod(k, null_every) == 0_int64) then
+                    call c%append_null()
+                    cycle
+                end if
+            end if
+            l = 1_int64 + mod(k*5_int64, 11_int64)
+            write(buf, '(a,i0)') repeat(char(ichar("a") + int(mod(k, 26_int64))), int(l)), k
+            call c%append_string(trim(buf))
+        end do
+    end subroutine build_marked
+    !
+    !> **`slice` moves the validity bitmap in whole BYTES when its source start is 8-aligned, and
+    !! bit by bit when it is not — so every bit phase of `first` has to be exercised.**
+    !!
+    !! The byte path has three parts (a ragged head, whole bytes, a ragged tail) and a fallback for
+    !! a run whose two sides disagree on phase. `first = 1` takes the all-byte path and is what a
+    !! benchmark measures; `first = 2..9` walks every other phase, where the destination starts at
+    !! bit 0 and the source does not, so the whole run goes through the fallback. Lengths are swept
+    !! independently so the tail lands at every position within a byte.
+    !!
+    !! Asserted against the SOURCE element by element, not against a second slice — an oracle built
+    !! from the same code would agree with itself.
+    subroutine test_slice_validity_alignment(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, dst
+        character(len=:), allocatable :: a, b
+        integer(int64) :: first, n, k, last, expect_nulls
+        logical :: ok_null, ok_val
+        !
+        call build_marked(src, 200_int64, 3_int64)
+        ok_null = .true.
+        ok_val = .true.
+        do first = 1_int64, 17_int64
+            do n = 1_int64, 40_int64
+                last = first + n - 1_int64
+                call src%slice(first, last, dst)
+                if (dst%size() /= n) then
+                    call check(error, .false., "slice must produce exactly last-first+1 rows")
+                    return
+                end if
+                expect_nulls = 0_int64
+                do k = 1_int64, n
+                    if (src%is_null(first+k-1_int64) .neqv. dst%is_null(k)) ok_null = .false.
+                    if (src%is_null(first+k-1_int64)) then
+                        expect_nulls = expect_nulls + 1_int64
+                    else
+                        call src%get(first+k-1_int64, a)
+                        call dst%get(k, b)
+                        ! Nested rather than `.and.`-ed: Fortran does not short-circuit.
+                        if (len(a) /= len(b)) then
+                            ok_val = .false.
+                        else if (a /= b) then
+                            ok_val = .false.
+                        end if
+                    end if
+                end do
+                if (dst%null_count() /= expect_nulls) then
+                    call check(error, .false., "slice must recount nulls to match the rows it took")
+                    return
+                end if
+                if (.not. dst%validate()) then
+                    call check(error, .false., "a slice must satisfy the class invariants at every bit phase")
+                    return
+                end if
+            end do
+        end do
+        call check(error, ok_null, "every sliced row must carry the null state of the row it came from")
+        if (allocated(error)) return
+        call check(error, ok_val, "every sliced row must carry the value of the row it came from")
+    end subroutine test_slice_validity_alignment
+    !
+    !> **`append_column` writes the incoming validity run at the DESTINATION's current row count**,
+    !! so the bit phase that decides between the byte path and the fallback is the destination's,
+    !! not the source's.
+    !!
+    !! The destination is swept from empty to 17 rows so every phase is hit, in both the
+    !! source-has-nulls arm (a copied run) and the source-is-clean arm (a fill, which must still
+    !! write bits because the destination's bitmap can carry stale nulls). Both are asserted against
+    !! the two originals, element by element.
+    subroutine test_append_column_validity_alignment(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: dst, head, tail
+        character(len=:), allocatable :: a, b
+        integer(int64) :: d, k, expect_nulls, stride
+        logical :: ok_null, ok_val
+        !
+        ok_null = .true.
+        ok_val = .true.
+        do stride = 0_int64, 4_int64, 4_int64      ! 0 = a clean source, 4 = one with nulls
+            do d = 0_int64, 17_int64
+                call build_marked(head, d, 3_int64)
+                call build_marked(tail, 37_int64, stride)
+                dst = head%clone()
+                call dst%append_column(tail)
+                if (dst%size() /= d + 37_int64) then
+                    call check(error, .false., "append_column must add exactly the source's row count")
+                    return
+                end if
+                expect_nulls = head%null_count() + tail%null_count()
+                if (dst%null_count() /= expect_nulls) then
+                    call check(error, .false., "append_column must carry both columns' null counts")
+                    return
+                end if
+                do k = 1_int64, d
+                    if (head%is_null(k) .neqv. dst%is_null(k)) ok_null = .false.
+                end do
+                do k = 1_int64, 37_int64
+                    if (tail%is_null(k) .neqv. dst%is_null(d+k)) ok_null = .false.
+                    if (.not. tail%is_null(k)) then
+                        call tail%get(k, a)
+                        call dst%get(d+k, b)
+                        if (len(a) /= len(b)) then
+                            ok_val = .false.
+                        else if (a /= b) then
+                            ok_val = .false.
+                        end if
+                    end if
+                end do
+                if (.not. dst%validate()) then
+                    call check(error, .false., "an appended column must satisfy the class invariants")
+                    return
+                end if
+            end do
+        end do
+        call check(error, ok_null, "appending must preserve both sides' null states at every bit phase")
+        if (allocated(error)) return
+        call check(error, ok_val, "appending must preserve the source's values at every bit phase")
+    end subroutine test_append_column_validity_alignment
     !
 
 end module test_parquet_string

@@ -350,10 +350,12 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 
 | variable | accepts |
 |---|---|
-| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the three below at once |
+| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the five below at once |
 | `PARQUET_FORTRAN_ARROW_THREADS` | integer >= 1 |
 | `PARQUET_FORTRAN_SORT_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_PREFETCH_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_TABLE_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_STRING_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS` | integer >= 0 (`0` = built-in) |
 | `PARQUET_FORTRAN_SORT_COUNTING_PATH` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT` | integer >= 0 (`0` = built-in) |
@@ -365,10 +367,10 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_VERBOSITY` | `normal`/`silent`/`errors_only` |
 | `PARQUET_FORTRAN_MESSAGE_STREAM` | `stdout`/`stderr` |
 
-`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the other three, so a
+`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the other five, so a
 specific variable always overrides it — `PARQUET_FORTRAN_THREADS=8 PARQUET_FORTRAN_SORT_THREADS=2`
-gives eight threads to Arrow and the prefetch, and two to sorting, whichever order the two appear in
-your shell.
+gives eight threads to Arrow, the prefetch, the table and the string column, and two to sorting,
+whichever order the two appear in your shell.
 
 ```bash
 export PARQUET_FORTRAN_THREADS=4

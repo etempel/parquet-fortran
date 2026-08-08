@@ -17,7 +17,7 @@
 !! flags only when `--profile` is given), and this measures ratios between loops that optimise very
 !! differently, so an unoptimised run does not merely scale everything down -- it reorders the table.
 program benchmark_strings
-    use, intrinsic :: iso_fortran_env, only : int64, real64, output_unit, error_unit
+    use, intrinsic :: iso_fortran_env, only : int8, int64, real64, output_unit, error_unit
     use parquet
     implicit none
 
@@ -275,9 +275,127 @@ contains
         end do
         call report("length loop", best, payload)
 
+        call validation_cost_model(perm, nrows, rounds, sink)
+
         write (output_unit, '(a)') ""
         write (output_unit, '(a,i0,a)') "(checksum ", sink, ")"
     end subroutine run_all
+
+    !> **A cost model for `reindex`'s permutation validation (feature_string_parallel.md S7).**
+    !!
+    !! `reindex` = `reindex_trusted` + a validation scan, and the difference between those two rows
+    !! above is what that scan costs end to end. This section takes it apart, because "make the scan
+    !! parallel" and "make the scan cheaper" are different projects and the split decides which.
+    !!
+    !! The loops here are DELIBERATE REPLICAS of `reindex_i64`'s validation, not calls into it: the
+    !! library has no entry point that runs one half of it. The replica is kept honest by the
+    !! `bit seen` row, which must reproduce the end-to-end difference above -- if it does not, the
+    !! model is measuring something else and none of the other rows mean anything.
+    !!
+    !! Rows:
+    !! - `validate: range only`   -- the sequential read of `perm` plus the bounds compare. The floor:
+    !!                               no scan can cost less than reading its own input.
+    !! - `validate: bit seen`     -- what ships today; a bit-packed seen-set, `(n+7)/8` bytes.
+    !! - `validate: byte seen`    -- one byte per element instead of one bit: 8x the memory, but a
+    !!                               plain store instead of a read-modify-write, and no shift/mask.
+    !! - `validate: byte + memset`-- the same, counting the `seen = 0` clear that a byte-set needs 8x
+    !!                               more of. Charged separately because it is the byte-set's only
+    !!                               structural disadvantage.
+    !!
+    !! **Two permutation SHAPES, because the ranking is not shape-independent.** A reversal is the
+    !! best case for the seen-set's locality (8 consecutive `p` share one byte) and simultaneously
+    !! the worst case for the bit-set's store-to-load forwarding (those 8 read-modify-writes
+    !! serialise on one byte). A scattered permutation inverts both. Reporting either alone would
+    !! give a confident answer to the wrong question -- and the byte-set costs 8x the memory, which
+    !! only shows up once the access misses cache.
+    subroutine validation_cost_model(perm, nrows, rounds, sink)
+        integer(int64), intent(in) :: perm(:)    !! the reversal the rows above reindex by.
+        integer(int64), intent(in) :: nrows      !! element count.
+        integer, intent(in) :: rounds            !! timed rounds.
+        integer(int64), intent(inout) :: sink    !! keep-alive accumulator, so nothing is optimised out.
+        integer(int8), allocatable :: bits(:), bytes(:)
+        integer(int64), allocatable :: scat(:), p_use(:)
+        integer(int64) :: k, p, word, bad, stride
+        integer :: r, shape_ix
+        real(real64) :: t0, best
+
+        if (nrows <= 0_int64) return
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a)') "permutation validation (S7 cost model; MB/s column is over perm itself)"
+        write (output_unit, '(a)') "---------------------------------------------------------------"
+        allocate(bits((nrows + 7_int64)/8_int64), bytes(nrows), scat(nrows))
+        ! k*stride mod nrows is a permutation exactly when the two are coprime; 7919 is prime and
+        ! does not divide any row count this benchmark is run with.
+        stride = 7919_int64
+        do k = 1_int64, nrows
+            scat(k) = 1_int64 + mod(k*stride, nrows)
+        end do
+
+        bad = 0_int64
+        do shape_ix = 1, 2
+            if (shape_ix == 1) then
+                p_use = perm
+            else
+                write (output_unit, '(a)') "  (scattered permutation)"
+                p_use = scat
+            end if
+
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                do k = 1_int64, nrows
+                    p = p_use(k)
+                    if (p < 1_int64 .or. p > nrows) bad = bad + 1_int64
+                end do
+                best = min(best, now() - t0)
+            end do
+            call report("validate: range only", best, nrows*8_int64)
+
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                bits = 0_int8
+                do k = 1_int64, nrows
+                    p = p_use(k)
+                    if (p < 1_int64 .or. p > nrows) bad = bad + 1_int64
+                    word = (p - 1_int64)/8_int64 + 1_int64
+                    if (btest(bits(word), int(mod(p - 1_int64, 8_int64)))) bad = bad + 1_int64
+                    bits(word) = ibset(bits(word), int(mod(p - 1_int64, 8_int64)))
+                end do
+                best = min(best, now() - t0)
+            end do
+            call report("validate: bit seen", best, nrows*8_int64)
+
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                bytes = 0_int8
+                t0 = now()
+                do k = 1_int64, nrows
+                    p = p_use(k)
+                    if (p < 1_int64 .or. p > nrows) bad = bad + 1_int64
+                    if (bytes(p) /= 0_int8) bad = bad + 1_int64
+                    bytes(p) = 1_int8
+                end do
+                best = min(best, now() - t0)
+            end do
+            call report("validate: byte seen", best, nrows*8_int64)
+
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                bytes = 0_int8
+                do k = 1_int64, nrows
+                    p = p_use(k)
+                    if (p < 1_int64 .or. p > nrows) bad = bad + 1_int64
+                    if (bytes(p) /= 0_int8) bad = bad + 1_int64
+                    bytes(p) = 1_int8
+                end do
+                best = min(best, now() - t0)
+            end do
+            call report("validate: byte + memset", best, nrows*8_int64)
+        end do
+        sink = sink + bad
+    end subroutine validation_cost_model
 
     !> Writes one result row.
     subroutine report(label, secs, payload)

@@ -42,6 +42,12 @@ contains
                 test_reindex_threaded_equals_serial), &
             new_unittest("threaded reindex places nulls identically across byte boundaries", &
                 test_reindex_threaded_nulls), &
+            new_unittest("threaded to_character equals the serial to_character", &
+                test_to_character_threaded_equals_serial), &
+            new_unittest("threaded build_from equals the serial build_from", &
+                test_build_from_threaded_equals_serial), &
+            new_unittest("threaded gather equals the serial gather", &
+                test_gather_threaded_equals_serial), &
             new_unittest("the thread floor declines below its break-even", test_thread_break_even) &
             ]
     end subroutine collect_tests_string_parallel
@@ -190,6 +196,168 @@ contains
         end do
         call check(error, ever_threaded, "negative control: the null arms must actually have threaded")
     end subroutine test_reindex_threaded_nulls
+    !
+    !> **`to_character`'s fill loop threads with no serial twin, so this asserts a different thing
+    !! from the reindex tests above.**
+    !!
+    !! There is no alternative code path to diff against — with one thread the same loop runs — so
+    !! what a race would corrupt here is the *content* of `out`, and the reference is the same call
+    !! made serially. Both the abort-on-null form and the `null_value=` form are swept, because they
+    !! take different arms inside the threaded loop and only one of them writes `out(i)` whole.
+    subroutine test_to_character_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: ser(:), par(:)
+        integer(int64) :: n, stride
+        logical :: ever_threaded
+        !
+        ever_threaded = .false.
+        do stride = 0_int64, 5_int64, 5_int64      ! 0 = no nulls, 5 = every 5th null
+            do n = 1021_int64, 1024_int64
+                call build(col, n, stride)
+                !
+                call parquet_debug_set_string_min_bytes(0_int64)
+                call parquet_set_string_threads(1)
+                if (stride > 0_int64) then
+                    call col%to_character(ser, null_value="<none>")
+                else
+                    call col%to_character(ser)
+                end if
+                !
+                call parquet_set_string_threads(0)
+                call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                if (parquet_debug_string_bulk_threads(col) > 1) ever_threaded = .true.
+                if (stride > 0_int64) then
+                    call col%to_character(par, null_value="<none>")
+                else
+                    call col%to_character(par)
+                end if
+                call parquet_debug_set_string_min_bytes(0_int64)
+                !
+                ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so a shape test and
+                ! a content test on one line would compare mismatched arrays.
+                call check(error, size(ser) == size(par), "both arms must materialize the same row count")
+                if (allocated(error)) return
+                call check(error, len(ser) == len(par), &
+                    "both arms must pad to the same length, or the maxlen scan disagreed")
+                if (allocated(error)) return
+                call check(error, all(ser == par), &
+                    "threaded to_character must produce byte-identical elements to the serial one")
+                if (allocated(error)) return
+            end do
+        end do
+        call check(error, ever_threaded, &
+            "negative control: at least one arm must actually have threaded, or this compares serial with serial")
+    end subroutine test_to_character_threaded_equals_serial
+    !
+    !> **`gather` keeps a serial twin because the phased shape measured 1.5x SLOWER on one thread**,
+    !! so this is an A/B between two genuinely different rebuilds, like the reindex tests above.
+    !!
+    !! Unlike a reindex, a gather may drop elements, repeat them and change the row count, so the
+    !! null *count* is recomputed rather than carried — which is the part a wrong split corrupts
+    !! silently. The index lists here deliberately do all three: a subset, a reversal, and one with
+    !! repeats.
+    subroutine test_gather_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, ser, par
+        integer(int64), allocatable :: idx(:)
+        integer(int64) :: n, k, m, mode, stride
+        logical :: ever_threaded
+        !
+        ever_threaded = .false.
+        do stride = 0_int64, 3_int64, 3_int64
+            do mode = 1_int64, 3_int64
+                do n = 1021_int64, 1022_int64
+                    call build(src, n, stride)
+                    select case (int(mode))
+                    case (1)                                   ! a strict subset, in order
+                        m = n/2_int64
+                        allocate(idx(m))
+                        do k = 1_int64, m
+                            idx(k) = 2_int64*k
+                        end do
+                    case (2)                                   ! everything, reversed
+                        m = n
+                        allocate(idx(m))
+                        do k = 1_int64, m
+                            idx(k) = n - k + 1_int64
+                        end do
+                    case default                               ! longer than the source, with repeats
+                        m = n + n/3_int64
+                        allocate(idx(m))
+                        do k = 1_int64, m
+                            idx(k) = 1_int64 + mod(k*7_int64, n)
+                        end do
+                    end select
+                    !
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    call parquet_set_string_threads(1)
+                    ser = src%clone()
+                    call ser%gather(idx)
+                    !
+                    call parquet_set_string_threads(0)
+                    call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                    par = src%clone()
+                    if (parquet_debug_string_bulk_threads(par) > 1) ever_threaded = .true.
+                    call par%gather(idx)
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    !
+                    call check(error, ser%size() == par%size(), "both gathers must produce the same row count")
+                    if (allocated(error)) return
+                    call check(error, ser%null_count() == par%null_count(), &
+                        "both gathers must RECOUNT the same number of nulls")
+                    if (allocated(error)) return
+                    call check(error, same_column(ser, par), &
+                        "threaded gather must equal the serial gather in every element and null")
+                    if (allocated(error)) return
+                    call check(error, par%validate(), "the threaded gather satisfies the class invariants")
+                    if (allocated(error)) return
+                    deallocate(idx)
+                end do
+            end do
+        end do
+        call check(error, ever_threaded, "negative control: at least one gather arm must have threaded")
+    end subroutine test_gather_threaded_equals_serial
+    !
+    !> **`build_from`'s threaded fill is a genuinely different shape from its serial one**, so this
+    !! is an A/B in the same sense as the reindex tests: one loop against three phases plus a scan.
+    !!
+    !! The handles are taken from a column with nulls, so the run exercises the phase that writes
+    !! validity bits under the byte-aligned split — the one whose failure is silent.
+    subroutine test_build_from_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, ser, par
+        type(parquet_string), allocatable :: h(:)
+        integer(int64) :: n, stride
+        logical :: ever_threaded
+        !
+        ever_threaded = .false.
+        do stride = 0_int64, 3_int64, 3_int64
+            do n = 1021_int64, 1024_int64
+                call build(src, n, stride)
+                allocate(h(n))
+                call src%view_all(h)
+                !
+                call parquet_debug_set_string_min_bytes(0_int64)
+                call parquet_set_string_threads(1)
+                call ser%build_from(h)
+                !
+                call parquet_set_string_threads(0)
+                call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                if (parquet_debug_string_bulk_threads(src) > 1) ever_threaded = .true.
+                call par%build_from(h)
+                call parquet_debug_set_string_min_bytes(0_int64)
+                !
+                call check(error, same_column(ser, par), &
+                    "threaded build_from must equal the serial build_from in every element and null")
+                if (allocated(error)) return
+                call check(error, par%validate(), "the threaded gather satisfies the class invariants")
+                if (allocated(error)) return
+                deallocate(h)
+            end do
+        end do
+        call check(error, ever_threaded, "negative control: at least one build_from arm must have threaded")
+    end subroutine test_build_from_threaded_equals_serial
     !
     !> The thread floor declines below its break-even rather than running a slower shape on two
     !! threads.

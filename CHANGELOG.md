@@ -28,8 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overrides the rule that work inside an OpenMP parallel region runs serially.
   `parquet_set_threads(n)` now sets five subsystems rather than four, and
   `PARQUET_FORTRAN_STRING_THREADS` reaches it from the environment. **What currently uses it:**
-  `%reindex`/`%reindex_trusted`, and so `parquet_column`'s string reindex and `parquet_table%sort_by`
-  on a string column when they are not already inside a parallel region. **The gain scales with both
+  `%reindex`/`%reindex_trusted` — and so `parquet_column`'s string reindex and
+  `parquet_table%sort_by` on a string column — plus `%to_character`, `%build_from` and `%gather`,
+  in each case only when not already inside a parallel region. On an 8-core M1 Pro those three add
+  **3.4x**, **1.4x** and **1.3x** on 4 M elements. **The gain scales with both
   the machine and the column**, measured on three: **1.15x** on an 8-core M1 Pro, **1.6-2.7x** on an
   8-core i7, and **3.4-4.5x** on a 192-core dual-socket EPYC — in each case the larger figure is the
   larger column, and a 40 M-element column gains roughly 1.7x more than a 4 M one on the same
@@ -448,6 +450,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.168 s to 0.038 s, `%build_from` 0.305 s to 0.033 s. Results are unchanged in every respect —
   same padding to the longest element, same `null_value` substitution, same trimming behaviour, same
   aborts on a null with no `null_value` and on an invalid handle.
+- **`parquet_string_column%slice` and `%append_column` no longer pay for a column's nulls.** Both
+  copied the validity bitmap one row at a time, so a column with nulls cost roughly three times one
+  without — where a bitmap packs eight rows to a byte and the run being copied is contiguous. They
+  now move it in whole bytes wherever both sides start on a byte boundary, which covers slicing from
+  row 1 and appending onto an empty or 8-aligned column, and fall back to the per-row walk
+  otherwise. Measured on 4 M elements with nulls: `%slice` 0.0118 s to 0.0039 s, `%append_column`
+  0.0113 s to 0.0031 s — in both cases now the same cost as the null-free column. This is serial:
+  it needs no threads and helps every caller. Null placement and counts are unchanged.
 - **Applying a `filter=` is 3–4x faster**, and the gain grows with the number of columns the filter
   names. The per-row clause evaluation was reading each value through a helper that took the Arrow
   array by `shared_ptr` — one atomic refcount increment and decrement per row, to read one number.

@@ -288,6 +288,22 @@ j = col%find("Bob ", exact=.false.)     ! trailing-blanks ignored on both sides
 The same operations are available on a handle: `h%equals(str)`, `h%startswith(prefix)`,
 `h%endswith(suffix)`, `h%contains(str)`.
 
+`compare(i, j)` orders two elements of the same column against each other, returning `-1` when `i`
+sorts first, `+1` when `j` does, and `0` when they are equal. It is exactly Fortran's own `<` on the
+two values — the shorter one is compared as though padded with blanks, so `"ab"` equals `"ab  "` and
+sorts before `"abc"` — so it can replace a `%get`-both-then-compare without changing any answer:
+
+```fortran
+if (col%compare(i, j) < 0) ...          ! same as: get both, then a < b
+```
+
+The point of it is that **it allocates nothing**. A scan for the smallest and largest value that
+fetches every element through `%get` pays one heap round-trip per row; tracking the two winning
+*indices* through `compare` and fetching only those two at the end pays none — which is how
+`parquet_table%print_stat` reports a string column's min and max. Nulls are not special-cased: a
+null is zero-width, so it compares as an empty string and sorts first. Test `%is_null` yourself if
+you need them ordered otherwise, exactly as you would around `%get`.
+
 ## Modifying a column
 
 ```fortran
@@ -521,6 +537,7 @@ same type's accessors, but not specific to it — is covered in the main
 | `append_column(other)` | O(other rows + other chars) |
 | `get(i)` | O(length) |
 | `equals` / `contains` / `startswith` / `endswith` (one element) | O(length) |
+| `compare(i, j)` | O(shorter length), no allocation |
 | `find` | O(rows × avg length) |
 | `set` (different length), `set_null`, `erase`, `strip_all`, `trim_all`, `clone`, `to_character`, `shrink_to_fit` | O(N) |
 | `slice(first, last, dest)` | O(range length + range chars) |
@@ -603,7 +620,7 @@ call parquet_read_column_chunk(reader, "name", row_group, chunk)   ! cleared, th
 
 ## Interop hooks for the read/write path
 
-Two advanced procedures expose the internal buffers that back the read/write integration above —
+Three advanced procedures expose the internal buffers that back the read/write integration above —
 ordinary users of `parquet_write_column`/`parquet_read_column` never need to call them directly:
 
 - `raw_buffers(offsets_ptr, data_ptr, validity_ptr, nrows, nchars, has_validity)` — exports
@@ -619,6 +636,13 @@ ordinary users of `parquet_write_column`/`parquet_read_column` never need to cal
   element's bytes. `validity`'s bit 0 has the same requirement and is not separately guarded
   (not detectable from a raw pointer), so a source bitmap with a non-byte-aligned logical start
   must likewise be repacked by the caller before calling this.
+- `copy_buffers(offsets, data)` — the **safe** counterpart to `raw_buffers`: it copies the same
+  offsets and packed payload into two caller-supplied arrays (sized `size()+1` and
+  `character_size()`; anything shorter aborts) instead of handing out pointers. Two `memcpy`s, and
+  the result outlives the next mutation. Prefer it whenever the consumer is Fortran — `raw_buffers`
+  exists for the case where a C caller must read the buffers in place, and its pointers are only
+  valid while the actual argument carries `TARGET` all the way up a call chain the column cannot
+  inspect. This is how a string sort key is packed.
 
 These reference only `iso_c_binding`, keeping the module independent of the rest of this
 library — `parquet_write_string.f90`/`parquet_read_string.f90` (the string read/write integration

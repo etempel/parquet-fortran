@@ -239,6 +239,17 @@ contains
         ! where a float64 column's is a gather, so a static split leaves threads idle behind the
         ! string columns.
         !
+        ! **The imbalance is real but the choice is not settled -- measured, and the measurement did
+        ! not confirm this.** On 5.2M rows a PK_STRING (len 16) reindex costs 7.9x a float64 one, so
+        ! the premise above holds. But over 24 columns on 8 threads, which schedule wins depends on
+        ! where the string column SITS: dynamic is ~12% faster when it comes first and ~14% slower
+        ! when it comes last (it is then picked up near the end and 7 threads idle behind it), while
+        ! static is within 5% of itself either way. Neither dominates, because the loop is
+        ! bandwidth-saturated -- 24 columns summing to 0.068 s serially take 0.031 s on 8 threads,
+        ! a 2.2x speedup, so the machine binds before the schedule does. **Do not "fix" this either
+        ! way on reasoning alone; the ordering fix (expensive columns first) beats both and is what
+        ! a change here should actually do.** See `feature_table.md` for the numbers and the option.
+        !
         ! Nothing finalizable is declared inside this construct -- the body only references slots
         ! that already exist. That is what keeps feature_risks.md Risk-45 (gfortran and ifx forbid
         ! opposite shapes for a finalizable type in a parallel region) out of this region entirely;

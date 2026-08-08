@@ -409,6 +409,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`parquet_string_column%to_character` is 4.3x faster.** It was materializing each element through
+  `%get`, which allocates a deferred-length string, fills it, copies it into the output row and frees
+  it — one heap round-trip per row, which measured as 71% of the whole operation rather than the
+  copying it was there to do. The payload bytes are now copied straight out of the column's own
+  buffer. Measured on 4 M elements / 70 MB: 0.168 s to 0.038 s. The result is unchanged in every
+  respect — same padding to the longest element, same `null_value` substitution, same abort on a null
+  with no `null_value`.
 - **Applying a `filter=` is 3–4x faster**, and the gain grows with the number of columns the filter
   names. The per-row clause evaluation was reading each value through a helper that took the Arrow
   array by `shared_ptr` — one atomic refcount increment and decrement per row, to read one number.

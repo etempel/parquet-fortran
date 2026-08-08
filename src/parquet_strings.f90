@@ -1624,14 +1624,22 @@ contains
     !> Materializes the whole column into a conventional Fortran character array `out`, each
     !! element blank-padded to the longest element's length. A null element error stops by default;
     !! pass `null_value` to substitute a string for nulls.
+    !!
+    !! **The payload is copied straight out of `data`, never through `%get`.** `%get` allocates a
+    !! deferred-length temporary per element, and a whole-column loop over it costs one heap
+    !! allocation, one fill, one copy into `out(i)` and one free **per row** -- which measured as
+    !! 71 % of this procedure, not the copying it was there to do. Do not reintroduce a
+    !! `character(len=:), allocatable` intermediate here, or in any other bulk operation over this
+    !! type; see `feature_risks.md` Risk-60.
     subroutine to_character(self, out, null_value)
         class(parquet_string_column), intent(in) :: self          !! the column.
         character(len=:), allocatable, intent(out) :: out(:)      !! materialized, padded strings.
         character(len=*), intent(in), optional :: null_value      !! substitute for null elements.
-        integer(int64) :: i, elen, maxlen
-        character(len=:), allocatable :: elem
+        integer(int64) :: i, elen, maxlen, a, b
         maxlen = 0_int64
         if (present(null_value)) maxlen = int(len(null_value), int64)
+        ! First pass sizes the result AND is where a null aborts -- both before `out` is allocated,
+        ! so a column that cannot be materialized never allocates the array it would have gone into.
         do i = 1_int64, self%nrows
             if (bit_valid(self, i)) then
                 elen = self%offsets(i+1) - self%offsets(i)
@@ -1645,9 +1653,13 @@ contains
             if (.not. bit_valid(self, i)) then
                 out(i) = null_value
             else
-                ! normal character assignment left-justifies and blank-pads to maxlen
-                call self%get_i64(i, elem)
-                out(i) = elem
+                call elem_bounds(self, i, a, b)
+                elen = b - a + 1_int64
+                ! Left-justified and blank-padded to maxlen, exactly as the whole-element
+                ! assignment this replaced was: the payload bytes first, then the padding, which
+                ! together write each element's maxlen bytes exactly once.
+                if (elen > 0_int64) out(i)(1:elen) = transfer(self%data(a:b), out(i)(1:elen))
+                if (elen < maxlen) out(i)(elen+1_int64:) = ""
             end if
         end do
     end subroutine to_character

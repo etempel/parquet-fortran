@@ -75,12 +75,15 @@ working rules).
   - [Keeping `tools/prep_fpm_publish.sh` in sync](#keeping-toolsprep_fpm_publishsh-in-sync)
   - [Manual (never-`fpm test`) large-scale/benchmark tools](#manual-never-fpm-test-large-scalebenchmark-tools)
   - [Measuring whether Arrow memory was actually freed](#measuring-whether-arrow-memory-was-actually-freed-rss-cannot-answer-the-pool-counter-can)
+  - [A `shared_ptr` parameter on a per-row helper](#a-shared_ptr-parameter-on-a-per-row-helper-is-the-first-thing-to-suspect-in-parquet_wrappercpp)
+  - [Instrument phases before optimising a multi-phase operation](#instrument-phases-before-optimising-a-multi-phase-operation)
 - [Testing & coverage](#testing--coverage)
   - [Running a single test suite/test](#running-a-single-test-suitetest)
   - [Error scenarios are pre-run in parallel](#error-scenarios-are-pre-run-in-parallel)
   - [Tests run concurrently: never share a fixture file path between two tests](#tests-run-concurrently-never-share-a-fixture-file-path-between-two-tests)
   - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
   - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
+  - [A test that asserts a REFUSAL must say what to assert when the refusal lifts](#a-test-that-asserts-a-refusal-must-say-what-to-assert-when-the-refusal-lifts)
   - [A static check that enumerates names goes stale silently](#a-static-check-that-enumerates-names-goes-stale-silently)
   - [Measuring test coverage](#measuring-test-coverage)
   - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
@@ -1673,6 +1676,23 @@ counterpart. User guide: `doc/pages/date-time.md`.
   `intent(out)`'s implicit reset alone is sufficient, and apply the same explicit-reset treatment
   to any new scalar `logical`/default-initialized component added to a finalizable type's
   `intent(out)`-entry procedure, rather than trusting the implicit reset for it.
+- **A component and its parent cannot both be actual arguments of one call.** Passing `t%cache` and
+  `t%cache%reader` to the same procedure argument-associates two dummies with overlapping storage,
+  which Fortran forbids as soon as either is defined (F2018 15.5.2.13) and which compilers optimise
+  against. Neither gfortran nor ifx diagnoses it. This shapes API design rather than being a bug to
+  fix afterwards: `table_open_reader_with_transform(cache, filename, [rdr])` takes the reader as an
+  **optional** argument precisely because of it — absent means "open `cache%reader`", reached through
+  the cache, and `rdr` names any OTHER reader. Where that leaves two near-identical code paths, a
+  local `type(...), pointer` resolving to one or the other is the way out, with `target` on both
+  dummies; a pointer to a component of a plain (non-`target`) dummy is not permitted, which is why
+  `table_materialize` writes its own two arms out instead.
+- **`.and.` does not short-circuit, and `-fcheck=bounds` is what tells you.** Fortran may evaluate
+  both operands, so `size(a) == size(b) .and. all(a == b)` compares two differently-sized arrays
+  whenever the sizes differ — an out-of-bounds read that a plain `fpm test` runs straight past and
+  `fpm test --profile debug` aborts on. Nest the tests instead (`same = .false.; if (size(a) ==
+  size(b)) same = all(a == b)`). This has bitten twice: once in `parquet_close_writer`'s
+  mask-consumed check, once in a test comparing two sample draws. Both times the guarded form looked
+  obviously safe.
 - **A `pointer`-typed intermediate component defeats `-fcheck=bounds`'s trust in a freshly
   unallocated LHS on intrinsic assignment.** `table_clone` (`parquet_tables_clone.f90`) used to do
   `out%cache%rg_bounds = self%cache%rg_bounds` to copy an allocatable 2-D array, relying on F2003+
@@ -2010,6 +2030,12 @@ cannot answer (someone running the built binary directly). `tools/run_error_scen
 standalone and still has to `find`, so the hazard remains there. `tools/coverage.sh` runs
 `fpm clean` up front to avoid it; for a plain `fpm test`, `fpm clean --skip` fixes it.
 
+**A change to a GATE is the most misleading form of this**, because a stale binary makes the tests
+agree with you. Opening `parallel_prefetch_ok`'s refusal clauses and re-running left the two tests
+that assert the refusal still reporting **PASSED** — i.e. the evidence said the change had not taken
+effect, which reads as "my edit was wrong" rather than "my binary is old". `fpm clean --skip` showed
+both failing, as intended. Treat a gate that appears not to have changed as a cache symptom first.
+
 **A restored `src/parquet_wrapper.cpp` is the case fpm most reliably misses, and it bites hardest
 during mutation testing.** Reverting that file (`cp backup src/parquet_wrapper.cpp`, `git checkout`,
 a stash pop) and re-running `fpm build` repeatedly left the *mutated* object still linked — the
@@ -2156,6 +2182,44 @@ hooks follow. Two further rules when writing such a measurement:
   memory it had already released.
 - **State in the output which number is the real answer.** A report that prints RSS next to the pool
   figure invites the reader to draw the wrong conclusion from the wrong line.
+
+### A `shared_ptr` parameter on a per-row helper is the first thing to suspect in `parquet_wrapper.cpp`
+
+A helper that takes `const std::shared_ptr<arrow::Array> &` and is called **once per row** pays two
+atomic refcount operations per call, because every `std::static_pointer_cast` inside it builds a new
+`shared_ptr`. Measured here: reading one `double` through `real_family_value_at` that way cost
+**13.6 ns per row**, against **1.8 ns** once the helper took a plain `const arrow::Array *` — a 7.6x
+improvement in the filter's clause evaluation and 3-4x in the whole cost of installing a filter, with
+no threading involved at all. The caller already owns a reference for the duration of the loop; the
+loop needs the pointer, not a share of the ownership.
+
+**Three things make this worth a standing note rather than a one-off fix:**
+
+- **Nothing fails when it comes back.** Every answer stays identical and the whole suite stays green;
+  only a benchmark notices. `tools/check_source_conventions.py`'s `check_no_per_element_shared_ptr`
+  is what actually guards it, matching by *shape* (an array parameter beside an element index) so it
+  cannot go blind to the next helper added. See `feature_risks.md` Risk-59.
+- **It hides from a profile that samples by function name**, because the atomics are attributed to a
+  helper that was already expected to be hot.
+- **The plausible-looking explanation was wrong**, which is the part worth copying. The same loop
+  called `compare_op(value, bound, op)` with the operator as a `std::string`, testing it with up to
+  five string comparisons **per row** for a loop-invariant value. Converting that to an enum changed
+  the measurement by **nothing** — the compiler was already hoisting it. Measure the fix, not just
+  the symptom: an obvious inefficiency that is genuinely there can still be worth 0%.
+
+### Instrument phases before optimising a multi-phase operation
+
+"X is slow" is not actionable until it is known *which part* of X is, and the cheapest way to find
+out here is a few `parquet_debug_get_*_nanos` counters in the `parquet_debug_*` family (no
+`src/parquet_bindings.f90` entry; the consumer declares its own local `bind(C)` interface). Three
+counters around `parquet_reader_set_filter`'s decode / evaluate / mask-build phases turned a vague
+"the filter is expensive" into "93% of it is one helper's parameter type", and they turned the *next*
+question — whether to parallelise what remains — from a design argument into a number.
+
+**Leave them in.** They cost nothing at runtime (one `steady_clock` read per phase, on a path that
+runs once per reader open) and they are what makes the next measurement one benchmark away rather
+than a fresh investigation. The rule that governs where such a hook may sit is the existing one: a
+debug hook may sit on a coarse operation, never on a per-row or per-element path.
 
 ## Testing & coverage
 
@@ -2325,6 +2389,20 @@ Three things about doing it *here* specifically:
   defensive** — say so in a comment and `GCOVR_EXCL` it rather than deleting it or inventing an
   unbuildable fixture. `list_uniform_width`'s `IsNull` check is the worked example: Arrow's own
   `ListBuilder::AppendNull` already leaves `value_length == 0`, so no Arrow-built array reaches it.
+
+### A test that asserts a REFUSAL must say what to assert when the refusal lifts
+
+Some guards refuse a case on **cost** rather than correctness — the machinery is built and tested,
+and the clause exists only because a measurement said the case was not worth it yet. A test asserting
+such a refusal is correct today and is the wrong test tomorrow, and whoever lifts the clause meets a
+failing test with no indication whether it is protecting something or merely out of date.
+
+**Write the deferral into the test's own doc-comment**, in the form "when X lands, this becomes an
+equality test, not a deletion — what it asserts today is that the refusal is real, and what it should
+assert afterwards is that Y kept the answer." Two such tests were written that way for the prefetch
+gate's `filter=`/`sort=` clauses and both were converted rather than deleted when the clause lifted,
+by following their own instructions. The same applies to the *code*: a refusal comment must read
+"deferred until X", never "this cannot be done", or the next reader takes the clause as settled.
 
 ### A static check that enumerates names goes stale silently
 

@@ -46,6 +46,8 @@ contains
             new_unittest("slice extracts an owning copy of a row range", test_slice), &
             new_unittest("build_from gathers an array of handles into a column", test_build_from), &
             new_unittest("to_character materialization + null_value", test_to_character), &
+            new_unittest("to_character matches %get element for element, padded with blanks", &
+                test_to_character_bytes), &
             new_unittest("clone is an independent deep copy", test_clone_independence), &
             new_unittest("move_from empties source; swap exchanges", test_move_and_swap), &
             new_unittest("reserve/capacity/shrink_to_fit", test_reserve_capacity), &
@@ -791,6 +793,71 @@ contains
         if (allocated(error)) return
         call check(error, arr(3) == "NA", "arr(3) null_value")
     end subroutine test_to_character
+    !
+    !> `to_character` copies each element's payload bytes directly rather than through `%get`, so
+    !! `%get` is now an INDEPENDENT oracle for it rather than the same code path -- this asserts
+    !! the two agree element for element, and that every byte past an element's own length is a
+    !! blank.
+    !!
+    !! Three things this covers that `test_to_character` does not, each of which a plausible
+    !! defect in the direct-copy loop would pass: the **no-`null_value`** path (the common case,
+    !! and the one that reaches the copy loop for every row); a **zero-length** element, which the
+    !! copy skips entirely and must therefore leave wholly blank; and a **`null_value` longer than
+    !! every real element**, which is what makes it rather than the data set `maxlen`.
+    !!
+    !! The first element is deliberately the SHORTEST, per CLAUDE.md's rule for this bug class --
+    !! a fixture whose first element is longest passes even when a width is taken from element one.
+    subroutine test_to_character_bytes(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: arr(:), one
+        integer(int64) :: i, n, elen
+        logical :: ok
+        !
+        ! Shortest first, an empty element in the middle, longest last.
+        call col%append_string("a")
+        call col%append_string("bc")
+        call col%append_string("")
+        call col%append_string("defgh")
+        ! Lengths 1-4, deliberately all SHORTER than "defgh", so the longest element stays 5 and
+        ! the null_value tested below (7) is genuinely longer than anything in the data.
+        do i = 1_int64, 40_int64
+            call col%append_string(repeat("z", int(mod(i, 4_int64)) + 1))
+        end do
+        n = col%size()
+        !
+        ! --- no null_value: every row goes through the direct copy ---
+        call col%to_character(arr)
+        call check(error, size(arr, kind=int64) == n, "to_character returns one row per element")
+        if (allocated(error)) return
+        call check(error, len(arr) == 5, "padded to the longest element (5)")
+        if (allocated(error)) return
+        ok = .true.
+        do i = 1_int64, n
+            call col%get(i, one)
+            elen = col%length(i)
+            if (arr(i)(1:elen) /= one) ok = .false.
+            ! Everything past the element's own length must be blank, not stale payload.
+            if (elen < len(arr)) then
+                if (arr(i)(elen+1:) /= repeat(" ", len(arr) - int(elen))) ok = .false.
+            end if
+        end do
+        call check(error, ok, "every row matches %get, blank-padded to the right of its own length")
+        if (allocated(error)) return
+        call check(error, arr(3) == repeat(" ", len(arr)), "a zero-length element is wholly blank")
+        if (allocated(error)) return
+        !
+        ! --- a null_value longer than any real element sets maxlen ---
+        call col%append_null()
+        call col%to_character(arr, null_value="missing")
+        call check(error, len(arr) == 7, "null_value longer than the data sets maxlen")
+        if (allocated(error)) return
+        call check(error, arr(1) == "a", "a real element still compares equal under the wider pad")
+        if (allocated(error)) return
+        call check(error, arr(1)(2:) == repeat(" ", 6), "and its padding really is blanks")
+        if (allocated(error)) return
+        call check(error, arr(size(arr)) == "missing", "the null row carries null_value")
+    end subroutine test_to_character_bytes
     !
     subroutine test_clone_independence(error)
         type(error_type), allocatable, intent(out) :: error

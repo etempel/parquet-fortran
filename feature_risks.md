@@ -124,6 +124,7 @@ something a reader is expected to have.
 | [Risk-57](#risk-57--a-row-group-split-column-read-allocates-its-validity-bitmap-on-first-null-from-any-thread) | A row-group-split column read allocates its validity bitmap on first null, from any thread | 3 — not testable |
 | [Risk-58](#risk-58--an-adopted-transform-is-shared-state-and-only-its-preconditions-stand-between-it-and-a-wrong-row-set) | An adopted transform is shared state, and only its preconditions stand between it and a wrong row set | 4 — covered |
 | [Risk-59](#risk-59--a-shared_ptr-parameter-on-a-per-element-helper-costs-7x-and-fails-nothing) | A `shared_ptr` parameter on a per-element helper costs 7x and fails nothing | 3 — not testable |
+| [Risk-60](#risk-60--a-per-element-allocatable-character-round-trip-in-a-bulk-string-operation-costs-4x-and-fails-nothing) | A per-element allocatable-character round trip in a bulk string operation costs 4x and fails nothing | 3 — not testable |
 
 ---
 
@@ -131,7 +132,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-60**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-61**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1343,7 +1344,8 @@ reach for.
   `protected_cols:` **aborts**, `qc: miss:` **warns**.
 - **Every column that will ever appear must appear in the first row group**, chunked writes require
   exact type agreement with the schema (no int32-into-float64 conversion), and the triplet runs on one
-  thread in row-group order. These constrain any future streaming write — see the chunked-write entry in `feature_table.md` §3.4.
+  thread in row-group order. These constrain any future streaming write — see the chunked-write entry
+  in `feature_table.md` §2.4.
 
 **Test.** Covered, though not all of it at the table layer — and the reason is worth knowing.
 
@@ -2349,3 +2351,39 @@ Its second half is a negative control: two separate unseeded opens must still di
 that settled on a constant seed fails. Mutation-confirmed both ways — removing the draw aborts with
 `row count mismatch for column x: file has 1037 rows but the values array implies 979`, and a
 hard-wired constant seed fails the control.
+
+### Risk-60 — A per-element allocatable-character round trip in a bulk string operation costs 4x and fails nothing
+
+`parquet_string_column`'s bulk operations walk every element. Materializing each element through
+`%get`/`%to_string` — which does `allocate(character(len=elen) :: res)`, fills it, hands it back, and
+frees it — turns an O(payload) byte copy into **one heap allocation, one fill, one copy and one free
+per row**.
+
+Measured on 4 M elements / 70 MB, `%to_character`: **0.168 s** through `%get`, **0.038 s** copying the
+payload bytes directly — **4.3x**, with the allocator accounting for 71 % of the original. `%build_from`
+has the same shape and is the slowest operation in the module at 0.30 s (it pays the allocation *and*
+grows the destination incrementally).
+
+**The failure is not a wrong answer — it is no signal at all.** The allocating form returns byte-identical
+results, so every test passes, every error scenario stays green, and the code reads as ordinary, idiomatic
+Fortran. Only a benchmark notices. This is the Fortran twin of [Risk-59](#risk-59--a-shared_ptr-parameter-on-a-per-element-helper-costs-7x-and-fails-nothing),
+found the same way and for the same underlying reason: a per-element convenience that the surrounding loop
+never needed.
+
+**Test.** Not testable as such — a timing assertion would be the flakiest test in the suite. What *is*
+tested is that the direct-copy path is correct, by `to_character matches %get element for element,
+padded with blanks` (`test/test_parquet_string.f90`), which uses `%get` as an **independent oracle**:
+the two no longer share code, so element-for-element agreement is a real cross-check rather than a
+tautology. It covers the no-`null_value` path, a zero-length element, and a `null_value` longer than
+any real element. Four mutations confirmed caught: dropped padding, an off-by-one on the copied
+length, a width taken from element one, and a skipped `null_value` substitution.
+
+**What this forbids.** Do not reintroduce a `character(len=:), allocatable` intermediate inside any
+per-element loop in `src/parquet_strings.f90`. The bytes are already contiguous in `data(:)` and their
+bounds are one subtraction away (`elem_bounds`); a bulk operation should read them there. The rule is
+about the *loop*, not about `%get`, which is exactly right for its own job of returning one element.
+
+**Not yet guarded by a static check, deliberately.** A shape-based check in
+`tools/check_source_conventions.py` — the analogue of `check_no_per_element_shared_ptr` — is the right
+enforcement, but it cannot be added until the remaining instances are fixed, or it fails the lint stage
+on known work-in-progress. `%build_from` is the next one. See `feature_string_parallel.md` S2 and S3.

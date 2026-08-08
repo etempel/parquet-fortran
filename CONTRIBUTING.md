@@ -255,10 +255,11 @@ memory.
 The **sort** run is the only one that touches no file: it builds a table of `SORT_SIZE_GB` worth
 of float64 columns plus one character column **in memory**, because what it measures is the cost of
 reordering an already-resident table and reading a fixture first would only add a decode to both
-sides. It splits `%sort_by` into its two halves — the permutation build (`pf_argsort`, parallel, in
-C++) and the per-column reindex loop (serial Fortran) — which is the split worth watching, because
-on a many-core machine the second dominates: 1.9 s against 13.1 s on a 100+ core server, since only
-the first half is threaded.
+sides. It splits `%sort_by` into its two halves — the permutation build (`pf_argsort`, in C++) and the
+per-column reindex loop — which is the split worth watching, because on a many-core machine the
+second dominates: when the loop was still serial it measured 13.1 s against the permutation's 1.9 s
+on a 100+ core server. **Both halves are threaded now** (the loop runs one column per thread,
+gated), so that ratio is the historical motivation rather than what a run today reports.
 
 It then measures the reindex phase **two ways**, all columns validating the permutation against
 only the first one doing so. That comparison is also the only thing that would notice if
@@ -500,6 +501,28 @@ fpm-published package (see its `KEEP_PATHS` entry in `tools/prep_fpm_publish.sh`
 tools/parquet_metadata_to_md.py data.parquet                 # -> data.md, overwritten if it exists
 tools/parquet_metadata_to_md.py data.parquet report.md
 ```
+
+`tools/benchmark_strings.sh` times every `parquet_string_column` bulk operation — `reindex`,
+`gather`, `delete_by_mask`, `trim_all`, `clone`, `slice`, `append_column`, `to_character`,
+`view_all`, `build_from` and a per-element `length` loop — on one synthetic in-memory column, so an
+optimisation to that type is measured rather than argued. It touches no file. Two runs by default,
+null-free and null-containing, since several operations have a separate validity pass whose cost
+appears only in the second.
+
+Each operation is best-of-`ROUNDS`, every round starting from a fresh `%clone()` of the same source
+column so no round inherits another's page state or allocation. The throughput column is
+payload-equivalent — the source column's byte count over the elapsed time — and compares rows
+against each other only; it is not a claim about bytes moved, since `gather` selects half the rows
+and `to_character` writes a wider padded result than it reads.
+
+```bash
+tools/benchmark_strings.sh
+NROWS=20000000 LEN=48 ROUNDS=5 tools/benchmark_strings.sh
+NULLS=no tools/benchmark_strings.sh                          # skip the null-containing run
+```
+
+Config: `NROWS` (default 4000000), `LEN` (24, the mean element length — lengths vary
+deterministically around it), `ROUNDS` (3), `NULL_EVERY` (7), `NULLS` (`both`, or `no`/`yes`).
 
 ### Testing genuine OpenMP concurrency
 

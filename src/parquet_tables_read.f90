@@ -36,6 +36,7 @@ submodule (parquet_tables) parquet_tables_read
     !! **Not a public setting** -- `parquet_set_prefetch_threads` is already the user-facing control
     !! over this read. It IS overridable through a test-only hook; see `colread_gate_limit`.
     integer(int64), parameter :: colread_min_elements = 131072_int64
+
     !
 contains
     !
@@ -224,6 +225,7 @@ contains
         integer(int64), allocatable :: bounds(:,:)
         integer :: nslots, t
         integer(int64) :: rg
+        logical :: needs_bitmap
         type(parquet_reader), allocatable :: readers(:)
         logical, allocatable :: reader_open(:)
 #endif
@@ -258,8 +260,8 @@ contains
             ! common case, and the one this path is fastest on -- still allocates nothing. "Might
             ! have nulls" is that query's uncertain answer, which is the safe direction here too:
             ! a bitmap nobody needed costs one bit per row.
-            if (parquet_column_has_nulls(cache%reader, slot%file_name, 0_int64, 0_int64)) &
-                call slot%values%ensure_validity()
+            needs_bitmap = parquet_column_has_nulls(cache%reader, slot%file_name, 0_int64, 0_int64)
+            if (needs_bitmap) call slot%values%ensure_validity()
             !$omp parallel do default(shared) private(rg, t) schedule(dynamic) num_threads(nslots)
             do rg = 1_int64, nrg
                 block
@@ -283,9 +285,12 @@ contains
                         end if
                         call table_materialize_chunk_kind(slot%declared_kind, readers(t), &
                             slot%file_name, rg, chunk, rows_rg, int(slot%width, int32), "")
-                        ! Disjoint by construction: row group rg owns table rows
-                        ! bounds(1,rg)..bounds(2,rg) and no other row group owns any of them.
-                        call slot%values%paste(chunk, bounds(1, rg))
+                        ! The ROWS are disjoint by construction -- row group rg owns table rows
+                        ! bounds(1,rg)..bounds(2,rg) and no other row group owns any of them -- but
+                        ! disjoint rows are NOT disjoint validity bits, which is what
+                        ! paste_row_group_safely exists for. See its own comment.
+                        call paste_row_group_safely(slot%values, chunk, bounds(1, rg), &
+                            bounds(2, rg), int(slot%width, int64), needs_bitmap)
                         call chunk%clear()
                     end if
                 end block
@@ -298,6 +303,117 @@ contains
         did = .true.
 #endif
     end function materialize_column_parallel
+    !
+    !> The sub-range of rows `lo..hi` whose validity bits occupy **whole** bitmap blocks, so that
+    !! pasting it cannot touch a block any neighbouring row range also writes. `mid_lo > mid_hi`
+    !! means no such sub-range exists and the caller must serialise the whole paste.
+    !!
+    !! **This is the arithmetic behind a silent wrong answer, so it is a separate, pure procedure
+    !! that can be tested on its own** — the race it prevents is a few instructions wide and an
+    !! end-to-end test cannot be relied on to see it (`feature_risks.md` Risk-61 records the same
+    !! division of labour for `parquet_string_column`'s own byte-aligned split).
+    !!
+    !! `parquet_column` packs validity as a bitmap indexed by ELEMENT, `parquet_validity_block_bits`
+    !! of them to a block. **That constant is imported, never copied** — a second definition of it
+    !! here could drift from the real one with nothing to report it, and the failure would be a
+    !! silent wrong answer rather than a build error. `parquet_columns` publishes it for this caller
+    !! specifically.
+    !!
+    !! Row boundary `r` sits on a block boundary exactly when `(r-1)*width` is a multiple of the
+    !! block, so aligned boundaries repeat every `block/gcd(width, block)` rows — every 64 rows for a
+    !! scalar column, and as often as every row for a width that is itself a multiple of the block.
+    pure subroutine bitmap_whole_block_rows(lo, hi, width, mid_lo, mid_hi)
+        integer(int64), intent(in) :: lo     !! first row of the range.
+        integer(int64), intent(in) :: hi     !! last row of the range.
+        integer(int64), intent(in) :: width  !! elements per row.
+        integer(int64), intent(out) :: mid_lo !! first row of the whole-block sub-range.
+        integer(int64), intent(out) :: mid_hi !! last row of it; < mid_lo when there is none.
+        integer(int64) :: period, a, b
+        mid_lo = 1_int64
+        mid_hi = 0_int64
+        if (hi < lo) return
+        if (width <= 0_int64) return
+        period = parquet_validity_block_bits/gcd_int64(width, parquet_validity_block_bits)
+        ! Round `lo` up and `hi` down onto that period.
+        a = lo + modulo(-(lo - 1_int64), period)
+        b = hi - modulo(hi, period)
+        if (a > b) return
+        mid_lo = a
+        mid_hi = b
+    end subroutine bitmap_whole_block_rows
+    !
+    !> Test-only view of `bitmap_whole_block_rows`; see the interface in `parquet_tables.f90`.
+    module procedure parquet_debug_colread_block_rows
+        call bitmap_whole_block_rows(lo, hi, width, mid_lo, mid_hi)
+    end procedure parquet_debug_colread_block_rows
+    !
+    !> Greatest common divisor; Fortran has no intrinsic for it.
+    pure integer(int64) function gcd_int64(a, b) result(g)
+        integer(int64), intent(in) :: a !! first value (> 0).
+        integer(int64), intent(in) :: b !! second value (> 0).
+        integer(int64) :: x, y, r
+        x = abs(a)
+        y = abs(b)
+        do while (y /= 0_int64)
+            r = modulo(x, y)
+            x = y
+            y = r
+        end do
+        g = max(x, 1_int64)
+    end function gcd_int64
+    !
+    !> Pastes one row group's chunk into its place in a column being filled by several threads.
+    !!
+    !! **Disjoint ROWS are not disjoint validity BITS, and that difference is a silent wrong
+    !! answer.** `parquet_column`'s validity is a bit-packed `integer(int64)` map, so
+    !! many elements share one block and `%paste` updates a block with a read-modify-write. A
+    !! row-group boundary almost never lands on a block boundary — for a
+    !! 25,000-row group it never does — so the thread finishing row group `g` and the thread
+    !! starting `g+1` both read, modify and write the *same* block, and one update is lost. The
+    !! column still validates, the row count is right, and some row's null flag is simply wrong.
+    !! This was observed once in 25 full test runs before it was diagnosed.
+    !!
+    !! The fix keeps the parallelism: the middle of the range occupies whole blocks and is pasted
+    !! freely, while only the ragged ends — under one bitmap block each — go through a
+    !! critical section shared by every thread. Serialising the *whole* paste would also be correct
+    !! and was measured at roughly **5x slower** on a null-carrying column, because the validity
+    !! write is about two thirds of this operation's cost.
+    !!
+    !! **`no_bitmap` is not an optimisation, it is the common case**: a column the footer says has no
+    !! nulls never allocates a bitmap, so `%paste` writes no validity at all and there is nothing to
+    !! serialise.
+    subroutine paste_row_group_safely(dst, chunk, lo, hi, width, has_bitmap)
+        type(parquet_column), intent(inout) :: dst !! the column being filled.
+        type(parquet_column), intent(in) :: chunk  !! this row group's decoded rows.
+        integer(int64), intent(in) :: lo           !! first destination row this chunk owns.
+        integer(int64), intent(in) :: hi           !! last destination row this chunk owns.
+        integer(int64), intent(in) :: width        !! elements per row.
+        logical, intent(in) :: has_bitmap          !! whether a validity bitmap exists to race on.
+        integer(int64) :: mid_lo, mid_hi
+        if (.not. has_bitmap) then
+            call dst%paste(chunk, lo)
+            return
+        end if
+        call bitmap_whole_block_rows(lo, hi, width, mid_lo, mid_hi)
+        if (mid_lo > mid_hi) then
+            ! No whole block anywhere in this range -- a very short row group. Serialise all of it.
+            !$omp critical (colread_bitmap)
+            call dst%paste(chunk, lo)
+            !$omp end critical (colread_bitmap)
+            return
+        end if
+        if (mid_lo > lo) then
+            !$omp critical (colread_bitmap)
+            call dst%paste(chunk, lo, 1_int64, mid_lo - lo)
+            !$omp end critical (colread_bitmap)
+        end if
+        call dst%paste(chunk, mid_lo, mid_lo - lo + 1_int64, mid_hi - mid_lo + 1_int64)
+        if (mid_hi < hi) then
+            !$omp critical (colread_bitmap)
+            call dst%paste(chunk, mid_hi + 1_int64, mid_hi - lo + 2_int64, hi - mid_hi)
+            !$omp end critical (colread_bitmap)
+        end if
+    end subroutine paste_row_group_safely
     !
     !> Assembles one column from just the row groups covering the table's slice.
     !!

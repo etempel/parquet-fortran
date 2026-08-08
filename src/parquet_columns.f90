@@ -79,6 +79,17 @@ module parquet_columns
     !! ceiling, which is why this library takes no stdlib dependency for it.
     integer(int64), parameter :: BITS_PER_BLOCK = 64_int64
     !
+    !> `BITS_PER_BLOCK`, published.
+    !!
+    !! **Exposed for exactly one reason: so that nobody has to copy it.** A caller filling one
+    !! column from several threads -- `parquet_tables`' parallel single-column read is the one that
+    !! exists -- must keep two threads off the same bitmap block, because updating a block is a
+    !! read-modify-write and a lost update silently moves a null to the wrong row. Computing that
+    !! alignment needs this number, and a second copy of it living in another module could drift
+    !! from this one with nothing to report it. This is a fact about the storage layout, not a knob:
+    !! it is a `parameter`, and changing it changes only how the same bits are grouped.
+    integer(int64), parameter, public :: parquet_validity_block_bits = BITS_PER_BLOCK
+    !
     ! ---- Column kind discriminators ----
     integer, parameter :: PK_NONE = 0 !! no kind assigned yet (a default-initialized column)
     integer, parameter :: PK_INT32 = 1 !! 32-bit integer scalar column

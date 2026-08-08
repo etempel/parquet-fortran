@@ -157,7 +157,9 @@ contains
             new_unittest("the single-column work floor opens and closes the split", &
                 test_colread_floor_override), &
             new_unittest("a sampled single-column read splits onto one sample", &
-                test_colread_sampled_agrees) &
+                test_colread_sampled_agrees), &
+            new_unittest("no two row groups' pastes share a validity block", &
+                test_colread_block_alignment) &
             ]
     end subroutine collect_tests_table_parallel
     !
@@ -1392,5 +1394,87 @@ contains
         if (allocated(error)) return
         call check(error, all(gs == ws), "%" // what // ": the string column must match the serial result")
     end subroutine check_tables_identical
+    !
+    !> **The validity-block alignment rule the parallel column read depends on, asserted directly.**
+    !!
+    !! `parquet_column` packs validity as a bit map, so two threads pasting *adjacent row groups*
+    !! read-modify-write the same block unless each trims its range to whole blocks first. That race
+    !! is a few instructions wide: it was seen twice in a few dozen full test runs before being
+    !! diagnosed, and `nulls land in the right rows when one column's read is split` — the test that
+    !! caught it — cannot be relied on to catch a regression, because a lost update simply may not
+    !! happen on any given run. So the rule itself is what is asserted here, deterministically, the
+    !! way `thread row ranges cover every row and never share a validity byte` does for
+    !! `parquet_string_column` (`feature_risks.md` Risk-61).
+    !!
+    !! What it checks, for a sweep of widths and row-group layouts including ones whose boundaries
+    !! deliberately do not divide the alignment: the reported middle is inside the range; no two
+    !! adjacent row groups' middles share a block; and the middles cover everything except ragged
+    !! ends short enough to be worth serialising.
+    subroutine test_colread_block_alignment(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The library's own published block width. Importing it rather than restating it is right
+        ! here, because there is exactly one definition of it -- the thing this test guards is the
+        ! ALIGNMENT ARITHMETIC, not the constant.
+        integer(int64), parameter :: ALIGN = parquet_validity_block_bits
+        integer(int64) :: w, rg, lo, hi, mid_lo, mid_hi, prev_end_blk, blk_first, blk_last, chunk
+        integer :: bad_inside, bad_shared, bad_ragged
+        !
+        bad_inside = 0
+        bad_shared = 0
+        bad_ragged = 0
+        do w = 1_int64, 5_int64
+            ! 25000 is the size the failing fixture used and divides none of the alignments; 4096
+            ! divides all of them, so it is the control where no trimming should be needed at all.
+            do chunk = 1_int64, 2_int64
+                prev_end_blk = -1_int64
+                do rg = 0_int64, 7_int64
+                    if (chunk == 1_int64) then
+                        lo = rg*25000_int64 + 1_int64
+                        hi = lo + 25000_int64 - 1_int64
+                    else
+                        lo = rg*4096_int64 + 1_int64
+                        hi = lo + 4096_int64 - 1_int64
+                    end if
+                    call parquet_debug_colread_block_rows(lo, hi, w, mid_lo, mid_hi)
+                    if (mid_lo > mid_hi) cycle          ! no whole block: the caller serialises it all
+                    ! The middle must lie inside the range it was derived from.
+                    if (mid_lo < lo .or. mid_hi > hi) bad_inside = bad_inside + 1
+                    ! Element indices are 1-based over (row-1)*w + 1 .. row*w.
+                    blk_first = ((mid_lo - 1_int64)*w)/ALIGN
+                    blk_last = (mid_hi*w - 1_int64)/ALIGN
+                    ! The middle must start on a block boundary and end on one.
+                    if (modulo((mid_lo - 1_int64)*w, ALIGN) /= 0_int64) bad_shared = bad_shared + 1
+                    if (modulo(mid_hi*w, ALIGN) /= 0_int64) bad_shared = bad_shared + 1
+                    ! ...and it must not begin in a block a previous row group's middle ended in.
+                    if (prev_end_blk >= 0_int64 .and. blk_first <= prev_end_blk) bad_shared = bad_shared + 1
+                    prev_end_blk = blk_last
+                    ! The ragged ends left over must be short: they go through a critical section,
+                    ! so a rule that trimmed away most of the range would be correct but useless.
+                    ! The bound is in ROWS and is the alignment period -- for a width coprime with
+                    ! the block that is the whole block, and for a width dividing it, fewer.
+                    if (mid_lo - lo >= ALIGN) bad_ragged = bad_ragged + 1
+                    if (hi - mid_hi >= ALIGN) bad_ragged = bad_ragged + 1
+                end do
+            end do
+        end do
+        call check(error, bad_inside == 0, "the whole-block sub-range must lie inside the row group it came from")
+        if (allocated(error)) return
+        call check(error, bad_shared == 0, &
+            "two row groups' pasted ranges must never share a validity block")
+        if (allocated(error)) return
+        call check(error, bad_ragged == 0, &
+            "the serialised ragged ends must stay under one block, or the split gives back its parallelism")
+        if (allocated(error)) return
+        ! A range shorter than one block has no whole block in it and must say so rather than
+        ! returning something that looks usable -- the caller keys on mid_lo > mid_hi.
+        call parquet_debug_colread_block_rows(5_int64, 9_int64, 1_int64, mid_lo, mid_hi)
+        call check(error, mid_lo > mid_hi, "a range too short to hold a whole block must report none")
+        if (allocated(error)) return
+        ! A width that is itself a multiple of the alignment makes every row boundary aligned, so
+        ! nothing should be trimmed at all.
+        call parquet_debug_colread_block_rows(7_int64, 19_int64, ALIGN, mid_lo, mid_hi)
+        call check(error, mid_lo == 7_int64 .and. mid_hi == 19_int64, &
+            "when every row fills whole blocks the range must be used untrimmed")
+    end subroutine test_colread_block_alignment
     !
 end module test_table_parallel

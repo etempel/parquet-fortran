@@ -128,6 +128,7 @@ something a reader is expected to have.
 | [Risk-61](#risk-61--a-validity-split-that-is-not-byte-aligned-loses-nulls-and-no-end-to-end-test-can-be-relied-on-to-see-it) | A validity split that is not byte-aligned loses nulls, and no end-to-end test can be relied on to see it | 4 — covered |
 | [Risk-62](#risk-62--a-validity-run-copied-byte-wise-silently-mis-places-nulls-when-its-alignment-precondition-is-wrong) | A validity run copied byte-wise silently mis-places nulls when its alignment precondition is wrong | 4 — covered |
 | [Risk-63](#risk-63--replacing-an-in-place-compactions-byte-loop-with-an-array-section-costs-a-heap-temporary-per-element) | Replacing an in-place compaction's byte loop with an array section costs a heap temporary per element | 3 — not testable |
+| [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null) | Two threads pasting adjacent row groups share a validity bitmap block and lose a null | 4 — covered |
 
 ---
 
@@ -135,7 +136,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-64**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-65**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -669,6 +670,50 @@ in question (iterate the set bits, not all 64 positions of a word) is *correct* 
 differs only in cost, which no unit test can see. That does not move the entry into section 2: the
 correctness is covered, and the suggestion improves how it is covered rather than filling a gap in
 whether it is.
+
+### Risk-64 — Two threads pasting adjacent row groups share a validity bitmap block and lose a null
+
+`materialize_column_parallel` (`src/parquet_tables_read.f90`) fills one column by giving each row
+group to a thread. The **rows** are disjoint by construction, and it is tempting to stop reasoning
+there. The **validity bits are not**: `parquet_column` packs them `parquet_validity_block_bits` to a
+block and `%paste` updates a block with a read-modify-write, so the thread finishing row group `g`
+and the thread starting `g+1` read, modify and write the *same* block whenever the boundary between
+them falls inside it — which is almost always, since a row-group size is chosen for I/O and has no
+reason to be a multiple of 64. One update is lost. The column still validates, the row count is
+right, and some row's null flag is simply wrong.
+
+**This shipped and was found by luck.** It survived the suite until two full runs out of a few dozen
+happened to fail `nulls land in the right rows when one column's read is split`; on the development
+machine it never reproduced at all, not in 40 runs of the test alone and not in 25 runs of the suite
+under deliberate CPU contention. The fixture's own numbers show how ordinary the condition is: eight
+row groups of 25,000 rows, and **all seven** interior boundaries share a block.
+
+The fix keeps the parallelism rather than serialising the paste — which would also be correct, and
+was measured at roughly **5x slower** on a null-carrying column, because the validity write is about
+two thirds of that operation. `bitmap_whole_block_rows` trims each row group to the sub-range
+occupying whole blocks; that middle is pasted freely and only the ragged ends, under one block each,
+go through a shared `critical`. The measured cost of the fix is nil.
+
+**Test.** `no two row groups' pastes share a validity block` (`test/test_table_parallel.f90`), through
+`parquet_debug_colread_block_rows`. **The shape is the whole point**, and it is the same division of
+labour [Risk-61](#risk-61--a-validity-split-that-is-not-byte-aligned-loses-nulls-and-no-end-to-end-test-can-be-relied-on-to-see-it)
+records for `parquet_string_column`: the end-to-end test that *found* this cannot be trusted to catch
+a regression, because a lost update may simply not happen, so the alignment arithmetic is asserted
+directly instead. Three mutations are caught deterministically — no trimming at all (the original
+bug), trimming only the start, and a period that ignores the column's width.
+
+**What this forbids.**
+
+- **Do not reason from "the rows are disjoint" to "the writes are disjoint"** anywhere a bit-packed
+  structure is written by more than one thread. Rows, elements and bits are three different
+  granularities and only the last one is what a read-modify-write actually touches.
+- **Do not copy `parquet_validity_block_bits` into another module.** It is published by
+  `parquet_columns` precisely so this caller need not restate it; a second copy could drift with
+  nothing to report it, and the failure is silent.
+- **Any new code that fills one `parquet_column` from several threads inherits this**, including a
+  future parallel `materialize_slice` — which pastes row-group pieces the same way and is serial
+  today only because it was left that way. It must go through `paste_row_group_safely` or repeat its
+  reasoning.
 
 ### Risk-1 — The release policy regresses silently
 

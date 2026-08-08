@@ -245,6 +245,7 @@ module parquet_tables
     !> TEST-ONLY debug hook; deliberately NOT in README.md's API overview. See its own
     !! doc-comment for why it has to be public at all.
     public :: parquet_debug_table_set_inflight
+    public :: parquet_debug_colread_block_rows
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_table: "
@@ -1694,6 +1695,26 @@ def gen_spec_interfaces():
             logical, intent(in), optional :: appending !! .true.: pretend an append is in flight.
             logical, intent(in), optional :: reading   !! .true.: pretend a read is in flight.
         end subroutine parquet_debug_table_set_inflight
+        !> Exposes the parallel single-column read's validity-block alignment arithmetic for testing.
+        !!
+        !! **This is a debug hook, not API**, public for the same reason
+        !! `parquet_debug_table_set_inflight` is: the procedure it forwards to lives in a submodule
+        !! and the property it computes cannot be observed from outside.
+        !!
+        !! What it computes is which rows of `lo..hi` occupy WHOLE validity-bitmap blocks, and it is
+        !! the one thing standing between the parallel column read and a silent wrong answer -- two
+        !! threads pasting adjacent row groups share a bitmap block unless their ranges are trimmed
+        !! to this. That race is a few instructions wide, so an end-to-end test cannot be relied on
+        !! to catch a mistake in it; this makes the rule itself assertable, exactly as
+        !! `parquet_debug_string_row_ranges` does for `parquet_string_column`'s byte-aligned split.
+        !! `mid_lo > mid_hi` reports that no whole block exists in the range.
+        module subroutine parquet_debug_colread_block_rows(lo, hi, width, mid_lo, mid_hi)
+            integer(int64), intent(in) :: lo      !! first row of the range.
+            integer(int64), intent(in) :: hi      !! last row of the range.
+            integer(int64), intent(in) :: width   !! elements per row.
+            integer(int64), intent(out) :: mid_lo !! first row occupying a whole block.
+            integer(int64), intent(out) :: mid_hi !! last such row; < mid_lo when there is none.
+        end subroutine parquet_debug_colread_block_rows
         !> Aborts if another thread is inside %append on this store.
         !!
         !! The cheap half of the append/read contract, and the one every read entry point takes:

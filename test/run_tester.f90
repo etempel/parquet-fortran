@@ -29,6 +29,7 @@ program tester
     use test_temporal, only : collect_tests_parquet_temporal
     use test_table, only : collect_tests_parquet_table
     use test_table_parallel, only : collect_tests_table_parallel
+    use test_string_parallel, only : collect_tests_string_parallel
     use test_table_codegen, only : collect_tests_table_codegen
     use test_settings, only : collect_tests_parquet_settings
     use parquet_bindings, only : parquet_warmup_memory_pool
@@ -80,6 +81,7 @@ program tester
         new_testsuite("sorting", collect_tests_parquet_sorting), &
         new_testsuite("table", collect_tests_parquet_table), &
         new_testsuite("table_parallel", collect_tests_table_parallel), &
+        new_testsuite("string_parallel", collect_tests_string_parallel), &
         new_testsuite("table_codegen", collect_tests_table_codegen), &
         new_testsuite("settings", collect_tests_parquet_settings) &
         ]
@@ -198,6 +200,15 @@ contains
     !> project's worst failure mode. Its thread counter is process-global as well, which is the
     !> second and independent reason.
     !>
+    !> "string_parallel" is excluded for the SAME reason as "table_parallel", and it is a separate
+    !> suite from "parquet_string" precisely so that only these tests pay for it. A string column's
+    !> bulk operation resolves to ONE thread inside an existing parallel region, deliberately, so
+    !> every test in it would compare the serial path against itself and pass while testing nothing.
+    !> That is not hypothetical here: two mutations survived exactly this way while these tests were
+    !> still in the parallelized suite (feature_string_parallel.md S4). Its tests also write
+    !> parquet_set_string_threads and the payload-floor override, both process-global, which is the
+    !> second and independent reason.
+    !>
     !> "parquet_string" no longer needs an entry here: it used to, because of a
     !> gfortran/OpenMP runtime bug (not a bug in parquet_strings.f90's own
     !> logic) that silently corrupted memory when multiple threads
@@ -213,7 +224,7 @@ contains
         character(len=*), intent(in) :: name
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sort" .or. name == "settings" &
-            .or. name == "table_parallel")
+            .or. name == "table_parallel" .or. name == "string_parallel")
     end function suite_is_safe_to_parallelize
 
     !> Whether running just this suite is worth pre-running the whole scenario set for. Purely a

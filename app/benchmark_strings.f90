@@ -22,22 +22,24 @@ program benchmark_strings
     implicit none
 
     integer(int64) :: nrows
-    integer :: avg_len, rounds
+    integer :: avg_len, rounds, threads
     logical :: with_nulls
     integer(int64) :: null_every
 
-    call parse_arguments(nrows, avg_len, rounds, with_nulls, null_every)
+    call parse_arguments(nrows, avg_len, rounds, with_nulls, null_every, threads)
+    call parquet_set_string_threads(threads)
     call run_all(nrows, avg_len, rounds, with_nulls, null_every)
 
 contains
 
     !> Reads the `--key=value` command line, applying each default when the flag is absent.
-    subroutine parse_arguments(nrows, avg_len, rounds, with_nulls, null_every)
+    subroutine parse_arguments(nrows, avg_len, rounds, with_nulls, null_every, threads)
         integer(int64), intent(out) :: nrows      !! elements in the synthetic column.
         integer, intent(out) :: avg_len           !! mean element length in bytes.
         integer, intent(out) :: rounds            !! timed rounds; the best of them is kept.
         logical, intent(out) :: with_nulls        !! .true. => make every null_every-th element null.
         integer(int64), intent(out) :: null_every !! null stride, when with_nulls.
+        integer, intent(out) :: threads           !! string-column thread cap; 0 = automatic.
         character(len=64) :: arg, val
         integer :: k, eq
 
@@ -46,6 +48,7 @@ contains
         rounds = 3
         with_nulls = .false.
         null_every = 7_int64
+        threads = 0
 
         do k = 1, command_argument_count()
             call get_command_argument(k, arg)
@@ -66,13 +69,15 @@ contains
                 read (val, *) avg_len
             case ("--rounds")
                 read (val, *) rounds
+            case ("--threads")
+                read (val, *) threads
             case ("--null-every")
                 read (val, *) null_every
                 with_nulls = .true.
             case default
                 write (error_unit, '(a)') "benchmark_strings: unknown option '"//trim(arg(1:eq-1))//"'"
                 write (error_unit, '(a)') "Usage: benchmark_strings [--nrows=N] [--len=N] " // &
-                    "[--rounds=N] [--nulls] [--null-every=N]"
+                    "[--rounds=N] [--nulls] [--null-every=N] [--threads=N]"
                 error stop 1
             end select
         end do
@@ -81,6 +86,7 @@ contains
         if (avg_len < 2) error stop "benchmark_strings: --len must be >= 2"
         if (rounds < 1) error stop "benchmark_strings: --rounds must be >= 1"
         if (null_every < 2_int64) error stop "benchmark_strings: --null-every must be >= 2"
+        if (threads < 0) error stop "benchmark_strings: --threads must be >= 0 (0 = automatic)"
     end subroutine parse_arguments
 
     !> Fills `c` with `n` elements whose lengths vary deterministically around `avg_len`.
@@ -136,8 +142,9 @@ contains
         payload = src%character_size()
         write (output_unit, '(a,i0,a,i0,a,l1,a,i0)') "rows=", src%size(), "  avg_len=", avg_len, &
             "  nulls=", with_nulls, "  null_count=", src%null_count()
-        write (output_unit, '(a,f9.1,a,i0,a)') "payload=", real(payload, real64)/1.0e6_real64, &
-            " MB   best of ", rounds, " rounds"
+        write (output_unit, '(a,f9.1,a,i0,a,i0,a,i0)') "payload=", real(payload, real64)/1.0e6_real64, &
+            " MB   best of ", rounds, " rounds   string_threads cap=", parquet_get_string_threads(), &
+            "  resolved=", parquet_string_threads()
         write (output_unit, '(a)') ""
         write (output_unit, '(a)') "operation                     seconds     MB/s (payload-equiv)"
         write (output_unit, '(a)') "---------------------------------------------------------------"

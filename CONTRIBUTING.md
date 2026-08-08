@@ -524,6 +524,10 @@ NULLS=no tools/benchmark_strings.sh                          # skip the null-con
 Config: `NROWS` (default 4000000), `LEN` (24, the mean element length — lengths vary
 deterministically around it), `ROUNDS` (3), `NULL_EVERY` (7), `NULLS` (`both`, or `no`/`yes`).
 
+The app also takes `--threads=N`, which caps `parquet_set_string_threads` for the run — a sweep
+over `1 2 4 8` is how the internally-threaded operations' scaling is measured, and it is the
+only way to see the serial path and the threaded path of the same operation side by side.
+
 ### Testing genuine OpenMP concurrency
 
 This repository's own OpenMP-dependent tests (the `openmp`/`openmp_write` test suites, plus the `concurrent_calls_into_shared_reader`/`writer` error scenarios) need OpenMP to actually be active to exercise concurrency:

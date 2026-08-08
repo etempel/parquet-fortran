@@ -61,6 +61,18 @@ module parquet_strings
     !! memcpy of that size on the machines this was measured on.
     integer(int64), parameter :: STRING_MIN_BYTES = 262144_int64
     !
+    !> Fewest threads worth splitting a bulk rebuild across. Below this the operation runs serial.
+    !!
+    !! **This is not a tuning preference, it is the break-even of a structural cost.** Making a
+    !! rebuild splittable requires a three-phase form (lengths, scan, copy) that is measurably slower
+    !! than the single pass it replaces -- 0.0266 s against 0.0162 s on 4 M elements / 70 MB, because
+    !! a permuted `offsets(perm(k))` read misses cache and the split pays that miss twice where one
+    !! pass pays it once. So the parallelism has to beat roughly 1.7x before it breaks even at all,
+    !! and measurement agrees: 2 threads is a net LOSS (0.0177 s), 4 is the first real gain
+    !! (0.0136 s). Measured on an 8-core M1 Pro; a machine with more memory bandwidth would break
+    !! even sooner, so this is a conservative floor rather than a universal one.
+    integer, parameter :: STRING_MIN_THREADS = 4
+    !
     !> Test-only override of `STRING_MIN_BYTES`; `<= 0` restores the real constant.
     !!
     !! **Exists because no fixture a test suite can afford reaches the real floor.** Every column
@@ -306,6 +318,9 @@ contains
         if (payload < string_floor_bytes()) return
         n = parquet_string_threads()
         if (int(n, int64) > (nrows + 7_int64)/8_int64) n = int((nrows + 7_int64)/8_int64)
+        ! Below the break-even the split costs more than it saves, so decline outright rather than
+        ! run a slower shape on two threads. See STRING_MIN_THREADS.
+        if (n < STRING_MIN_THREADS) n = 1
         if (n < 1) n = 1
     end function bulk_threads
     !
@@ -1350,7 +1365,12 @@ contains
     !> Rebuilds payload, offsets and validity in the order `perm` gives, for a permutation that has
     !! already been checked (or trusted). Split out so the two entry points differ only in whether
     !! they scan, rather than carrying two copies of the rebuild.
-    subroutine reindex_apply(self, perm)
+    !> `reindex_apply`'s single-pass form: the whole rebuild in one loop over the permutation.
+    !!
+    !! Faster than the parallel form's three phases whenever there is one thread to run it on, for
+    !! the reason given at that procedure's own branch: one pass pays one cache miss per element on
+    !! the scattered `offsets(perm(k))` read, and any splittable form pays it twice.
+    subroutine reindex_apply_serial(self, perm)
         class(parquet_string_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
         integer(int64) :: n, k, a, b, elen, pos
@@ -1358,14 +1378,12 @@ contains
         character(len=1), allocatable :: new_data(:)
         logical, allocatable :: old_null(:)
         n = self%nrows
-        ! capture the old null flags before any buffer is replaced
         if (self%has_nulls) then
             allocate(old_null(n))
             do k = 1_int64, n
                 old_null(k) = .not. bit_valid(self, k)
             end do
         end if
-        ! gather payload and offsets in permuted order
         allocate(new_off(n+1_int64))
         new_off(1) = 0_int64
         allocate(new_data(max(self%nchars, 1_int64)))
@@ -1379,7 +1397,6 @@ contains
         end do
         call move_alloc(new_off, self%offsets)
         call move_alloc(new_data, self%data)
-        ! rebuild validity in the new order (n_null is unchanged by a permutation)
         if (self%has_nulls) then
             call ensure_validity_cap(self, n)
             do k = 1_int64, n
@@ -1389,6 +1406,110 @@ contains
                     call set_bit_valid(self, k)
                 end if
             end do
+        end if
+    end subroutine reindex_apply_serial
+    !
+    subroutine reindex_apply(self, perm)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        integer(int64), intent(in) :: perm(:)               !! 1-based permutation of 1..size().
+        integer(int64) :: n, k, a, elen
+        integer(int64), allocatable :: new_off(:)
+        character(len=1), allocatable :: new_data(:)
+        logical, allocatable :: old_null(:)
+        integer(int64), allocatable :: lo(:), hi(:)
+        integer :: nt, tix
+        n = self%nrows
+        nt = bulk_threads(n, self%nchars)
+        ! **The serial path is the ORIGINAL single-pass loop, kept deliberately.** Making this
+        ! splittable costs a restructure -- lengths, a scan, then the copy -- and that restructure is
+        ! measurably slower than one pass when there is only one thread to run it on: 0.0154 s
+        ! against 0.0266 s on 4 M elements / 70 MB. The reason is cache misses, not instruction
+        ! count. `perm` is a permutation, so every `offsets(perm(k))` read misses in a 32 MB array,
+        ! and any two-pass form pays that miss twice where one pass pays it once.
+        !
+        ! So collapsing these two into "just run the parallel version with nt = 1" would hand a 1.7x
+        ! slowdown to every caller that does not thread -- a column below the work floor, and any
+        ! caller already inside an OpenMP parallel region, which is where %sort_by reaches this from.
+        ! The two paths must produce byte-identical columns; `test_parquet_string`'s equality test
+        ! over both is what holds them to that.
+        if (nt <= 1) then
+            call reindex_apply_serial(self, perm)
+            return
+        end if
+        call thread_row_ranges(n, nt, lo, hi)
+        ! Capture the old null flags before any buffer is replaced. Writes are to disjoint elements
+        ! of a fresh array, so ANY split is safe here -- the byte-aligned one is reused only because
+        ! it is already computed.
+        if (self%has_nulls) then
+            allocate(old_null(n))
+            !$omp parallel do default(shared) private(tix, k) schedule(static) num_threads(nt) if (nt > 1)
+            do tix = 1, nt
+                do k = lo(tix), hi(tix)
+                    old_null(k) = .not. bit_valid(self, k)
+                end do
+            end do
+            !$omp end parallel do
+        end if
+        allocate(new_off(n+1_int64))
+        allocate(new_data(max(self%nchars, 1_int64)))
+        ! Three phases, because the obvious single loop carries a sequential dependence through the
+        ! write cursor and cannot be split at all. **The prefix sum IS `new_off`**, which is what
+        ! makes this cost no extra memory: phase 1 writes each element's LENGTH into its own slot,
+        ! phase 2 turns those lengths into offsets in place, and phase 3 then knows every element's
+        ! destination without reference to any other element -- so the destination ranges are
+        ! disjoint by construction and the copy is embarrassingly parallel.
+        !
+        ! Phase 1: lengths, one slot per element, no dependence.
+        !$omp parallel do default(shared) private(tix, k) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = lo(tix), hi(tix)
+                new_off(k+1_int64) = self%offsets(perm(k)+1_int64) - self%offsets(perm(k))
+            end do
+        end do
+        !$omp end parallel do
+        ! Phase 2: the scan. Serial deliberately -- it is O(n) over int64 and bandwidth-light next
+        ! to the payload, and a parallel scan is more code and more risk than it is worth here.
+        ! Measure before changing that.
+        new_off(1) = 0_int64
+        do k = 1_int64, n
+            new_off(k+1_int64) = new_off(k+1_int64) + new_off(k)
+        end do
+        ! Phase 3: the payload copy -- the expensive one, and the one that divides cleanly.
+        !$omp parallel do default(shared) private(tix, k, a, elen) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do k = lo(tix), hi(tix)
+                ! The LENGTH comes from `new_off`, which phase 2 just made sequential -- not from a
+                ! second look at `offsets(perm(k)+1)`. That matters more than it looks: `perm` is a
+                ! permutation, so every `offsets(perm(k))` read is a cache miss into a 32 MB array,
+                ! and taking the length from here rather than from the source halves the misses this
+                ! phase pays. Only the source START still has to be looked up.
+                elen = new_off(k+1_int64) - new_off(k)
+                if (elen > 0_int64) then
+                    a = self%offsets(perm(k)) + 1_int64
+                    new_data(new_off(k)+1_int64:new_off(k)+elen) = self%data(a:a+elen-1_int64)
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        call move_alloc(new_off, self%offsets)
+        call move_alloc(new_data, self%data)
+        ! Validity, in the new order (n_null is unchanged by a permutation). **This is the phase the
+        ! byte-aligned ranges exist for**: the bitmap packs 8 rows per byte, so two threads meeting
+        ! inside a byte would race on it -- a read-modify-write each, one lost, with nothing to
+        ! notice afterwards. `thread_row_ranges` makes that impossible rather than unlikely.
+        if (self%has_nulls) then
+            call ensure_validity_cap(self, n)
+            !$omp parallel do default(shared) private(tix, k) schedule(static) num_threads(nt) if (nt > 1)
+            do tix = 1, nt
+                do k = lo(tix), hi(tix)
+                    if (old_null(perm(k))) then
+                        call set_bit_null(self, k)
+                    else
+                        call set_bit_valid(self, k)
+                    end if
+                end do
+            end do
+            !$omp end parallel do
         end if
     end subroutine reindex_apply
     !

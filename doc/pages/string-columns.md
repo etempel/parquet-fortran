@@ -410,6 +410,28 @@ runs at roughly 2.1 GB/s of gathered payload on an M1 Pro. An element gathered t
 twice — this is a gather, not a permutation, so the result may be shorter than, as long as, or
 longer than any of its sources.
 
+## Threading inside one column
+
+`%reindex` and `%reindex_trusted` split their work across threads when the column is large enough to
+be worth it. Nothing needs to be asked for — `parquet_string_threads()` reports what an operation
+would use here, and `parquet_set_string_threads(n)` caps it (see
+[Settings](settings.html#threads-inside-one-string-column)).
+
+Three things decide whether an operation actually threads, and all three decline toward serial:
+
+- **Inside your own OpenMP parallel region it stays serial**, deliberately — `T` threads each asking
+  for `T` more is slower than not threading at all, and a nested region is your business, not the
+  library's. This is the same rule sorting follows.
+- **A small payload stays serial.** The floor is measured in bytes of payload rather than rows,
+  because that is what has to be copied.
+- **Below four threads it stays serial**, which is less obvious and worth knowing: making a rebuild
+  splittable costs a restructure that is about 1.7x slower than the single pass it replaces, so two
+  or three threads cannot pay for themselves. The library declines rather than running the slower
+  shape.
+
+**The result is byte-identical whatever the thread count** — same values, same offsets, same nulls.
+Threading here is purely a wall-clock control, never a change of answer.
+
 ## Capacity management
 
 The column grows automatically (geometric growth) as you append, so appends are amortized

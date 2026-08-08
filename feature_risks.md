@@ -125,6 +125,7 @@ something a reader is expected to have.
 | [Risk-58](#risk-58--an-adopted-transform-is-shared-state-and-only-its-preconditions-stand-between-it-and-a-wrong-row-set) | An adopted transform is shared state, and only its preconditions stand between it and a wrong row set | 4 — covered |
 | [Risk-59](#risk-59--a-shared_ptr-parameter-on-a-per-element-helper-costs-7x-and-fails-nothing) | A `shared_ptr` parameter on a per-element helper costs 7x and fails nothing | 3 — not testable |
 | [Risk-60](#risk-60--a-per-element-allocatable-character-round-trip-in-a-bulk-string-operation-costs-4x-and-fails-nothing) | A per-element allocatable-character round trip in a bulk string operation costs 4x and fails nothing | 3 — not testable |
+| [Risk-61](#risk-61--a-validity-split-that-is-not-byte-aligned-loses-nulls-and-no-end-to-end-test-can-be-relied-on-to-see-it) | A validity split that is not byte-aligned loses nulls, and no end-to-end test can be relied on to see it | 4 — covered |
 
 ---
 
@@ -132,7 +133,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-61**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-62**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2416,3 +2417,32 @@ allocation per element costs **0.11 s**, which is **19 %** of a `parquet_string_
 **33 %** of a `parquet_column` one. **Widening the check to `src/` requires fixing those first**, or
 it fails the lint stage on known work — which is scheduled as `feature_string_parallel.md` **S10**,
 whose last step is that widening. See S3 there for the numbers and the method.
+
+### Risk-61 — A validity split that is not byte-aligned loses nulls, and no end-to-end test can be relied on to see it
+
+`parquet_string_column`'s validity bitmap packs **8 rows per byte**. A threaded bulk operation whose
+row ranges meet *inside* a byte has two threads doing a read-modify-write on that byte: one update is
+lost, some row's null flag is wrong, the column still passes `%validate()`, and nothing aborts.
+
+`thread_row_ranges` (`src/parquet_strings.f90`) exists to make that impossible rather than unlikely:
+it divides the validity **bytes** and converts back to rows, so every range begins at `1 mod 8` and no
+two threads ever touch the same byte. Every threaded phase in the module uses its ranges, including
+the phases that would be safe with any split (the `old_null` capture writes disjoint array elements),
+because one split shared by all phases cannot drift from itself.
+
+**Test — and the division of labour here is the point, not an accident.**
+
+- **The alignment rule is unit-tested deterministically**, by `thread row ranges cover every row and
+  never share a validity byte` (`test/test_parquet_string.f90`), which asserts coverage, alignment and
+  the legality of empty ranges over a sweep of row counts that straddle byte boundaries. Replacing the
+  byte split with an even row split fails it every time.
+- **The end-to-end equality tests do NOT reliably catch it**, and this was measured rather than
+  assumed: the same mutation, run against `test/test_string_parallel.f90`'s threaded-vs-serial
+  comparisons, **passed** — because a data race on a handful of boundary bytes, in a loop that
+  finishes in microseconds, simply may not occur in any given run.
+
+**What this forbids.** Do not treat the equality tests as cover for the alignment rule; they cover
+everything *except* it. Any new threaded phase must take its ranges from `thread_row_ranges` rather
+than compute its own, and any change to that helper must keep the unit test passing — it is the only
+deterministic guard this risk has. A "simplification" that splits rows evenly is the exact defect, and
+it will look correct in every test run that does not happen to lose a write.

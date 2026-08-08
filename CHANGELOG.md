@@ -17,7 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the other caps it is read per operation, `0` means automatic, `1` forces serial, and it never
   overrides the rule that work inside an OpenMP parallel region runs serially.
   `parquet_set_threads(n)` now sets five subsystems rather than four, and
-  `PARQUET_FORTRAN_STRING_THREADS` reaches it from the environment.
+  `PARQUET_FORTRAN_STRING_THREADS` reaches it from the environment. **What currently uses it:**
+  `%reindex`/`%reindex_trusted`, and so `parquet_column`'s string reindex and `parquet_table%sort_by`
+  on a string column when they are not already inside a parallel region. The gain is modest and
+  hardware-dependent — 1.15x on an 8-core M1 Pro at 4 M elements, where the loop is bandwidth-bound —
+  and the serial path is untouched, so nothing is slower than before at any thread count.
 - **`parquet_reader_adopt_transform(reader, source)`** gives one reader the read-time transform
   another has already worked out — its `filter=`/`sample_fraction=` row mask and its `sort_by=`
   permutation — instead of making it derive the same thing from the same file again. This is for the

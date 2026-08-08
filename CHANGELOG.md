@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_set_string_threads(n)` / `parquet_get_string_threads()`**, and
+  `parquet_string_threads()` reporting what one `parquet_string_column` bulk operation would
+  resolve to here. This is the **within-one-column** thread axis: `parquet_set_table_threads` splits
+  a table's work by column, this splits one column's work by row range, and the two never multiply
+  because a string operation reached from inside the table's own parallel region stands down. Like
+  the other caps it is read per operation, `0` means automatic, `1` forces serial, and it never
+  overrides the rule that work inside an OpenMP parallel region runs serially.
+  `parquet_set_threads(n)` now sets five subsystems rather than four, and
+  `PARQUET_FORTRAN_STRING_THREADS` reaches it from the environment.
 - **`parquet_reader_adopt_transform(reader, source)`** gives one reader the read-time transform
   another has already worked out — its `filter=`/`sample_fraction=` row mask and its `sort_by=`
   permutation — instead of making it derive the same thing from the same file again. This is for the

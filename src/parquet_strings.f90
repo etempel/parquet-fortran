@@ -22,8 +22,12 @@ module parquet_strings
     use, intrinsic :: iso_fortran_env, only : int8, int32, int64, output_unit
     ! The ONLY reason this otherwise self-contained module imports anything of the
     ! library's: its two print procedures are solicited output, and verbosity="silent"
-    ! governs those exactly as it governs %print_stat.
-    use parquet_settings, only : parquet_output_is_suppressed
+    ! governs those exactly as it governs %print_stat -- and, since threading arrived, the
+    ! string-column thread cap, which is a setting for the same reason every other thread cap is.
+    use parquet_settings, only : parquet_output_is_suppressed, parquet_get_string_threads
+#ifdef _OPENMP
+    use omp_lib, only : omp_get_max_threads, omp_in_parallel
+#endif
     use, intrinsic :: iso_c_binding, only : c_ptr, c_loc, c_f_pointer, c_null_ptr, c_associated
     !
     implicit none
@@ -31,6 +35,10 @@ module parquet_strings
     !
     public :: parquet_string_column
     public :: parquet_string
+    public :: parquet_string_threads
+    public :: parquet_debug_set_string_min_bytes
+    public :: parquet_debug_string_row_ranges
+    public :: parquet_debug_string_bulk_threads
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_strings: "
@@ -43,6 +51,24 @@ module parquet_strings
     !> Minimum initial row / character capacity for the first allocation from empty.
     integer(int64), parameter :: MIN_ROW_CAP = 16_int64
     integer(int64), parameter :: MIN_CHAR_CAP = 64_int64
+    !
+    !> Payload below which a bulk operation runs serially however many threads are available.
+    !!
+    !! **Measured in BYTES, not rows**, because that is what the work actually scales with: a column
+    !! of 10 M single-character elements and one of 10 k ten-kilobyte elements have wildly different
+    !! row counts and nearly the same payload, and it is the payload that has to be copied. The
+    !! value is one order of magnitude above the point where thread startup stops dominating a
+    !! memcpy of that size on the machines this was measured on.
+    integer(int64), parameter :: STRING_MIN_BYTES = 262144_int64
+    !
+    !> Test-only override of `STRING_MIN_BYTES`; `<= 0` restores the real constant.
+    !!
+    !! **Exists because no fixture a test suite can afford reaches the real floor.** Every column
+    !! small enough to build in a unit test sits far below 256 KiB, so without this every test would
+    !! silently exercise the serial path and a threaded operation would be covered by nothing --
+    !! `feature_risks.md` Risk-49's failure exactly, where a dense sweep over small arrays never
+    !! reached the code it was written for.
+    integer(int64), save :: dbg_string_min_bytes = 0_int64
     !
     !> An owning, Arrow-LargeUtf8-compatible variable-length string column.
     !!
@@ -190,6 +216,143 @@ contains
     ! ==================================================================================
     ! Internal helpers (private module procedures)
     ! ==================================================================================
+    !
+    !> How many threads one `parquet_string_column` bulk operation would use here, right now.
+    !!
+    !! **Public for the same reason `pf_sort_threads` is** (`feature_risks.md` Risk-40): this is the
+    !! ONE place the cap and the OpenMP environment are combined, so a caller asking "what will this
+    !! do?" and the operation itself can never give different answers. A second reader is how the
+    !! two would come to disagree.
+    !!
+    !! Two rules, in this order:
+    !!
+    !! * **Serial inside an OpenMP parallel region**, deliberately, and this is not a refusal -- it
+    !!   picks a DEFAULT, exactly as `pf_sort_threads` and `parallel_prefetch_ok` do. `T` threads
+    !!   each asking for `T` more is slower than not threading at all, and nesting is the caller's
+    !!   business. Note `omp_get_max_threads()` reads an ICV rather than the current team size, so
+    !!   inside an 8-thread region it answers 8 and a missing check means 8x8.
+    !! * **`parquet_set_string_threads` CAPS the automatic answer**; it never raises it, and never
+    !!   overrides the rule above.
+    integer function parquet_string_threads() result(n)
+        integer :: cap
+        n = 1
+#ifdef _OPENMP
+        if (.not. omp_in_parallel()) n = omp_get_max_threads()
+#endif
+        cap = parquet_get_string_threads()
+        if (cap > 0 .and. cap < n) n = cap
+        if (n < 1) n = 1
+    end function parquet_string_threads
+    !
+    !> Overrides the payload floor below which a bulk operation stays serial. **Test-only**; `<= 0`
+    !! restores the real `STRING_MIN_BYTES`.
+    !!
+    !! **Public only because Fortran has no narrower visibility, and deliberately accepted** --
+    !! `parquet_debug_table_set_inflight` is the existing precedent and the reasoning is the same
+    !! (CLAUDE.md, "A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one"). The C++ route
+    !! is not available here: `parquet_strings` is standalone by design and reaches no `bind(C)`
+    !! surface at all, so routing this through `parquet_wrapper.cpp` would cost the module's
+    !! independence to save one public name. No library code calls this.
+    subroutine parquet_debug_set_string_min_bytes(n)
+        integer(int64), intent(in) :: n !! new floor in bytes, or <= 0 to restore the real one.
+        dbg_string_min_bytes = n
+    end subroutine parquet_debug_set_string_min_bytes
+    !
+    !> What a bulk operation over `col` would actually resolve to, floor and all. **Test-only**.
+    !!
+    !! Returns the REAL decision rather than letting a test rebuild it: a test that reimplements
+    !! `bulk_threads` asserts against its own copy, which drifts the moment the rule changes and
+    !! then agrees with itself forever. This is the observation `feature_string_parallel.md` section
+    !! 9 item 5 asks for -- the subject a knob's observed-effect test measures.
+    integer function parquet_debug_string_bulk_threads(col) result(n)
+        type(parquet_string_column), intent(in) :: col !! the column an operation would walk.
+        n = bulk_threads(col%nrows, col%nchars)
+    end function parquet_debug_string_bulk_threads
+    !
+    !> Exposes `thread_row_ranges` for testing. **Test-only**; no library code calls it.
+    !!
+    !! Public for the same reason `parquet_debug_set_string_min_bytes` is, and with more at stake:
+    !! the byte-alignment rule this returns is the one property of the threading layer whose failure
+    !! is a **silent wrong answer** (two threads sharing a validity byte lose one another's writes,
+    !! and the column still validates). It has no consumer inside the module until S5, so without
+    !! this it would ship untested — which is precisely how a rule everyone agrees with comes to be
+    !! implemented wrongly.
+    subroutine parquet_debug_string_row_ranges(n, nt, lo, hi)
+        integer(int64), intent(in) :: n                   !! total rows.
+        integer, intent(in) :: nt                         !! number of ranges.
+        integer(int64), allocatable, intent(out) :: lo(:) !! first row of each range.
+        integer(int64), allocatable, intent(out) :: hi(:) !! last row of each range.
+        call thread_row_ranges(n, nt, lo, hi)
+    end subroutine parquet_debug_string_row_ranges
+    !
+    !> The payload floor actually in force: the test override where one is set, otherwise the real
+    !! constant. One reader, so the two cannot drift.
+    integer(int64) function string_floor_bytes() result(n)
+        n = STRING_MIN_BYTES
+        if (dbg_string_min_bytes > 0_int64) n = dbg_string_min_bytes
+    end function string_floor_bytes
+    !
+    !> Threads a bulk operation over `payload` bytes should actually use: `parquet_string_threads()`
+    !! narrowed by the work floor and by having at least one whole validity byte (8 rows) per thread.
+    !!
+    !! **The 8-rows-per-thread clamp is not a tuning choice.** `thread_row_ranges` can only produce
+    !! byte-aligned boundaries, so asking for more threads than there are validity bytes yields empty
+    !! ranges; clamping here keeps that impossible rather than merely unlikely.
+    integer function bulk_threads(nrows, payload) result(n)
+        integer(int64), intent(in) :: nrows   !! rows the operation will walk.
+        integer(int64), intent(in) :: payload !! bytes the operation will move.
+        n = 1
+        if (nrows <= 0_int64) return
+        if (payload < string_floor_bytes()) return
+        n = parquet_string_threads()
+        if (int(n, int64) > (nrows + 7_int64)/8_int64) n = int((nrows + 7_int64)/8_int64)
+        if (n < 1) n = 1
+    end function bulk_threads
+    !
+    !> Splits rows `1..n` into `nt` contiguous ranges whose boundaries fall on **validity BYTE**
+    !! boundaries -- every `lo` is `1 mod 8` and every `hi` is `0 mod 8` except the last.
+    !!
+    !! **This is the correctness rule of the whole threading layer, not a convenience.** The validity
+    !! bitmap packs 8 rows per byte, so two threads writing rows in the same byte race on that byte:
+    !! a read-modify-write each, one of which is lost. Nothing aborts, the column still validates,
+    !! and the nulls are simply wrong -- `feature_risks.md` Risk-60's silent class. Splitting on
+    !! arbitrary row counts is what makes that possible; splitting on byte boundaries makes it
+    !! impossible, because no two threads ever touch the same byte.
+    !!
+    !! Ranges are returned even when the split is uneven, and an empty range (`lo > hi`) is a valid
+    !! answer for a trailing thread -- callers must tolerate it rather than assume every thread gets
+    !! work.
+    subroutine thread_row_ranges(n, nt, lo, hi)
+        integer(int64), intent(in) :: n                  !! total rows (>= 0).
+        integer, intent(in) :: nt                        !! number of ranges (>= 1).
+        integer(int64), allocatable, intent(out) :: lo(:) !! first row of each range.
+        integer(int64), allocatable, intent(out) :: hi(:) !! last row of each range; hi < lo when empty.
+        integer(int64) :: nbytes, per, extra, cur, take
+        integer :: k
+        allocate(lo(nt), hi(nt))
+        if (n <= 0_int64) then
+            lo = 1_int64
+            hi = 0_int64
+            return
+        end if
+        ! Divide the BYTES, then convert back to rows -- which is what guarantees the alignment,
+        ! rather than dividing rows and rounding afterwards.
+        nbytes = (n + 7_int64)/8_int64
+        per = nbytes/int(nt, int64)
+        extra = mod(nbytes, int(nt, int64))
+        cur = 1_int64
+        do k = 1, nt
+            take = per
+            if (int(k, int64) <= extra) take = take + 1_int64
+            lo(k) = cur
+            hi(k) = min(cur + take*8_int64 - 1_int64, n)
+            if (take == 0_int64) hi(k) = cur - 1_int64
+            cur = hi(k) + 1_int64
+        end do
+        ! The last range always runs to n: integer division cannot leave a tail, but saying so here
+        ! means a future change to the split above cannot silently drop rows.
+        if (hi(nt) < n) hi(nt) = n
+    end subroutine thread_row_ranges
     !
     !> Aborts with a bounds-violation message; called by every index-checked accessor.
     subroutine check_index(c, i, proc)

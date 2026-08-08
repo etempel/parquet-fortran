@@ -145,6 +145,27 @@ copies come to at most one extra copy of the table — so a whole-column rewrite
 proportionally cheaper, since their new storage is sized by the rows they keep. A program working
 near its memory ceiling caps the threads here, which caps the copies with them.
 
+
+## Threads inside one string column
+
+`parquet_set_string_threads(n)` caps the threads **one `parquet_string_column` bulk operation** may
+use internally — a reindex, a gather, a compaction, a materialization of one column's packed
+payload.
+
+This is the only one of the thread caps that divides work *within* a column rather than across
+several. `parquet_set_table_threads` splits a table's work by **column**; this splits one column's
+work by **row range**. They do not multiply: a string operation reached from inside the table's own
+parallel region stands down, exactly as a sort does, so at most one of the two is ever active.
+
+Like the others it is a cap rather than a request, read per operation, with `0` meaning automatic
+and `1` forcing serial. A string operation also stays serial on its own inside your own OpenMP
+parallel region, and on a payload too small to be worth a thread team — the floor is measured in
+**bytes of payload rather than rows**, because a column of ten million one-character elements and
+one of ten thousand ten-kilobyte elements have very different row counts and much the same amount of
+copying to do.
+
+`parquet_string_threads()` reports the resolved answer for the current context;
+`parquet_get_string_threads()` reports the raw setting (`0` when automatic).
 ## Writer defaults
 
 `parquet_set_default_compression(name)` and `parquet_set_default_compression_level(n)` supply what
@@ -379,6 +400,7 @@ parquet-fortran settings
   sort_threads                     0
   prefetch_threads                 0
   table_threads                    0
+  string_threads                   0
   sort_parallel_min_rows           8192
   sort_counting_path               true
   sort_counting_bucket_limit       4194304

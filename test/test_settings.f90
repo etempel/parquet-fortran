@@ -85,6 +85,12 @@ contains
             new_unittest("sort_threads never lifts the in-parallel serial answer", test_sort_threads_respects_region), &
             new_unittest("prefetch_threads caps the parallel prefetch", test_prefetch_threads_effect), &
             new_unittest("table_threads caps the parallel per-column rewrite", test_table_threads_effect), &
+            new_unittest("string_threads caps what one string column resolves to", &
+                test_string_threads_effect), &
+            new_unittest("the string work floor is a payload floor, overridable for tests", &
+                test_string_work_floor), &
+            new_unittest("a string operation stands down inside a parallel region", &
+                test_string_threads_in_region), &
             new_unittest("default_compression changes the bytes written", test_default_compression_effect), &
             new_unittest("default_compression_level changes the bytes written", test_default_compression_level_effect), &
             new_unittest("naming a codec default drops the zstd-tuned level", test_default_compression_decouples_level), &
@@ -110,7 +116,7 @@ contains
             new_unittest("a variable overrides an earlier explicit set", test_env_overrides_explicit), &
             new_unittest("integers accept blanks and a sign, booleans fold case", test_env_value_forms), &
             new_unittest("a codec and its level both arrive", test_env_codec_and_level), &
-            new_unittest("set_threads moves all four thread counts", test_set_threads), &
+            new_unittest("set_threads moves all five thread counts", test_set_threads), &
             new_unittest("PARQUET_FORTRAN_THREADS is overridden by the specific variables", &
                 test_env_threads_then_specific) &
             ]
@@ -282,6 +288,7 @@ contains
         !
         call parquet_set_sort_threads(6)
         call parquet_set_prefetch_threads(2)
+        call parquet_set_string_threads(3)
         call parquet_set_default_compression("gzip")
         call parquet_set_default_compression_level(9)
         call parquet_set_default_use_threads(.false.)
@@ -295,6 +302,8 @@ contains
         call check(error, parquet_get_sort_threads() == 0, "reset restores sort_threads")
         if (allocated(error)) return
         call check(error, parquet_get_prefetch_threads() == 0, "reset restores prefetch_threads")
+        if (allocated(error)) return
+        call check(error, parquet_get_string_threads() == 0, "reset restores string_threads")
         if (allocated(error)) return
         call parquet_get_default_compression(codec)
         call check(error, codec == "zstd", "reset restores default_compression")
@@ -847,10 +856,13 @@ contains
             "set_threads must set the sort cap")
         if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 3, &
             "set_threads must set the prefetch cap")
-        ! The fourth knob. A forgotten call here is invisible without its own assertion, since the
-        ! other three still work and the name says nothing about how many "all" is.
+        ! The fourth and fifth knobs. A forgotten call is invisible without its own assertion, since
+        ! the others still work and the name says nothing about how many "all" is -- which is exactly
+        ! how this test came to say "all four" while a fifth cap existed and was never set.
         if (.not. allocated(error)) call check(error, parquet_get_table_threads() == 3, &
             "set_threads must set the table mutation cap")
+        if (.not. allocated(error)) call check(error, parquet_get_string_threads() == 3, &
+            "set_threads must set the string-column cap")
         ! A later individual setter overrides just its own knob, which is what makes the convenience
         ! composable rather than a mode you have to leave.
         if (.not. allocated(error)) then
@@ -886,7 +898,7 @@ contains
         call restore(original)
     end subroutine test_env_threads_then_specific
 
-    !> Removes all fourteen, so no test can inherit another's environment.
+    !> Removes all fifteen, so no test can inherit another's environment.
     !>
     !> **This matters more than the usual restore-what-you-changed discipline.** The environment
     !> outlives the test that set it and is read by nothing until the next parquet_settings_from_env
@@ -899,6 +911,7 @@ contains
         call unset_env("PARQUET_FORTRAN_SORT_THREADS")
         call unset_env("PARQUET_FORTRAN_PREFETCH_THREADS")
         call unset_env("PARQUET_FORTRAN_TABLE_THREADS")
+        call unset_env("PARQUET_FORTRAN_STRING_THREADS")
         call unset_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_PATH")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT")
@@ -930,6 +943,7 @@ contains
         call set_env("PARQUET_FORTRAN_SORT_THREADS", "5")
         call set_env("PARQUET_FORTRAN_PREFETCH_THREADS", "2")
         call set_env("PARQUET_FORTRAN_TABLE_THREADS", "7")
+        call set_env("PARQUET_FORTRAN_STRING_THREADS", "5")
         call set_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", "64")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_PATH", "false")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", "128")
@@ -951,6 +965,8 @@ contains
             "PARQUET_FORTRAN_PREFETCH_THREADS reaches prefetch_threads")
         if (.not. allocated(error)) call check(error, parquet_get_table_threads() == 7, &
             "PARQUET_FORTRAN_TABLE_THREADS reaches table_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_string_threads() == 5, &
+            "PARQUET_FORTRAN_STRING_THREADS reaches string_threads")
         if (.not. allocated(error)) call check(error, parquet_get_sort_parallel_min_rows() == 64_int64, &
             "PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS reaches sort_parallel_min_rows")
         if (.not. allocated(error)) call check(error, .not. parquet_get_sort_counting_path(), &
@@ -1451,4 +1467,157 @@ contains
         call parquet_close_writer(writer)
     end subroutine estimated_chunk_size
     !
+
+    !> The observed effect, not the round trip. `parquet_string_threads()` is the ONE place the
+    !> string cap and the OpenMP environment are combined, so it is what every bulk operation
+    !> actually asks -- a setting that were stored and never read would leave the capped and
+    !> automatic answers equal.
+    !>
+    !> **The negative control is the automatic arm**, asserted in the same test: without it, a cap
+    !> that fired unconditionally (or a machine offering one thread anyway) would pass just as
+    !> happily. On a single-core machine the automatic answer is legitimately 1 and there is nothing
+    !> to distinguish, so the strict comparison is guarded on `omp_get_max_threads() > 1` -- which
+    !> is a real limitation of the environment, not a weakened assertion.
+    subroutine test_string_threads_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: auto_n, capped_n, avail
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        call parquet_set_string_threads(0)
+        auto_n = parquet_string_threads()
+        call check(error, auto_n >= 1, "the automatic answer is always at least one thread")
+        if (allocated(error)) return
+        !
+        call parquet_set_string_threads(1)
+        capped_n = parquet_string_threads()
+        call check(error, capped_n == 1, "a cap of 1 forces one thread")
+        if (allocated(error)) return
+        if (avail > 1) then
+            call check(error, auto_n > capped_n, &
+                "negative control: with threads available the automatic answer must EXCEED the cap")
+            if (allocated(error)) return
+            call check(error, auto_n == avail, "the automatic answer is what OpenMP offers")
+            if (allocated(error)) return
+        end if
+        !
+        ! A cap ABOVE what OpenMP offers changes nothing -- it caps, it never raises.
+        call parquet_set_string_threads(avail + 16)
+        call check(error, parquet_string_threads() == auto_n, &
+            "a cap above the available thread count does not raise the answer")
+        if (allocated(error)) return
+        !
+        call parquet_set_string_threads(0)
+        call check(error, parquet_get_string_threads() == 0, "the raw getter reports the cap, not the resolved count")
+    end subroutine test_string_threads_effect
+
+
+    !> The work floor is a **payload** floor, not a row floor, and it is overridable so tests can
+    !> reach the threaded path at all.
+    !>
+    !> Without the override every fixture a suite can afford would sit below 256 KiB and silently
+    !> take the serial path, so a threaded operation would be covered by nothing -- `feature_risks.md`
+    !> Risk-49's failure exactly. The negative control is the same column measured at the real floor,
+    !> which must resolve to 1: a floor that never declined would pass any test written for it.
+    !>
+    !> **This lives in the settings suite, not the string one, for two independent reasons** -- and
+    !> it was written there first and found vacuous by mutation testing. `parquet_debug_set_string_min_bytes`
+    !> is process-global, so a test writing it inside test-drive's per-suite parallelism is visible to
+    !> every sibling running at the same time; and test-drive achieves that parallelism with its own
+    !> `!$omp parallel do`, so `omp_in_parallel()` is `.true.` throughout a parallelized suite and
+    !> `parquet_string_threads()` correctly answers 1 for *every* arm -- leaving an A/B comparing one
+    !> code path against itself, which passes while testing nothing. This suite is excluded from that
+    !> parallelism (see run_tester.f90), which is what makes the observation real.
+    subroutine test_string_work_floor(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        integer :: i, avail, n_default, n_lowered
+        !
+        avail = parquet_string_threads()
+        do i = 1, 64
+            call col%append_string("abcdefgh")
+        end do
+        call check(error, col%character_size() == 512, "the fixture is 512 bytes -- far below the real floor")
+        if (allocated(error)) return
+        !
+        call parquet_debug_set_string_min_bytes(0_int64)
+        n_default = parquet_debug_string_bulk_threads(col)
+        call check(error, n_default == 1, &
+            "negative control: at the real floor this column is far too small to thread")
+        if (allocated(error)) return
+        !
+        call parquet_debug_set_string_min_bytes(64_int64)
+        n_lowered = parquet_debug_string_bulk_threads(col)
+        if (avail > 1) then
+            call check(error, n_lowered > 1, "with the floor lowered the same column does thread")
+            if (allocated(error)) return
+        end if
+        call parquet_debug_set_string_min_bytes(0_int64)
+        call check(error, parquet_debug_string_bulk_threads(col) == 1, &
+            "restoring the floor restores the serial answer")
+    end subroutine test_string_work_floor
+    !
+
+
+    !> **Inside an OpenMP parallel region a string operation resolves to ONE thread**, whatever the
+    !> environment offers and whatever the cap says. `T` threads each asking for `T` more is slower
+    !> than not threading at all, and nesting is the caller's business -- the same rule
+    !> `pf_sort_threads` and `parallel_prefetch_ok` implement, stated once more here because a third
+    !> copy of it is how the three come to disagree.
+    !>
+    !> **The region is opened explicitly by this test rather than inherited from the harness.**
+    !> test-drive runs most suites inside its own `!$omp parallel do`, so a test placed in one of
+    !> those would see `omp_in_parallel()` true for every arm and could not measure the difference at
+    !> all -- which is exactly how the sibling floor test came to be vacuous before it was moved
+    !> here. This suite is excluded from that parallelism, so the `outside` reading is genuinely
+    !> outside and the two arms really do differ.
+    subroutine test_string_threads_in_region(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: outside, inside, avail
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        call parquet_set_string_threads(0)
+        outside = parquet_string_threads()
+        inside = -1
+#ifdef _OPENMP
+        !$omp parallel
+        !$omp master
+        inside = parquet_string_threads()
+        !$omp end master
+        !$omp end parallel
+#else
+        inside = parquet_string_threads()
+#endif
+        call check(error, inside == 1, "inside a parallel region a string operation must resolve to one thread")
+        if (allocated(error)) return
+        if (avail > 1) then
+            call check(error, outside > 1, &
+                "negative control: outside a region the same call must resolve to more than one")
+            if (allocated(error)) return
+            call check(error, outside > inside, "so the two readings genuinely differ")
+            if (allocated(error)) return
+        end if
+        !
+        ! An explicit cap does not lift the rule either -- it caps the automatic answer, and inside a
+        ! region that answer is already 1.
+        call parquet_set_string_threads(8)
+        inside = -1
+#ifdef _OPENMP
+        !$omp parallel
+        !$omp master
+        inside = parquet_string_threads()
+        !$omp end master
+        !$omp end parallel
+#else
+        inside = parquet_string_threads()
+#endif
+        call check(error, inside == 1, "a cap does not lift the serial-inside-a-region rule")
+        call parquet_set_string_threads(0)
+    end subroutine test_string_threads_in_region
+
 end module test_settings

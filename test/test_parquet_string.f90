@@ -63,7 +63,9 @@ contains
             new_unittest("first element shortest regression", test_first_shortest), &
             new_unittest("dual-kind int32/int64 index arguments", test_dual_kind), &
             new_unittest("diagnostics: clear, memory_usage, print, validity growth", test_diagnostics_extra), &
-            new_unittest("capacity edge cases (empty, shrink, validity shrink)", test_capacity_edges) &
+            new_unittest("capacity edge cases (empty, shrink, validity shrink)", test_capacity_edges), &
+            new_unittest("thread row ranges cover every row and never share a validity byte", &
+                test_thread_row_ranges) &
             ]
     end subroutine collect_tests_parquet_string
     !
@@ -1356,5 +1358,66 @@ contains
         if (allocated(error)) return
         call check(error, b%is_null(1), "the null survives reserve+shrink")
     end subroutine test_capacity_edges
+    !
+
+    !> **The one correctness rule of the threading layer, tested before anything threads.**
+    !!
+    !! The validity bitmap packs 8 rows per byte, so two threads whose ranges meet inside a byte
+    !! race on that byte -- a read-modify-write each, one lost. Nothing aborts and the column still
+    !! validates; the nulls are just wrong. `thread_row_ranges` exists to make that impossible by
+    !! splitting on byte boundaries, and this asserts the three properties that makes true:
+    !!
+    !!   * **coverage** -- every row 1..n appears in exactly one range, in order, so no row is
+    !!     dropped or done twice;
+    !!   * **alignment** -- every range starts at `1 mod 8`, which is what guarantees no two threads
+    !!     share a byte;
+    !!   * **empty ranges are legal** -- a trailing thread may get none, and callers must tolerate
+    !!     that rather than assume every thread has work.
+    !!
+    !! Swept over row counts that straddle byte boundaries (7, 8, 9, ...) rather than round numbers,
+    !! since an off-by-one in the byte arithmetic is invisible at multiples of 8.
+    subroutine test_thread_row_ranges(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), allocatable :: lo(:), hi(:)
+        integer(int64) :: n, next
+        integer :: nt, k
+        logical :: ok_cover, ok_align, saw_empty
+        !
+        ok_cover = .true.
+        ok_align = .true.
+        saw_empty = .false.
+        do n = 0_int64, 40_int64
+            do nt = 1, 6
+                call parquet_debug_string_row_ranges(n, nt, lo, hi)
+                if (size(lo) /= nt .or. size(hi) /= nt) then
+                    ok_cover = .false.
+                    cycle
+                end if
+                next = 1_int64
+                do k = 1, nt
+                    if (hi(k) < lo(k)) then
+                        saw_empty = .true.
+                        cycle          ! an empty range contributes nothing and must not move `next`
+                    end if
+                    if (lo(k) /= next) ok_cover = .false.
+                    ! Every non-empty range must BEGIN on a validity byte boundary. The last one may
+                    ! end mid-byte -- there is no thread after it to collide with.
+                    if (mod(lo(k) - 1_int64, 8_int64) /= 0_int64) ok_align = .false.
+                    next = hi(k) + 1_int64
+                end do
+                if (next /= n + 1_int64) ok_cover = .false.
+            end do
+        end do
+        call check(error, ok_cover, "every row is covered exactly once, in order, for n = 0..40 and 1..6 ranges")
+        if (allocated(error)) return
+        call check(error, ok_align, "every non-empty range starts on a validity byte boundary")
+        if (allocated(error)) return
+        call check(error, saw_empty, "the sweep really did produce an empty range (else it proves nothing about them)")
+        if (allocated(error)) return
+        !
+        ! A single range must be the whole column, whatever n is -- the serial path.
+        call parquet_debug_string_row_ranges(37_int64, 1, lo, hi)
+        call check(error, lo(1) == 1_int64 .and. hi(1) == 37_int64, "one range spans the whole column")
+    end subroutine test_thread_row_ranges
     !
 end module test_parquet_string

@@ -53,6 +53,7 @@ module parquet_settings
     public :: parquet_set_sort_threads, parquet_get_sort_threads
     public :: parquet_set_prefetch_threads, parquet_get_prefetch_threads
     public :: parquet_set_table_threads, parquet_get_table_threads
+    public :: parquet_set_string_threads, parquet_get_string_threads
     public :: parquet_set_threads
     public :: parquet_set_default_compression, parquet_get_default_compression
     public :: parquet_set_default_compression_level, parquet_get_default_compression_level
@@ -173,6 +174,11 @@ module parquet_settings
     !! many as OpenMP offers, never more than the table has columns). Read only in
     !! src/parquet_tables_parallel.f90, which owns the table layer's OpenMP plumbing.
     integer, save :: cfg_table_threads = 0
+    !> Cap on the threads one `parquet_string_column` bulk operation may use internally. `0` means
+    !! "auto" (as many as OpenMP offers). Read only by `parquet_string_threads`
+    !! (src/parquet_strings.f90), deliberately, for the same reason cfg_sort_threads has a single
+    !! reader: one question asked in one place cannot give two answers (feature_risks.md Risk-40).
+    integer, save :: cfg_string_threads = 0
     !> Default compression codec for parquet_open_writer. Empty means "never set", which is what
     !! distinguishes a factory default from a deliberate choice of "zstd" -- see
     !! parquet_resolve_writer_compression for why that distinction is load-bearing.
@@ -296,6 +302,39 @@ contains
         n = cfg_prefetch_threads
     end function parquet_get_prefetch_threads
 
+    !> Sets the cap on how many threads one `parquet_string_column` bulk operation may use --
+    !> a reindex, gather, compaction or materialization of a single column's packed payload.
+    !>
+    !> This is the **within-one-column** axis, and it is the only one of the thread caps that is:
+    !> `parquet_set_table_threads` splits a table's work by COLUMN, this splits one column's work by
+    !> ROW RANGE. The two are mutually exclusive in practice, because a string operation reached from
+    !> inside the table's own parallel region stands down (see below), so setting both does not
+    !> multiply.
+    !>
+    !> Read per operation, so it takes effect immediately. `0` restores automatic behaviour. The
+    !> value is a **cap**: never more threads than OpenMP offers, so setting it above
+    !> `OMP_NUM_THREADS` changes nothing, and `1` forces every string operation serial.
+    !>
+    !> **A cap never overrides the rule that a string operation inside an OpenMP parallel region runs
+    !> serially.** A caller who capped string work at 8 said nothing about what should happen inside
+    !> someone else's region, and lifting the serial answer back to 8 there is exactly the T*T
+    !> oversubscription that rule exists to prevent.
+    subroutine parquet_set_string_threads(n)
+        integer, intent(in) :: n !! thread cap, or 0 for automatic; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_string_threads: n must be >= 0 (0 means automatic)"
+        cfg_string_threads = n
+    end subroutine parquet_set_string_threads
+
+    !> Reports the string-column thread cap, or 0 if left automatic. This is the raw setting, not the
+    !> resolved count -- ask `parquet_string_threads()` for the number a bulk operation would
+    !> actually use here, which additionally accounts for the OpenMP environment and for being
+    !> inside a parallel region.
+    integer function parquet_get_string_threads() result(n)
+
+        n = cfg_string_threads
+    end function parquet_get_string_threads
+
     !> Sets the cap on how many threads a `parquet_table`'s row-structural mutation may use to
     !> rewrite its columns concurrently -- `%sort_by`, `%filter_rows`, `%top_n`, and `%delete_rows`
     !> and `%truncate`, which go through the same loop.
@@ -335,27 +374,28 @@ contains
     !> one of them afterwards to override just that one.
     !>
     !> **`n` must be at least 1; `0` is not accepted here even though three of the four take it.**
-    !> `0` means "automatic" to the sort, prefetch and table caps, but Arrow's pool has no automatic
+    !> `0` means "automatic" to the sort, prefetch, table and string caps, but Arrow's pool has no automatic
     !> value at all -- its starting capacity is hardware-derived and is not a number this library gets
     !> to invent. Rather than have one argument mean two different things, this takes a real thread
     !> count only; use the individual setters when you want automatic behaviour, or
     !> `parquet_reset_settings` to put everything back.
     !>
-    !> **The four do not all take effect at the same moment**, which is the one thing worth knowing
+    !> **The five do not all take effect at the same moment**, which is the one thing worth knowing
     !> before reaching for this. Arrow's pool is resized immediately and is shared, so readers and
-    !> writers already open are affected too; the sort, prefetch and table caps are read per call, so
-    !> they apply to work started afterwards. Setting all four together does not make them
+    !> writers already open are affected too; the sort, prefetch, table and string caps are read per
+    !> call, so they apply to work started afterwards. Setting all five together does not make them
     !> simultaneous.
     subroutine parquet_set_threads(n)
-        integer, intent(in) :: n !! thread count for all four; must be >= 1.
+        integer, intent(in) :: n !! thread count for all five; must be >= 1.
 
         if (n < 1) error stop "parquet_set_threads: n must be >= 1 " // &
-            "(0 means automatic to the sort, prefetch and table caps, but Arrow's pool has no " // &
-            "automatic value; set them individually if that is what you want)"
+            "(0 means automatic to the sort, prefetch, table and string caps, but Arrow's pool " // &
+            "has no automatic value; set them individually if that is what you want)"
         call parquet_set_arrow_threads(n)
         call parquet_set_sort_threads(n)
         call parquet_set_prefetch_threads(n)
         call parquet_set_table_threads(n)
+        call parquet_set_string_threads(n)
     end subroutine parquet_set_threads
 
     !> Sets the compression codec `parquet_open_writer` uses when the caller passes no
@@ -893,6 +933,11 @@ contains
             call env_int32("PARQUET_FORTRAN_TABLE_THREADS", text, n32)
             call parquet_set_table_threads(n32)
         end if
+        call env_value("PARQUET_FORTRAN_STRING_THREADS", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_STRING_THREADS", text, n32)
+            call parquet_set_string_threads(n32)
+        end if
         call env_value("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", text, got)
         if (got) then
             call env_int64("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", text, n64)
@@ -1146,6 +1191,7 @@ contains
         cfg_sort_threads = 0
         cfg_prefetch_threads = 0
         cfg_table_threads = 0
+        cfg_string_threads = 0
         cfg_default_compression = ""
         cfg_default_compression_level = level_codec_default
         cfg_default_use_threads = .true.
@@ -1181,6 +1227,7 @@ contains
         call print_one(u, "sort_threads", cfg_sort_threads)
         call print_one(u, "prefetch_threads", cfg_prefetch_threads)
         call print_one(u, "table_threads", cfg_table_threads)
+        call print_one(u, "string_threads", cfg_string_threads)
         call print_big(u, "sort_parallel_min_rows", parquet_get_sort_parallel_min_rows())
         call print_text(u, "sort_counting_path", merge("true ", "false", cfg_sort_counting_path))
         call print_big(u, "sort_counting_bucket_limit", parquet_get_sort_counting_bucket_limit())

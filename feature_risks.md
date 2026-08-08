@@ -2414,5 +2414,5 @@ a `tools/generate_parquet_sorting.py` template edit), `stat_str`/`stat_strv`
 (`src/parquet_write_string.f90`). Measured by differencing two real code paths at 4 M elements: one
 allocation per element costs **0.11 s**, which is **19 %** of a `parquet_string_column` sort and
 **33 %** of a `parquet_column` one. **Widening the check to `src/` requires fixing those first**, or
-it fails the lint stage on known work. See `feature_string_parallel.md` S3 for the numbers and the
-method.
+it fails the lint stage on known work — which is scheduled as `feature_string_parallel.md` **S10**,
+whose last step is that widening. See S3 there for the numbers and the method.

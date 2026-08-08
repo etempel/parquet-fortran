@@ -409,6 +409,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Applying a `filter=` is 3–4x faster**, and the gain grows with the number of columns the filter
+  names. The per-row clause evaluation was reading each value through a helper that took the Arrow
+  array by `shared_ptr` — one atomic refcount increment and decrement per row, to read one number.
+  Measured on a 16-column × 2 M-row file: evaluating one clause went from 13.6 ns to 1.8 ns per row,
+  and installing an eight-clause filter from 0.25 s to 0.061 s. Nothing about which rows match
+  changed. Every caller benefits, `parquet_open_reader(..., filter=)` as much as `parquet_table`; a
+  filtered table read is now 2.3x faster single-threaded and 3.3x faster on several threads.
+
 - **`parquet_table%sort_by` is substantially faster on wide tables** — measured at 6.22 s to 3.76 s
   on a 15.6-million-row, 25-column table, and the gap grows with both dimensions. Two things
   changed: the permutation check now uses a bit-packed seen-set rather than a `logical` array

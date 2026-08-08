@@ -134,19 +134,58 @@ private:
 	Handle *handle_;
 };
 
+// The six comparison operators, resolved from their text ONCE per clause rather than per row.
+//
+// **Honest about what this did and did not buy, because the story is instructive.** compare_op used
+// to take the operator as a `const std::string &` and test it with up to five string comparisons,
+// per row, for a value that is loop-invariant -- which looked like the obvious explanation for
+// evaluate_nodes costing 13.6 ns per row on a plain `>` over doubles. Converting it to this enum
+// changed the measurement by **nothing at all** (0.0272 s -> 0.0275 s over 2 M rows): the compiler
+// was already hoisting it. The real cost was one line away, in real_family_value_at -- a
+// `std::static_pointer_cast` PER ROW, i.e. two atomic refcount operations to read one double.
+// Passing those helpers a raw `const arrow::Array *` instead took the same loop to 1.8 ns per row.
+//
+// The enum is kept because it is free and does not depend on a particular compiler noticing, but it
+// is not what made this fast. **The lesson worth carrying: in this file, look for a shared_ptr copy
+// in a row loop before looking at anything else.**
+enum class CmpOp
+{
+	Gt,
+	Ge,
+	Lt,
+	Le,
+	Eq,
+	Ne
+};
+
+// Every other operator string is rejected long before this is reached (parquet_parse_filter_rule
+// and the qc validators both restrict it), so "/=" is the residual case rather than a guess.
+static CmpOp cmp_op_of(const std::string &op)
+{
+	if (op == ">") return CmpOp::Gt;
+	if (op == ">=") return CmpOp::Ge;
+	if (op == "<") return CmpOp::Lt;
+	if (op == "<=") return CmpOp::Le;
+	if (op == "==") return CmpOp::Eq;
+	return CmpOp::Ne;
+}
+
 // Used by eval_filter_clause (filter row-matching, further below) -- declared
 // here, outside extern "C", since templates cannot have C language linkage
 // (same reason read_list_primitive_row/ctype_name live between extern "C"
 // blocks rather than inside one).
 template <typename T>
-static bool compare_op(const T &a, const T &b, const std::string &op)
+static bool compare_op(const T &a, const T &b, CmpOp op)
 {
-	if (op == ">") return a > b;
-	if (op == ">=") return a >= b;
-	if (op == "<") return a < b;
-	if (op == "<=") return a <= b;
-	if (op == "==") return a == b;
-	return a != b; // "/="; every other op string is rejected before this is ever called.
+	switch (op)
+	{
+	case CmpOp::Gt: return a > b;
+	case CmpOp::Ge: return a >= b;
+	case CmpOp::Lt: return a < b;
+	case CmpOp::Le: return a <= b;
+	case CmpOp::Eq: return a == b;
+	default: return a != b;
+	}
 }
 
 extern "C"
@@ -1998,19 +2037,32 @@ extern "C"
 	// shared by convert_values_to_int32/int64 (via real_to_int_checked above),
 	// convert_values_to_float32/float64's HALF_FLOAT widening case, and
 	// run_qc_range_check/eval_filter_clause below.
-	static double real_family_value_at(const std::shared_ptr<arrow::Array> &vals, int64_t idx)
+	// **Takes a RAW POINTER, not a `shared_ptr`, and that is the whole performance story of the
+	// filter path.** These helpers are called once per ROW; taking the array by
+	// `const std::shared_ptr<arrow::Array> &` meant every `std::static_pointer_cast` inside them
+	// built a new shared_ptr, i.e. an atomic increment and an atomic decrement, to read one value.
+	// Measured on a 16-column x 2 M-row file, one filter clause: 13.6 ns per row before, 1.8 ns
+	// after -- a 7.6x improvement in evaluate_nodes and 2.9x-4.1x in the whole cost of installing a
+	// filter, with no threading involved at all.
+	//
+	// So: **never widen one of these back to a `shared_ptr` parameter, and never add a new per-row
+	// helper that takes one.** The caller already owns a reference for the duration of the loop;
+	// the loop needs the pointer, not a share of the ownership. Nothing fails if this is undone --
+	// the answers stay identical and every test still passes, which is exactly why it is written
+	// down here rather than left to be rediscovered.
+	static double real_family_value_at(const arrow::Array *vals, int64_t idx)
 	{
 		switch (vals->type_id())
 		{
 		case arrow::Type::FLOAT:
-			return static_cast<double>(std::static_pointer_cast<arrow::FloatArray>(vals)->Value(idx));
+			return static_cast<double>(static_cast<const arrow::FloatArray *>(vals)->Value(idx));
 		case arrow::Type::HALF_FLOAT:
 		{
-			auto arr = std::static_pointer_cast<arrow::HalfFloatArray>(vals);
+			auto arr = static_cast<const arrow::HalfFloatArray *>(vals);
 			return static_cast<double>(arrow::util::Float16::FromBits(arr->Value(idx)).ToFloat());
 		}
 		default: // arrow::Type::DOUBLE
-			return std::static_pointer_cast<arrow::DoubleArray>(vals)->Value(idx);
+			return static_cast<const arrow::DoubleArray *>(vals)->Value(idx);
 		}
 	}
 
@@ -2018,7 +2070,7 @@ extern "C"
 	// shared by every DECIMAL32/64/128/256 case below. DecimalType is the
 	// common base every decimal width's concrete type class derives from, so
 	// this one accessor works regardless of which width `vals` actually is.
-	static int32_t decimal_scale_of(const std::shared_ptr<arrow::Array> &vals)
+	static int32_t decimal_scale_of(const arrow::Array *vals)
 	{
 		return std::static_pointer_cast<arrow::DecimalType>(vals->type())->scale();
 	} // GCOVR_EXCL_LINE -- gcov attribution artifact: this closing brace shows uncovered even though the covered `return` above proves the body ran.
@@ -2033,7 +2085,7 @@ extern "C"
 	// Decimal256::Rescale Result<> wrappers) so kRescaleDataLoss can be told
 	// apart from a genuine overflow, instead of collapsing both into one
 	// opaque Status.
-	static NumericConvertStatus decimal_to_int64_checked(const std::shared_ptr<arrow::Array> &vals, int64_t idx, int64_t &out)
+	static NumericConvertStatus decimal_to_int64_checked(const arrow::Array *vals, int64_t idx, int64_t &out)
 	{
 		int32_t scale = decimal_scale_of(vals);
 		switch (vals->type_id())
@@ -2049,7 +2101,7 @@ extern "C"
 		// uncovered in its own right, distinct from Clang's gcov.
 		case arrow::Type::DECIMAL32:
 		{
-			auto arr = std::static_pointer_cast<arrow::Decimal32Array>(vals);
+			auto arr = static_cast<const arrow::Decimal32Array *>(vals);
 			arrow::Decimal32 dec(arr->GetValue(idx));
 			arrow::BasicDecimal32 rescaled;
 			auto status = dec.BasicDecimal32::Rescale(scale, 0, &rescaled);
@@ -2060,7 +2112,7 @@ extern "C"
 		}
 		case arrow::Type::DECIMAL64:
 		{
-			auto arr = std::static_pointer_cast<arrow::Decimal64Array>(vals);
+			auto arr = static_cast<const arrow::Decimal64Array *>(vals);
 			arrow::Decimal64 dec(arr->GetValue(idx));
 			arrow::BasicDecimal64 rescaled;
 			auto status = dec.BasicDecimal64::Rescale(scale, 0, &rescaled);
@@ -2072,7 +2124,7 @@ extern "C"
 		// GCOVR_EXCL_STOP
 		case arrow::Type::DECIMAL128:
 		{
-			auto arr = std::static_pointer_cast<arrow::Decimal128Array>(vals);
+			auto arr = static_cast<const arrow::Decimal128Array *>(vals);
 			arrow::Decimal128 dec(arr->GetValue(idx));
 			arrow::BasicDecimal128 rescaled;
 			auto status = dec.BasicDecimal128::Rescale(scale, 0, &rescaled);
@@ -2085,7 +2137,7 @@ extern "C"
 		}
 		default: // arrow::Type::DECIMAL256
 		{
-			auto arr = std::static_pointer_cast<arrow::Decimal256Array>(vals);
+			auto arr = static_cast<const arrow::Decimal256Array *>(vals);
 			arrow::Decimal256 dec(arr->GetValue(idx));
 			arrow::BasicDecimal256 rescaled;
 			auto status = dec.BasicDecimal256::Rescale(scale, 0, &rescaled);
@@ -2112,7 +2164,7 @@ extern "C"
 	// (silently lossy, same stance as int64->real32/double->real32 narrowing
 	// elsewhere in this file) widening cases, and run_qc_range_check/
 	// eval_filter_clause below.
-	static double decimal_value_at(const std::shared_ptr<arrow::Array> &vals, int64_t idx)
+	static double decimal_value_at(const arrow::Array *vals, int64_t idx)
 	{
 		int32_t scale = decimal_scale_of(vals);
 		switch (vals->type_id())
@@ -2128,14 +2180,14 @@ extern "C"
 		// tools/generate_fixtures.cpp's own generation comment). So these two case arms have no
 		// reachable caller through the public API, on any input, successful or aborting.
 		case arrow::Type::DECIMAL32:
-			return arrow::Decimal32(std::static_pointer_cast<arrow::Decimal32Array>(vals)->GetValue(idx)).ToDouble(scale);
+			return arrow::Decimal32(static_cast<const arrow::Decimal32Array *>(vals)->GetValue(idx)).ToDouble(scale);
 		case arrow::Type::DECIMAL64:
-			return arrow::Decimal64(std::static_pointer_cast<arrow::Decimal64Array>(vals)->GetValue(idx)).ToDouble(scale);
+			return arrow::Decimal64(static_cast<const arrow::Decimal64Array *>(vals)->GetValue(idx)).ToDouble(scale);
 		// GCOVR_EXCL_STOP
 		case arrow::Type::DECIMAL128:
-			return arrow::Decimal128(std::static_pointer_cast<arrow::Decimal128Array>(vals)->GetValue(idx)).ToDouble(scale);
+			return arrow::Decimal128(static_cast<const arrow::Decimal128Array *>(vals)->GetValue(idx)).ToDouble(scale);
 		default: // arrow::Type::DECIMAL256
-			return arrow::Decimal256(std::static_pointer_cast<arrow::Decimal256Array>(vals)->GetValue(idx)).ToDouble(scale);
+			return arrow::Decimal256(static_cast<const arrow::Decimal256Array *>(vals)->GetValue(idx)).ToDouble(scale);
 		}
 	}
 
@@ -2177,24 +2229,24 @@ extern "C"
 	// Extracts element `idx` of any is_small_integer_family array as an exact
 	// int64_t. Shared by convert_values_to_int32/int64 and
 	// run_qc_range_check/eval_filter_clause.
-	static int64_t small_integer_value_at(const std::shared_ptr<arrow::Array> &vals, int64_t idx)
+	static int64_t small_integer_value_at(const arrow::Array *vals, int64_t idx)
 	{
 		switch (vals->type_id())
 		{
 		case arrow::Type::INT8:
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::Int8Array>(vals)->Value(idx));
+			return static_cast<int64_t>(static_cast<const arrow::Int8Array *>(vals)->Value(idx));
 		case arrow::Type::INT16:
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::Int16Array>(vals)->Value(idx));
+			return static_cast<int64_t>(static_cast<const arrow::Int16Array *>(vals)->Value(idx));
 		case arrow::Type::UINT8:
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::UInt8Array>(vals)->Value(idx));
+			return static_cast<int64_t>(static_cast<const arrow::UInt8Array *>(vals)->Value(idx));
 		case arrow::Type::UINT16:
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::UInt16Array>(vals)->Value(idx));
+			return static_cast<int64_t>(static_cast<const arrow::UInt16Array *>(vals)->Value(idx));
 		case arrow::Type::UINT32:
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::UInt32Array>(vals)->Value(idx));
+			return static_cast<int64_t>(static_cast<const arrow::UInt32Array *>(vals)->Value(idx));
 		case arrow::Type::INT32:
-			return static_cast<int64_t>(std::static_pointer_cast<arrow::Int32Array>(vals)->Value(idx));
+			return static_cast<int64_t>(static_cast<const arrow::Int32Array *>(vals)->Value(idx));
 		default: // arrow::Type::INT64
-			return std::static_pointer_cast<arrow::Int64Array>(vals)->Value(idx);
+			return static_cast<const arrow::Int64Array *>(vals)->Value(idx);
 		}
 	}
 
@@ -2236,6 +2288,9 @@ extern "C"
 		if (!(rule.has_min || rule.has_max)) return false;
 		if (array->type_id() == arrow::Type::BOOL) return false;
 
+		// Resolved once per rule rather than per element, for the reason CmpOp's own comment gives.
+		const CmpOp min_cmp = cmp_op_of(rule.min_op);
+		const CmpOp max_cmp = cmp_op_of(rule.max_op);
 		int64_t n = array->length();
 		int64_t n_valid = 0, n_violate = 0;
 		bool any_valid = false;
@@ -2262,11 +2317,11 @@ extern "C"
 				if (!any_valid) { data_min = v; data_max = v; any_valid = true; }
 				else { data_min = std::min(data_min, v); data_max = std::max(data_max, v); }
 				bool ok = true;
-				if (have_min) ok = ok && compare_op<int64_t>(v, min_bound, rule.min_op);
-				if (have_max) ok = ok && compare_op<int64_t>(v, max_bound, rule.max_op);
+				if (have_min) ok = ok && compare_op<int64_t>(v, min_bound, min_cmp);
+				if (have_max) ok = ok && compare_op<int64_t>(v, max_bound, max_cmp);
 				if (!ok) n_violate++;
 			};
-			for (int64_t i = 0; i < n; ++i) if (!array->IsNull(i)) scan(small_integer_value_at(array, i));
+			for (int64_t i = 0; i < n; ++i) if (!array->IsNull(i)) scan(small_integer_value_at(array.get(), i));
 			if (!any_valid || n_violate == 0) return false;
 			if (have_min) bounds_desc = "min " + rule.min_op + " " + std::to_string(min_bound);
 			if (have_max)
@@ -2298,8 +2353,8 @@ extern "C"
 				if (!any_valid) { data_min = v; data_max = v; any_valid = true; }
 				else { data_min = std::min(data_min, v); data_max = std::max(data_max, v); }
 				bool ok = true;
-				if (have_min) ok = ok && compare_op<double>(v, min_bound, rule.min_op);
-				if (have_max) ok = ok && compare_op<double>(v, max_bound, rule.max_op);
+				if (have_min) ok = ok && compare_op<double>(v, min_bound, min_cmp);
+				if (have_max) ok = ok && compare_op<double>(v, max_bound, max_cmp);
 				if (!ok) n_violate++;
 			};
 			auto type_id = array->type_id();
@@ -2308,9 +2363,9 @@ extern "C"
 			for (int64_t i = 0; i < n; ++i)
 			{
 				if (array->IsNull(i)) continue;
-				if (is_decimal) scan(decimal_value_at(array, i));
+				if (is_decimal) scan(decimal_value_at(array.get(), i));
 				else if (type_id == arrow::Type::UINT64) scan(static_cast<double>(std::static_pointer_cast<arrow::UInt64Array>(array)->Value(i)));
-				else scan(real_family_value_at(array, i));
+				else scan(real_family_value_at(array.get(), i));
 			}
 			if (!any_valid || n_violate == 0) return false;
 			if (have_min) bounds_desc = "min " + rule.min_op + " " + format_stat_double(min_bound);
@@ -2342,8 +2397,8 @@ extern "C"
 				if (!any_valid) { data_min = v; data_max = v; any_valid = true; }
 				else { data_min = std::min(data_min, v); data_max = std::max(data_max, v); }
 				bool ok = true;
-				if (rule.has_min) ok = ok && compare_op<std::string>(v, rule.min_raw, rule.min_op);
-				if (rule.has_max) ok = ok && compare_op<std::string>(v, rule.max_raw, rule.max_op);
+				if (rule.has_min) ok = ok && compare_op<std::string>(v, rule.min_raw, min_cmp);
+				if (rule.has_max) ok = ok && compare_op<std::string>(v, rule.max_raw, max_cmp);
 				if (!ok) n_violate++;
 			};
 			for (int64_t i = 0; i < n; ++i) if (!acc.is_null(i)) scan(std::string(acc.get_view(i)));
@@ -3285,6 +3340,35 @@ extern "C"
 		return g_debug_prefetch_threads_used;
 	}
 
+	// Maintainer-only phase timers for parquet_reader_set_filter, in nanoseconds, accumulated since
+	// the last reset. Three phases, because "the filter is expensive" is not actionable until it is
+	// known WHICH part is:
+	//
+	//   decode  -- reading the filter's key columns (read_live_row_groups, or the per-row-group
+	//              reads on the scoped path). Already batched into one Arrow call with use_threads
+	//              enabled, so improving it means going around Arrow rather than through it.
+	//   eval    -- evaluate_nodes: one Kleene value per row per clause, plus the and/or/not folds.
+	//              This library's own code, O(rows x clauses), and independent per row.
+	//   mask    -- the final walk that collapses unknown to false, applies the row range, folds in
+	//              the sample draw and writes the BooleanArray.
+	//
+	// Not part of the library's behaviour in any way: nothing reads these but a benchmark, and they
+	// are plain non-atomic int64 because set_filter runs once per reader open, on one thread.
+	static int64_t g_debug_filter_decode_nanos = 0;
+	static int64_t g_debug_filter_eval_nanos = 0;
+	static int64_t g_debug_filter_mask_nanos = 0;
+
+	void parquet_debug_reset_filter_phase_nanos(void)
+	{
+		g_debug_filter_decode_nanos = 0;
+		g_debug_filter_eval_nanos = 0;
+		g_debug_filter_mask_nanos = 0;
+	}
+
+	int64_t parquet_debug_get_filter_decode_nanos(void) { return g_debug_filter_decode_nanos; }
+	int64_t parquet_debug_get_filter_eval_nanos(void) { return g_debug_filter_eval_nanos; }
+	int64_t parquet_debug_get_filter_mask_nanos(void) { return g_debug_filter_mask_nanos; }
+
 	// Test-only: how many threads the last parquet_table SINGLE-COLUMN read was spread across, by
 	// row group (materialize_column_parallel, src/parquet_tables_read.f90); 0 when that read took
 	// the ordinary whole-column path. A separate counter from the prefetch one above on purpose --
@@ -4179,7 +4263,7 @@ extern "C"
 		{
 			key.kind = SortValueKind::Integer;
 			key.ints.resize(static_cast<size_t>(n));
-			for (int64_t i = 0; i < n; ++i) key.ints[static_cast<size_t>(i)] = small_integer_value_at(array, i);
+			for (int64_t i = 0; i < n; ++i) key.ints[static_cast<size_t>(i)] = small_integer_value_at(array.get(), i);
 		}
 		else if (id == arrow::Type::BOOL)
 		{
@@ -4245,10 +4329,10 @@ extern "C"
 			for (int64_t i = 0; i < n; ++i)
 			{
 				if (array->IsNull(i)) { key.reals[static_cast<size_t>(i)] = 0.0; continue; }
-				if (is_decimal) key.reals[static_cast<size_t>(i)] = decimal_value_at(array, i);
+				if (is_decimal) key.reals[static_cast<size_t>(i)] = decimal_value_at(array.get(), i);
 				else if (id == arrow::Type::UINT64)
 					key.reals[static_cast<size_t>(i)] = static_cast<double>(std::static_pointer_cast<arrow::UInt64Array>(array)->Value(i));
-				else key.reals[static_cast<size_t>(i)] = real_family_value_at(array, i);
+				else key.reals[static_cast<size_t>(i)] = real_family_value_at(array.get(), i);
 			}
 		}
 		else if (is_string_like_type(id))
@@ -4956,11 +5040,16 @@ extern "C"
 					out[static_cast<size_t>(i)] = kUnknown;
 					continue;
 				}
-				bool isnan = std::isnan(real_family_value_at(array, i));
+				bool isnan = std::isnan(real_family_value_at(array.get(), i));
 				out[static_cast<size_t>(i)] = kleene_of(want_nan ? isnan : !isnan);
 			}
 			return true;
 		}
+
+		// Resolved ONCE for this clause, then used by every row loop below -- see CmpOp's own
+		// comment for the measurement that made this worth doing. Placed after the is_null/is_nan
+		// arms above, which are not comparisons and return before reaching it.
+		const CmpOp cmp = cmp_op_of(op);
 
 		switch (array->type_id())
 		{
@@ -4990,7 +5079,7 @@ extern "C"
 				for (int64_t i = 0; i < n; ++i)
 				{
 					out[static_cast<size_t>(i)] = arr->IsNull(i) ? kUnknown
-						: kleene_of(compare_op<int32_t>(arr->Value(i), v, op));
+						: kleene_of(compare_op<int32_t>(arr->Value(i), v, cmp));
 				}
 			}
 			else if (array->type_id() == arrow::Type::INT64)
@@ -4999,7 +5088,7 @@ extern "C"
 				for (int64_t i = 0; i < n; ++i)
 				{
 					out[static_cast<size_t>(i)] = arr->IsNull(i) ? kUnknown
-						: kleene_of(compare_op<int64_t>(arr->Value(i), parsed, op));
+						: kleene_of(compare_op<int64_t>(arr->Value(i), parsed, cmp));
 				}
 			}
 			else
@@ -5010,7 +5099,7 @@ extern "C"
 				for (int64_t i = 0; i < n; ++i)
 				{
 					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
-						: kleene_of(compare_op<int64_t>(small_integer_value_at(array, i), parsed, op));
+						: kleene_of(compare_op<int64_t>(small_integer_value_at(array.get(), i), parsed, cmp));
 				}
 			}
 			return true;
@@ -5047,7 +5136,7 @@ extern "C"
 				for (int64_t i = 0; i < n; ++i)
 				{
 					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
-						: kleene_of(compare_op<double>(real_family_value_at(array, i), parsed, op));
+						: kleene_of(compare_op<double>(real_family_value_at(array.get(), i), parsed, cmp));
 				}
 			}
 			else if (array->type_id() == arrow::Type::UINT64)
@@ -5056,7 +5145,7 @@ extern "C"
 				for (int64_t i = 0; i < n; ++i)
 				{
 					out[static_cast<size_t>(i)] = arr->IsNull(i) ? kUnknown
-						: kleene_of(compare_op<double>(static_cast<double>(arr->Value(i)), parsed, op));
+						: kleene_of(compare_op<double>(static_cast<double>(arr->Value(i)), parsed, cmp));
 				}
 			}
 			else
@@ -5065,7 +5154,7 @@ extern "C"
 				for (int64_t i = 0; i < n; ++i)
 				{
 					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
-						: kleene_of(compare_op<double>(decimal_value_at(array, i), parsed, op));
+						: kleene_of(compare_op<double>(decimal_value_at(array.get(), i), parsed, cmp));
 				}
 			}
 			return true;
@@ -5102,7 +5191,7 @@ extern "C"
 				for (int64_t i = 0; i < n; ++i)
 				{
 					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
-						: kleene_of(compare_op<int64_t>(static_cast<int64_t>(raw[i]), parsed, op));
+						: kleene_of(compare_op<int64_t>(static_cast<int64_t>(raw[i]), parsed, cmp));
 				}
 			}
 			else
@@ -5114,7 +5203,7 @@ extern "C"
 				for (int64_t i = 0; i < n; ++i)
 				{
 					out[static_cast<size_t>(i)] = array->IsNull(i) ? kUnknown
-						: kleene_of(compare_op<int64_t>(raw[i], parsed, op));
+						: kleene_of(compare_op<int64_t>(raw[i], parsed, cmp));
 				}
 			}
 			return true;
@@ -5161,7 +5250,7 @@ extern "C"
 			for (int64_t i = 0; i < n; ++i)
 			{
 				out[static_cast<size_t>(i)] = acc.is_null(i) ? kUnknown
-					: kleene_of(compare_op<std::string>(std::string(acc.get_view(i)), value_text, op));
+					: kleene_of(compare_op<std::string>(std::string(acc.get_view(i)), value_text, cmp));
 			}
 			return true;
 		}
@@ -5809,6 +5898,19 @@ extern "C"
 	// side effect of evaluating its own clause) so it's consistent with every other column.
 	// Returns 0 on success; on failure, returns 1 and writes a human-readable reason into err_out
 	// (truncated to err_cap).
+	// Adds the elapsed time since `t0` to one of the phase counters above, and returns a fresh mark.
+	// A function rather than a macro so it can be stepped through, and taking the counter by
+	// reference so a new phase costs one line at the call site.
+	extern "C++" {
+	static std::chrono::steady_clock::time_point charge_phase(std::chrono::steady_clock::time_point t0,
+		int64_t &counter)
+	{
+		auto now = std::chrono::steady_clock::now();
+		counter += std::chrono::duration_cast<std::chrono::nanoseconds>(now - t0).count();
+		return now;
+	}
+	}
+
 	int64_t parquet_reader_set_filter(void *handle,
 		const char *names_packed, int64_t name_len,
 		const char *ops_packed, int64_t op_len,
@@ -6024,6 +6126,7 @@ extern "C"
 					filter_leaf_indices);
 			}
 			std::shared_ptr<arrow::Table> table;
+			auto t_dec = std::chrono::steady_clock::now();
 			try
 			{
 				table = read_live_row_groups(reader_handle, filter_leaf_indices);
@@ -6038,6 +6141,7 @@ extern "C"
 				return 1;
 			}
 			// GCOVR_EXCL_STOP
+			charge_phase(t_dec, g_debug_filter_decode_nanos);
 			for (int idx : touched_indices)
 			{
 				const std::string &top_name = reader_handle->schema->field(idx)->name();
@@ -6148,16 +6252,19 @@ extern "C"
 				// asked for yet (qc runs when the column is actually read, on filtered rows).
 				std::vector<std::shared_ptr<arrow::Array>> rg_arrays;
 				rg_arrays.reserve(leaf_names.size());
+				auto t_rg = std::chrono::steady_clock::now();
 				for (const auto &leaf_name : leaf_names)
 				{
 					rg_arrays.push_back(read_row_group_array_for_measuring(reader_handle, leaf_name.c_str(), rg));
 				}
+				t_rg = charge_phase(t_rg, g_debug_filter_decode_nanos);
 				std::vector<uint8_t> local;
 				if (!evaluate_nodes(rg_arrays, static_cast<size_t>(rows), local, eval_err))
 				{
 					std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", eval_err.c_str());
 					return 1;
 				}
+				charge_phase(t_rg, g_debug_filter_eval_nanos);
 				for (int64_t i = 0; i < rows; ++i)
 				{
 					combined[static_cast<size_t>(offset + i)] = local[static_cast<size_t>(i)];
@@ -6171,6 +6278,7 @@ extern "C"
 			// live-row length, which is now exactly the mask's own layout, so it moves straight in
 			// rather than being scattered by row-group offset the way it used to be.
 			std::vector<uint8_t> local;
+			auto t_ev = std::chrono::steady_clock::now();
 			if (!evaluate_nodes(leaf_arrays, static_cast<size_t>(live_rows), local, eval_err))
 			{
 				// Tag the clause-level message so it is unambiguously a row-filter error (vs a
@@ -6179,6 +6287,7 @@ extern "C"
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "filter rule: %s", eval_err.c_str());
 				return 1;
 			}
+			charge_phase(t_ev, g_debug_filter_eval_nanos);
 			combined = std::move(local);
 		}
 
@@ -6192,6 +6301,7 @@ extern "C"
 		// or the same seed would pick different rows depending on what the screen pruned (see
 		// stream_sample_draw). Rows in an excluded row group are drawn for and discarded; every
 		// other row's answer lands at its own live-space offset.
+		auto t_mask = std::chrono::steady_clock::now();
 		{
 			SampleDraw draw;
 			if (draw_sample) draw.start(sample_fraction, sample_seed);
@@ -6254,6 +6364,8 @@ extern "C"
 			it->second = filtered.ValueOrDie().make_array();
 			reader_handle->was_prefetched.insert(idx);
 		}
+
+		charge_phase(t_mask, g_debug_filter_mask_nanos);
 
 		// Read-time qc on the filter columns themselves. Only the unscoped path can do this here:
 		// it is the one that leaves those columns decoded in column_cache. Under a scoped filter
@@ -8030,7 +8142,7 @@ extern "C"
 		case arrow::Type::UINT16:
 		{
 			// Always fits int32 exactly -- no overflow check needed.
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int32_t>(small_integer_value_at(vals, offset + i * stride));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<int32_t>(small_integer_value_at(vals.get(), offset + i * stride));
 			break;
 		}
 		// UINT32 is genuinely exercised by a passing (non-aborting) round trip, unlike UINT64 just
@@ -8078,7 +8190,7 @@ extern "C"
 			std::string type_name = vals->type()->ToString();
 			for (int64_t i = 0; i < n; ++i)
 			{
-				double v = real_family_value_at(vals, offset + i * stride);
+				double v = real_family_value_at(vals.get(), offset + i * stride);
 				int32_t out;
 				auto status = real_to_int32_checked(v, out);
 				if (status == NumericConvertStatus::kNonIntegral)
@@ -8107,7 +8219,7 @@ extern "C"
 			for (int64_t i = 0; i < n; ++i)
 			{
 				int64_t v64;
-				auto status = decimal_to_int64_checked(vals, offset + i * stride, v64);
+				auto status = decimal_to_int64_checked(vals.get(), offset + i * stride, v64);
 				if (status == NumericConvertStatus::kNonIntegral)
 				{
 					report_fatal_error(context, type_name + " value has a fractional part, cannot convert to int32 for column: " + name);
@@ -8151,7 +8263,7 @@ extern "C"
 		case arrow::Type::UINT32:
 		{
 			// Always fits int64 exactly -- no overflow check needed.
-			for (int64_t i = 0; i < n; ++i) data[i] = small_integer_value_at(vals, offset + i * stride);
+			for (int64_t i = 0; i < n; ++i) data[i] = small_integer_value_at(vals.get(), offset + i * stride);
 			break;
 		}
 		case arrow::Type::UINT64:
@@ -8181,7 +8293,7 @@ extern "C"
 			std::string type_name = vals->type()->ToString();
 			for (int64_t i = 0; i < n; ++i)
 			{
-				double v = real_family_value_at(vals, offset + i * stride);
+				double v = real_family_value_at(vals.get(), offset + i * stride);
 				int64_t out;
 				auto status = real_to_int64_checked(v, out);
 				if (status == NumericConvertStatus::kNonIntegral)
@@ -8206,7 +8318,7 @@ extern "C"
 			for (int64_t i = 0; i < n; ++i)
 			{
 				int64_t v64;
-				auto status = decimal_to_int64_checked(vals, offset + i * stride, v64);
+				auto status = decimal_to_int64_checked(vals.get(), offset + i * stride, v64);
 				if (status == NumericConvertStatus::kNonIntegral)
 				{
 					report_fatal_error(context, type_name + " value has a fractional part, cannot convert to int64 for column: " + name);
@@ -8254,7 +8366,7 @@ extern "C"
 		case arrow::Type::UINT16:
 		case arrow::Type::UINT32:
 		{
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(small_integer_value_at(vals, offset + i * stride));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(small_integer_value_at(vals.get(), offset + i * stride));
 			break;
 		}
 		case arrow::Type::UINT64:
@@ -8265,7 +8377,7 @@ extern "C"
 		}
 		case arrow::Type::HALF_FLOAT:
 		{
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(real_family_value_at(vals, offset + i * stride));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(real_family_value_at(vals.get(), offset + i * stride));
 			break;
 		}
 		case arrow::Type::DECIMAL32:
@@ -8273,7 +8385,7 @@ extern "C"
 		case arrow::Type::DECIMAL128:
 		case arrow::Type::DECIMAL256:
 		{
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(decimal_value_at(vals, offset + i * stride));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<float>(decimal_value_at(vals.get(), offset + i * stride));
 			break;
 		}
 		default: // GCOVR_EXCL_LINE -- gcov attribution artifact under GCC: this label shows
@@ -8311,7 +8423,7 @@ extern "C"
 		case arrow::Type::UINT16:
 		case arrow::Type::UINT32:
 		{
-			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(small_integer_value_at(vals, offset + i * stride));
+			for (int64_t i = 0; i < n; ++i) data[i] = static_cast<double>(small_integer_value_at(vals.get(), offset + i * stride));
 			break;
 		}
 		case arrow::Type::UINT64:
@@ -8322,7 +8434,7 @@ extern "C"
 		}
 		case arrow::Type::HALF_FLOAT:
 		{
-			for (int64_t i = 0; i < n; ++i) data[i] = real_family_value_at(vals, offset + i * stride);
+			for (int64_t i = 0; i < n; ++i) data[i] = real_family_value_at(vals.get(), offset + i * stride);
 			break;
 		}
 		case arrow::Type::DECIMAL32:
@@ -8330,7 +8442,7 @@ extern "C"
 		case arrow::Type::DECIMAL128:
 		case arrow::Type::DECIMAL256:
 		{
-			for (int64_t i = 0; i < n; ++i) data[i] = decimal_value_at(vals, offset + i * stride);
+			for (int64_t i = 0; i < n; ++i) data[i] = decimal_value_at(vals.get(), offset + i * stride);
 			break;
 		}
 		default: // GCOVR_EXCL_LINE -- gcov attribution artifact under GCC: this label shows

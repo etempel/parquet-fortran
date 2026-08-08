@@ -123,6 +123,7 @@ something a reader is expected to have.
 | [Risk-56](#risk-56--a-per-thread-reader-that-writes-shared-cache-state-races-silently) | A per-thread reader that writes shared cache state races silently | 3 — not testable |
 | [Risk-57](#risk-57--a-row-group-split-column-read-allocates-its-validity-bitmap-on-first-null-from-any-thread) | A row-group-split column read allocates its validity bitmap on first null, from any thread | 3 — not testable |
 | [Risk-58](#risk-58--an-adopted-transform-is-shared-state-and-only-its-preconditions-stand-between-it-and-a-wrong-row-set) | An adopted transform is shared state, and only its preconditions stand between it and a wrong row set | 4 — covered |
+| [Risk-59](#risk-59--a-shared_ptr-parameter-on-a-per-element-helper-costs-7x-and-fails-nothing) | A `shared_ptr` parameter on a per-element helper costs 7x and fails nothing | 3 — not testable |
 
 ---
 
@@ -130,7 +131,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-59**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-60**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -578,6 +579,41 @@ an idle source is either correct or a race no fixture can force, and the mutatio
 field left out of the copy list) are covered instead by the equality tests in
 `test/test_table_parallel.f90`, which caught all three tried — see `feature_table_parallel.md`
 section 17.9.
+
+### Risk-59 — A `shared_ptr` parameter on a per-element helper costs 7x and fails nothing
+
+Every per-element helper in `src/parquet_wrapper.cpp` — `real_family_value_at`,
+`small_integer_value_at`, `decimal_value_at`, `decimal_to_int64_checked` — is called **once per
+row**. Taking the array as `const std::shared_ptr<arrow::Array> &` rather than `const arrow::Array *`
+means every `std::static_pointer_cast` inside builds a new `shared_ptr`: **an atomic increment and
+an atomic decrement, to read one number.**
+
+Measured on a 16-column x 2 M-row file, one filter clause: **13.6 ns per row** with the `shared_ptr`
+parameter, **1.8 ns** with the raw pointer. The clause evaluation it serves was 75-93% of the cost of
+installing a row filter, so the whole operation went from 0.25 s to 0.061 s at eight clauses. See
+`feature_table_parallel.md` section 17.10.
+
+**The failure is not a wrong answer — it is no signal at all.** Reverting the signature keeps every
+value identical, every test passing, and every error scenario green. Only a benchmark nobody runs by
+default notices, and the cost is invisible in a profile that samples by function name, because the
+atomics are attributed to the helper that was already going to be hot.
+
+**Test.** Not testable, and not worth trying to make so. A timing assertion would be the flakiest
+test in the suite — it would fail on a loaded CI runner and pass on a fast one, whatever threshold
+was chosen — and a call-count assertion would test the implementation rather than the property.
+
+**How it is guarded instead.** `tools/check_source_conventions.py`'s
+`check_no_per_element_shared_ptr` fails the lint stage on the SHAPE — a `static` function taking
+`const std::shared_ptr<arrow::Array> &` next to an element index — rather than on a list of helper
+names, so it cannot go blind to the next helper added (CLAUDE.md's "A static check that enumerates
+names goes stale silently"). Confirmed to fire: reverting `real_family_value_at`'s signature makes
+it fail with the line number and the measurement, and restoring it clears.
+
+**What this forbids more generally.** The rule is about ownership, not about `shared_ptr` being
+slow: the caller already holds a reference for the whole loop, so the loop needs the *pointer*, not a
+share of the ownership. A genuinely per-element helper that must extend an array's lifetime would be
+the exception, and would have to argue for itself in a comment and in the check — not simply be
+written and merged because nothing complained.
 
 ## 4. Risks already covered, kept for what they still forbid
 

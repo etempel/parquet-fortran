@@ -409,7 +409,7 @@ exactly what a serial read would:
 | nothing | **4.5x** |
 | `qc=` | **3.3x** — rules are installed per reader but checked per column, and each column is read by one thread, so nothing is checked or warned twice |
 | `sample_fraction=` | **3.5x**, seeded or not — the table settles one seed at open and the draw rides inside the shared mask |
-| `filter=` | **2.2x** with one key column, **1.3x** with eight — the filter's own evaluation is done once, by the table's reader, and stays serial |
+| `filter=` | **3.0x** with one key column, **1.9x** with eight — the filter's own evaluation is done once, by the table's reader, and stays serial |
 | `sort=` | **2.2x** — one permutation, built once |
 | `filter=` + `sort=` | **1.8x** |
 

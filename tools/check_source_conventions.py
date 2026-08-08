@@ -681,6 +681,51 @@ def check_single_cpp_translation_unit():
     ]
 
 
+def check_no_per_element_shared_ptr():
+    """A per-ELEMENT helper in parquet_wrapper.cpp must take `const arrow::Array *`, never a
+    `const std::shared_ptr<arrow::Array> &`.
+
+    A `std::shared_ptr` parameter looks free and is not: every `std::static_pointer_cast` inside
+    such a helper builds a new shared_ptr, which is an atomic increment and an atomic decrement.
+    In a helper called once per row that is the dominant cost of the whole operation --
+    `real_family_value_at` measured at **13.6 ns per row** to read one double this way, against
+    **1.8 ns** once it took a raw pointer, and `evaluate_nodes` was 75-93% of the cost of installing
+    a row filter (feature_table_parallel.md section 17.10).
+
+    **Nothing fails when this is undone.** Every answer stays identical and every test still passes;
+    only the clock moves, and only under a benchmark nobody runs by default. That is exactly why it
+    is a lint check rather than a comment -- and why the check keys on the SHAPE (a parameter pair
+    of an array and an index) rather than on a list of helper names, which would go blind to the
+    next one added (see CLAUDE.md's "A static check that enumerates names goes stale silently").
+
+    The caller always owns a reference for the duration of the loop, so the loop needs the pointer,
+    not a share of the ownership. If a genuinely per-element helper ever does need to extend the
+    array's lifetime, it is the exception that should be argued in a comment -- and this check
+    updated to name it -- rather than silently reverted.
+    """
+    path = SRC / "parquet_wrapper.cpp"
+    if not path.exists():
+        return ["src/parquet_wrapper.cpp: not found -- this check needs updating"]
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # A per-element helper is one taking an Arrow array AND an element index. Matched by shape:
+    # `(const std::shared_ptr<arrow::Array> &<name>, int64_t <idx>` on one line.
+    pattern = re.compile(
+        r"^\s*static\s+[^\n(]*?\b(\w+)\s*\(\s*const\s+std::shared_ptr<arrow::Array>\s*&\s*\w+\s*,"
+        r"\s*(?:const\s+)?int(?:64_t|32_t)?\s+\w*(?:idx|index|i)\b",
+        re.MULTILINE,
+    )
+    problems = []
+    for match in pattern.finditer(text):
+        line = text.count("\n", 0, match.start()) + 1
+        problems.append(
+            "src/parquet_wrapper.cpp:%d: `%s` takes an Arrow array by const shared_ptr& alongside "
+            "an element index, which makes it a per-element helper paying two atomic refcount "
+            "operations per call -- take `const arrow::Array *` instead (measured 13.6 ns/row vs "
+            "1.8 ns/row; see feature_table_parallel.md section 17.10)" % (line, match.group(1))
+        )
+    return problems
+
+
 def check_scenario_list_is_complete():
     """Every scenario error_scenarios.f90 dispatches on must be named in run_error_scenarios.sh.
 
@@ -763,6 +808,7 @@ CHECKS = (
     ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
     ("every setting has an environment variable", check_env_covers_every_setting),
+    ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
 )
 

@@ -1528,7 +1528,7 @@ counterpart. User guide: `doc/pages/date-time.md`.
   `parquet_writer`, `parquet_table_row`), and to any future one — so a per-thread instance of any
   of them belongs in a `block`, and any example or guide page showing `private(<that type>)` is
   wrong and should be corrected on sight.
-- **ifx forbids the `block` form the previous bullet prescribes, for any finalizable type that has
+- **ifx forbids the `block` form the previous bullet prescribes, for any type that has
   ALLOCATABLE COMPONENTS — and is perfectly happy with `private()`. The two compilers forbid
   opposite shapes, so a type in that class can use neither, and needs a shared per-thread array
   instead.** ifx 2026.1 emits privatization scaffolding (`<TYPE>.omp.mold_ctor` →
@@ -1547,13 +1547,20 @@ counterpart. User guide: `doc/pages/date-time.md`.
   defined in the same file as its user does not crash, so a single-file reproducer will say the
   shape is fine when it is not.
 
-  **A finalizable type with no allocatable components is exempt, which is why `parquet_table` is
-  still safe block-local** — it is five scalars and a pointer by deliberate design (see "New
+  **The allocatable components are the whole trigger — FINALIZABILITY IS NOT REQUIRED, and reading
+  it as though it were is what let the shape back in.** An earlier wording of this bullet said
+  "any finalizable type that has allocatable components"; `materialize_column_parallel` then
+  declared a block-local `type(parquet_column) :: chunk`, and `parquet_column` has no `FINAL` at
+  all — it crashed exactly as described, on every full `fpm test` under ifx. So the class is: **any
+  derived type with an allocatable component.** `parquet_reader`, `parquet_writer`,
+  `parquet_schema`, `parquet_column` and `parquet_string_column` are all in it today.
+
+  **A type with no allocatable components is exempt, which is why `parquet_table` is still safe
+  block-local** — it is five scalars and a pointer by deliberate design (see "New
   `parquet_table` state goes on the CACHE"), and that design is now load-bearing for ifx too: the
   first allocatable component added to it would make every block-local per-thread table in user
   code start crashing. That is very likely what the `parquet_schema`-component segfault recorded
-  in that section actually was. `parquet_reader`, `parquet_writer` and `parquet_schema` are all in
-  the affected class today. See `feature_risks.md` Risk-45.
+  in that section actually was. See `feature_risks.md` Risk-45.
 
   **Diagnosing it takes one command**, and it is worth running before concluding a compiler is at
   fault at all: `nm <object> | grep -E "for_alloc_private|mold_ctor"`. If the scaffolding is absent,

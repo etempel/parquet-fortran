@@ -227,6 +227,7 @@ contains
         integer(int64) :: rg
         logical :: needs_bitmap
         type(parquet_reader), allocatable :: readers(:)
+        type(parquet_column), allocatable :: chunks(:)
         logical, allocatable :: reader_open(:)
 #endif
         !
@@ -240,7 +241,16 @@ contains
         call reader_row_group_bounds(cache%reader, bounds)
         !
         nslots = prefetch_thread_count()
+        ! One slot per thread the region could possibly use, allocated up front so the region only
+        ! ever indexes an existing element. `chunks` is here for the same reason `readers` is: a
+        ! derived type with ALLOCATABLE COMPONENTS declared in a block lexically inside a parallel
+        ! region makes ifx emit privatization scaffolding (`mold_ctor` -> `for_alloc_private` ->
+        ! `do_alloc_copy`) that segfaults at -O1+ on every thread entering the region --
+        ! feature_risks.md Risk-45. Reusing one chunk per thread across the row groups the
+        ! scheduler hands it is also what `materialize_slice` does serially, so the chunk's own
+        ! contract (each `table_materialize_chunk_kind` call resizes it) is already relied on.
         allocate(readers(nslots))
+        allocate(chunks(nslots))
         allocate(reader_open(nslots))
         reader_open = .false.
         call parquet_debug_note_colread_threads(int(min(int(nslots, int64), nrg), int64))
@@ -265,10 +275,10 @@ contains
             !$omp parallel do default(shared) private(rg, t) schedule(dynamic) num_threads(nslots)
             do rg = 1_int64, nrg
                 block
-                    ! Plain locals ONLY -- a finalizable derived type declared in a block lexically
-                    ! inside a parallel region segfaults ifx at -O1+ (feature_risks.md Risk-45),
-                    ! which is why `readers` is an array allocated before the region instead.
-                    type(parquet_column) :: chunk
+                    ! Plain locals ONLY -- a derived type with allocatable components declared in a
+                    ! block lexically inside a parallel region segfaults ifx at -O1+
+                    ! (feature_risks.md Risk-45), which is why `readers` and `chunks` are arrays
+                    ! allocated before the region instead.
                     integer(int64) :: rows_rg
                     !
                     rows_rg = bounds(2, rg) - bounds(1, rg) + 1_int64
@@ -284,14 +294,14 @@ contains
                             reader_open(t) = .true.
                         end if
                         call table_materialize_chunk_kind(slot%declared_kind, readers(t), &
-                            slot%file_name, rg, chunk, rows_rg, int(slot%width, int32), "")
+                            slot%file_name, rg, chunks(t), rows_rg, int(slot%width, int32), "")
                         ! The ROWS are disjoint by construction -- row group rg owns table rows
                         ! bounds(1,rg)..bounds(2,rg) and no other row group owns any of them -- but
                         ! disjoint rows are NOT disjoint validity bits, which is what
                         ! paste_row_group_safely exists for. See its own comment.
-                        call paste_row_group_safely(slot%values, chunk, bounds(1, rg), &
+                        call paste_row_group_safely(slot%values, chunks(t), bounds(1, rg), &
                             bounds(2, rg), int(slot%width, int64), needs_bitmap)
-                        call chunk%clear()
+                        call chunks(t)%clear()
                     end if
                 end block
             end do

@@ -2117,24 +2117,38 @@ to the first number and report success. `settings_env_two_numbers`
 
 ### Risk-45 — The two compilers' rules for the prefetch region conflict, and only one shape satisfies both
 
-`materialize_marked_parallel` (`src/parquet_tables_read.f90`) holds the library's **only** `!$omp
-parallel` region. What may be declared inside its lexical scope is constrained from two directions
-at once, and the two constraints contradict each other:
+`materialize_marked_parallel` and `materialize_column_parallel` (`src/parquet_tables_read.f90`) hold
+the `!$omp parallel` regions that declare anything at all inside their lexical scope. What may be
+declared there is constrained from two directions at once, and the two constraints contradict each
+other:
 
 - **gfortran breaks `private()`**: it does not reliably default-initialize a private copy of a
   finalizable derived type, so the first finalization frees an undefined pointer. CLAUDE.md's
   documented workaround is to declare the variable in a `block` inside the loop body instead.
-- **ifx breaks that very workaround, and is perfectly happy with `private()`.** A finalizable type
-  *with allocatable components* declared in a `block` lexically nested in the region makes ifx emit
+- **ifx breaks that very workaround, and is perfectly happy with `private()`.** A derived type
+  **with allocatable components** declared in a `block` lexically nested in the region makes ifx emit
   privatization scaffolding for it (`<TYPE>.omp.mold_ctor` → `for_alloc_private` → `do_alloc_copy`
   → `copy_src_xdesc_to_dest_xdesc`) that segfaults on every thread entering the region — 100%
   reproducible with as few as 2 threads, independent of team size, so not a race.
 
-The two forbidden shapes are opposites, so only a third one is left, and it is what the file uses:
-**one shared `parquet_reader` array, indexed by thread number, allocated before the region**, so no
-derived-type instance is constructed inside the parallel construct at all. Passing an element of it
-on to an `optional, intent(inout)` dummy (how `table_materialize`/`table_release_one` receive
-`rdr`) does not reintroduce the scaffolding either.
+**The allocatable components are the whole trigger; the type does NOT have to be finalizable.**
+This entry (and CLAUDE.md's own note) originally said "a finalizable type with allocatable
+components", and that phrasing is what let the shape back in: `materialize_column_parallel` declared
+a block-local `type(parquet_column) :: chunk`, `parquet_column` has **no `FINAL`** at all, and it
+crashed exactly as described — ifx 2026.1, `mold_ctor` → `for_alloc_private` → `do_alloc_copy`,
+every thread, on five of the twenty-one `table_parallel` tests and so on every full `fpm test`. Read
+the rule as: **no derived type with an allocatable component, finalizable or not.**
+
+The two forbidden shapes are opposites, so only a third one is left, and it is what both regions
+use: **a shared array of the type, indexed by thread number, allocated before the region** — the
+`parquet_reader` array in both, plus the `parquet_column` chunk array in
+`materialize_column_parallel` — so no such instance is constructed inside the parallel construct at
+all. Passing an element of it on to an `optional, intent(inout)` dummy (how
+`table_materialize`/`table_release_one` receive `rdr`) does not reintroduce the scaffolding either,
+and neither does passing one as an ordinary `intent(inout)` argument (how
+`table_materialize_chunk_kind` receives the chunk). Reusing one such slot across the iterations a
+thread is handed is safe for the same reason the serial `materialize_slice` reuses one chunk across
+its row groups: each call resizes it.
 
 **Four things make the ifx half quiet, and two of them will exonerate the wrong shape if you
 reproduce carelessly.** It needs `-O1`+ — at `-O0` it runs clean, so a `--profile debug` run cannot
@@ -2172,9 +2186,12 @@ result). Reach for that check before reaching for a per-compiler bail-out.
 — is what reported the path being switched off. The crash half is caught by building the suite with
 ifx at `-O1`+, which CI does not do; use the CI-environment image.
 
-**What this still forbids.** Do not declare a `parquet_reader`, `parquet_writer`, `parquet_schema`
-or any other finalizable type carrying allocatable components inside that region's `block` — plain
-integers only, and the comment saying so must stay. Do not weaken the positive control into
+**What this still forbids.** Do not declare a `parquet_reader`, `parquet_writer`, `parquet_schema`,
+`parquet_column`, `parquet_string_column` or **any other type carrying an allocatable component**
+inside such a region's `block` — plain integers only, and the comment saying so must stay, in every
+region, phrased as "allocatable components" rather than "finalizable" so the next reader cannot
+conclude a non-finalizable type is exempt. A new parallel region needs its own per-thread array up
+front, added at the same time as the region. Do not weaken the positive control into
 something that tolerates a compiler taking the serial path; a test written that way passes against
 the parallel path being disabled everywhere. Do not conclude anything about this region from a
 `-O0` run, a `--profile debug` run, or a single-file reproducer. And note the coupling to

@@ -1499,17 +1499,41 @@ contains
             call check(error, auto_n > capped_n, &
                 "negative control: with threads available the automatic answer must EXCEED the cap")
             if (allocated(error)) return
-            call check(error, auto_n == avail, "the automatic answer is what OpenMP offers")
+        end if
+        call check(error, auto_n <= avail, "the automatic answer never exceeds what OpenMP offers")
+        if (allocated(error)) return
+        !
+        ! **The automatic answer is CEILINGED, not simply omp_get_max_threads().** On a very large
+        ! machine the full thread count is past the point where this work scales and is measurably
+        ! worse than a fraction of it, so the default is bounded. That ceiling is 64 and therefore
+        ! never binds on an ordinary development machine -- which is exactly why it is overridable:
+        ! without lowering it here, a change that removed the ceiling entirely would pass on every
+        ! machine but the 192-core one.
+        if (avail > 2) then
+            call parquet_set_string_threads(0)
+            call parquet_debug_set_string_max_auto_threads(2)
+            call check(error, parquet_string_threads() == 2, &
+                "the automatic answer is bounded by the ceiling, not by omp_get_max_threads()")
             if (allocated(error)) return
+            !
+            ! ...and an EXPLICIT setting is honoured ABOVE that ceiling, bounded only by what OpenMP
+            ! offers. This is the one place the string cap deliberately differs from the sort cap,
+            ! which can only ever lower the automatic answer.
+            call parquet_set_string_threads(avail)
+            call check(error, parquet_string_threads() == avail, &
+                "an explicit request is honoured above the automatic ceiling")
+            if (allocated(error)) return
+            call parquet_debug_set_string_max_auto_threads(0)
         end if
         !
-        ! A cap ABOVE what OpenMP offers changes nothing -- it caps, it never raises.
+        ! A cap above what OpenMP offers is still bounded by what OpenMP offers.
         call parquet_set_string_threads(avail + 16)
-        call check(error, parquet_string_threads() == auto_n, &
-            "a cap above the available thread count does not raise the answer")
+        call check(error, parquet_string_threads() == avail, &
+            "a cap above the available thread count is bounded by the available thread count")
         if (allocated(error)) return
         !
         call parquet_set_string_threads(0)
+        call parquet_debug_set_string_max_auto_threads(0)
         call check(error, parquet_get_string_threads() == 0, "the raw getter reports the cap, not the resolved count")
     end subroutine test_string_threads_effect
 

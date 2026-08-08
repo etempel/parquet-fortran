@@ -157,12 +157,27 @@ several. `parquet_set_table_threads` splits a table's work by **column**; this s
 work by **row range**. They do not multiply: a string operation reached from inside the table's own
 parallel region stands down, exactly as a sort does, so at most one of the two is ever active.
 
-Like the others it is a cap rather than a request, read per operation, with `0` meaning automatic
-and `1` forcing serial. A string operation also stays serial on its own inside your own OpenMP
-parallel region, and on a payload too small to be worth a thread team — the floor is measured in
-**bytes of payload rather than rows**, because a column of ten million one-character elements and
-one of ten thousand ten-kilobyte elements have very different row counts and much the same amount of
-copying to do.
+Read per operation, with `0` meaning automatic and `1` forcing serial. A string operation also stays
+serial on its own inside your own OpenMP parallel region, and on a payload too small to be worth a
+thread team — the floor is measured in **bytes of payload rather than rows**, because a column of ten
+million one-character elements and one of ten thousand ten-kilobyte elements have very different row
+counts and much the same amount of copying to do.
+
+**This one behaves differently from the other thread settings in one respect, and on a large machine
+the difference matters.** The others only ever *lower* the automatic answer. This one *replaces* it:
+the automatic answer is deliberately **capped well below** what OpenMP offers, because past a certain
+thread count a string rebuild stops scaling and begins losing ground — measured on a 384-logical-thread
+dual-socket machine, where taking the full count was 18–40 % **worse** than the best available. If you
+know your machine wants more than the default, say so and it is honoured, bounded only by what OpenMP
+offers:
+
+```fortran
+call parquet_set_string_threads(128)   ! honoured, even though the automatic default is lower
+```
+
+Measured speedups for the operations this governs, for calibration: about 1.15x on an 8-core laptop,
+1.6–2.7x on an 8-core desktop, and 3.4–4.5x on a 192-core server — larger columns gaining more than
+smaller ones on the same hardware. The result is byte-identical at every thread count.
 
 `parquet_string_threads()` reports the resolved answer for the current context;
 `parquet_get_string_threads()` reports the raw setting (`0` when automatic).

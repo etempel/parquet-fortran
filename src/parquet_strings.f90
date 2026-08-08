@@ -37,6 +37,7 @@ module parquet_strings
     public :: parquet_string
     public :: parquet_string_threads
     public :: parquet_debug_set_string_min_bytes
+    public :: parquet_debug_set_string_max_auto_threads
     public :: parquet_debug_string_row_ranges
     public :: parquet_debug_string_bulk_threads
     !
@@ -73,6 +74,31 @@ module parquet_strings
     !! even sooner, so this is a conservative floor rather than a universal one.
     integer, parameter :: STRING_MIN_THREADS = 4
     !
+    !> Most threads the AUTOMATIC answer will ever ask for. An explicit `parquet_set_string_threads`
+    !! is honoured above this; only the unconfigured default is bounded by it.
+    !!
+    !! **Measured, and the reason is that more threads eventually make this SLOWER, not merely no
+    !! faster.** On a 2-socket, 192-physical-core (384-logical) EPYC 9654 running `ifx`, the same
+    !! `%reindex_trusted` sweep peaks in the 64-128 band and then loses ground as the thread count
+    !! rises into the SMT siblings:
+    !!
+    !! | threads | 4 M rows | 40 M rows | 4 M with nulls |
+    !! |---|---|---|---|
+    !! | 64 | 3.18x | **4.51x** | **3.54x** |
+    !! | 128 | **3.42x** | 4.40x | 3.44x |
+    !! | 256 | 2.73x | 3.40x | 3.36x |
+    !! | 384 | 2.43x | 2.70x | 2.89x |
+    !!
+    !! Taking `omp_get_max_threads()` there means 384 -- close to the *worst* threaded point of every
+    !! sweep, giving up 18-40 % of the speedup that was available, for a caller who did nothing wrong.
+    !! 64 is chosen over 128 because it is optimal on the two larger/realistic runs, costs 7 % on the
+    !! smallest, and is the less aggressive number for a library to claim from an application that may
+    !! have its own plans for the machine.
+    !!
+    !! This is a ceiling on a DEFAULT, not a limit on the operation: `parquet_set_string_threads(128)`
+    !! gets 128. Re-measure before changing it; the useful band was found, not merely approached.
+    integer, parameter :: STRING_MAX_AUTO_THREADS = 64
+    !
     !> Test-only override of `STRING_MIN_BYTES`; `<= 0` restores the real constant.
     !!
     !! **Exists because no fixture a test suite can afford reaches the real floor.** Every column
@@ -81,6 +107,16 @@ module parquet_strings
     !! `feature_risks.md` Risk-49's failure exactly, where a dense sweep over small arrays never
     !! reached the code it was written for.
     integer(int64), save :: dbg_string_min_bytes = 0_int64
+    !
+    !> Test-only override of `STRING_MAX_AUTO_THREADS`; `<= 0` restores the real constant.
+    !!
+    !! **Without this the ceiling is untestable on any ordinary development machine**, because it only
+    !! binds when OpenMP offers more threads than the ceiling allows -- 64 on a machine with 8 cores
+    !! is never reached, so a change that dropped the ceiling entirely would pass every test written
+    !! for it and only show up on a 192-core node. Lowering it is how a small machine exercises the
+    !! same branch. Same reasoning as `dbg_string_min_bytes`, and `feature_risks.md` Risk-49's
+    !! failure mode.
+    integer, save :: dbg_string_max_auto = 0
     !
     !> An owning, Arrow-LargeUtf8-compatible variable-length string column.
     !!
@@ -236,23 +272,39 @@ contains
     !! do?" and the operation itself can never give different answers. A second reader is how the
     !! two would come to disagree.
     !!
-    !! Two rules, in this order:
+    !! Three rules, in this order:
     !!
     !! * **Serial inside an OpenMP parallel region**, deliberately, and this is not a refusal -- it
     !!   picks a DEFAULT, exactly as `pf_sort_threads` and `parallel_prefetch_ok` do. `T` threads
     !!   each asking for `T` more is slower than not threading at all, and nesting is the caller's
     !!   business. Note `omp_get_max_threads()` reads an ICV rather than the current team size, so
     !!   inside an 8-thread region it answers 8 and a missing check means 8x8.
-    !! * **`parquet_set_string_threads` CAPS the automatic answer**; it never raises it, and never
-    !!   overrides the rule above.
+    !! * **Otherwise, an explicit `parquet_set_string_threads` is HONOURED**, bounded only by what
+    !!   OpenMP offers. A caller who names a number has said what they want.
+    !! * **With no explicit setting, the automatic answer is capped at
+    !!   `STRING_MAX_AUTO_THREADS`**, not taken as `omp_get_max_threads()`. See that constant for the
+    !!   measurement; in short, a very large machine's full thread count is past the point where
+    !!   this work stops scaling and is measurably *worse* than a fraction of it.
+    !!
+    !! **The second rule differs from `pf_sort_threads`, deliberately**, where a setting can only
+    !! ever lower the automatic answer. Sorting has no measured ceiling of its own, so there is
+    !! nothing for an explicit request to reach past; here there is, and refusing to honour it would
+    !! leave a caller on a 192-core machine unable to ask for the 128 threads that machine's own
+    !! measurement prefers.
     integer function parquet_string_threads() result(n)
-        integer :: cap
+        integer :: cap, avail
         n = 1
+        avail = 1
 #ifdef _OPENMP
-        if (.not. omp_in_parallel()) n = omp_get_max_threads()
+        if (omp_in_parallel()) return
+        avail = omp_get_max_threads()
 #endif
         cap = parquet_get_string_threads()
-        if (cap > 0 .and. cap < n) n = cap
+        if (cap > 0) then
+            n = min(cap, avail)
+        else
+            n = min(string_max_auto(), avail)
+        end if
         if (n < 1) n = 1
     end function parquet_string_threads
     !
@@ -269,6 +321,13 @@ contains
         integer(int64), intent(in) :: n !! new floor in bytes, or <= 0 to restore the real one.
         dbg_string_min_bytes = n
     end subroutine parquet_debug_set_string_min_bytes
+    !
+    !> Overrides the ceiling on the AUTOMATIC thread count. **Test-only**; `<= 0` restores the real
+    !! `STRING_MAX_AUTO_THREADS`. Public for the same reason its sibling above is.
+    subroutine parquet_debug_set_string_max_auto_threads(n)
+        integer, intent(in) :: n !! new ceiling, or <= 0 to restore the real one.
+        dbg_string_max_auto = n
+    end subroutine parquet_debug_set_string_max_auto_threads
     !
     !> What a bulk operation over `col` would actually resolve to, floor and all. **Test-only**.
     !!
@@ -303,6 +362,13 @@ contains
         n = STRING_MIN_BYTES
         if (dbg_string_min_bytes > 0_int64) n = dbg_string_min_bytes
     end function string_floor_bytes
+    !
+    !> The automatic thread ceiling actually in force: the test override where one is set, otherwise
+    !! the real constant. One reader, so the two cannot drift.
+    integer function string_max_auto() result(n)
+        n = STRING_MAX_AUTO_THREADS
+        if (dbg_string_max_auto > 0) n = dbg_string_max_auto
+    end function string_max_auto
     !
     !> Threads a bulk operation over `payload` bytes should actually use: `parquet_string_threads()`
     !! narrowed by the work floor and by having at least one whole validity byte (8 rows) per thread.

@@ -343,7 +343,33 @@ contains
             work = src%clone()
             best = min(best, now() - t0)
         end do
-        write (output_unit, '(a,f12.5,a)') "  clone (memcpy ref)    : ", best, " s"
+        write (output_unit, '(a,f12.5,a)') "  clone (copy + alloc)  : ", best, " s"
+        !
+        ! **A real bandwidth floor, over WARM buffers.** The `clone` row above is a library
+        ! operation and allocates its destination, so on a large machine it is dominated by
+        ! first-touch page faults rather than by copying -- measured varying 5.6x between runs at
+        ! the same payload size, and in one case coming out slower than `to_character`, which no
+        ! genuine copy floor can be. Both buffers here are allocated and fully written BEFORE the
+        ! timer starts, so this measures memory bandwidth and nothing else. Compare the three rows
+        ! above against this one, not against `clone`.
+        block
+            character(len=1), allocatable :: warm_src(:), warm_dst(:)
+            integer(int64) :: nb
+            nb = max(payload, 1_int64)
+            allocate(warm_src(nb), warm_dst(nb))
+            warm_src = "x"
+            warm_dst = "y"            ! first-touch both, outside the timer
+            best = huge(1.0_real64)
+            do r = 1, rounds
+                t0 = now()
+                warm_dst(1:nb) = warm_src(1:nb)
+                best = min(best, now() - t0)
+            end do
+            write (output_unit, '(a,f12.5,a,f9.1,a)') "  memcpy floor (warm)   : ", best, " s  = ", &
+                real(nb, real64)/1.0e6_real64/max(best, 1.0e-12_real64), " MB/s"
+            ! Keep the copy observable so no compiler can elide the loop above.
+            if (warm_dst(1) /= "x") write (output_unit, '(a)') "  (warm copy check failed)"
+        end block
         write (output_unit, '(a)') "=================================================================="
     end subroutine run
 

@@ -417,7 +417,7 @@ be worth it. Nothing needs to be asked for — `parquet_string_threads()` report
 would use here, and `parquet_set_string_threads(n)` caps it (see
 [Settings](settings.html#threads-inside-one-string-column)).
 
-Three things decide whether an operation actually threads, and all three decline toward serial:
+Four things decide how many threads an operation uses, and the first three all decline toward serial:
 
 - **Inside your own OpenMP parallel region it stays serial**, deliberately — `T` threads each asking
   for `T` more is slower than not threading at all, and a nested region is your business, not the
@@ -429,8 +429,15 @@ Three things decide whether an operation actually threads, and all three decline
   or three threads cannot pay for themselves. The library declines rather than running the slower
   shape.
 
+- **The automatic count is capped well below what OpenMP offers.** Past a certain thread count this
+  work stops scaling and starts losing ground — on a 384-logical-thread dual-socket machine, taking
+  the full count measured 18–40 % *worse* than the best available. If your machine wants more,
+  `parquet_set_string_threads(n)` is honoured above the default, bounded only by what OpenMP offers.
+
 **The result is byte-identical whatever the thread count** — same values, same offsets, same nulls.
-Threading here is purely a wall-clock control, never a change of answer.
+Threading here is purely a wall-clock control, never a change of answer. For calibration: roughly
+1.15x on an 8-core laptop, 1.6–2.7x on an 8-core desktop and 3.4–4.5x on a 192-core server, with
+larger columns gaining more than smaller ones on the same hardware.
 
 ## Capacity management
 

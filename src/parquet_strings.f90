@@ -564,6 +564,51 @@ contains
         c%validity(b) = iand(c%validity(b), not(BIT_MASK(int(mod(k, 8_int64)))))
     end subroutine set_bit_null
     !
+    !> Rebuilds `c`'s validity bitmap for a MASK-COMPACTED column: destination row `j` is the `j`-th
+    !! source row whose `keep` entry is `.true.`, and its null state is `old_null` at that source row.
+    !!
+    !! **Accumulates a whole byte in a register and stores it once per eight rows**, rather than
+    !! calling `set_bit_valid`/`set_bit_null` per row — each of those is a read-modify-write on the
+    !! bitmap. Same insight as `copy_validity_run`, in the one case where that helper cannot be used:
+    !! a compaction has no contiguous run to copy, because which source rows survive is arbitrary.
+    !!
+    !! Serial by necessity, not by omission. A destination row index is a rank among survivors, so a
+    !! thread's first output row is not a multiple of 8 and the byte-aligned split every other
+    !! threaded validity phase in this module relies on cannot be constructed — see `feature_risks.md`
+    !! Risk-61 for what splitting it anyway would cost.
+    subroutine rebuild_validity_compacted(c, keep, old_null, n, nn)
+        type(parquet_string_column), intent(inout) :: c !! the column, already compacted and sized.
+        logical, intent(in) :: keep(:)                  !! .true. for every source row retained.
+        logical, intent(in) :: old_null(:)              !! per SOURCE row: was it null.
+        integer(int64), intent(in) :: n                 !! source row count.
+        integer(int64), intent(out) :: nn               !! nulls among the survivors.
+        integer(int64) :: k, done, bidx
+        integer(int8) :: acc
+        integer :: bit
+        nn = 0_int64
+        done = 0_int64
+        bidx = 1_int64
+        ! Unused high bits of the final byte are left VALID, which is the value `ensure_validity_cap`
+        ! gives a fresh byte -- so a partly-filled trailing byte is indistinguishable from one this
+        ! column never wrote.
+        acc = ALL_VALID_BYTE
+        do k = 1_int64, n
+            if (.not. keep(k)) cycle
+            bit = int(mod(done, 8_int64))
+            if (old_null(k)) then
+                acc = iand(acc, not(BIT_MASK(bit)))
+                nn = nn + 1_int64
+            end if
+            done = done + 1_int64
+            if (bit == 7) then
+                c%validity(bidx) = acc
+                bidx = bidx + 1_int64
+                acc = ALL_VALID_BYTE
+            end if
+        end do
+        if (mod(done, 8_int64) /= 0_int64) c%validity(bidx) = acc
+    end subroutine rebuild_validity_compacted
+    !
     !> Copies validity bits `k0..k1` (0-based offsets from `s_first`/`d_first`) one at a time,
     !! **adding** the nulls it copied to `nn`. The slow shape, used for the ragged ends of a run and
     !! for a run whose two sides do not share a bit phase.
@@ -1774,13 +1819,126 @@ contains
     subroutine delete_by_mask(self, keep)
         class(parquet_string_column), intent(inout) :: self !! the column.
         logical, intent(in) :: keep(:)                      !! .true. for every element to retain.
-        integer(int64) :: n, k, j, a, b, elen, pos, kept, nn
-        logical, allocatable :: old_null(:)
+        integer(int64) :: n
+        integer :: nt
         n = self%nrows
         if (size(keep, kind=int64) /= n) then
             error stop EP//"delete_by_mask: mask length does not match the row count"
         end if
         if (n == 0_int64) return
+        nt = bulk_threads(n, self%nchars)
+        if (nt <= 1) then
+            call delete_by_mask_serial(self, keep)
+        else
+            call delete_by_mask_parallel(self, keep, nt)
+        end if
+    end subroutine delete_by_mask
+    !
+    !> `delete_by_mask`'s threaded form. **The only rebuild in this module that carries TWO
+    !! loop-carried cursors** -- a destination row index and a destination byte offset -- because it
+    !! is the only one whose output row count differs from its input's.
+    !!
+    !! That is why it does not use the per-element prefix sum every other phased rebuild here uses:
+    !! `offsets` is indexed by DESTINATION row, and the natural per-element array is indexed by
+    !! SOURCE row, so the usual shape would need a second `n`-sized temporary to carry the mapping.
+    !! Instead each thread counts its own range first (rows and bytes), an `nt`-sized exclusive scan
+    !! turns those counts into per-thread bases, and each thread then walks its range sequentially
+    !! from its own base. **Auxiliary memory is O(threads), not O(rows).**
+    !!
+    !! Like `compact_all`, it rebuilds into fresh buffers rather than compacting in place -- see that
+    !! procedure for why in-place and parallel are incompatible here, and why the fresh destination
+    !! is also what lets the copy be a `memcpy` rather than a scalar byte loop.
+    subroutine delete_by_mask_parallel(self, keep, nt)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: keep(:)                      !! .true. for every element to retain.
+        integer, intent(in) :: nt                           !! threads to use (> 1).
+        integer(int64) :: n, k, a, b, elen, kept, total, nn, rpos, bpos, cnt, bytes
+        integer(int64), allocatable :: new_off(:), rlo(:), rhi(:), row_base(:), byte_base(:)
+        character(len=1), allocatable :: new_data(:)
+        logical, allocatable :: old_null(:)
+        integer :: tix
+        n = self%nrows
+        call thread_row_ranges(n, nt, rlo, rhi)
+        allocate(row_base(nt + 1), byte_base(nt + 1))
+        if (self%has_nulls) then
+            allocate(old_null(n))
+            !$omp parallel do default(shared) private(tix, k) schedule(static) num_threads(nt) if (nt > 1)
+            do tix = 1, nt
+                do k = rlo(tix), rhi(tix)
+                    old_null(k) = .not. bit_valid(self, k)
+                end do
+            end do
+            !$omp end parallel do
+        end if
+        ! Phase 1: how many rows and bytes each thread's range contributes. Reads `keep` and
+        ! `offsets` only -- never the payload -- so it is cheap next to the copy it is planning.
+        !$omp parallel do default(shared) private(tix, k, cnt, bytes) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            cnt = 0_int64
+            bytes = 0_int64
+            do k = rlo(tix), rhi(tix)
+                if (keep(k)) then
+                    cnt = cnt + 1_int64
+                    bytes = bytes + (self%offsets(k+1_int64) - self%offsets(k))
+                end if
+            end do
+            row_base(tix+1) = cnt
+            byte_base(tix+1) = bytes
+        end do
+        !$omp end parallel do
+        ! Phase 2: the scan -- over `nt` entries rather than `n`, which is the whole point.
+        row_base(1) = 0_int64
+        byte_base(1) = 0_int64
+        do tix = 1, nt
+            row_base(tix+1) = row_base(tix+1) + row_base(tix)
+            byte_base(tix+1) = byte_base(tix+1) + byte_base(tix)
+        end do
+        kept = row_base(nt+1)
+        total = byte_base(nt+1)
+        allocate(new_off(kept + 1_int64))
+        new_off(1) = 0_int64
+        allocate(new_data(max(total, 1_int64)))
+        ! Phase 3: each thread compacts its own range into its own disjoint slice of both outputs.
+        !$omp parallel do default(shared) private(tix, k, a, b, elen, rpos, bpos) &
+        !$omp     schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            rpos = row_base(tix)
+            bpos = byte_base(tix)
+            do k = rlo(tix), rhi(tix)
+                if (.not. keep(k)) cycle
+                call elem_bounds(self, k, a, b)
+                elen = b - a + 1_int64
+                if (elen > 0_int64) new_data(bpos+1_int64:bpos+elen) = self%data(a:b)
+                bpos = bpos + elen
+                rpos = rpos + 1_int64
+                new_off(rpos+1_int64) = bpos
+            end do
+        end do
+        !$omp end parallel do
+        call move_alloc(new_off, self%offsets)
+        call move_alloc(new_data, self%data)
+        self%nrows = kept
+        self%nchars = total
+        ! Phase 4: validity, and it is **deliberately serial**. A destination row index is a rank
+        ! among survivors, so thread `t`'s first output row is `row_base(t)+1`, which is not a
+        ! multiple of 8 -- the byte-aligned split that makes every other threaded validity phase in
+        ! this module safe cannot be constructed here. Writing it serially is correct by
+        ! construction; splitting it on `row_base` would be Risk-61's exact defect.
+        if (self%has_nulls) then
+            call ensure_validity_cap(self, max(kept, 1_int64))
+            call rebuild_validity_compacted(self, keep, old_null, n, nn)
+            self%n_null = nn
+        end if
+    end subroutine delete_by_mask_parallel
+    !
+    !> `delete_by_mask`'s serial, in-place form. See `delete_by_mask_parallel` for why the threaded
+    !! one cannot be in place and why this one's copy must stay a scalar loop.
+    subroutine delete_by_mask_serial(self, keep)
+        class(parquet_string_column), intent(inout) :: self !! the column.
+        logical, intent(in) :: keep(:)                      !! .true. for every element to retain.
+        integer(int64) :: n, k, j, a, b, elen, pos, kept, nn
+        logical, allocatable :: old_null(:)
+        n = self%nrows
         if (self%has_nulls) then
             allocate(old_null(n))
             do k = 1_int64, n
@@ -1794,6 +1952,9 @@ contains
             if (.not. keep(k)) cycle
             call elem_bounds(self, k, a, b)
             elen = b - a + 1_int64
+            ! A scalar byte loop, deliberately -- see `compact_all` for why a section assignment
+            ! between two ranges of the SAME array costs a heap temporary per element (measured at
+            ! 7.5x slower here) and must not be substituted for this.
             do j = 0_int64, elen - 1_int64
                 self%data(pos+1_int64+j) = self%data(a+j)
             end do
@@ -1805,21 +1966,10 @@ contains
         self%nchars = pos
         ! rebuild validity for the surviving elements and recount the nulls
         if (self%has_nulls) then
-            nn = 0_int64
-            kept = 0_int64
-            do k = 1_int64, n
-                if (.not. keep(k)) cycle
-                kept = kept + 1_int64
-                if (old_null(k)) then
-                    call set_bit_null(self, kept)
-                    nn = nn + 1_int64
-                else
-                    call set_bit_valid(self, kept)
-                end if
-            end do
+            call rebuild_validity_compacted(self, keep, old_null, n, nn)
             self%n_null = nn
         end if
-    end subroutine delete_by_mask
+    end subroutine delete_by_mask_serial
     !
     !> int32 specific of gather; see the gather generic.
     subroutine gather_i32(self, idx)
@@ -2051,10 +2201,113 @@ contains
         call compact_all(self, .false.)
     end subroutine trim_all
     !
-    !> Shared worker for strip_all/trim_all: rewrites the payload compactly in a single left-to-right
-    !! pass (elements only shrink, so no reallocation is needed). When `do_strip` is .true. both ends
-    !! are trimmed; otherwise only trailing blanks are removed.
+    !> Returns the strip/trim bounds `lo:hi` of the payload range `a:b` (hi < lo when nothing is
+    !! left). Works on `data` directly rather than on a `character(len=*)` the way `process_bounds`
+    !! does, so a bulk pass needs no per-element string to hand it.
+    subroutine payload_bounds(c, a, b, do_strip, lo, hi)
+        type(parquet_string_column), intent(in) :: c !! the column.
+        integer(int64), intent(in) :: a              !! first payload byte of the element.
+        integer(int64), intent(in) :: b              !! last payload byte of the element.
+        logical, intent(in) :: do_strip              !! strip both ends when .true., else trailing only.
+        integer(int64), intent(out) :: lo            !! first byte to keep.
+        integer(int64), intent(out) :: hi            !! last byte to keep; hi < lo when empty.
+        lo = a
+        hi = b
+        if (do_strip) then
+            do while (lo <= b)
+                if (c%data(lo) /= ' ') exit
+                lo = lo + 1_int64
+            end do
+        end if
+        do while (hi >= lo)
+            if (c%data(hi) /= ' ') exit
+            hi = hi - 1_int64
+        end do
+    end subroutine payload_bounds
+    !
+    !> Shared worker for strip_all/trim_all. Rewrites the payload compactly, serially **in place**
+    !! (elements only shrink, so no reallocation is needed) or, past the work floor, into fresh
+    !! buffers across threads. When `do_strip` is .true. both ends are trimmed; otherwise only
+    !! trailing blanks are removed.
+    !!
+    !! **The threaded form cannot compact in place, and that is not a concession -- it is what makes
+    !! it fast twice over.** Thread `t` writes its output starting at a byte position at or *before*
+    !! its own input range, so its writes reach back into a range another thread is still reading:
+    !! in-place and parallel are incompatible here. Writing into a fresh buffer removes the race
+    !! **and** removes the aliasing, which lets the copy be a section assignment (one `memcpy`)
+    !! instead of the scalar byte loop the in-place path is stuck with -- see the serial path's own
+    !! comment for what that loop costs and why it may not be "tidied up".
     subroutine compact_all(c, do_strip)
+        type(parquet_string_column), intent(inout) :: c !! the column.
+        logical, intent(in) :: do_strip                 !! strip both ends when .true., else trailing only.
+        integer(int64) :: i, orig_a, orig_b, lo, hi, elen, total
+        integer(int64), allocatable :: new_off(:), rlo(:), rhi(:)
+        character(len=1), allocatable :: new_data(:)
+        integer :: nt, tix
+        nt = bulk_threads(c%nrows, c%nchars)
+        if (nt <= 1) then
+            call compact_all_serial(c, do_strip)
+            return
+        end if
+        call thread_row_ranges(c%nrows, nt, rlo, rhi)
+        allocate(new_off(c%nrows + 1_int64))
+        new_off(1) = 0_int64
+        ! Phase 1: each element's KEPT length. Reads only the blank runs at the two ends, not the
+        ! whole element, so it is far cheaper than the copy it is sizing.
+        !$omp parallel do default(shared) private(tix, i, orig_a, orig_b, lo, hi) &
+        !$omp     schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do i = rlo(tix), rhi(tix)
+                new_off(i+1_int64) = 0_int64
+                if (bit_valid(c, i)) then
+                    orig_a = c%offsets(i) + 1_int64
+                    orig_b = c%offsets(i+1_int64)
+                    if (orig_b >= orig_a) then
+                        call payload_bounds(c, orig_a, orig_b, do_strip, lo, hi)
+                        if (hi >= lo) new_off(i+1_int64) = hi - lo + 1_int64
+                    end if
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        ! Phase 2: the scan. Serial, as everywhere else in this module.
+        do i = 1_int64, c%nrows
+            new_off(i+1_int64) = new_off(i+1_int64) + new_off(i)
+        end do
+        total = new_off(c%nrows + 1_int64)
+        allocate(new_data(max(total, 1_int64)))
+        ! Phase 3: the copy. Only the LEADING blank run is rescanned (and only when stripping) --
+        ! the length comes from the scan, so the trailing scan is not repeated. The rescan is
+        ! guaranteed to terminate inside the element, because a non-blank byte exists whenever
+        ! `elen > 0`.
+        !$omp parallel do default(shared) private(tix, i, orig_a, lo, elen) &
+        !$omp     schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do i = rlo(tix), rhi(tix)
+                elen = new_off(i+1_int64) - new_off(i)
+                if (elen > 0_int64) then
+                    lo = c%offsets(i) + 1_int64
+                    if (do_strip) then
+                        do while (c%data(lo) == ' ')
+                            lo = lo + 1_int64
+                        end do
+                    end if
+                    new_data(new_off(i)+1_int64:new_off(i)+elen) = c%data(lo:lo+elen-1_int64)
+                end if
+            end do
+        end do
+        !$omp end parallel do
+        call move_alloc(new_off, c%offsets)
+        call move_alloc(new_data, c%data)
+        c%nchars = total
+        ! Validity is untouched: compaction only shortens elements, so no row changes null state and
+        ! `n_null` is unchanged. This is the one bulk rebuild in the module with no validity phase,
+        ! and so the one with no byte-alignment requirement.
+    end subroutine compact_all
+    !
+    !> `compact_all`'s serial, in-place form. See `compact_all` for why the threaded one cannot be
+    !! in place and why this one's copy must stay a scalar loop.
+    subroutine compact_all_serial(c, do_strip)
         type(parquet_string_column), intent(inout) :: c !! the column.
         logical, intent(in) :: do_strip                 !! strip both ends when .true., else trailing only.
         integer(int64) :: i, orig_a, orig_b, prev_end, lo, hi, wpos, k
@@ -2065,18 +2318,16 @@ contains
             orig_b = c%offsets(i+1)            ! original end (not overwritten until end of this iteration)
             prev_end = orig_b                  ! save before the overwrite
             if (bit_valid(c, i) .and. orig_b >= orig_a) then
-                lo = orig_a
-                hi = orig_b
-                if (do_strip) then
-                    do while (lo <= orig_b)
-                        if (c%data(lo) /= ' ') exit
-                        lo = lo + 1_int64
-                    end do
-                end if
-                do while (hi >= lo)
-                    if (c%data(hi) /= ' ') exit
-                    hi = hi - 1_int64
-                end do
+                ! The same helper the threaded path uses, so the two cannot drift on what "trim"
+                ! means -- which the equality test between them would then be unable to detect.
+                call payload_bounds(c, orig_a, orig_b, do_strip, lo, hi)
+                ! **A scalar byte loop, deliberately, and it must stay one.** The obvious tidy-up --
+                ! `c%data(wpos+1:wpos+n) = c%data(lo:hi)` -- is a section assignment whose two sides
+                ! are the SAME array, so the compiler cannot prove they do not overlap and must
+                ! materialise the right-hand side first: one heap temporary per element, which is
+                ! exactly `feature_risks.md` Risk-60's shape. Measured at **5.5x SLOWER** (0.0261 s
+                ! to 0.1439 s over 4 M elements). The threaded path can use a section assignment
+                ! only because its destination is a different array.
                 do k = lo, hi
                     wpos = wpos + 1_int64
                     c%data(wpos) = c%data(k)
@@ -2085,7 +2336,7 @@ contains
             c%offsets(i+1) = wpos
         end do
         c%nchars = wpos
-    end subroutine compact_all
+    end subroutine compact_all_serial
     !
     ! ==================================================================================
     ! Searching / comparison

@@ -124,9 +124,10 @@ something a reader is expected to have.
 | [Risk-57](#risk-57--a-row-group-split-column-read-allocates-its-validity-bitmap-on-first-null-from-any-thread) | A row-group-split column read allocates its validity bitmap on first null, from any thread | 3 — not testable |
 | [Risk-58](#risk-58--an-adopted-transform-is-shared-state-and-only-its-preconditions-stand-between-it-and-a-wrong-row-set) | An adopted transform is shared state, and only its preconditions stand between it and a wrong row set | 4 — covered |
 | [Risk-59](#risk-59--a-shared_ptr-parameter-on-a-per-element-helper-costs-7x-and-fails-nothing) | A `shared_ptr` parameter on a per-element helper costs 7x and fails nothing | 3 — not testable |
-| [Risk-60](#risk-60--a-per-element-allocatable-character-round-trip-in-a-bulk-string-operation-costs-4x-and-fails-nothing) | A per-element allocatable-character round trip in a bulk string operation costs 4x and fails nothing | 3 — not testable |
+| [Risk-60](#risk-60--a-per-element-allocatable-character-round-trip-in-a-bulk-string-operation-costs-4x-and-fails-nothing) | A per-element allocatable-character round trip in a bulk string operation costs 4x and fails nothing | 4 — covered |
 | [Risk-61](#risk-61--a-validity-split-that-is-not-byte-aligned-loses-nulls-and-no-end-to-end-test-can-be-relied-on-to-see-it) | A validity split that is not byte-aligned loses nulls, and no end-to-end test can be relied on to see it | 4 — covered |
 | [Risk-62](#risk-62--a-validity-run-copied-byte-wise-silently-mis-places-nulls-when-its-alignment-precondition-is-wrong) | A validity run copied byte-wise silently mis-places nulls when its alignment precondition is wrong | 4 — covered |
+| [Risk-63](#risk-63--replacing-an-in-place-compactions-byte-loop-with-an-array-section-costs-a-heap-temporary-per-element) | Replacing an in-place compaction's byte loop with an array section costs a heap temporary per element | 3 — not testable |
 
 ---
 
@@ -134,7 +135,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-63**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-64**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -617,6 +618,45 @@ slow: the caller already holds a reference for the whole loop, so the loop needs
 share of the ownership. A genuinely per-element helper that must extend an array's lifetime would be
 the exception, and would have to argue for itself in a comment and in the check — not simply be
 written and merged because nothing complained.
+
+### Risk-63 — Replacing an in-place compaction's byte loop with an array section costs a heap temporary per element
+
+`compact_all_serial` and `delete_by_mask_serial` (`src/parquet_strings.f90`) compact a column's payload
+**in place**, copying each element's bytes with a scalar loop:
+
+```fortran
+do k = lo, hi
+    wpos = wpos + 1_int64
+    c%data(wpos) = c%data(k)
+end do
+```
+
+That loop looks like an oversight. It is not, and the tidy-up is expensive in a way nothing reports:
+`c%data(wpos+1:wpos+n) = c%data(lo:hi)` has **the same array on both sides**, so the compiler cannot
+prove the two ranges do not overlap and must evaluate the right-hand side into a temporary first — one
+heap allocation and free **per element**. Measured on 4 M elements: `trim_all` **0.0261 s → 0.1439 s
+(5.5x slower)**, `delete_by_mask` **0.0118 s → 0.0886 s (7.5x slower)**. Every test still passes, every
+answer is still correct, and the column still validates.
+
+This is [Risk-60](#risk-60--a-per-element-allocatable-character-round-trip-in-a-bulk-string-operation-costs-4x-and-fails-nothing)'s
+class arriving from a direction that risk's lint check cannot see: `check_no_per_element_string_alloc`
+matches `%get`/`%to_string` calls, and there is no call here at all — the allocation is emitted by the
+compiler from an assignment that mentions nothing.
+
+**The threaded paths use exactly that section assignment, and must.** Their destination is a *different*
+array, so it is provably non-overlapping and compiles to a single `memcpy` — which is most of why
+`delete_by_mask` threads to 3.46x (5,800 MB/s to 19,900 MB/s) rather than to the ~3x threads alone would
+buy. **The rule is about aliasing, not about sections**: same array, use the loop; different arrays, use
+the section.
+
+**Test.** None, and none is proposed: the failure is a 5.5x slowdown, not a wrong answer, and a timing
+assertion in the unit suite would be flaky on a loaded machine. `tools/benchmark_strings.sh`'s `trim_all`
+and `delete_by_mask` rows are where it would show, which is how it was found.
+
+**What this forbids.** Do not "modernise" either loop, and do not copy the pattern *into* a new in-place
+compaction without checking which array the destination lives in. If a future in-place bulk operation is
+added here, it inherits this constraint; if it can afford a fresh destination buffer, prefer that
+instead, since it removes the aliasing and buys the parallelism at the same time.
 
 ## 4. Risks already covered, kept for what they still forbid
 

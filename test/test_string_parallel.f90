@@ -48,6 +48,10 @@ contains
                 test_build_from_threaded_equals_serial), &
             new_unittest("threaded gather equals the serial gather", &
                 test_gather_threaded_equals_serial), &
+            new_unittest("threaded trim_all/strip_all equal the serial ones", &
+                test_compact_threaded_equals_serial), &
+            new_unittest("threaded delete_by_mask equals the serial delete_by_mask", &
+                test_delete_by_mask_threaded_equals_serial), &
             new_unittest("the thread floor declines below its break-even", test_thread_break_even) &
             ]
     end subroutine collect_tests_string_parallel
@@ -358,6 +362,176 @@ contains
         end do
         call check(error, ever_threaded, "negative control: at least one build_from arm must have threaded")
     end subroutine test_build_from_threaded_equals_serial
+    !
+    !> Builds a column whose elements carry leading and/or trailing blanks in every combination, so
+    !! that `trim_all` and `strip_all` actually have something to remove and remove different amounts.
+    !!
+    !! **An all-blank element and a zero-length element are both included on purpose**: the first is
+    !! the case where compaction takes an element to length 0, which is where a length computed in
+    !! one phase and a copy performed in another can disagree; the second is where the leading-blank
+    !! rescan in the threaded copy would run off the end if it were ever reached with `elen == 0`.
+    subroutine build_padded(c, n, null_every)
+        type(parquet_string_column), intent(inout) :: c !! receives the column.
+        integer(int64), intent(in) :: n                 !! element count.
+        integer(int64), intent(in) :: null_every        !! null stride; <= 0 for none.
+        integer(int64) :: k, body
+        character(len=48) :: buf
+        integer :: lead, trail
+        call c%clear()
+        do k = 1_int64, n
+            if (null_every > 0_int64) then
+                if (mod(k, null_every) == 0_int64) then
+                    call c%append_null()
+                    cycle
+                end if
+            end if
+            select case (int(mod(k, 6_int64)))
+            case (0)
+                call c%append_string("")                       ! zero length
+                cycle
+            case (1)
+                call c%append_string("    ")                   ! all blanks -> length 0 after either
+                cycle
+            end select
+            lead = int(mod(k, 4_int64))
+            trail = int(mod(k, 3_int64))
+            body = 1_int64 + mod(k*5_int64, 9_int64)
+            buf = repeat(" ", lead) // repeat(char(ichar("a") + int(mod(k, 26_int64))), int(body)) &
+                // repeat(" ", trail)
+            call c%append_string(buf(1:lead+int(body)+trail))
+        end do
+    end subroutine build_padded
+    !
+    !> **`trim_all`/`strip_all` thread by rebuilding into fresh buffers; the serial form compacts in
+    !! place.** Two genuinely different shapes, so this is an A/B in the same sense as the reindex
+    !! tests, and the fixture has to contain blanks or neither arm does any work.
+    !!
+    !! Both operations are swept because they differ in one clause — `strip_all` also removes leading
+    !! blanks, which is the only thing the threaded copy has to recompute rather than read from the
+    !! prefix sum, and therefore the one place the two phases can disagree.
+    subroutine test_compact_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, ser, par
+        integer(int64) :: n, stride
+        integer :: op
+        logical :: ever_threaded
+        !
+        ever_threaded = .false.
+        do stride = 0_int64, 5_int64, 5_int64
+            do op = 1, 2
+                do n = 1021_int64, 1024_int64
+                    call build_padded(src, n, stride)
+                    !
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    call parquet_set_string_threads(1)
+                    ser = src%clone()
+                    if (op == 1) then
+                        call ser%trim_all()
+                    else
+                        call ser%strip_all()
+                    end if
+                    !
+                    call parquet_set_string_threads(0)
+                    call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                    par = src%clone()
+                    if (parquet_debug_string_bulk_threads(par) > 1) ever_threaded = .true.
+                    if (op == 1) then
+                        call par%trim_all()
+                    else
+                        call par%strip_all()
+                    end if
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    !
+                    call check(error, ser%character_size() == par%character_size(), &
+                        "both arms must compact to the same payload size")
+                    if (allocated(error)) return
+                    call check(error, same_column(ser, par), &
+                        "threaded trim/strip must equal the serial one in every element and null")
+                    if (allocated(error)) return
+                    call check(error, par%validate(), "the threaded compaction satisfies the class invariants")
+                    if (allocated(error)) return
+                end do
+            end do
+        end do
+        call check(error, ever_threaded, "negative control: at least one compaction arm must have threaded")
+    end subroutine test_compact_threaded_equals_serial
+    !
+    !> **`delete_by_mask` is the only rebuild here whose OUTPUT ROW COUNT differs from its input's**,
+    !! so its threaded form carries two cursors and derives per-thread bases rather than a
+    !! per-element prefix sum. A base computed one row out shifts every later element of that thread's
+    !! range — in both the payload and the offsets — so the masks below vary how many rows each
+    !! thread's range contributes.
+    !!
+    !! Keep-all and keep-none are included because they are the degenerate ends of that arithmetic:
+    !! keep-none leaves a zero-row column whose buffers still have to be well formed.
+    subroutine test_delete_by_mask_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, ser, par
+        logical, allocatable :: keep(:)
+        integer(int64) :: n, k, stride
+        integer :: mode
+        logical :: ever_threaded
+        !
+        ever_threaded = .false.
+        do stride = 0_int64, 3_int64, 3_int64
+            do mode = 1, 4
+                do n = 1021_int64, 1022_int64
+                    call build_padded(src, n, stride)
+                    allocate(keep(n))
+                    select case (mode)
+                    case (1)
+                        keep = .true.                                  ! keep everything
+                    case (2)
+                        keep = .false.                                 ! keep nothing
+                    case (3)
+                        do k = 1_int64, n
+                            keep(k) = mod(k, 2_int64) == 0_int64       ! every other row
+                        end do
+                    case default
+                        do k = 1_int64, n
+                            ! Uneven: whole stretches survive and whole stretches do not, so the
+                            ! per-thread row counts differ sharply from each other.
+                            keep(k) = mod(k/37_int64, 3_int64) /= 0_int64
+                        end do
+                    end select
+                    !
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    call parquet_set_string_threads(1)
+                    ser = src%clone()
+                    call ser%delete_by_mask(keep)
+                    !
+                    call parquet_set_string_threads(0)
+                    call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                    par = src%clone()
+                    if (parquet_debug_string_bulk_threads(par) > 1) ever_threaded = .true.
+                    call par%delete_by_mask(keep)
+                    call parquet_debug_set_string_min_bytes(0_int64)
+                    !
+                    call check(error, ser%size() == par%size(), &
+                        "both arms must keep the same number of rows")
+                    if (allocated(error)) return
+                    call check(error, ser%size() == count(keep), &
+                        "the surviving row count must equal the mask's own count")
+                    if (allocated(error)) return
+                    call check(error, ser%null_count() == par%null_count(), &
+                        "both arms must recount the surviving nulls identically")
+                    if (allocated(error)) return
+                    call check(error, same_column(ser, par), &
+                        "threaded delete_by_mask must equal the serial one in every element and null")
+                    if (allocated(error)) return
+                    ! Both arms, not just the threaded one: they share `rebuild_validity_compacted`,
+                    ! so a defect in it corrupts them identically and the equality check above cannot
+                    ! see it -- only the class invariant can.
+                    call check(error, ser%validate(), "the serial deletion satisfies the class invariants")
+                    if (allocated(error)) return
+                    call check(error, par%validate(), "the threaded deletion satisfies the class invariants")
+                    if (allocated(error)) return
+                    deallocate(keep)
+                end do
+            end do
+        end do
+        call check(error, ever_threaded, "negative control: at least one delete_by_mask arm must have threaded")
+    end subroutine test_delete_by_mask_threaded_equals_serial
     !
     !> The thread floor declines below its break-even rather than running a slower shape on two
     !! threads.

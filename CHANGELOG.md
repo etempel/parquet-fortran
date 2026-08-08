@@ -29,13 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_set_threads(n)` now sets five subsystems rather than four, and
   `PARQUET_FORTRAN_STRING_THREADS` reaches it from the environment. **What currently uses it:**
   `%reindex`/`%reindex_trusted` — and so `parquet_column`'s string reindex and
-  `parquet_table%sort_by` on a string column — plus `%to_character`, `%build_from` and `%gather`,
-  in each case only when not already inside a parallel region. On an 8-core M1 Pro those three add
-  **3.4x**, **1.4x** and **1.3x** on 4 M elements. **The gain scales with both
-  the machine and the column**, measured on three: **1.15x** on an 8-core M1 Pro, **1.6-2.7x** on an
-  8-core i7, and **3.4-4.5x** on a 192-core dual-socket EPYC — in each case the larger figure is the
-  larger column, and a 40 M-element column gains roughly 1.7x more than a 4 M one on the same
-  hardware. The result is byte-identical at every thread count, and the serial path is untouched, so
+  `parquet_table%sort_by` on a string column — plus `%to_character`, `%build_from`, `%gather`,
+  `%delete_by_mask` and `%trim_all`/`%strip_all`, in each case only when not already inside a
+  parallel region. On an 8-core M1 Pro, at 4 M elements: `%delete_by_mask` **3.5x**,
+  `%to_character` **3.4x**, `%trim_all` **1.9x**, `%build_from` **1.4x**, `%gather` **1.3x**.
+  **The gain scales with both the machine and the column**, measured for `%reindex` on three:
+  **1.15x** on that M1 Pro, **1.6-2.7x** on an 8-core i7, and **3.4-4.5x** on a 192-core
+  dual-socket EPYC — in each case the larger figure is the larger column, and a 40 M-element column
+  gains roughly 1.7x more than a 4 M one on the same hardware. The result is byte-identical at every thread count, and the serial path is untouched, so
   nothing is slower than before whatever the setting. Left alone, the automatic count is capped
   rather than taken as `omp_get_max_threads()`: past a certain point this work stops scaling and
   starts losing ground, and on a 384-logical-thread machine the uncapped answer was 18-40 % *worse*
@@ -450,6 +451,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.168 s to 0.038 s, `%build_from` 0.305 s to 0.033 s. Results are unchanged in every respect —
   same padding to the longest element, same `null_value` substitution, same trimming behaviour, same
   aborts on a null with no `null_value` and on an invalid handle.
+- **`parquet_string_column%delete_by_mask` is faster on a column with nulls even single-threaded**
+  (0.0183 s to 0.0154 s on 4 M elements). Rebuilding the validity bitmap for the surviving rows was
+  setting one bit at a time, each a read-modify-write on the bitmap; it now accumulates a whole byte
+  and stores it once per eight rows. Which rows survive and how many are null are unchanged.
 - **`parquet_string_column%slice` and `%append_column` no longer pay for a column's nulls.** Both
   copied the validity bitmap one row at a time, so a column with nulls cost roughly three times one
   without — where a bitmap packs eight rows to a byte and the run being copied is contiguous. They

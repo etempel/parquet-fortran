@@ -3276,8 +3276,6 @@ contains
         w("        integer(int64), allocatable :: idxs(:)")
         w("        integer(int64) :: k, nd, nn")
         w("        logical :: desc")
-        if family == "strcol":
-            w("        character(len=:), allocatable :: s")
         w("        !")
         w("        desc = .false.")
         w("        if (present(descending)) desc = descending")
@@ -3289,10 +3287,14 @@ contains
             w("        call distinct%clear()")
         else:
             w("        allocate(distinct(nd))")
+        if family == "strcol":
+            w("        ! `%append_from` carries both the bytes and the null state, so nothing is")
+            w("        ! materialized per element. `idxs` only ever names non-null elements -- the walk")
+            w("        ! in unique_impl_strcol stops at the first null -- so carrying the null state")
+            w("        ! cannot change what lands here. See feature_risks.md Risk-60.")
         w("        do k = 1_int64, nd")
         if family == "strcol":
-            w("            call values%get(idxs(k), s, allow_null=.true.)")
-            w("            call distinct%append_string(s)")
+            w("            call distinct%append_from(values, idxs(k))")
         else:
             w("            distinct(k) = values(idxs(k))")
         w("        end do")

@@ -48,15 +48,16 @@ contains
     !! library's existing fixed-width string reads use.
     module procedure get_at_strv
         integer(int64) :: e, base, w
-        character(len=:), allocatable :: s
         call check_kind(self, PK_STRING_VEC, "get_at")
         call check_index(self, i, "get_at")
         w = int(self%width, int64)
         call check_width(self, size(value, kind=int64), "get_at")
         base = (i - 1_int64)*w
+        ! `%copy_to` rather than `%get` into a temporary: `value(e)` is already a fixed-length slot,
+        ! so going through an allocatable string costs a heap round trip per element for a copy that
+        ! ends up blank-padded either way. Truncation semantics are identical -- see `%copy_to`.
         do e = 1_int64, w
-            call self%str%get(base + e, s, allow_null=.true.)
-            value(e) = s
+            call self%str%copy_to(base + e, value(e), allow_null=.true.)
         end do
     end procedure get_at_strv
     !

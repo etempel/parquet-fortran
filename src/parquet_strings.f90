@@ -162,6 +162,9 @@ module parquet_strings
         procedure, private :: get_i32                  !! int32 specific of get.
         procedure, private :: get_i64                  !! int64 specific of get.
         generic :: get => get_i32, get_i64             !! Writes element i into an allocatable string.
+        procedure, private :: copy_to_i32              !! int32 specific of copy_to.
+        procedure, private :: copy_to_i64              !! int64 specific of copy_to.
+        generic :: copy_to => copy_to_i32, copy_to_i64 !! Copies element i into a fixed-length slot.
         procedure, private :: view_i32                 !! int32 specific of view.
         procedure, private :: view_i64                 !! int64 specific of view.
         generic :: view => view_i32, view_i64          !! Zero-copy handle to element i.
@@ -179,6 +182,9 @@ module parquet_strings
         procedure :: append_string                     !! Append a string to the end.
         procedure :: append_null                       !! Append a null element to the end.
         procedure :: append_column                     !! Append all elements from another column.
+        procedure, private :: append_from_i32          !! int32 specific of append_from.
+        procedure, private :: append_from_i64          !! int64 specific of append_from.
+        generic :: append_from => append_from_i32, append_from_i64 !! Append one element of another column.
         procedure :: build_from                        !! Clears self, then gathers an array of handles into it.
         procedure, private :: set_i32                  !! int32 specific of set.
         procedure, private :: set_i64                  !! int64 specific of set.
@@ -612,20 +618,23 @@ contains
     !> Copies validity bits `k0..k1` (0-based offsets from `s_first`/`d_first`) one at a time,
     !! **adding** the nulls it copied to `nn`. The slow shape, used for the ragged ends of a run and
     !! for a run whose two sides do not share a bit phase.
-    subroutine copy_validity_bits(src, s_first, dst, d_first, k0, k1, nn)
-        type(parquet_string_column), intent(in) :: src    !! source column.
-        integer(int64), intent(in) :: s_first             !! 1-based first source element of the run.
-        type(parquet_string_column), intent(inout) :: dst !! destination column (bitmap allocated).
-        integer(int64), intent(in) :: d_first             !! 1-based first destination element.
-        integer(int64), intent(in) :: k0                  !! first 0-based offset within the run.
-        integer(int64), intent(in) :: k1                  !! last 0-based offset within the run.
-        integer(int64), intent(inout) :: nn               !! accumulates the nulls copied.
-        integer(int64) :: k
+    subroutine copy_validity_bits(src_map, s_bit0, dst_map, d_bit0, k0, k1, nn)
+        integer(int8), intent(in) :: src_map(:)     !! source bitmap (1 = valid, as Arrow packs it).
+        integer(int64), intent(in) :: s_bit0        !! 0-based bit index of the run's first source element.
+        integer(int8), intent(inout) :: dst_map(:)  !! destination bitmap.
+        integer(int64), intent(in) :: d_bit0        !! 0-based bit index of the run's first destination element.
+        integer(int64), intent(in) :: k0            !! first 0-based offset within the run.
+        integer(int64), intent(in) :: k1            !! last 0-based offset within the run.
+        integer(int64), intent(inout) :: nn         !! accumulates the nulls copied.
+        integer(int64) :: k, sb, db, dbyte
         do k = k0, k1
-            if (bit_valid(src, s_first + k)) then
-                call set_bit_valid(dst, d_first + k)
+            sb = s_bit0 + k
+            db = d_bit0 + k
+            dbyte = db/8_int64 + 1_int64
+            if (iand(src_map(sb/8_int64 + 1_int64), BIT_MASK(int(mod(sb, 8_int64)))) /= 0_int8) then
+                dst_map(dbyte) = ior(dst_map(dbyte), BIT_MASK(int(mod(db, 8_int64))))
             else
-                call set_bit_null(dst, d_first + k)
+                dst_map(dbyte) = iand(dst_map(dbyte), not(BIT_MASK(int(mod(db, 8_int64)))))
                 nn = nn + 1_int64
             end if
         end do
@@ -652,35 +661,47 @@ contains
     !! The ragged TAIL and a misaligned run fall back to `copy_validity_bits`, and neither is a rare
     !! corner: `slice(3, 900)` takes the fallback whole, and any row count not a multiple of 8 has a
     !! tail. Both must stay correct rather than merely present.
-    subroutine copy_validity_run(src, s_first, dst, d_first, m, nn)
-        type(parquet_string_column), intent(in) :: src    !! source column.
-        integer(int64), intent(in) :: s_first             !! 1-based first source element of the run.
+    subroutine copy_validity_run(src_map, s_bit0, dst_map, d_bit0, m, nn)
+        integer(int8), intent(in) :: src_map(:)     !! source bitmap (1 = valid).
+        integer(int64), intent(in) :: s_bit0        !! 0-based bit index of the first source element.
+        integer(int8), intent(inout) :: dst_map(:)  !! destination bitmap.
+        integer(int64), intent(in) :: d_bit0        !! 0-based bit index of the first destination element.
+        integer(int64), intent(in) :: m             !! elements to copy.
+        integer(int64), intent(out) :: nn           !! nulls among the copied elements.
+        integer(int64) :: k, nbytes, sbyte, dbyte
+        nn = 0_int64
+        if (m <= 0_int64) return
+        if (mod(s_bit0, 8_int64) /= 0_int64 .or. mod(d_bit0, 8_int64) /= 0_int64) then
+            call copy_validity_bits(src_map, s_bit0, dst_map, d_bit0, 0_int64, m - 1_int64, nn)
+            return
+        end if
+        nbytes = m/8_int64
+        sbyte = s_bit0/8_int64 + 1_int64
+        dbyte = d_bit0/8_int64 + 1_int64
+        do k = 0_int64, nbytes - 1_int64
+            dst_map(dbyte + k) = src_map(sbyte + k)
+            ! A set bit is a VALID row, so the nulls in this byte are its zeros. Masked to 8 bits
+            ! because int8 is signed and `int()` would sign-extend the high bit into 24 more ones.
+            nn = nn + int(8 - popcnt(iand(int(src_map(sbyte + k), int32), 255)), int64)
+        end do
+        if (nbytes*8_int64 < m) then
+            call copy_validity_bits(src_map, s_bit0, dst_map, d_bit0, nbytes*8_int64, m - 1_int64, nn)
+        end if
+    end subroutine copy_validity_run
+    !
+    !> `copy_validity_run` between two columns, both of which must already have a bitmap. A thin
+    !! wrapper so the byte-wise core has exactly one implementation, shared with the read path's
+    !! `append_buffers` -- whose source is a raw Arrow bitmap behind a C pointer and so cannot be
+    !! expressed as a column at all.
+    subroutine copy_validity_run_cols(src, s_first, dst, d_first, m, nn)
+        type(parquet_string_column), intent(in) :: src    !! source column (bitmap allocated).
+        integer(int64), intent(in) :: s_first             !! 1-based first source element.
         type(parquet_string_column), intent(inout) :: dst !! destination column (bitmap allocated).
         integer(int64), intent(in) :: d_first             !! 1-based first destination element.
         integer(int64), intent(in) :: m                   !! elements to copy.
         integer(int64), intent(out) :: nn                 !! nulls among the copied elements.
-        integer(int64) :: k, nbytes, sb, db, sbyte, dbyte
-        nn = 0_int64
-        if (m <= 0_int64) return
-        sb = s_first - 1_int64
-        db = d_first - 1_int64
-        if (mod(sb, 8_int64) /= 0_int64 .or. mod(db, 8_int64) /= 0_int64) then
-            call copy_validity_bits(src, s_first, dst, d_first, 0_int64, m - 1_int64, nn)
-            return
-        end if
-        nbytes = m/8_int64
-        sbyte = sb/8_int64 + 1_int64
-        dbyte = db/8_int64 + 1_int64
-        do k = 0_int64, nbytes - 1_int64
-            dst%validity(dbyte + k) = src%validity(sbyte + k)
-            ! A set bit is a VALID row, so the nulls in this byte are its zeros. Masked to 8 bits
-            ! because int8 is signed and `int()` would sign-extend the high bit into 24 more ones.
-            nn = nn + int(8 - popcnt(iand(int(src%validity(sbyte + k), int32), 255)), int64)
-        end do
-        if (nbytes*8_int64 < m) then
-            call copy_validity_bits(src, s_first, dst, d_first, nbytes*8_int64, m - 1_int64, nn)
-        end if
-    end subroutine copy_validity_run
+        call copy_validity_run(src%validity, s_first - 1_int64, dst%validity, d_first - 1_int64, m, nn)
+    end subroutine copy_validity_run_cols
     !
     !> Marks `m` elements from `d_first` valid, whole bytes at a time. The counterpart of
     !! `copy_validity_run` for a source that has no nulls at all: the destination still needs its
@@ -1107,6 +1128,49 @@ contains
         if (elen > 0) res = transfer(self%data(a:b), res)
     end subroutine get_i64
     !
+    !> int32 specific of copy_to; see the copy_to generic.
+    subroutine copy_to_i32(self, i, dest, allow_null)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int32), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(out) :: dest            !! receives the element, blank-padded.
+        logical, intent(in), optional :: allow_null      !! .true. => a null yields blanks.
+        call self%copy_to_i64(int(i, int64), dest, allow_null)
+    end subroutine copy_to_i32
+    !
+    !> int64 specific of copy_to: copies element `i`'s bytes into `dest`, blank-padding the rest.
+    !!
+    !! **The allocation-free counterpart of `%get`**, for the very common shape where the caller
+    !! already has somewhere fixed-width to put the value — a `character(len=N)` array being filled
+    !! row by row, or a scratch buffer reused across a loop. `%get` must allocate, because it
+    !! returns a string sized to the element; this cannot and does not.
+    !!
+    !! **It follows Fortran's own assignment semantics exactly**, so it is a drop-in for
+    !! `call c%get(i, s); dest = s`: shorter values are blank-padded, and a value longer than `dest`
+    !! is truncated rather than aborting — which is what `dest = s` would have done. A caller that
+    !! must not truncate sizes `dest` from `%length(i)` or `%max_length()` first, both of which
+    !! allocate nothing either.
+    subroutine copy_to_i64(self, i, dest, allow_null)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based element index.
+        character(len=*), intent(out) :: dest            !! receives the element, blank-padded.
+        logical, intent(in), optional :: allow_null      !! .true. => a null yields blanks.
+        integer(int64) :: a, b, elen, n
+        logical :: ok_null
+        call check_index(self, i, "copy_to")
+        ok_null = .false.
+        if (present(allow_null)) ok_null = allow_null
+        if (.not. bit_valid(self, i)) then
+            if (.not. ok_null) call fail_null("copy_to")
+            dest = ""
+            return
+        end if
+        call elem_bounds(self, i, a, b)
+        elen = b - a + 1_int64
+        n = min(elen, int(len(dest), int64))
+        if (n > 0_int64) dest(1:n) = transfer(self%data(a:a+n-1_int64), dest(1:n))
+        if (n < int(len(dest), int64)) dest(n+1_int64:) = ""
+    end subroutine copy_to_i64
+    !
     !> int32 specific of view; see the view generic.
     function view_i32(self, i) result(h)
         class(parquet_string_column), intent(in), target :: self !! the column (must be a target).
@@ -1136,8 +1200,14 @@ contains
         if (size(data_string, kind=int64) /= self%nrows) then
             error stop EP//"view_all: size(data_string) does not match self%size()"
         end if
+        ! **The components are written directly, not via `%view(i)`, and that is worth 2.5x.**
+        ! `parquet_string` is finalizable, so `data_string(i) = self%view(i)` runs the finalizer
+        ! twice per element -- once on the destination, which intrinsic assignment finalizes before
+        ! overwriting, and once on the function result afterwards -- to set a pointer and an integer.
+        ! `%view`'s bounds check is also redundant here: `i` runs over exactly 1..nrows.
         do i = 1_int64, self%nrows
-            data_string(i) = self%view_i64(i)
+            data_string(i)%col => self
+            data_string(i)%idx = i
         end do
     end subroutine view_all
     !
@@ -1165,8 +1235,11 @@ contains
         if (size(data_string, kind=int64) /= n) then
             error stop EP//"view_slice: size(data_string) does not match last-first+1"
         end if
+        ! Direct component writes, for the reason `view_all` gives at length: `parquet_string` is
+        ! finalizable, so going through `%view` runs its finalizer twice per element.
         do i = 1_int64, n
-            data_string(i) = self%view_i64(first + i - 1_int64)
+            data_string(i)%col => self
+            data_string(i)%idx = first + i - 1_int64
         end do
     end subroutine view_slice_i64
     !
@@ -1278,7 +1351,7 @@ contains
         if (other%has_nulls) then
             self%has_nulls = .true.
             call ensure_validity_cap(self, self%nrows + other%nrows)
-            call copy_validity_run(other, 1_int64, self, self%nrows + 1_int64, other%nrows, nn)
+            call copy_validity_run_cols(other, 1_int64, self, self%nrows + 1_int64, other%nrows, nn)
             self%n_null = self%n_null + nn
         else if (self%has_nulls) then
             call ensure_validity_cap(self, self%nrows + other%nrows)
@@ -1287,6 +1360,52 @@ contains
         self%nrows = self%nrows + other%nrows
         self%nchars = self%nchars + other%nchars
     end subroutine append_column
+    !
+    !> int32 specific of append_from; see the append_from generic.
+    subroutine append_from_i32(self, src, i)
+        class(parquet_string_column), intent(inout) :: self !! the destination column.
+        type(parquet_string_column), intent(in) :: src      !! the source column.
+        integer(int32), intent(in) :: i                     !! 1-based source element index.
+        call self%append_from_i64(src, int(i, int64))
+    end subroutine append_from_i32
+    !
+    !> int64 specific of append_from: appends element `i` of `src` to the end of self, **null state
+    !! included**.
+    !!
+    !! **The allocation-free counterpart of `call src%get(i, s); call dst%append_string(s)`**, which
+    !! is the shape every "copy the rows I want into a new column" loop reaches for and which costs
+    !! one heap round trip per row for bytes that are already contiguous in `src`. See
+    !! `feature_risks.md` Risk-60.
+    !!
+    !! It never trims, matching `%append_string`'s own default: the bytes are copied verbatim.
+    !!
+    !! **`src` must not be the same object as self.** Fortran forbids argument-associating one object
+    !! with both an `intent(inout)` and an `intent(in)` dummy of the same call once either is defined
+    !! (F2018 15.5.2.13), and neither gfortran nor ifx diagnoses it. Appending a column to itself is
+    !! `%append_column(other)`'s job, on a copy.
+    subroutine append_from_i64(self, src, i)
+        class(parquet_string_column), intent(inout) :: self !! the destination column.
+        type(parquet_string_column), intent(in) :: src      !! the source column.
+        integer(int64), intent(in) :: i                     !! 1-based source element index.
+        integer(int64) :: a, b, elen
+        call check_index(src, i, "append_from")
+        if (.not. bit_valid(src, i)) then
+            call self%append_null()
+            return
+        end if
+        call elem_bounds(src, i, a, b)
+        elen = b - a + 1_int64
+        call ensure_offsets_cap(self, self%nrows + 1_int64)
+        call ensure_data_cap(self, self%nchars + elen)
+        if (elen > 0_int64) self%data(self%nchars+1_int64:self%nchars+elen) = src%data(a:b)
+        self%offsets(self%nrows+2_int64) = self%nchars + elen
+        if (self%has_nulls) then
+            call ensure_validity_cap(self, self%nrows + 1_int64)
+            call set_bit_valid(self, self%nrows + 1_int64)
+        end if
+        self%nrows = self%nrows + 1_int64
+        self%nchars = self%nchars + elen
+    end subroutine append_from_i64
     !
     !> Clears self, then gathers an array of independently-obtained parquet_string handles into it
     !! (each handle's referenced element becomes one row, in array order; a null handle becomes
@@ -2655,27 +2774,41 @@ contains
         integer(int64) :: i, elen, maxlen, a, b
         integer(int64), allocatable :: lo(:), hi(:)
         integer :: nt, tix
+        logical :: any_null
         maxlen = 0_int64
         if (present(null_value)) maxlen = int(len(null_value), int64)
         ! First pass sizes the result AND is where a null aborts -- both before `out` is allocated,
         ! so a column that cannot be materialized never allocates the array it would have gone into.
-        ! Deliberately still serial: the abort must name the FIRST offending row whatever the machine
-        ! does, and this pass moves 8 bytes per row against the fill loop's `maxlen`. See S9.
-        do i = 1_int64, self%nrows
-            if (bit_valid(self, i)) then
-                elen = self%offsets(i+1) - self%offsets(i)
-                if (elen > maxlen) maxlen = elen
-            else if (.not. present(null_value)) then
-                call fail_null("to_character")
-            end if
+        !
+        ! It reads 8 bytes per row against the fill loop's `maxlen`, so it is sized on its own terms.
+        ! **The abort is deferred until after the region rather than raised inside it**: `error stop`
+        ! from inside an OpenMP region is not somewhere to be adventurous, and it buys nothing here
+        ! because `fail_null`'s message names no row -- whichever null a thread saw first, the
+        ! message is identical, so there is no nondeterminism to protect against.
+        nt = bulk_threads(self%nrows, self%nrows*8_int64)
+        call thread_row_ranges(self%nrows, nt, lo, hi)
+        any_null = .false.
+        !$omp parallel do default(shared) private(tix, i, elen) reduction(max:maxlen) &
+        !$omp     reduction(.or.:any_null) schedule(static) num_threads(nt) if (nt > 1)
+        do tix = 1, nt
+            do i = lo(tix), hi(tix)
+                if (bit_valid(self, i)) then
+                    elen = self%offsets(i+1) - self%offsets(i)
+                    if (elen > maxlen) maxlen = elen
+                else
+                    any_null = .true.
+                end if
+            end do
         end do
+        !$omp end parallel do
+        if (any_null .and. .not. present(null_value)) call fail_null("to_character")
         allocate(character(len=maxlen) :: out(self%nrows))
         ! The work measure is what this loop WRITES (`nrows * maxlen`), not the packed payload: a
         ! column of short strings padded to a long `maxlen` moves several times its own
         ! `character_size()` here, and asking about the payload would decline to thread exactly the
         ! case that most needs it.
         nt = bulk_threads(self%nrows, self%nrows*maxlen)
-        call thread_row_ranges(self%nrows, nt, lo, hi)
+        call thread_row_ranges(self%nrows, nt, lo, hi)   ! re-split: this loop's count may differ
         ! No validity is WRITTEN here -- `out` is a plain character array and the bitmap is only read
         ! -- so any split would be safe. The byte-aligned one is reused because it is already
         ! written, tested, and gives contiguous ranges, which is what keeps two threads off one cache
@@ -2764,7 +2897,7 @@ contains
             call ensure_validity_cap(dest, n)
             ! `dest` was cleared, so its count starts at zero. The run moves in whole bytes when
             ! `first` is 8-aligned and bit by bit otherwise; see `copy_validity_run`.
-            call copy_validity_run(self, first, dest, 1_int64, n, dest%n_null)
+            call copy_validity_run_cols(self, first, dest, 1_int64, n, dest%n_null)
         end if
         dest%nrows = n
         dest%nchars = b - base
@@ -2856,7 +2989,8 @@ contains
         integer(int64), intent(out), optional :: char_capacity  !! current character capacity.
         integer(int64), intent(out), optional :: bytes          !! total allocated bytes.
         integer(int64) :: i, elen, lo, hi
-        logical :: any_valid
+        integer(int64), allocatable :: rlo(:), rhi(:)
+        integer :: nt, tix
         if (present(nrows)) nrows = self%nrows
         if (present(nchars)) nchars = self%nchars
         if (present(n_null)) n_null = self%n_null
@@ -2864,22 +2998,31 @@ contains
         if (present(char_capacity)) char_capacity = self%character_capacity()
         if (present(bytes)) bytes = self%memory_usage()
         if (present(min_len) .or. present(max_len)) then
-            lo = 0_int64
-            hi = 0_int64
-            any_valid = .false.
-            do i = 1_int64, self%nrows
-                if (bit_valid(self, i)) then
-                    elen = self%offsets(i+1) - self%offsets(i)
-                    if (.not. any_valid) then
-                        lo = elen
-                        hi = elen
-                        any_valid = .true.
-                    else
+            ! `hi = -1` is the "no valid element seen" sentinel, which is what lets this be two
+            ! plain reductions: a length is never negative, so a surviving -1 means the column had
+            ! nothing to measure and both answers are 0 -- the same result the `any_valid` flag this
+            ! replaced produced, but without a first-iteration special case a reduction cannot
+            ! express.
+            lo = huge(0_int64)
+            hi = -1_int64
+            nt = bulk_threads(self%nrows, self%nrows*8_int64)
+            call thread_row_ranges(self%nrows, nt, rlo, rhi)
+            !$omp parallel do default(shared) private(tix, i, elen) reduction(min:lo) &
+            !$omp     reduction(max:hi) schedule(static) num_threads(nt) if (nt > 1)
+            do tix = 1, nt
+                do i = rlo(tix), rhi(tix)
+                    if (bit_valid(self, i)) then
+                        elen = self%offsets(i+1) - self%offsets(i)
                         if (elen < lo) lo = elen
                         if (elen > hi) hi = elen
                     end if
-                end if
+                end do
             end do
+            !$omp end parallel do
+            if (hi < 0_int64) then
+                lo = 0_int64
+                hi = 0_int64
+            end if
             if (present(min_len)) min_len = lo
             if (present(max_len)) max_len = hi
         end if
@@ -2990,7 +3133,7 @@ contains
         integer(int32), pointer :: off32(:)
         character(len=1), pointer :: din(:)
         integer(int8), pointer :: vin(:)
-        integer(int64) :: base, k, voff, abit
+        integer(int64) :: base, k, voff, nn
         if (nrows_in <= 0) return
         voff = 0_int64
         if (present(validity_offset_bits)) voff = validity_offset_bits
@@ -3025,20 +3168,16 @@ contains
             self%has_nulls = .true.
             call ensure_validity_cap(self, self%nrows + nrows_in)
             call c_f_pointer(validity, vin, [(voff + nrows_in + 7_int64)/8_int64])
-            do k = 1_int64, nrows_in
-                abit = voff + k - 1_int64
-                if (iand(vin(abit/8_int64 + 1_int64), BIT_MASK(int(mod(abit, 8_int64)))) /= 0_int8) then
-                    call set_bit_valid(self, self%nrows + k)
-                else
-                    call set_bit_null(self, self%nrows + k)
-                    self%n_null = self%n_null + 1_int64
-                end if
-            end do
+            ! The same byte-wise core `%slice`/`%append_column` use, reached with raw maps because
+            ! the source here is an Arrow bitmap behind a C pointer rather than a column. Whole bytes
+            ! move as bytes whenever both sides start on a byte boundary -- which the common case
+            ! does, since Arrow hands back an unsliced chunk (`voff` 0) and a row group is appended
+            ! onto a column whose row count is a multiple of 8 for every group but a ragged last one.
+            call copy_validity_run(vin, voff, self%validity, self%nrows, nrows_in, nn)
+            self%n_null = self%n_null + nn
         else if (self%has_nulls) then
             call ensure_validity_cap(self, self%nrows + nrows_in)
-            do k = 1_int64, nrows_in
-                call set_bit_valid(self, self%nrows + k)
-            end do
+            call fill_validity_valid(self, self%nrows + 1_int64, nrows_in)
         end if
         self%nrows = self%nrows + nrows_in
         self%nchars = self%nchars + nchars_in

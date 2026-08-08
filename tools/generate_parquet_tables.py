@@ -3405,13 +3405,10 @@ def getslice_str_impl():
         call self%cache%cols(idx)%values%string_column(store)
         ! Built element by element rather than copied and trimmed: a gather has no contiguous
         ! source range to clone from, and appending keeps the result compact.
+        ! `%append_from` carries both the bytes and the null state, so the is_null fork this
+        ! replaced is redundant and no per-row string is materialized.
         do k = 1, size(rows, kind=int64)
-            if (store%is_null(rows(k))) then
-                call arr%append_null()
-            else
-                call store%get(rows(k), sv)
-                call arr%append_string(sv)
-            end if
+            call arr%append_from(store, rows(k))
         end do
     end procedure get_slice_str
     !
@@ -3430,15 +3427,14 @@ def getslice_str_impl():
         call self%cache%cols(idx)%values%string_column(store)
         ! Two passes: a fixed-length array's width must be the longest element SELECTED, which
         ! is not known until every selected row has been looked at.
+        ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do k = 1, size(rows, kind=int64)
-            call store%get(rows(k), sv, allow_null=.true.)
-            if (len(sv) > maxlen) maxlen = len(sv)
+            if (int(store%length(rows(k))) > maxlen) maxlen = int(store%length(rows(k)))
         end do
         allocate(character(len=maxlen) :: arr(size(rows)))
         do k = 1, size(rows, kind=int64)
-            call store%get(rows(k), sv, allow_null=.true.)
-            arr(k) = sv
+            call store%copy_to(rows(k), arr(k), allow_null=.true.)
         end do
     end procedure get_slice_chr
     !
@@ -3456,20 +3452,19 @@ def getslice_str_impl():
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         wdt = self%cache%cols(idx)%width
         call self%cache%cols(idx)%values%string_column(store)
+        ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do k = 1, size(rows, kind=int64)
             do e = 1, wdt
                 flat = (rows(k) - 1) * int(wdt, int64) + int(e, int64)
-                call store%get(flat, sv, allow_null=.true.)
-                if (len(sv) > maxlen) maxlen = len(sv)
+                if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
             end do
         end do
         allocate(character(len=maxlen) :: arr(wdt, size(rows)))
         do k = 1, size(rows, kind=int64)
             do e = 1, wdt
                 flat = (rows(k) - 1) * int(wdt, int64) + int(e, int64)
-                call store%get(flat, sv, allow_null=.true.)
-                arr(e, k) = sv
+                call store%copy_to(flat, arr(e, k), allow_null=.true.)
             end do
         end do
     end procedure get_slice_chrv
@@ -3551,17 +3546,16 @@ def rowget_impl(k):
         ! A vector string column is ONE flat store of width*nrows elements, element (e, i) at
         ! (i-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
         call self%cache%cols(idx)%values%string_column(store)
+        ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do e = 1, wdt
             flat = (self%irow - 1) * int(wdt, int64) + int(e, int64)
-            call store%get(flat, s, allow_null=.true.)
-            if (len(s) > maxlen) maxlen = len(s)
+            if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
         end do
         allocate(character(len=maxlen) :: value(wdt))
         do e = 1, wdt
             flat = (self%irow - 1) * int(wdt, int64) + int(e, int64)
-            call store%get(flat, s, allow_null=.true.)
-            value(e) = s
+            call store%copy_to(flat, value(e), allow_null=.true.)
         end do
     end procedure row_get_strv
     !"""
@@ -3965,15 +3959,16 @@ def get_str_impl():
         ! Two passes: the width must be the longest element present, and a fixed-length array
         ! cannot be grown per element. A null reads back as "" and so contributes length 0.
         call self%cache%cols(idx)%values%string_column(store)
+        ! `%length` measures without allocating and `%copy_to` fills a fixed-length slot without
+        ! allocating, so neither pass materializes a string. `maxlen` starts at 1 so that an
+        ! all-empty column still yields `character(len=1)` rather than `len=0`.
         maxlen = 1
         do i = 1, n
-            call store%get(i, s, allow_null=.true.)
-            if (len(s) > maxlen) maxlen = len(s)
+            if (int(store%length(i)) > maxlen) maxlen = int(store%length(i))
         end do
         allocate(character(len=maxlen) :: arr(n))
         do i = 1, n
-            call store%get(i, s, allow_null=.true.)
-            arr(i) = s
+            call store%copy_to(i, arr(i), allow_null=.true.)
         end do
     end procedure get_arr_chr
     !
@@ -3997,20 +3992,19 @@ def get_str_impl():
         ! (e, i) living at (i-1)*width + e -- reaching it directly is what lets each element
         ! come back as an allocatable string, which the two-pass width measurement needs.
         call self%cache%cols(idx)%values%string_column(store)
+        ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do i = 1, n
             do e = 1, wdt
                 flat = (i - 1) * int(wdt, int64) + int(e, int64)
-                call store%get(flat, s, allow_null=.true.)
-                if (len(s) > maxlen) maxlen = len(s)
+                if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
             end do
         end do
         allocate(character(len=maxlen) :: arr(wdt, n))
         do i = 1, n
             do e = 1, wdt
                 flat = (i - 1) * int(wdt, int64) + int(e, int64)
-                call store%get(flat, s, allow_null=.true.)
-                arr(e, i) = s
+                call store%copy_to(flat, arr(e, i), allow_null=.true.)
             end do
         end do
     end procedure get_arr_chrv
@@ -4169,17 +4163,16 @@ def getelem_str_impl():
         ! A vector string column is ONE flat store of width*nrows elements, element (e, row) at
         ! (row-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
         call self%cache%cols(idx)%values%string_column(store)
+        ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do e = 1, wdt
             flat = (i - 1_int64) * int(wdt, int64) + int(e, int64)
-            call store%get(flat, str1, allow_null=.true.)
-            if (len(str1) > maxlen) maxlen = len(str1)
+            if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
         end do
         allocate(character(len=maxlen) :: value(wdt))
         do e = 1, wdt
             flat = (i - 1_int64) * int(wdt, int64) + int(e, int64)
-            call store%get(flat, str1, allow_null=.true.)
-            value(e) = str1
+            call store%copy_to(flat, value(e), allow_null=.true.)
         end do
     end procedure get_element_chrv_i64
     !"""

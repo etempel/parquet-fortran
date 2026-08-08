@@ -108,9 +108,10 @@ contains
         character(len=*), intent(in) :: name !! string column name.
         type(parquet_string_column), intent(in) :: values !! the compact column being written.
         integer :: idx
-        integer(int64) :: i, n_valid, n_violate, nrows
+        integer(int64) :: i, n_valid, n_violate, nrows, imin, imax, widest, elen
         logical :: any_valid, ok
-        character(len=:), allocatable :: data_min, data_max, bounds_desc, fmt_int, fmt_int2, s
+        character(len=:), allocatable :: data_min, data_max, bounds_desc, fmt_int, fmt_int2
+        character(len=:), allocatable :: scratch
 
         if (.not. writer%qc) return
         if (.not. writer%is_schema_enforced) return
@@ -122,31 +123,47 @@ contains
         n_valid = 0_int64
         n_violate = 0_int64
         nrows = values%size()
+        ! **Nothing in this loop allocates.** It used to materialize every element through `%get`,
+        ! which is one heap round trip per row on a check that runs over the whole column at write
+        ! time. Two things replace it: the running min/max track INDICES and compare through
+        ! `%compare`, which is Fortran's own `<` on the stored bytes; and the value the qc predicate
+        ! needs is copied into one scratch buffer, sized once from the column's longest element and
+        ! reused every row. See `feature_risks.md` Risk-60.
+        call values%statistics(max_len=widest)
+        allocate(character(len=max(widest, 0_int64)) :: scratch)
+        imin = 0_int64
+        imax = 0_int64
         do i = 1_int64, nrows
             if (values%is_null(i)) cycle
-            call values%get(i, s)
             n_valid = n_valid + 1
             if (.not. any_valid) then
-                data_min = s
-                data_max = s
+                imin = i
+                imax = i
                 any_valid = .true.
             else
-                if (s < data_min) data_min = s
-                if (s > data_max) data_max = s
+                if (values%compare(i, imin) < 0) imin = i
+                if (values%compare(i, imax) > 0) imax = i
             end if
 
+            elen = values%length(i)
+            call values%copy_to(i, scratch)
             ok = .true.
             if (writer%all_columns(idx)%has_qc_min) then
                 ok = ok .and. parquet_qc_string_satisfies( &
-                    s, trim(writer%all_columns(idx)%qc_min_raw), writer%all_columns(idx)%qc_min_op)
+                    scratch(1:elen), trim(writer%all_columns(idx)%qc_min_raw), &
+                    writer%all_columns(idx)%qc_min_op)
             end if
             if (writer%all_columns(idx)%has_qc_max) then
                 ok = ok .and. parquet_qc_string_satisfies( &
-                    s, trim(writer%all_columns(idx)%qc_max_raw), writer%all_columns(idx)%qc_max_op)
+                    scratch(1:elen), trim(writer%all_columns(idx)%qc_max_raw), &
+                    writer%all_columns(idx)%qc_max_op)
             end if
             if (.not. ok) n_violate = n_violate + 1
         end do
         if (.not. any_valid .or. n_violate == 0) return
+        ! Only now are the two winning elements materialized -- two allocations for the whole column.
+        call values%get(imin, data_min)
+        call values%get(imax, data_max)
 
         bounds_desc = ""
         if (writer%all_columns(idx)%has_qc_min) then
@@ -351,7 +368,6 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         logical, allocatable :: row_mask(:)
         type(parquet_string_column) :: values_c
-        character(len=:), allocatable :: item_scratch
         call check_writer_open(writer)
 
         if (writer%is_schema_enforced) then
@@ -381,12 +397,9 @@ contains
         call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
         do i = 1_int64, nrows
             if (.not. row_mask(i)) cycle
-            if (values%is_null(i)) then
-                call values_c%append_null()
-            else
-                call values%get(i, item_scratch, allow_null=.true.)
-                call values_c%append_string(item_scratch)
-            end if
+            ! `%append_from` carries the element's null state as well as its bytes, so the
+            ! is_null fork this replaced is redundant, and no per-row string is materialized.
+            call values_c%append_from(values, i)
         end do
         nrows = count(row_mask, kind=int64)
         call parquet_check_row_count(writer, name, nrows)
@@ -596,7 +609,6 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         logical, allocatable :: row_mask(:)
         type(parquet_string_column) :: values_c
-        character(len=:), allocatable :: item_scratch
         call check_writer_open(writer)
 
         if (writer%is_schema_enforced) then
@@ -626,12 +638,9 @@ contains
 
         do i = 1_int64, nrows
             if (.not. row_mask(i)) cycle
-            if (values%is_null(i)) then
-                call values_c%append_null()
-            else
-                call values%get(i, item_scratch, allow_null=.true.)
-                call values_c%append_string(item_scratch)
-            end if
+            ! `%append_from` carries the element's null state as well as its bytes, so the
+            ! is_null fork this replaced is redundant, and no per-row string is materialized.
+            call values_c%append_from(values, i)
         end do
         nrows = count(row_mask, kind=int64)
 

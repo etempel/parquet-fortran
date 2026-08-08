@@ -382,16 +382,18 @@ contains
         integer(int64), allocatable :: idxs(:)
         integer(int64) :: k, nd, nn
         logical :: desc
-        character(len=:), allocatable :: s
         !
         desc = .false.
         if (present(descending)) desc = descending
         call unique_impl_strcol(values, desc, "pf_unique", idxs, nd, nn, threads=threads)
         if (present(n_null)) n_null = nn
         call distinct%clear()
+        ! `%append_from` carries both the bytes and the null state, so nothing is
+        ! materialized per element. `idxs` only ever names non-null elements -- the walk
+        ! in unique_impl_strcol stops at the first null -- so carrying the null state
+        ! cannot change what lands here. See feature_risks.md Risk-60.
         do k = 1_int64, nd
-            call values%get(idxs(k), s, allow_null=.true.)
-            call distinct%append_string(s)
+            call distinct%append_from(values, idxs(k))
         end do
     end procedure unique_strcol
     !

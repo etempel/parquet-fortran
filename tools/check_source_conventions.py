@@ -752,21 +752,21 @@ def check_no_per_element_string_alloc():
     is caught immediately, and nothing goes stale silently -- which a bare allowlist would
     (CLAUDE.md, "A static check that enumerates names goes stale silently").
 
-    The remaining entries are work, not exemptions. Two shapes among them are worth knowing before
-    picking one up: a loop that only needs an ORDERING can use `%compare(i, j)`, and one that wants
-    the whole packed payload can use `%copy_buffers`. The one genuine hold-out is
-    `parquet_check_qc_string_compact` (`parquet_write_string.f90`), whose loop needs each element's
-    VALUE to pass to `parquet_qc_string_satisfies` against a declared bound -- removing that
-    allocation needs a second comparison primitive and surgery on a qc helper shared with the padded
-    string path, behind three early-return guards. See feature_string_parallel.md S10.
+    **`KNOWN_REMAINING` is now empty: the debt is cleared and the rule is absolute.** It is kept as a
+    mechanism rather than deleted, so that a future violation too large to fix in one change can be
+    recorded as debt that may only shrink -- which is what an allowlist could not do.
+
+    Four primitives exist so that a new call site never needs the allocating shape, and knowing which
+    one fits is most of the work of clearing a violation: `%length(i)` measures without allocating,
+    `%copy_to(i, dest)` fills a fixed-length slot, `%append_from(src, i)` moves one element between
+    columns (null state included), and `%compare(i, j)` orders two elements. A loop that wants the
+    whole packed payload takes `%copy_buffers` instead. `parquet_check_qc_string_compact` was once
+    judged a permanent hold-out on the grounds that it needs each element's VALUE; it does, and
+    `%copy_to` into a scratch buffer sized once from the column's longest element supplies it, so the
+    judgement was wrong. See feature_string_parallel.md S10.
     """
     # file -> instances still to be converted. Lower a number when you fix one; never raise one.
-    KNOWN_REMAINING = {
-        "parquet_tables_access.f90": 13,
-        "parquet_write_string.f90": 3,
-        "parquet_sorting_unique.f90": 1,
-        "parquet_columns_string.f90": 1,
-    }
+    KNOWN_REMAINING = {}
     problems = []
     found = {}
     call_re = re.compile(r"call\s+\w+(?:%\w+)*%(get_i32|get_i64|get|to_string)\s*\(", re.I)

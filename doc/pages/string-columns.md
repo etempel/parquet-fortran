@@ -288,6 +288,34 @@ j = col%find("Bob ", exact=.false.)     ! trailing-blanks ignored on both sides
 The same operations are available on a handle: `h%equals(str)`, `h%startswith(prefix)`,
 `h%endswith(suffix)`, `h%contains(str)`.
 
+`copy_to(i, dest)` copies an element into a **fixed-length** slot you already have — a
+`character(len=N)` array being filled row by row, or a scratch buffer reused across a loop — instead
+of allocating a string sized to the element the way `get` must:
+
+```fortran
+character(len=32) :: slot
+call col%copy_to(i, slot)                      ! blank-padded to len(slot)
+call col%copy_to(i, slot, allow_null=.true.)   ! a null yields blanks
+```
+
+It follows Fortran's own assignment semantics exactly, so it is a drop-in for
+`call col%get(i, s); slot = s`: a short value is blank-padded and one longer than the slot is
+truncated. Size the slot from `length(i)` or from `statistics(max_len=...)` first if you must not
+truncate — neither of those allocates either.
+
+`append_from(src, i)` is the matching primitive on the writing side: it appends element `i` of
+another column, **null state included**, without materialising the value.
+
+```fortran
+do k = 1, n                       ! copy the rows you want into a new column
+    call picked%append_from(col, keep(k))
+end do
+```
+
+`src` must not be the same object as the destination — Fortran forbids passing one object as both
+an `intent(inout)` and an `intent(in)` argument of the same call, and no compiler diagnoses it.
+Appending a column to itself is `append_column`'s job, on a copy.
+
 `compare(i, j)` orders two elements of the same column against each other, returning `-1` when `i`
 sorts first, `+1` when `j` does, and `0` when they are equal. It is exactly Fortran's own `<` on the
 two values — the shorter one is compared as though padded with blanks, so `"ab"` equals `"ab  "` and
@@ -538,6 +566,8 @@ same type's accessors, but not specific to it — is covered in the main
 | `get(i)` | O(length) |
 | `equals` / `contains` / `startswith` / `endswith` (one element) | O(length) |
 | `compare(i, j)` | O(shorter length), no allocation |
+| `copy_to(i, dest)` | O(length), no allocation |
+| `append_from(src, i)` | amortized O(length), no allocation |
 | `find` | O(rows × avg length) |
 | `set` (different length), `set_null`, `erase`, `strip_all`, `trim_all`, `clone`, `to_character`, `shrink_to_fit` | O(N) |
 | `slice(first, last, dest)` | O(range length + range chars) |

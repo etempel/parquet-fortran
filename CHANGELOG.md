@@ -31,8 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `%reindex`/`%reindex_trusted` — and so `parquet_column`'s string reindex and
   `parquet_table%sort_by` on a string column — plus `%to_character`, `%build_from`, `%gather`,
   `%delete_by_mask` and `%trim_all`/`%strip_all`, in each case only when not already inside a
-  parallel region. On an 8-core M1 Pro, at 4 M elements: `%delete_by_mask` **3.5x**,
-  `%to_character` **3.4x**, `%trim_all` **1.9x**, `%build_from` **1.4x**, `%gather` **1.3x**.
+  parallel region. On an 8-core M1 Pro, at 4 M elements: `%to_character` **3.9x**,
+  `%delete_by_mask` **3.5x**, `%trim_all` **1.9x**, `%build_from` **1.4x**, `%gather` **1.3x**.
   **The gain scales with both the machine and the column**, measured for `%reindex` on three:
   **1.15x** on that M1 Pro, **1.6-2.7x** on an 8-core i7, and **3.4-4.5x** on a 192-core
   dual-socket EPYC — in each case the larger figure is the larger column, and a 40 M-element column
@@ -451,6 +451,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.168 s to 0.038 s, `%build_from` 0.305 s to 0.033 s. Results are unchanged in every respect —
   same padding to the longest element, same `null_value` substitution, same trimming behaviour, same
   aborts on a null with no `null_value` and on an invalid handle.
+- **`parquet_string_column` gains `%copy_to(i, dest)` and `%append_from(src, i)`**, the two
+  allocation-free counterparts of `%get`/`%append_string`. `%copy_to` copies one element into a
+  fixed-length slot the caller already has, following Fortran's own assignment semantics exactly
+  (blank-padding a short value, truncating one too long), so it is a drop-in for
+  `call c%get(i, s); dest = s`. `%append_from` appends one element of another column, **null state
+  included**, so a "copy the rows I want" loop needs no `is_null` fork and materializes nothing.
+  Both take either integer kind for the index. With `%compare` and `%copy_buffers` (above) these
+  complete the set, and every bulk loop over a string column inside this library now uses one of
+  them: the eighteen remaining per-element string allocations — in `parquet_table`'s `%get`/`%row`/
+  `%get_slice` accessors, the masked write path, `pf_unique` and `parquet_column%get_at` — are gone,
+  and a lint check keeps new ones out. **Nothing about any result changes**; this is the last of the
+  per-element heap round trips the string work has been removing.
+- **`parquet_string_column%view_all` and `%view_slice` are 3.9x faster** (0.0175 s to 0.0045 s on
+  4 M elements), which also makes them the fastest way to walk a column. Both filled the caller's
+  array with `data_string(i) = col%view(i)`, and `parquet_string` has a finalizer — so intrinsic
+  assignment ran it on the destination before overwriting it and again on the function result, twice
+  per element, to set a pointer and an index. They now write those two components directly. The
+  handles are identical; nothing about their lifetime or write-through behaviour changes.
 - **`parquet_string_column%delete_by_mask` is faster on a column with nulls even single-threaded**
   (0.0183 s to 0.0154 s on 4 M elements). Rebuilding the validity bitmap for the surviving rows was
   setting one bit at a time, each a read-modify-write on the bitmap; it now accumulates a whole byte
@@ -462,7 +480,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row 1 and appending onto an empty or 8-aligned column, and fall back to the per-row walk
   otherwise. Measured on 4 M elements with nulls: `%slice` 0.0118 s to 0.0039 s, `%append_column`
   0.0113 s to 0.0031 s — in both cases now the same cost as the null-free column. This is serial:
-  it needs no threads and helps every caller. Null placement and counts are unchanged.
+  it needs no threads and helps every caller. The same code now also merges the validity of a row
+  group read from a file, so reading a compact string column with nulls benefits too. Null placement
+  and counts are unchanged.
 - **Applying a `filter=` is 3–4x faster**, and the gain grows with the number of columns the filter
   names. The per-row clause evaluation was reading each value through a helper that took the Arrow
   array by `shared_ptr` — one atomic refcount increment and decrement per row, to read one number.

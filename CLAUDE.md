@@ -1262,6 +1262,20 @@ Rules a change here must not break:
   24-column x 900k-row file with 8 OpenMP threads: 0.037-0.040 s nested, 0.046-0.047 s with
   `use_threads=.false.`. Nesting the two is faster, so the "one level of parallelism only" instinct
   is wrong here. Re-measure before changing it.
+- **Disjoint ROWS are not disjoint BITS.** The one shipped concurrency bug found this way came from
+  reasoning that each thread owned its own row group, so its writes could not collide.
+  `parquet_column`'s validity is a bit-packed `integer(int64)` map — `parquet_validity_block_bits`
+  elements to a block — and updating a block is a read-modify-write, so the threads filling adjacent
+  row groups both read, modify and write the block their boundary falls in. One update is lost, the
+  column still validates, and a row's null flag is simply wrong. **Rows, elements and bits are three
+  granularities, and only the last is what a read-modify-write actually touches**; a row-group size
+  is chosen for I/O and has no reason to be a multiple of 64, so the collision is the normal case
+  rather than a corner. `feature_risks.md` Risk-64 has the fix (trim each range to whole blocks, and
+  put only the ragged ends in a `critical`) and the measurement that ruled out simply serialising the
+  paste. **Corollary:** when a sibling module needs an internal layout fact in order to be *correct*,
+  publish the constant rather than copy it — `parquet_columns` exports
+  `parquet_validity_block_bits` for exactly this caller, because a second copy of that number could
+  drift with nothing to report it.
 - **Every new guard needs a NEGATIVE control**, not just an error scenario. A guard that fires
   unconditionally passes every abort test ever written for it while breaking the permitted case;
   `test_table_private_mutation_allowed` (`test/test_openmp.f90`) is the pattern.
@@ -1620,6 +1634,28 @@ counterpart. User guide: `doc/pages/date-time.md`.
 - **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**, not
   blank-padded. To place a short string into a longer fixed-length slot, assign normally (which
   blank-pads); reserve `transfer` for exact-size byte moves.
+- **An array-section assignment whose two sides are the SAME array costs a heap temporary per
+  iteration.** A scalar byte loop compacting a buffer in place —
+  `do k = lo, hi; w = w + 1; a(w) = a(k); end do` — reads like something waiting to be replaced by
+  `a(w+1:w+n) = a(lo:hi)`. It is not: the compiler cannot prove the two ranges do not overlap, so it
+  must evaluate the right-hand side into a temporary first, which is one allocate/free **per
+  element**. Measured on 4 M elements: `trim_all` 0.0261 s → 0.1439 s (**5.5x slower**),
+  `delete_by_mask` 0.0118 s → 0.0886 s (**7.5x**). Nothing fails; only a benchmark notices.
+  **The rule is about aliasing, not about sections** — same array, use the loop; different arrays,
+  use the section, where it is a single `memcpy` and is worth having. This is why a threaded rebuild
+  that writes into fresh buffers wins twice over: it removes the race *and* the aliasing. See
+  `feature_risks.md` Risk-63, and `compact_all_serial`/`delete_by_mask_serial`
+  (`src/parquet_strings.f90`), whose loops carry a comment saying they may not be tidied up.
+- **Intrinsic assignment to or from a FINALIZABLE type runs the finalizer — twice per iteration in
+  the obvious loop.** `dest(i) = obj%make(i)` finalizes `dest(i)` before overwriting it *and*
+  finalizes the function result afterwards, so a loop that only needs to set a couple of components
+  pays two finalizer calls per element for them. `parquet_string_column%view_all` did exactly that
+  (`data_string(i) = self%view(i)`, setting a pointer and an integer) and got **3.9x** faster by
+  writing the two components directly, which also dropped a redundant bounds check. This library
+  exposes six finalizable types (`parquet_writer`, `parquet_reader`, `parquet_string_column`,
+  `parquet_string`, `parquet_table`, `parquet_table_row` — grep `final ::` to re-derive the list), so
+  check for this shape before threading any loop that assigns one of them. Every other finalizer note
+  in this file is about *correctness*; this one is purely about cost.
 - **Passing an UNALLOCATED allocatable to an `optional` dummy makes that dummy ABSENT** (F2018
   15.5.2.12; verified on gfortran before relying on it). This is load-bearing, not a curiosity:
   `parquet_column%row_validity` and every `mat_*`/`matchunk_*` return or hold an unallocated mask for
@@ -2160,6 +2196,25 @@ before being noticed:**
   alone between the two, which is enough to invert a comparison and did: an early run of the sort
   benchmark showed bit-packing *losing* below 2M rows, an artifact that vanished under `-O3`. The
   `tools/*.sh` wrappers already pass `--profile release`; match them.
+- **A benchmark that REPLICATES library code is untested code — validate it against the real number
+  before believing any of it.** Taking a loop apart sometimes needs a copy of it in the benchmark,
+  because the library has no entry point that runs one half. That copy can be subtly wrong in a way
+  no test covers. Require one of its rows to reproduce an end-to-end figure you can measure directly:
+  the S7 validation cost model was only evidence once its `bit seen` row matched
+  `reindex − reindex_trusted` (3 % at 4 M rows, 11 % at 16 M). Without that tie-down its other rows
+  would have been three confident numbers about nothing.
+- **Sweep the input SHAPE, not just its size — a ranking can invert.** Measuring one shape gives a
+  confident answer to the wrong question. A byte-per-element seen-set beat the bit-packed one by
+  **3.2x** on a reversal permutation and lost by **1.6x** on a scattered one at 16 M rows, because a
+  reversal is simultaneously the best case for the seen-set's locality and the worst case for the
+  bit-set's store-to-load forwarding, while the byte-set's 8x memory only bites once it misses cache.
+  Both were needed to reach the right conclusion, which was to change nothing.
+- **Measure what a restructure costs SERIALLY before assuming the threaded form can replace the
+  original.** Making a rebuild splittable usually adds a pass, and that pass is charged to every
+  caller below the work floor and every caller already inside a parallel region. Three of the four
+  threaded rebuilds in `parquet_strings` kept their original as a serial twin for this reason, and
+  `gather` is why it is worth measuring rather than guessing in either direction: written without a
+  twin, its phased form came out **1.5x slower** on one thread (0.0140 s against 0.0094 s).
 - **Take the best of several rounds, not one measurement.** Single rounds of the `access` mode swung
   0.96x–1.22x on the same build — wider than the effect being measured. The minimum is the run least
   disturbed by everything else on the machine, which is what these modes are actually asking about.
@@ -2402,6 +2457,13 @@ Three things about doing it *here* specifically:
   `is_stats_set()`/`HasNullCount()` pair, where removing both segfaults), or by a later check that
   catches the same error anyway (the `col_size` footer screen is masked by the row-group scan that
   follows it). Test the pair, or the tier below, before concluding anything.
+- **A procedure that writes into a caller-supplied fixed-length slot needs a CANARY, not a
+  read-back.** Asserting the slot's contents afterwards passes just as happily against a procedure
+  that overran it, because the bytes you check are the ones it got right. Removing the length clamp
+  from `parquet_string_column%copy_to` — an out-of-bounds write — survived the entire suite for that
+  reason. Hand the procedure a **substring of a longer buffer** and assert the remainder is
+  untouched (`canary(1:3)` passed as the slot, `canary(4:)` still all `#`); the mutation then fails
+  deterministically. A plain `fpm test` has no bounds checking, so nothing else will catch it.
 - **A surviving mutation may be semantically a NO-OP, in which case it proves the design rather
   than exposing a gap.** Check that the mutation actually changes behaviour before concluding the
   test is weak. The worked example: flipping the parallel merge's tie rule from "take the left run

@@ -68,7 +68,7 @@ module parquet
     private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
     private :: parquet_output_is_suppressed
     !
-    character(len=*),parameter:: cversion = "v1.4.0 (2026-08-04)" !! version info
+    character(len=*),parameter:: cversion = "v1.5.0 (2026-08-08)" !! version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1
 #endif

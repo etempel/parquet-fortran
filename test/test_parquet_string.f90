@@ -71,7 +71,15 @@ contains
             new_unittest("slice copies validity correctly from every bit phase", &
                 test_slice_validity_alignment), &
             new_unittest("append_column copies validity correctly onto every bit phase", &
-                test_append_column_validity_alignment) &
+                test_append_column_validity_alignment), &
+            new_unittest("statistics reports 0/0 when no element is valid", &
+                test_statistics_no_valid_elements), &
+            new_unittest("to_character pads to null_value when it is the longest value", &
+                test_to_character_long_null_value), &
+            new_unittest("copy_to matches get-then-assign, padding and truncation included", &
+                test_copy_to_matches_get), &
+            new_unittest("append_from matches get-then-append, null state included", &
+                test_append_from_matches_get) &
             ]
     end subroutine collect_tests_parquet_string
     !
@@ -1628,6 +1636,210 @@ contains
         if (allocated(error)) return
         call check(error, ok_val, "appending must preserve the source's values at every bit phase")
     end subroutine test_append_column_validity_alignment
+    !
+    !> **`statistics`' min/max are computed as reductions, so "no valid element" needs a sentinel
+    !! rather than a first-iteration special case** — and the sentinel is the part a reduction can
+    !! get wrong silently.
+    !!
+    !! Two ways to have nothing to measure: a column of nothing but nulls, and an empty column. Both
+    !! must report `min_len == 0` and `max_len == 0`, which is what the flag-based loop this replaced
+    !! produced. A sentinel left unconverted would surface as `huge(0_int64)` and `-1`, which no
+    !! caller could tell from a real answer without knowing to look.
+    subroutine test_statistics_no_valid_elements(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        integer(int64) :: mn, mx, i
+        !
+        do i = 1_int64, 20_int64
+            call col%append_null()
+        end do
+        call col%statistics(min_len=mn, max_len=mx)
+        call check(error, mn == 0, "an all-null column reports min_len 0, not the sentinel")
+        if (allocated(error)) return
+        call check(error, mx == 0, "an all-null column reports max_len 0, not the sentinel")
+        if (allocated(error)) return
+        !
+        call col%clear()
+        call col%statistics(min_len=mn, max_len=mx)
+        call check(error, mn == 0, "an empty column reports min_len 0")
+        if (allocated(error)) return
+        call check(error, mx == 0, "an empty column reports max_len 0")
+        if (allocated(error)) return
+        !
+        ! ...and one valid element among the nulls must be measured normally, so the sentinel is not
+        ! simply swallowing every answer.
+        call col%clear()
+        call col%append_null()
+        call col%append_string("abcd")
+        call col%append_null()
+        call col%statistics(min_len=mn, max_len=mx)
+        call check(error, mn == 4, "a single valid element sets min_len")
+        if (allocated(error)) return
+        call check(error, mx == 4, "a single valid element sets max_len")
+    end subroutine test_statistics_no_valid_elements
+    !
+    !> **The sizing pass is a `max` reduction seeded with `len(null_value)`**, and an OpenMP
+    !! reduction combining only the threads' own partial results — never the variable's incoming
+    !! value — would drop that seed.
+    !!
+    !! The failure is specific and quiet: with a `null_value` LONGER than every real element, the
+    !! result would be padded to the longest element instead, and the substituted string would come
+    !! back truncated. Every other test here uses a short `null_value`, where the seed is dominated
+    !! by a real element and the bug cannot show.
+    subroutine test_to_character_long_null_value(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: arr(:)
+        integer(int64) :: k
+        character(len=*), parameter :: NV = "MISSING-VALUE-PLACEHOLDER"
+        !
+        ! Short elements only, and the first is the shortest, per the project's fixture rule.
+        call col%append_string("a")
+        call col%append_string("bb")
+        call col%append_null()
+        do k = 1_int64, 300_int64                 ! enough rows to reach the threaded path
+            call col%append_string("ccc")
+        end do
+        call col%append_null()
+        !
+        call col%to_character(arr, null_value=NV)
+        call check(error, len(arr) == len(NV), &
+            "the padded width must be the null_value's length when it is the longest value present")
+        if (allocated(error)) return
+        call check(error, arr(3) == NV, "the null element must carry the whole null_value, untruncated")
+        if (allocated(error)) return
+        call check(error, arr(1) == "a", "a real element is still blank-padded to the same width")
+        if (allocated(error)) return
+        call check(error, size(arr) == int(col%size()), "to_character returns one row per element")
+    end subroutine test_to_character_long_null_value
+    !
+    !> **`%copy_to` exists to replace `call c%get(i, s); dest = s`, so what it must reproduce is that
+    !! pair exactly** — including the two parts of it that are easy to get wrong because Fortran does
+    !! them silently: blank-padding a short value, and TRUNCATING one too long for the slot.
+    !!
+    !! Asserted against the pair itself, element by element, over slots deliberately shorter than,
+    !! equal to and longer than the values. A `%copy_to` that aborted on a long value instead of
+    !! truncating would be defensible in isolation and wrong as a replacement, which is why the
+    !! oracle is the expression it replaces rather than a hand-written expectation.
+    subroutine test_copy_to_matches_get(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: s
+        character(len=1) :: d1
+        character(len=3) :: d3
+        character(len=8) :: d8
+        character(len=1) :: e1
+        character(len=3) :: e3
+        character(len=8) :: e8
+        character(len=16) :: canary
+        integer(int64) :: i
+        logical :: ok
+        !
+        call col%append_string("a")            ! shortest first, per the project fixture rule
+        call col%append_string("ab")
+        call col%append_string("abc")
+        call col%append_string("abcdefgh")
+        call col%append_string("")
+        call col%append_null()
+        !
+        ok = .true.
+        do i = 1_int64, col%size()
+            call col%get(i, s, allow_null=.true.)
+            e1 = s
+            e3 = s
+            e8 = s
+            call col%copy_to(i, d1, allow_null=.true.)
+            call col%copy_to(i, d3, allow_null=.true.)
+            call col%copy_to(i, d8, allow_null=.true.)
+            if (d1 /= e1) ok = .false.
+            if (d3 /= e3) ok = .false.
+            if (d8 /= e8) ok = .false.
+        end do
+        call check(error, ok, "copy_to must equal get-then-assign at every slot width")
+        if (allocated(error)) return
+        !
+        ! The specific behaviours the sweep above depends on, asserted by name so a failure says
+        ! which one broke.
+        call col%copy_to(1_int64, d8)
+        call check(error, d8 == "a       ", "a short value is blank-padded to the slot")
+        if (allocated(error)) return
+        ! **Truncation is asserted with a canary, not by reading the slot.** Checking only
+        ! `d3 == "abc"` passes just as happily against a `copy_to` that writes all eight bytes and
+        ! overruns the slot — the first three are still correct. Handing it a SUBSTRING of a longer
+        ! buffer makes the overrun observable: the bytes past the slot must be untouched. Verified by
+        ! mutation: removing the length clamp survives the plain assertion and fails this one.
+        canary = repeat("#", len(canary))
+        call col%copy_to(4_int64, canary(1:3))
+        call check(error, canary(1:3) == "abc", "a value longer than the slot is truncated, as assignment would")
+        if (allocated(error)) return
+        call check(error, canary(4:) == repeat("#", len(canary) - 3), &
+            "copy_to must not write a single byte past the slot it was given")
+        if (allocated(error)) return
+        call col%copy_to(6_int64, d3, allow_null=.true.)
+        call check(error, d3 == "   ", "a null with allow_null yields blanks")
+        if (allocated(error)) return
+        call col%copy_to(5_int64, d3, allow_null=.true.)
+        call check(error, d3 == "   ", "an empty element yields blanks")
+    end subroutine test_copy_to_matches_get
+    !
+    !> **`%append_from` replaces `call src%get(i, s); call dst%append_string(s)`, and additionally
+    !! carries the null state** — which is what lets a copy loop drop its `is_null` fork.
+    !!
+    !! The oracle is a second column built the old way, compared element for element. Nulls are
+    !! placed so that the destination crosses a validity byte boundary while being built, since a
+    !! destination that only ever grows into fresh bytes would not exercise the append path's own
+    !! bookkeeping.
+    subroutine test_append_from_matches_get(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: src, viaget, viafrom
+        character(len=:), allocatable :: a, b
+        integer(int64) :: k, n
+        logical :: ok
+        !
+        n = 37_int64
+        do k = 1_int64, n
+            if (mod(k, 5_int64) == 0_int64) then
+                call src%append_null()
+            else
+                call src%append_string(repeat(char(ichar("a") + int(mod(k, 26_int64))), int(1 + mod(k, 7_int64))))
+            end if
+        end do
+        !
+        do k = 1_int64, n
+            ! The old shape, kept here as the oracle rather than in the library.
+            if (src%is_null(k)) then
+                call viaget%append_null()
+            else
+                call src%get(k, a)
+                call viaget%append_string(a)
+            end if
+            call viafrom%append_from(src, k)
+        end do
+        !
+        call check(error, viafrom%size() == viaget%size(), "append_from must append exactly one element per call")
+        if (allocated(error)) return
+        call check(error, viafrom%null_count() == viaget%null_count(), &
+            "append_from must carry the source element's null state")
+        if (allocated(error)) return
+        call check(error, viafrom%character_size() == viaget%character_size(), &
+            "append_from must copy exactly the source bytes")
+        if (allocated(error)) return
+        ok = .true.
+        do k = 1_int64, n
+            if (viafrom%is_null(k) .neqv. viaget%is_null(k)) ok = .false.
+            if (viafrom%is_null(k)) cycle
+            call viaget%get(k, a)
+            call viafrom%get(k, b)
+            if (len(a) /= len(b)) then
+                ok = .false.
+            else if (a /= b) then
+                ok = .false.
+            end if
+        end do
+        call check(error, ok, "append_from must equal get-then-append element for element")
+        if (allocated(error)) return
+        call check(error, viafrom%validate(), "a column built with append_from satisfies the class invariants")
+    end subroutine test_append_from_matches_get
     !
 
 end module test_parquet_string

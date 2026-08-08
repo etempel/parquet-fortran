@@ -1819,8 +1819,7 @@ contains
         integer, intent(in), optional :: unit            !! output unit (default output_unit).
         integer(int64), intent(in), optional :: max_rows  !! max elements to print (default 20).
         integer :: u
-        integer(int64) :: i, lim
-        character(len=:), allocatable :: s
+        integer(int64) :: i, lim, a, b
         if (parquet_output_is_suppressed()) return
         u = output_unit
         if (present(unit)) u = unit
@@ -1832,8 +1831,22 @@ contains
             if (.not. bit_valid(self, i)) then
                 write(u, '(2x,i0,a)') i, ": <null>"
             else
-                call self%get_i64(i, s)
-                write(u, '(2x,i0,a,a,a)') i, ': "', s, '"'
+                ! Written straight from the payload slice. The saving is irrelevant here -- this
+                ! loop is bounded by `lim` and dominated by the formatted write -- but it keeps
+                ! the module free of the shape entirely, so `feature_risks.md` Risk-60's rule
+                ! reads as absolute rather than "except where it does not matter", and a static
+                ! check over this file needs no exemption.
+                call elem_bounds(self, i, a, b)
+                if (b >= a) then
+                    write(u, '(2x,i0,a,a,a)') i, ': "', self%data(a:b), '"'
+                else
+                    ! A column whose elements are ALL zero-length never allocates `data` at all
+                    ! (`ensure_data_cap` skips a zero request), so the slice above would reference
+                    ! an unallocated array. gfortran happens to tolerate a zero-length section of
+                    ! one; the standard does not, and CLAUDE.md records ifx following the standard
+                    ! where gfortran hides it.
+                    write(u, '(2x,i0,a)') i, ': ""'
+                end if
             end if
         end do
         if (self%nrows > lim) write(u, '(2x,a,i0,a)') "... (", self%nrows - lim, " more)"

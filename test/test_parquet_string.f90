@@ -1307,6 +1307,23 @@ contains
         open(newunit=u, status='scratch')
         call col%print(unit=u, max_rows=3_int64)
         close(u)
+        ! print writes each element straight from the payload, so the one column shape that has
+        ! NO payload has to be covered separately: when every element is zero-length, `data` is
+        ! never allocated at all and an unguarded slice of it would reference an unallocated
+        ! array. gfortran tolerates that and ifx need not, so this is a portability guard rather
+        ! than something a local run would catch failing.
+        block
+            type(parquet_string_column) :: allempty
+            call allempty%append_string("")
+            call allempty%append_string("")
+            call check(error, allempty%character_size() == 0, "an all-empty column stores no bytes")
+            if (allocated(error)) return
+            open(newunit=u, status='scratch')
+            call allempty%print(unit=u)
+            close(u)
+            call check(error, allempty%validate(), "printing an all-empty column leaves it valid")
+            if (allocated(error)) return
+        end block
         ! clear releases all memory
         call col%clear()
         call check(error, col%empty(), "clear empties the column")

@@ -2399,7 +2399,20 @@ test-sized column is covered by the minimum however wrong the sum is. Confirmed 
 which turns it into a clean abort and makes the mutation caught. **Any future bulk operation that
 pre-sizes its destination needs the same guard**, and must not rely on tests to find its absence.
 
-**Not yet guarded by a static check, deliberately.** A shape-based check in
-`tools/check_source_conventions.py` — the analogue of `check_no_per_element_shared_ptr` — is the right
-enforcement, but it should wait until S3's audit has cleared the remaining instances, or it fails the
-lint stage on known work-in-progress. See `feature_string_parallel.md` S3.
+**Guarded by `check_no_per_element_string_alloc`** (`tools/check_source_conventions.py`), the analogue
+of `check_no_per_element_shared_ptr`: it matches by SHAPE — a `%get`/`%to_string` call at `do`-loop
+depth ≥ 1 — rather than by a list of procedure names, so it cannot go blind to the next bulk operation
+added. Confirmed to fire: reverting `%to_character` to the allocating form fails the lint stage with
+the right line, and restoring it clears.
+
+**The check is scoped to `src/parquet_strings.f90`, and that scope is a KNOWN GAP, not a judgement
+that the rest is clean.** S3's audit swept all of `src/*.f90` and found the shape alive in four
+places in the module's *consumers*, on hotter paths than anything left inside it:
+`extract_col_string` and `extract_strcol` (`src/parquet_sorting_keys.f90`, **generated** — the fix is
+a `tools/generate_parquet_sorting.py` template edit), `stat_str`/`stat_strv`
+(`src/parquet_tables_access.f90`), and `parquet_check_qc_string_compact`
+(`src/parquet_write_string.f90`). Measured by differencing two real code paths at 4 M elements: one
+allocation per element costs **0.11 s**, which is **19 %** of a `parquet_string_column` sort and
+**33 %** of a `parquet_column` one. **Widening the check to `src/` requires fixing those first**, or
+it fails the lint stage on known work. See `feature_string_parallel.md` S3 for the numbers and the
+method.

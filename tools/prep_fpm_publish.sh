@@ -89,6 +89,7 @@ REMOVE_PATHS=(
     .github
     docs.md
     test/fixtures
+    tools/benchmark_strings.sh
     tools/benchmark_table.sh
     tools/benchmark_threads.sh
     tools/build_ci_test_image.sh

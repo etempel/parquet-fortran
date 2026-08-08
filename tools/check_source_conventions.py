@@ -726,6 +726,56 @@ def check_no_per_element_shared_ptr():
     return problems
 
 
+def check_no_per_element_string_alloc():
+    """No bulk operation in parquet_strings.f90 may materialize elements through `%get`/`%to_string`.
+
+    Those return a `character(len=:), allocatable`, so calling one per element turns an O(payload)
+    byte copy into one heap allocation, one fill, one copy and one free **per row**. Measured on
+    4 M elements / 70 MB: `%to_character` 0.168 s -> 0.038 s (4.3x) and `%build_from` 0.305 s ->
+    0.033 s (9.3x) once each copied straight out of the payload instead. The allocator was 71 % of
+    `%to_character`.
+
+    **Nothing fails when this comes back.** Results stay byte-identical, the suite stays green, and
+    the allocating form reads as ordinary idiomatic Fortran -- only a benchmark notices. That is
+    what makes it a lint check rather than a comment, and it is the Fortran twin of
+    `check_no_per_element_shared_ptr` above (feature_risks.md Risk-60).
+
+    Scoped to `src/parquet_strings.f90` deliberately. The same shape survives in that module's
+    CONSUMERS -- `extract_col_string`/`extract_strcol` (via tools/generate_parquet_sorting.py),
+    `stat_str`/`stat_strv`, `parquet_check_qc_string_compact` -- where it is worth roughly 0.11 s
+    per allocation per 4 M elements, about a fifth of a string sort. Widening this check to `src/`
+    has to wait until those are fixed, or it fails the lint stage on known work. See
+    feature_string_parallel.md S3.
+
+    The rule is about the LOOP, not about `%get`, which is exactly right for its own job of
+    returning one element. The bytes are already contiguous in `data(:)` and `elem_bounds` gives
+    their range in one subtraction.
+    """
+    path = SRC / "parquet_strings.f90"
+    if not path.exists():
+        return ["src/parquet_strings.f90: not found -- this check needs updating"]
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    call_re = re.compile(r"call\s+\w+(?:%\w+)*%(get_i32|get_i64|get|to_string)\s*\(", re.I)
+    do_re = re.compile(r"^\s*(?:\w+\s*:\s*)?do\b", re.I)
+    enddo_re = re.compile(r"^\s*end\s*do\b", re.I)
+    problems = []
+    depth = 0
+    for n, line in enumerate(lines, 1):
+        code = line.split("!", 1)[0]
+        if do_re.match(code):
+            depth += 1
+        elif enddo_re.match(code):
+            depth = max(0, depth - 1)
+        elif depth > 0 and call_re.search(code):
+            problems.append(
+                "src/parquet_strings.f90:%d: a bulk loop materializes an element through "
+                "`%%get`/`%%to_string`, which allocates a deferred-length string per row -- copy "
+                "the payload bytes directly instead (`elem_bounds` gives the range; measured 4.3x "
+                "on %%to_character and 9.3x on %%build_from; see feature_risks.md Risk-60)" % n
+            )
+    return problems
+
+
 def check_scenario_list_is_complete():
     """Every scenario error_scenarios.f90 dispatches on must be named in run_error_scenarios.sh.
 
@@ -809,6 +859,7 @@ CHECKS = (
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
     ("every setting has an environment variable", check_env_covers_every_setting),
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
+    ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
 )
 

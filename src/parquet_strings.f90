@@ -908,9 +908,16 @@ contains
     subroutine build_from(self, handles)
         class(parquet_string_column), intent(inout), target :: self !! cleared, then filled from handles.
         type(parquet_string), intent(in) :: handles(:)               !! source handles, in order.
-        integer(int64) :: k
-        character(len=:), allocatable :: s
-        do k = 1_int64, size(handles, kind=int64)
+        integer(int64) :: k, m, want, pos, a, b, elen, idx
+        logical :: any_null
+        m = size(handles, kind=int64)
+        ! The validation pass SIZES the result as it goes. Both halves have to happen before `self`
+        ! is touched anyway -- a handle aliasing `self` would be corrupted by the %clear() below
+        ! before it could be read -- so summing the lengths here is free, and it is what lets the
+        ! fill loop allocate once rather than growing the destination one element at a time.
+        want = 0_int64
+        any_null = .false.
+        do k = 1_int64, m
             if (associated(handles(k)%col, self)) then
                 error stop EP//"build_from: handle aliases the destination column self"
             end if
@@ -920,16 +927,59 @@ contains
             if (handles(k)%idx < 1_int64 .or. handles(k)%idx > handles(k)%col%nrows) then
                 error stop EP//"build_from: stale or out-of-range handle in input array"
             end if
-        end do
-        call self%clear()
-        do k = 1_int64, size(handles, kind=int64)
             if (handles(k)%is_null()) then
-                call self%append_null()
+                any_null = .true.
             else
-                call handles(k)%to_string(s)
-                call self%append_string(s)
+                idx = handles(k)%idx
+                want = want + (handles(k)%col%offsets(idx+1_int64) - handles(k)%col%offsets(idx))
             end if
         end do
+        call self%clear()
+        ! Returning here rather than reserving keeps an empty result byte-for-byte what %clear()
+        ! leaves behind -- capacity 0, nothing allocated -- which is what this used to produce when
+        ! the append loop simply never ran.
+        if (m == 0_int64) return
+        call ensure_offsets_cap(self, m)
+        call ensure_data_cap(self, want)
+        if (any_null) then
+            self%has_nulls = .true.
+            ! Freshly allocated validity bytes are all-ones, i.e. every row valid, so only the
+            ! null rows below need writing.
+            call ensure_validity_cap(self, m)
+        end if
+        ! Each element's bytes are copied straight out of its OWN column's payload -- the handles
+        ! may reference several different columns, so this is a contiguous copy per handle rather
+        ! than one bulk move. What it avoids is the pair `%to_string` + `%append_string` cost per
+        ! element: a deferred-length allocation and free, plus a capacity check on a destination
+        ! that grew incrementally. Do not reintroduce either; see `feature_risks.md` Risk-60.
+        pos = 0_int64
+        do k = 1_int64, m
+            if (handles(k)%is_null()) then
+                call set_bit_null(self, k)
+                self%n_null = self%n_null + 1_int64
+            else
+                idx = handles(k)%idx
+                a = handles(k)%col%offsets(idx) + 1_int64
+                b = handles(k)%col%offsets(idx+1_int64)
+                elen = b - a + 1_int64
+                ! The destination was sized ONCE, from the pass above, so this loop is the one
+                ! place where a disagreement between the two would write past the end of `data`
+                ! -- silently, since nothing here grows it any more. One integer compare converts
+                ! that into a clean abort. It cannot fire while both loops agree, and no fixture
+                ! this repository can build makes them disagree (a small column is covered by
+                ! MIN_CHAR_CAP whatever the sum says), so it is defensive by construction.
+                if (pos + elen > want) then
+                    error stop EP//"build_from: internal error, payload sum disagrees with the fill" ! GCOVR_EXCL_LINE
+                end if
+                if (elen > 0_int64) self%data(pos+1_int64:pos+elen) = handles(k)%col%data(a:b)
+                pos = pos + elen
+            end if
+            ! Written on both arms: a null occupies a zero-width slot at the current position,
+            ! exactly as %append_null gave it.
+            self%offsets(k+1_int64) = pos
+        end do
+        self%nrows = m
+        self%nchars = pos
     end subroutine build_from
     !
     !> int32 specific of set; see the set generic.

@@ -45,6 +45,8 @@ contains
             new_unittest("view_slice fills one handle per row of a range", test_view_slice), &
             new_unittest("slice extracts an owning copy of a row range", test_slice), &
             new_unittest("build_from gathers an array of handles into a column", test_build_from), &
+            new_unittest("build_from: empty, all-null, zero-length and repeated handles", &
+                test_build_from_edges), &
             new_unittest("to_character materialization + null_value", test_to_character), &
             new_unittest("to_character matches %get element for element, padded with blanks", &
                 test_to_character_bytes), &
@@ -774,6 +776,96 @@ contains
         if (allocated(error)) return
         call check(error, dest%validate(), "build_from invariants hold")
     end subroutine test_build_from
+    !
+    !> `build_from` sizes the destination from a validation pass and then copies each element's
+    !! bytes straight out of ITS OWN source column, so these are the cases that separate a correct
+    !! fill from a plausible one: an **empty** handle array (which must leave the destination as
+    !! `%clear()` did, allocating nothing), an **all-null** array (no payload at all, so the data
+    !! buffer is never allocated and every validity bit must still be written), **zero-length**
+    !! elements, and **one element gathered twice**, which a length sum computed per source row
+    !! rather than per handle would get wrong.
+    !!
+    !! `character_size()` is asserted throughout, because it is the one field a wrong length sum
+    !! corrupts silently -- the strings still read back correctly right up until the column is
+    !! written or appended to.
+    !!
+    !! Shortest element first, per CLAUDE.md's rule for this bug class.
+    subroutine test_build_from_edges(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column), target :: src, other, dest
+        type(parquet_string) :: none(0), nulls(3), mixed(6)
+        character(len=:), allocatable :: s
+        integer :: i
+        logical :: ok
+        !
+        call src%append_string("a")       ! shortest first
+        call src%append_string("")        ! zero length
+        call src%append_null()
+        call src%append_string("bcdef")
+        call other%append_string("XY")
+        !
+        ! --- an empty handle array leaves the destination exactly as %clear() would ---
+        call dest%append_string("stale")
+        call dest%build_from(none)
+        call check(error, dest%size() == 0, "build_from of an empty array empties the destination")
+        if (allocated(error)) return
+        call check(error, dest%character_size() == 0, "and its payload is empty")
+        if (allocated(error)) return
+        call check(error, dest%capacity() == 0, "and it holds no capacity")
+        if (allocated(error)) return
+        call check(error, dest%validate(), "empty build_from leaves a valid column")
+        if (allocated(error)) return
+        !
+        ! --- all null: no payload is ever allocated, every validity bit must still be written ---
+        do i = 1, 3
+            nulls(i) = src%view(3_int64)
+        end do
+        call dest%build_from(nulls)
+        call check(error, dest%size() == 3, "all-null build_from row count")
+        if (allocated(error)) return
+        call check(error, dest%null_count() == 3, "all-null build_from null_count")
+        if (allocated(error)) return
+        call check(error, dest%character_size() == 0, "all-null build_from stores no bytes")
+        if (allocated(error)) return
+        ok = dest%is_null(1_int64) .and. dest%is_null(2_int64) .and. dest%is_null(3_int64)
+        call check(error, ok, "every row of an all-null build_from reads back null")
+        if (allocated(error)) return
+        call check(error, dest%validate(), "all-null build_from leaves a valid column")
+        if (allocated(error)) return
+        !
+        ! --- zero-length elements, a repeat, a null, and a second source column ---
+        mixed(1) = src%view(1_int64)      ! "a"
+        mixed(2) = src%view(2_int64)      ! ""
+        mixed(3) = src%view(4_int64)      ! "bcdef"
+        mixed(4) = src%view(2_int64)      ! "" again
+        mixed(5) = src%view(4_int64)      ! "bcdef" AGAIN -- the same element twice
+        mixed(6) = other%view(1_int64)    ! "XY" from a different column
+        call dest%build_from(mixed)
+        call check(error, dest%size() == 6, "mixed build_from row count")
+        if (allocated(error)) return
+        ! 1 + 0 + 5 + 0 + 5 + 2 -- the repeat is counted twice, as a gather must
+        call check(error, dest%character_size() == 13, "mixed build_from payload sums every handle")
+        if (allocated(error)) return
+        call check(error, dest%null_count() == 0, "mixed build_from has no nulls")
+        if (allocated(error)) return
+        call dest%get(1, s)
+        call check(error, s == "a", "mixed row 1")
+        if (allocated(error)) return
+        call check(error, dest%length(2_int64) == 0, "mixed row 2 is zero-length")
+        if (allocated(error)) return
+        call dest%get(3, s)
+        call check(error, s == "bcdef", "mixed row 3")
+        if (allocated(error)) return
+        call check(error, dest%length(4_int64) == 0, "mixed row 4 is zero-length")
+        if (allocated(error)) return
+        call dest%get(5, s)
+        call check(error, s == "bcdef", "mixed row 5 -- the repeated element")
+        if (allocated(error)) return
+        call dest%get(6, s)
+        call check(error, s == "XY", "mixed row 6, from a different source column")
+        if (allocated(error)) return
+        call check(error, dest%validate(), "mixed build_from invariants hold")
+    end subroutine test_build_from_edges
     !
     subroutine test_to_character(error)
         type(error_type), allocatable, intent(out) :: error

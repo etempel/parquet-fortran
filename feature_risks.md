@@ -2359,10 +2359,9 @@ hard-wired constant seed fails the control.
 frees it — turns an O(payload) byte copy into **one heap allocation, one fill, one copy and one free
 per row**.
 
-Measured on 4 M elements / 70 MB, `%to_character`: **0.168 s** through `%get`, **0.038 s** copying the
-payload bytes directly — **4.3x**, with the allocator accounting for 71 % of the original. `%build_from`
-has the same shape and is the slowest operation in the module at 0.30 s (it pays the allocation *and*
-grows the destination incrementally).
+Measured on 4 M elements / 70 MB, both fixed: `%to_character` **0.168 s -> 0.038 s** (4.3x), with the
+allocator accounting for 71 % of the original; `%build_from` **0.305 s -> 0.033 s** (9.3x), which was the
+slowest operation in the module because it paid the allocation *and* grew its destination incrementally.
 
 **The failure is not a wrong answer — it is no signal at all.** The allocating form returns byte-identical
 results, so every test passes, every error scenario stays green, and the code reads as ordinary, idiomatic
@@ -2378,12 +2377,29 @@ tautology. It covers the no-`null_value` path, a zero-length element, and a `nul
 any real element. Four mutations confirmed caught: dropped padding, an off-by-one on the copied
 length, a width taken from element one, and a skipped `null_value` substitution.
 
+`%build_from` is covered by `build_from: empty, all-null, zero-length and repeated handles` in the same
+file, which asserts `character_size()` throughout — the one field a wrong length sum corrupts silently,
+since the strings still read back correctly until the column is written or appended to. Six mutations
+confirmed caught: reading every element from the first handle's column, a dropped null-row offset write,
+a dropped `has_nulls`, a dropped empty-array early return, offsets written only on the non-null arm, and
+a halved length sum (caught by the guard below, not by an assertion).
+
 **What this forbids.** Do not reintroduce a `character(len=:), allocatable` intermediate inside any
 per-element loop in `src/parquet_strings.f90`. The bytes are already contiguous in `data(:)` and their
 bounds are one subtraction away (`elem_bounds`); a bulk operation should read them there. The rule is
 about the *loop*, not about `%get`, which is exactly right for its own job of returning one element.
 
+**A second failure mode arrives with the fix, and it is worse than the one it replaces.** Sizing the
+destination once means the fill loop can no longer grow it, so a length sum that disagrees with what the
+fill actually writes is a **heap overflow**, not a slow path. **No fixture this repository can build
+catches it**: `ensure_data_cap` allocates `max(need, MIN_CHAR_CAP)` = at least 64 bytes, so every
+test-sized column is covered by the minimum however wrong the sum is. Confirmed by mutation — halving
+`want` in `%build_from` left the whole suite green. `%build_from` therefore carries an inline
+`if (pos + elen > want) error stop` (one integer compare per element, `GCOVR_EXCL`'d as defensive),
+which turns it into a clean abort and makes the mutation caught. **Any future bulk operation that
+pre-sizes its destination needs the same guard**, and must not rely on tests to find its absence.
+
 **Not yet guarded by a static check, deliberately.** A shape-based check in
 `tools/check_source_conventions.py` — the analogue of `check_no_per_element_shared_ptr` — is the right
-enforcement, but it cannot be added until the remaining instances are fixed, or it fails the lint stage
-on known work-in-progress. `%build_from` is the next one. See `feature_string_parallel.md` S2 and S3.
+enforcement, but it should wait until S3's audit has cleared the remaining instances, or it fails the
+lint stage on known work-in-progress. See `feature_string_parallel.md` S3.

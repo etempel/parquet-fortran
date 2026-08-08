@@ -694,6 +694,8 @@ program error_scenarios
         call scenario_concurrent_calls_into_shared_reader()
     case ("concurrent_calls_into_shared_writer")
         call scenario_concurrent_calls_into_shared_writer()
+    case ("writer_guard_sequential_handoff")
+        call scenario_writer_guard_sequential_handoff()
     case ("get_metadata_missing_key_no_default")
         call scenario_get_metadata_missing_key_no_default()
     case ("get_metadata_conversion_failure_no_default")
@@ -7358,6 +7360,74 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly finished concurrent writes into a shared writer without the concurrency guard firing"
     end subroutine scenario_concurrent_calls_into_shared_writer
+
+    !> The NEGATIVE control for the two scenarios above, and the only thing that covers the write
+    !> path's early RETURNs: hands one writer between two threads *sequentially* and expects the
+    !> concurrency guard NOT to fire (exit 0).
+    !>
+    !> **What would break without it.** Every write entry point claims the guard at its first
+    !> statement via writer_lock (parquet_core.f90) and relies on Fortran finalizing that local to
+    !> release it -- on the normal path and on each of the 64 early RETURNs across those procedures.
+    !> A release that stopped happening would be invisible to the owning thread, which may re-enter a
+    !> handle it already holds: everything single-threaded keeps passing, and the damage only appears
+    !> when some *other* thread later touches that writer legitimately and aborts with a message
+    !> blaming a concurrent access that never happened. So the leak has to be provoked on one thread
+    !> and observed from another, which is exactly what this does.
+    !>
+    !> Thread 0 deliberately takes an early-return path before writing anything real -- a
+    !> schema-defined column that is not `is_set`, which returns while holding the claim, since the
+    !> claim is taken at the entry point's first statement -- and then writes a real column. Thread 1
+    !> writes the remaining column and the file is closed. The `!$omp barrier` between the two halves
+    !> is what makes this a hand-off rather than a race: the two blocks can never overlap, so the
+    !> guard has nothing legitimate to complain about and any abort here is a real leak.
+    !>
+    !> Self-adapting like its two siblings: with only one thread available, both halves would run on
+    !> the same thread, where a leaked claim is admitted as ordinary re-entry and proves nothing.
+    subroutine scenario_writer_guard_sequential_handoff()
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        integer :: tid, nthreads
+
+        nthreads = 1
+        !$ nthreads = omp_get_max_threads()
+        if (nthreads <= 1) then
+            print '(a)', "SKIPPED: OpenMP not active (omp_get_max_threads() <= 1); a hand-off needs two threads"
+            return
+        end if
+
+        schema%maml%name = "handoff.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: handoff_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "- name: skipped", &
+            "  data_type: int32", &
+            "- name: b", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+        call schema%set_column_unavailable("skipped")
+
+        call parquet_open_writer(writer, "test_run/error_scenario_writer_handoff.parquet", schema=schema)
+
+        tid = 0
+        !$omp parallel num_threads(2) default(shared) private(tid)
+        !$ tid = omp_get_thread_num()
+        if (tid == 0) then
+            ! Returns early (the column is not is_set) while holding this entry point's claim.
+            call parquet_write_column(writer, "skipped", values)
+            call parquet_write_column(writer, "a", values)
+        end if
+        !$omp barrier
+        if (tid == 1) then
+            call parquet_write_column(writer, "b", values)
+        end if
+        !$omp end parallel
+
+        call parquet_close_writer(writer)
+        print '(a)', "sequential hand-off of one writer between two threads completed without the guard firing"
+    end subroutine scenario_writer_guard_sequential_handoff
 
     !> parquet_get_metadata with no `default` given error stops the moment
     !> the requested key isn't present in the file's table metadata (see

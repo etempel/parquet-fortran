@@ -750,6 +750,11 @@ scenarios=(
     "flat_write_col_size_still_auto:1"
 )
 
+# writer_guard_sequential_handoff is the negative control for the two racy
+# scenarios: it expects exit 0 (no abort) rather than an abort, and it too is
+# only meaningful with a real OpenMP flag -- with one thread both halves of the
+# hand-off run on the same thread, where the guard admits re-entry by design.
+#
 # concurrent_calls_into_shared_reader/writer are deliberately not in the list
 # above: they only reliably trigger under genuine multi-threaded execution (a
 # real OpenMP flag supplied via FPM_FFLAGS -- see README's "Thread safety"
@@ -786,6 +791,7 @@ scenarios=(
 concurrency_scenarios=(
     "concurrent_calls_into_shared_reader"
     "concurrent_calls_into_shared_writer"
+    "writer_guard_sequential_handoff"
     "table_first_touch_in_parallel"
     "table_resolve_width_in_parallel"
     "table_first_touch_in_parallel_single"

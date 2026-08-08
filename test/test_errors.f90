@@ -641,6 +641,8 @@ contains
                 test_concurrent_calls_into_shared_reader_aborts), &
             new_unittest("concurrent calls into a shared parquet_writer abort", &
                 test_concurrent_calls_into_shared_writer_aborts), &
+            new_unittest("a sequential hand-off of one writer between threads succeeds", &
+                test_writer_guard_sequential_handoff_succeeds), &
             new_unittest("parquet_column data_ptr with a mismatched pointer kind aborts", &
                 test_columns_data_ptr_kind_mismatch_aborts), &
             new_unittest("parquet_column structural mutation on a kindless column aborts", &
@@ -4679,6 +4681,24 @@ contains
             failure_message="concurrent parquet_write_column calls into one shared writer were expected to abort", &
             required_stderr="concurrent access to a single parquet_writer detected")
     end subroutine test_concurrent_calls_into_shared_writer_aborts
+
+    !> The negative control for the two tests above: a guard that fired unconditionally would pass
+    !> both of them while making the library unusable. This hands one writer between two threads
+    !> sequentially and requires it to SUCCEED -- which is also what covers the release of the
+    !> writer's guard on the early-RETURN paths, since a leaked claim is only ever observable from a
+    !> second thread (see scenario_writer_guard_sequential_handoff for the full reasoning).
+    subroutine test_writer_guard_sequential_handoff_succeeds(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: nthreads
+
+        nthreads = 1
+        !$ nthreads = omp_get_max_threads()
+        if (nthreads <= 1) return   ! no second thread to hand off to -> skip (pass)
+
+        call check_scenario_exit_status(error, "writer_guard_sequential_handoff", &
+            expect_abort=.false., &
+            failure_message="a sequential hand-off of one writer between two threads was expected to succeed")
+    end subroutine test_writer_guard_sequential_handoff_succeeds
 
     !> Resolves the path to the built error_scenarios helper binary once and caches it for the
     !> rest of this process.

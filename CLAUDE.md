@@ -2041,7 +2041,7 @@ decided against it
 and `src/parquet_wrapper.cpp`'s own `// ====`-banner comments, added instead, for a cheaper
 navigability improvement). If that decision is ever revisited, the single most important, least
 obvious hazard is this: **every process-global `static` at file scope means exactly one instance
-per translation unit**, and this file has two families of them.
+per translation unit**, and this file has two families of them plus one singleton.
 
 The `g_debug_*` test-only overrides (`g_debug_force_whole_column_read_error`,
 `g_debug_string_offset_limit`, `g_debug_col_size_limit`, `g_debug_list_element_count_limit`,
@@ -2062,10 +2062,20 @@ another TU would keep the built-in initialiser — so a user's `parquet_set_verb
 `parquet_set_target_row_group_bytes(...)` would apply to some of the library and not the rest, with
 the Fortran getters still reporting the value correctly (`feature_risks.md` Risk-42).
 
-Before any split, promote every global in both families to a genuine `extern` global with exactly
-one definition in a shared internal header (not `static`), re-run every affected error scenario to
-confirm the override still takes effect, and re-run `test/test_settings.f90`'s observed-effect tests
-to confirm each mirrored setting still reaches the code that reads it.
+**`g_next_thread_token` is a third case and fails in a way neither family does — silently, in
+production, and only under concurrency.** It hands each thread the identity `ConcurrencyGuard` uses
+to decide whether a claim on a reader/writer handle is a re-entry by the owner or a collision with
+another thread. Per-TU copies would each start counting at 1, so two *different* threads would be
+issued the same token and each would be waved through a guard the other holds — turning the
+library's one defence against concurrent misuse into a silent no-op on exactly the code paths it
+exists to protect. Nothing would fail to build, no test asserts a token value, and the symptom
+would be the heap corruption the guard was added to prevent.
+
+Before any split, promote every global in both families — and this counter — to a genuine `extern`
+global with exactly one definition in a shared internal header (not `static`), re-run every affected
+error scenario to confirm the override still takes effect, re-run `test/test_settings.f90`'s
+observed-effect tests to confirm each mirrored setting still reaches the code that reads it, and
+re-run both `concurrent_calls_into_shared_*` scenarios to confirm the guard still fires.
 
 ### Stale `fpm` build cache
 

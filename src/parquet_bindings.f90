@@ -17,6 +17,7 @@ module parquet_bindings
 
     public :: create_parquet_writer, create_parquet_reader
     public :: close_parquet_writer, close_parquet_reader
+    public :: parquet_writer_enter, parquet_writer_leave
     public :: abandon_parquet_writer
     public :: parquet_reader_print_stat
     public :: parquet_set_writer_options
@@ -116,6 +117,24 @@ module parquet_bindings
             character(kind=c_char) :: filename(*)
             type(c_ptr) :: writer
         end function
+
+        !> Claims `writer`'s concurrency guard for the calling thread until parquet_writer_leave,
+        !> aborting if another thread already holds it. Reached only through parquet_core.f90's
+        !> writer_lock, never called directly -- see the C++ side for why the Fortran half of a
+        !> write has to hold this guard rather than leaving it to the append call at the end.
+        subroutine parquet_writer_enter(writer) &
+                bind(C, name="parquet_writer_enter")
+            import
+            type(c_ptr), value :: writer
+        end subroutine
+
+        !> Drops one level of the ownership parquet_writer_enter claimed; a no-op on a writer this
+        !> thread does not hold, so writer_lock's FINAL can run unconditionally.
+        subroutine parquet_writer_leave(writer) &
+                bind(C, name="parquet_writer_leave")
+            import
+            type(c_ptr), value :: writer
+        end subroutine
 
         !> Sets compression codec/level, row-group chunk size, and threading on `writer`.
         subroutine parquet_set_writer_options(writer, compression_name, compression_level, chunk_size, use_threads) &

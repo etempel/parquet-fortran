@@ -604,6 +604,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sharing one `parquet_writer` across threads now reliably aborts with the documented diagnostic
+  instead of segfaulting.** The concurrency guard was claimed only once a call reached C++, which on
+  the write path is the last statement of the entry point — so two threads first raced through the
+  writer's own Fortran bookkeeping, above all the reallocation that tracks which columns have been
+  written, and corrupted the heap before either reached the guard. The crash then usually landed far
+  from the cause, and the message promised by [Thread safety](doc/pages/thread-safety.md) survived to
+  stderr only some of the time. The guard is now claimed at the first statement of every write,
+  row-group and row-mask entry point, and released automatically on every exit path. Measured on a
+  384-core machine, the shared-writer case went from crashing on every single run to matching the
+  shared-reader case, which never had the problem. Correct single-threaded use is unaffected: the
+  guard now identifies the *owning* thread, so a thread may re-enter a handle it already holds, and
+  sequential hand-off of a writer between threads remains allowed.
 - **A `parquet_table` opened with an unseeded `sample_fraction=` now keeps one sample for its
   whole lifetime.** The seed is drawn once, at `parquet_open_table`, instead of being left to each
   reader the table opens — so a `%clone` (which reopens the file for every column the source had

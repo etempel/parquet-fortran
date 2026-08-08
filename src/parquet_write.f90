@@ -23,6 +23,18 @@ contains
             error stop "parquet_write_column: writer has not been opened (call parquet_open_writer first)"
         end if
     end subroutine check_writer_open
+    module procedure writer_lock_claim
+        ! An unopened writer has no handle to guard. Leaving self%handle null here is what makes
+        ! the finalizer below safe to run unconditionally.
+        if (.not. c_associated(writer%handle)) return
+        self%handle = writer%handle
+        call parquet_writer_enter(self%handle)
+    end procedure writer_lock_claim
+    module procedure writer_lock_release
+        if (.not. c_associated(self%handle)) return
+        call parquet_writer_leave(self%handle)
+        self%handle = c_null_ptr
+    end procedure writer_lock_release
     !> The name actually written to the parquet file/VOTable header for
     !> `col`: its output_name if set, else its (internal) name. Falling back
     !> to name defensively handles a parquet_column_type built without going
@@ -379,8 +391,10 @@ contains
     end subroutine parquet_writer_whole_column_mask
     module procedure parquet_write_row_mask_impl
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call writer_context_suffix(writer, ctx)
         if (writer%write_started) error stop &
             "parquet_write_row_mask: must be called before the writer's first parquet_write_column " // &
@@ -394,8 +408,10 @@ contains
     module procedure parquet_write_chunk_row_mask_impl
         character(len=32) :: expected_str, got_str
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call writer_context_suffix(writer, ctx)
         if (.not. writer%in_row_group) error stop &
             "parquet_write_chunk_row_mask: no row group is open (call parquet_new_row_group first)" // ctx
@@ -1050,8 +1066,10 @@ contains
         type(parquet_writer), intent(inout) :: writer !! open writer.
         integer(c_long_long), intent(in) :: nrows !! row count for the new row group; must be positive.
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call writer_context_suffix(writer, ctx)
         if (writer%in_row_group) error stop &
             "parquet_new_row_group: a row group is already open -- call parquet_finish_row_group first" // ctx
@@ -1103,7 +1121,9 @@ contains
         call parquet_new_row_group_impl(writer, nrows)
     end procedure parquet_new_row_group_int64
     module procedure parquet_finish_row_group
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
         if (writer%row_group_is_empty) then
             ! A zero-kept-row row group has no underlying C++ row group at all (never opened) --
             ! nothing to finish either.
@@ -1130,11 +1150,15 @@ contains
         writer%current_row_group_nrows = 0
     end procedure parquet_finish_row_group
     module procedure parquet_get_chunk_size_writer_int32
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
         chunk_size = int(parquet_writer_get_chunk_size(writer%handle), kind=int32)
     end procedure parquet_get_chunk_size_writer_int32
     module procedure parquet_get_chunk_size_writer_int64
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
         chunk_size = parquet_writer_get_chunk_size(writer%handle)
     end procedure parquet_get_chunk_size_writer_int64
     module procedure parquet_close_writer

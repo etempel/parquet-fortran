@@ -97,8 +97,10 @@ contains
         logical, allocatable :: row_mask(:), elem_mask(:)
         type(parquet_date), allocatable :: flat_c(:)
         integer(int64) :: nrows_c
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call temporal_write_preamble(writer, name, "date", asize, do_write, outname, idx)
         if (.not. do_write) return
         call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
@@ -128,8 +130,10 @@ contains
         logical, allocatable :: row_mask(:), elem_mask(:)
         type(parquet_time), allocatable :: flat_c(:)
         integer(int64) :: nrows_c
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call temporal_write_preamble(writer, name, "time", asize, do_write, outname, idx)
         if (.not. do_write) return
         call resolve_temporal_write_unit(writer, idx, unit, is_utc)
@@ -163,8 +167,10 @@ contains
         logical, allocatable :: row_mask(:), elem_mask(:)
         type(parquet_timestamp), allocatable :: flat_c(:)
         integer(int64) :: nrows_c
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call temporal_write_preamble(writer, name, "timestamp", asize, do_write, outname, idx)
         if (.not. do_write) return
         call resolve_temporal_write_unit(writer, idx, unit, is_utc)
@@ -257,8 +263,10 @@ contains
         type(c_ptr) :: valid_ptr
         logical, allocatable :: row_mask(:), elem_mask(:)
         type(parquet_date), allocatable :: flat_c(:)
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call temporal_chunk_preamble(writer, name, "date", asize, nrows, do_write, outname, idx, row_mask)
         if (.not. do_write) return
         elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -285,8 +293,10 @@ contains
         type(c_ptr) :: valid_ptr
         logical, allocatable :: row_mask(:), elem_mask(:)
         type(parquet_time), allocatable :: flat_c(:)
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call temporal_chunk_preamble(writer, name, "time", asize, nrows, do_write, outname, idx, row_mask)
         if (.not. do_write) return
         call resolve_temporal_write_unit(writer, idx, unit, is_utc)
@@ -316,8 +326,10 @@ contains
         integer(int64) :: i, m
         logical, allocatable :: row_mask(:), elem_mask(:)
         type(parquet_timestamp), allocatable :: flat_c(:)
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
+        call lk%claim(writer)
         call temporal_chunk_preamble(writer, name, "timestamp", asize, nrows, do_write, outname, idx, row_mask)
         if (.not. do_write) return
         call resolve_temporal_write_unit(writer, idx, unit, is_utc)

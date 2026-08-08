@@ -43,6 +43,7 @@
 #include <chrono>
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -70,15 +71,36 @@
 // thread race on them (e.g. two threads' unordered_map::emplace on
 // column_cache). Each library-facing entry point obtains its handle through
 // as_reader_handle/as_handle below, which return this guard instead of a raw
-// pointer: it atomically claims `busy` for the duration of the call (RAII)
-// and immediately aborts the process if another thread is already inside a
-// call on the same handle, rather than silently racing. This intentionally
-// does NOT forbid handing a reader/writer off between threads sequentially
-// (only true overlap is rejected), and it does not make it safe/meaningful to
-// call into one reader/writer from many threads at once for speed -- see the
-// README's Thread safety section: each thread must still use its own
-// independent instance for that. Declared outside the extern "C" block below
-// because templates cannot be given C language linkage.
+// pointer: it atomically claims ownership of the handle for the duration of
+// the call (RAII) and immediately aborts the process if a *different* thread
+// is already inside a call on the same handle, rather than silently racing.
+// This intentionally does NOT forbid handing a reader/writer off between
+// threads sequentially (only true overlap is rejected), and it does not make
+// it safe/meaningful to call into one reader/writer from many threads at once
+// for speed -- see the README's Thread safety section: each thread must still
+// use its own independent instance for that. Declared outside the extern "C"
+// block below because templates cannot be given C language linkage.
+//
+// **The guard records WHICH thread owns the handle, not merely that someone
+// does, and is re-entrant for that owner.** It used to be a plain
+// `std::atomic<bool> busy`, which made any nested claim on one handle abort --
+// including the library's own. That mattered once parquet_writer_enter/
+// parquet_writer_leave (below) let the *Fortran* half of a write claim the
+// same guard for the whole entry point: every C++ call it then makes is a
+// nested claim from the owning thread and must be allowed through. Ownership
+// is a per-thread token rather than std::thread::id because
+// std::atomic<std::thread::id> is not guaranteed lock-free and its
+// compare_exchange compares object representations, which a padded id type
+// would break; a uint64_t has neither problem.
+//
+// Two consequences worth knowing. A missed parquet_writer_leave leaks depth
+// rather than wedging the handle: the owning thread keeps working, and only
+// the documented sequential hand-off to another thread would be refused. And
+// the several `_impl` helpers elsewhere in this file that exist specifically
+// to avoid re-entering an exported entry point are no longer load-bearing for
+// correctness -- they are still the right shape (one atomic pair instead of
+// two), so they stay, but their comments no longer claim an abort would
+// follow.
 //
 // Deliberately calls std::abort() here instead of throwing: this guard is
 // meant to be hit from worker threads inside a caller's own !$omp/#pragma omp
@@ -88,14 +110,34 @@
 // OpenMP-runtime combinations are free to handle that differently. Aborting
 // directly sidesteps that entirely: it is well-defined from any thread,
 // inside or outside any parallel construct, on every platform.
+
+// Monotonic source of the per-thread ownership tokens above. Never reused and
+// never 0, so 0 unambiguously means "this handle is idle".
+//
+// NOTE for a future split of this file into several translation units (see
+// CLAUDE.md): this counter must become a single `extern` definition, exactly
+// like the g_debug_*/settings-mirror globals. Per-TU copies would hand two
+// different threads the same token, and each would then be admitted through a
+// guard the other holds.
+static std::atomic<std::uint64_t> g_next_thread_token{1};
+
+static std::uint64_t this_thread_token()
+{
+	static thread_local std::uint64_t token = g_next_thread_token.fetch_add(1, std::memory_order_relaxed);
+	return token;
+}
+
 template <typename Handle>
 class ConcurrencyGuard
 {
 public:
 	ConcurrencyGuard(Handle *handle, const char *what) : handle_(handle)
 	{
-		bool expected = false;
-		if (!handle_->busy.compare_exchange_strong(expected, true))
+		const std::uint64_t me = this_thread_token();
+		std::uint64_t expected = 0;
+		if (!handle_->guard_owner.compare_exchange_strong(expected, me, std::memory_order_acq_rel,
+				std::memory_order_acquire) &&
+			expected != me)
 		{ // GCOVR_EXCL_START -- same std::abort() gcov-loss mechanism as report_fatal_error's own GCOVR_EXCL comment
 			std::fprintf(stderr,
 				"parquet-fortran: concurrent access to a single %s detected: each thread must use "
@@ -106,11 +148,13 @@ public:
 			std::abort();
 		}
 		// GCOVR_EXCL_STOP
+		// Only ever incremented by the owning thread, so it needs no atomicity of its own.
+		++handle_->guard_depth;
 	}
 
 	~ConcurrencyGuard()
 	{
-		if (handle_) handle_->busy.store(false, std::memory_order_release);
+		if (handle_) guard_leave(handle_);
 	}
 
 	ConcurrencyGuard(const ConcurrencyGuard &) = delete;
@@ -122,12 +166,23 @@ public:
 	// Disarms the guard (its destructor becomes a no-op) and returns the raw
 	// pointer, for close_parquet_reader/close_parquet_writer, which delete
 	// the underlying handle themselves -- without this, the guard's
-	// destructor would touch already-freed memory afterwards.
+	// destructor would touch already-freed memory afterwards. Also how
+	// parquet_writer_enter hands a freshly claimed guard over to the Fortran
+	// side, which releases it later via parquet_writer_leave.
 	Handle *release()
 	{
 		auto *p = handle_;
 		handle_ = nullptr;
 		return p;
+	}
+
+	// Drops one level of ownership, releasing the handle at depth 0. Shared by
+	// the destructor above and parquet_writer_leave, so the two can never
+	// disagree about what "release" means.
+	static void guard_leave(Handle *handle)
+	{
+		if (handle->guard_depth <= 0) return;
+		if (--handle->guard_depth == 0) handle->guard_owner.store(0, std::memory_order_release);
 	}
 
 private:
@@ -283,7 +338,9 @@ extern "C"
 		int compression_level = arrow::util::kUseDefaultCompressionLevel;
 		int64_t chunk_size = -1; // <= 0 means "not set by the caller": auto-sized at close time from the final row count.
 		bool use_threads = true; // per-writer opt-out of Arrow's internal thread pool; see parquet_open_writer(..., use_threads=).
-		std::atomic<bool> busy{false}; // guards against two threads calling into the same writer at once; see ConcurrencyGuard.
+		// Guards against two threads calling into the same writer at once; see ConcurrencyGuard.
+		std::atomic<std::uint64_t> guard_owner{0}; // thread token of the thread currently inside a call; 0 when idle.
+		int guard_depth = 0; // re-entry depth for that owner; only ever touched by the owning thread.
 
 		// --- Streaming row-group API state (parquet_new_row_group/parquet_write_column_chunk/
 		// parquet_finish_row_group) -- unused (left at these defaults) by a writer that only
@@ -545,7 +602,9 @@ extern "C"
 		// not a crash). Pinning here unconditionally (cheap: one extra shared_ptr assignment, even
 		// for the already-safe non-struct case) closes this for every case uniformly.
 		std::shared_ptr<arrow::Array> last_whole_column_buffers_array;
-		std::atomic<bool> busy{false}; // guards against two threads calling into the same reader at once; see ConcurrencyGuard.
+		// Guards against two threads calling into the same reader at once; see ConcurrencyGuard.
+		std::atomic<std::uint64_t> guard_owner{0}; // thread token of the thread currently inside a call; 0 when idle.
+		int guard_depth = 0; // re-entry depth for that owner; only ever touched by the owning thread.
 	};
 
 	// Wraps a raw writer handle in a ConcurrencyGuard for the duration of one extern "C" call.
@@ -2527,9 +2586,10 @@ extern "C"
 
 	// The schema-only half of parquet_reader_get_column_col_size, factored out so the sibling entry
 	// points below can reuse it. Deliberately NOT the exported function: calling that would
-	// re-enter as_reader_handle while the caller's own guard is still held, which the
-	// (non-reentrant by design) ConcurrencyGuard always rejects -- the same reasoning
-	// parquet_reader_get_column_total_elements already records for its own helper calls.
+	// re-enter as_reader_handle while the caller's own guard is still held. That is merely wasteful
+	// now (ConcurrencyGuard admits its own owner re-entrantly, so it costs one redundant atomic
+	// pair) rather than fatal as it once was, but the factoring is still the right shape -- the same
+	// reasoning parquet_reader_get_column_total_elements already records for its own helper calls.
 	static int64_t parquet_reader_get_column_col_size_impl(ParquetReaderHandle *reader_handle, const char *name)
 	{
 		auto resolved = resolve_struct_path(reader_handle->schema, name);
@@ -3273,6 +3333,42 @@ extern "C"
 
 	// ==== Writer lifecycle (create/options) ====
 	//
+	// Claims this writer's concurrency guard for the calling thread and KEEPS it claimed after
+	// returning, until a matching parquet_writer_leave. Aborts with the guard's usual diagnostic
+	// if a different thread already holds it.
+	//
+	// **This exists because the C++ guard alone was claimed far too late to keep its own promise.**
+	// A parquet_write_column call spends its whole first half in Fortran, mutating writer state
+	// that no C++ guard can see -- above all writer%written_names, which parquet_write.f90's
+	// parquet_check_and_mark_written_name grows with allocate/copy/move_alloc on every call. Two
+	// threads sharing a writer therefore raced on a Fortran allocatable and corrupted the heap
+	// BEFORE either reached the guarded append at the end, so the documented diagnostic lost a race
+	// it was supposed to win: measured on a 384-core machine, every single run of
+	// test/error_scenarios.f90's concurrent_calls_into_shared_writer segfaulted, and the intended
+	// message survived to stderr only some of the time. The read path never had this problem --
+	// its first statement after the open check is already a guarded C++ call (see
+	// check_column_exists) and nothing on the Fortran side mutates a reader.
+	//
+	// The Fortran half now claims the guard for the whole entry point via writer_lock
+	// (parquet_core.f90), whose FINAL releases it on every exit path including an early RETURN.
+	// A NULL handle is ignored so the Fortran side does not have to special-case an unopened
+	// writer; check_writer_open has already rejected that case with a better message anyway.
+	void parquet_writer_enter(void *handle)
+	{
+		if (handle == nullptr) return; // GCOVR_EXCL_LINE -- check_writer_open rejects this first
+		ConcurrencyGuard<ParquetWriterHandle> guard(static_cast<ParquetWriterHandle *>(handle), "parquet_writer");
+		guard.release(); // ownership now belongs to the Fortran-side writer_lock, not to this scope
+	}
+
+	// Drops one level of the ownership parquet_writer_enter claimed. Idempotent on an unclaimed
+	// handle: a writer_lock that was never claimed (or was already released) leaves the guard
+	// exactly as it found it, which is what lets writer_lock's FINAL run unconditionally.
+	void parquet_writer_leave(void *handle)
+	{
+		if (handle == nullptr) return; // GCOVR_EXCL_LINE -- writer_lock never releases a null handle
+		ConcurrencyGuard<ParquetWriterHandle>::guard_leave(static_cast<ParquetWriterHandle *>(handle));
+	}
+
 	// Creates filename and returns an opaque handle to a new parquet writer for it.
 	void *create_parquet_writer(const char *filename)
 	{
@@ -6420,9 +6516,9 @@ extern "C"
 	// it would make the second thread abort on a reader nobody is writing to. What makes that safe
 	// is that every field read here is either immutable (the two arrays) or not written after the
 	// source's own open (the vectors and strings) -- so this is a concurrent read of settled state,
-	// plus two atomic increments. The `busy` check below is a net for the case that assumption is
-	// wrong, not the thing that makes it right; it cannot be airtight, because a reader could
-	// become busy the instant after it is tested.
+	// plus two atomic increments. The `guard_owner` check below is a net for the case that
+	// assumption is wrong, not the thing that makes it right; it cannot be airtight, because a
+	// reader could become busy the instant after it is tested.
 	//
 	// Refuses rather than silently producing a reader whose mask describes a different file: the
 	// two must agree on row-group count and total row count, the destination must be untouched (a
@@ -6434,7 +6530,7 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto *src = static_cast<ParquetReaderHandle *>(source);
 
-		if (src->busy.load())
+		if (src->guard_owner.load(std::memory_order_acquire) != 0)
 		{
 			std::snprintf(err_out, static_cast<size_t>(err_cap),
 				"the source reader is in use by another thread; its transform can only be adopted while it is idle");
@@ -7247,7 +7343,8 @@ extern "C"
 		// itself uses, rather than that exported function directly -- going
 		// through the exported function would re-enter as_reader_handle on
 		// the same handle while this call's own guard is still held, which
-		// the (deliberately non-reentrant) ConcurrencyGuard always rejects.
+		// ConcurrencyGuard now admits (the owner may re-enter) but only after
+		// a second, pointless atomic claim/release pair.
 		auto array = get_single_chunk_array(reader_handle, name);
 		auto asize = get_col_size(array);
 		return nrows * asize;
@@ -11013,6 +11110,7 @@ extern "C"
 	{
 		return g_debug_row_groups_pruned;
 	}
+
 
 	// Test-only: overrides g_debug_force_sample_mask_error (see its own comment, next to
 	// parquet_reader_set_sample) so test/error_scenarios.f90 can exercise parquet_reader_set_sample's

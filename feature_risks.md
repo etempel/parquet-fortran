@@ -129,6 +129,7 @@ something a reader is expected to have.
 | [Risk-62](#risk-62--a-validity-run-copied-byte-wise-silently-mis-places-nulls-when-its-alignment-precondition-is-wrong) | A validity run copied byte-wise silently mis-places nulls when its alignment precondition is wrong | 4 — covered |
 | [Risk-63](#risk-63--replacing-an-in-place-compactions-byte-loop-with-an-array-section-costs-a-heap-temporary-per-element) | Replacing an in-place compaction's byte loop with an array section costs a heap temporary per element | 3 — not testable |
 | [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null) | Two threads pasting adjacent row groups share a validity bitmap block and lose a null | 4 — covered |
+| [Risk-65](#risk-65--a-guard-claimed-after-the-state-it-protects-is-a-guard-that-loses-the-race) | A guard claimed after the state it protects is a guard that loses the race | 4 — covered |
 
 ---
 
@@ -136,7 +137,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-65**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-66**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2593,3 +2594,62 @@ caught by these two tests and by nothing else in the suite.
 that reaches it; do not drop the mask; and do not replace the phase sweep in either test with a single
 aligned case because "the loop is the same either way" — the fallback path is where two of the three
 defects hide.
+
+### Risk-65 — A guard claimed after the state it protects is a guard that loses the race
+
+`ConcurrencyGuard` (`src/parquet_wrapper.cpp`) is the library's only defence against a caller sharing
+one `parquet_reader`/`parquet_writer` across threads, and README's Thread safety section promises a
+clean diagnostic abort when that happens. **The promise depends entirely on WHERE the claim is
+taken**, and for a long time the writer took it in the wrong place.
+
+The guard can only be claimed once a call reaches C++. On the read path that is effectively the door
+— `parquet_read_column`'s second statement is `check_column_exists`, a guarded C++ call, and nothing
+on the Fortran side mutates a reader. On the write path it was the **last** statement: everything
+before it is Fortran mutating shared writer state, above all `parquet_check_and_mark_written_name`
+(`src/parquet_write.f90`) growing `writer%written_names` with allocate/copy/`move_alloc` on every
+single call. Two threads therefore raced on a Fortran allocatable — one freeing the array while the
+others walked it with `trim()` — and corrupted the heap before either reached the guard.
+
+The failure was quiet in the way this register exists to record: the process still aborted, so the
+error scenario asserting an abort still passed most of the time. Measured on a 384-core machine
+before the fix, **every** run of `concurrent_calls_into_shared_writer` segfaulted, the exit status
+varied across 134/139/174 run to run, and the promised message reached stderr only sometimes —
+occasionally accompanied by Arrow's own `cannot create default memory pool`, because the corruption
+had reached the allocator. The crash never named the writer.
+
+Four properties now keep it correct, and each is one edit from being lost:
+
+- **The claim is taken at the FIRST statement of every write entry point**, right after
+  `check_writer_open`, not at the first mutation and not at the C++ call. "First mutation" is not
+  good enough: it is a moving target that a future edit silently invalidates by adding a mutation
+  above it.
+- **The release is a FINAL, not a paired call.** Those 38 entry points contain 64 early `RETURN`s;
+  Fortran finalizes a nonpointer, nonallocatable local immediately before a `RETURN` or `END`
+  (F2018 7.5.6.3), which is what makes the release automatic on every one of them. Verified on
+  gfortran 15 and ifx 2026.1, including a return out of a loop. Converting `writer_lock` to explicit
+  enter/leave calls reintroduces 64 chances to leak a claim.
+- **`writer_lock` must stay free of allocatable components.** A finalizable type that has any is the
+  shape ifx miscompiles when it is block-local inside an OpenMP parallel region (CLAUDE.md's
+  "Compiler & language gotchas"), and these locks sit in exactly the procedures a misusing caller
+  invokes from inside one.
+- **The guard is owner-keyed, so a leaked claim does NOT fail loudly.** The owning thread may
+  re-enter, so a missed release leaves everything single-threaded passing; only a later, legitimate
+  hand-off to another thread aborts, in unrelated code, blaming a concurrency bug that never
+  happened. This is why the test below is a hand-off rather than an assertion about a single thread.
+  The same property is what allows the library's own nested C++ calls under a Fortran-held claim; the
+  per-thread token behind it (`g_next_thread_token`) must stay a single process-wide instance, which
+  is why CLAUDE.md's translation-unit-split section now names it alongside the `g_debug_*` family.
+
+**Test.** Covered. `writer_guard_sequential_handoff` (`test/error_scenarios.f90`, wrapped by
+`a sequential hand-off of one writer between threads succeeds` in `test/test_errors.f90`) hands one
+writer from thread 0 to thread 1 across an `!$omp barrier` and requires **exit 0**. Thread 0 first
+takes an early-return path (a schema column that is not `is_set`) while holding the claim, so the
+early-return release is what the test actually exercises. Deleting the `parquet_writer_leave` call
+from `writer_lock_release` makes it abort with the guard's own message — confirmed, and nothing else
+in the suite notices.
+
+**What this forbids.** Do not move the claim later "because the early part only reads"; do not
+replace the FINAL with explicit calls; do not add an allocatable component to `writer_lock`; and do
+not read a green `concurrent_calls_into_shared_*` run as evidence that this area is healthy — that
+scenario passed throughout the entire period the bug existed. Its negative control is the test that
+has teeth, exactly as Risk-6 records for the table layer's own guards.

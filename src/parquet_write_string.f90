@@ -192,7 +192,9 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
         character(len=:), allocatable :: values_c(:)
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -286,7 +288,9 @@ contains
         type(c_ptr) :: valid_ptr
         logical, allocatable :: row_mask(:), elem_mask(:)
         character(len=:), allocatable :: values_c(:,:)
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
         nrows = size(values, 2, kind=int64)
@@ -368,7 +372,9 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         logical, allocatable :: row_mask(:)
         type(parquet_string_column) :: values_c
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -435,7 +441,9 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
         character(len=:), allocatable :: values_c(:)
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
@@ -529,7 +537,9 @@ contains
         type(c_ptr) :: valid_ptr
         logical, allocatable :: row_mask(:), elem_mask(:)
         character(len=:), allocatable :: values_c(:,:)
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
 
         asize = size(values, 1, kind=int64)
         nrows = size(values, 2, kind=int64)
@@ -609,7 +619,9 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         logical, allocatable :: row_mask(:)
         type(parquet_string_column) :: values_c
+        type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
+        call lk%claim(writer)
 
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)

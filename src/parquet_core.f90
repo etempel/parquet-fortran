@@ -407,6 +407,45 @@ module parquet_core
         final :: writer_finalize !! Safety-net close if the writer is still open when it goes out of scope.
     end type parquet_writer
 
+    !> Scope-bound claim on one `parquet_writer`'s concurrency guard, held for a whole write entry
+    !> point rather than only for the C++ call at the end of it.
+    !>
+    !> **Why this exists.** The guard lives in `parquet_wrapper.cpp` and used to be claimed only
+    !> once a call crossed the `bind(C)` boundary -- which, on the write path, is the *last*
+    !> statement of the entry point. Everything before it is Fortran mutating shared writer state,
+    !> above all `parquet_check_and_mark_written_name` growing `writer%written_names` with
+    !> allocate/copy/move_alloc. Two threads sharing one writer therefore corrupted the heap before
+    !> either reached the guard, so the abort the README promises lost a race to a segfault. The
+    !> read path never had the problem: its first act is already a guarded C++ call.
+    !>
+    !> **Why a FINAL rather than paired enter/leave calls.** These entry points have 64 early
+    !> `return`s between them, and a missed release would silently weaken the guard rather than
+    !> fail loudly. Fortran finalizes a nonpointer, nonallocatable local immediately before a
+    !> `RETURN` or `END` (F2018 7.5.6.3), so declaring one of these as an ordinary local makes the
+    !> release automatic on every path -- verified on both gfortran 15 and ifx 2026.1, including a
+    !> return out of a loop. Using it costs two lines in an entry point and nothing at the exits:
+    !>
+    !> ```fortran
+    !> type(writer_lock) :: lk   ! among the other local declarations
+    !> call check_writer_open(writer)
+    !> call lk%claim(writer)     ! released automatically, however this procedure exits
+    !> ```
+    !>
+    !> **It deliberately has no allocatable components.** A finalizable type that has any is the
+    !> shape ifx miscompiles when it is declared block-local inside an OpenMP parallel region (see
+    !> CLAUDE.md's "Compiler & language gotchas"), and these locks sit in exactly the procedures a
+    !> misusing caller invokes from inside one. One `type(c_ptr)` keeps it exempt; keep it that way.
+    type writer_lock
+        private
+        !> Handle whose guard this lock currently holds, or `c_null_ptr` when it holds none --
+        !> which is both the initial state and what `%claim` leaves behind for an unopened writer,
+        !> so the finalizer can run unconditionally without tracking a separate flag.
+        type(c_ptr) :: handle = c_null_ptr
+    contains
+        procedure :: claim => writer_lock_claim !! Claims `writer`'s guard for this thread until this lock dies.
+        final :: writer_lock_release !! Releases the held guard, on every exit path including an early RETURN.
+    end type writer_lock
+
     !> Opaque handle for an open parquet file being read; see parquet_writer's
     !> doc comment above for the shared handle-ownership/no-copy rules.
     type parquet_reader
@@ -1889,6 +1928,27 @@ module parquet_core
         module subroutine metadata_clear_metadata(this)
             class(parquet_table_metadata), intent(inout) :: this !! table metadata being truncated.
         end subroutine metadata_clear_metadata
+    end interface
+
+    ! ---- Writer concurrency guard (see the writer_lock type) ----
+    interface
+        !> Claims `writer`'s concurrency guard for the calling thread, aborting with the diagnostic
+        !> in parquet_wrapper.cpp's ConcurrencyGuard if another thread already holds it. The claim
+        !> lasts until `self` is finalized, which Fortran does on every exit path from the
+        !> procedure `self` is a local of. Claiming an unopened writer is a no-op, so a caller does
+        !> not need to order this against its own check_writer_open (though every caller does that
+        !> check first anyway, for the better message).
+        module subroutine writer_lock_claim(self, writer)
+            class(writer_lock), intent(inout) :: self !! lock that will hold the guard until it dies.
+            type(parquet_writer), intent(in) :: writer !! writer whose guard is being claimed.
+        end subroutine writer_lock_claim
+        !> Releases the guard `self` holds, if any. Runs implicitly at every exit from the
+        !> procedure holding the lock, so it must never validate anything or abort -- the same rule
+        !> writer_finalize follows, and for the same reason (see CLAUDE.md's "Implicit finalizers
+        !> must never route through a path that can throw/abort").
+        module subroutine writer_lock_release(self)
+            type(writer_lock), intent(inout) :: self !! lock being finalized.
+        end subroutine writer_lock_release
     end interface
 
     ! ---- Writer lifecycle & column management ----

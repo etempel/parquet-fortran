@@ -3819,30 +3819,38 @@ def stat_impl(k):
         character(len=:), allocatable, intent(out) :: max_s    !! largest value, or "-".
         type(parquet_string_column), pointer :: store
         character(len=:), allocatable :: sv
-        integer(int64) :: i, n
-        logical :: first
+        integer(int64) :: i, n, imin, imax
         !
         min_s = "-"
         max_s = "-"
-        first = .true.
         call values%string_column(store)
         n = {n_elems}
+        imin = 0_int64
+        imax = 0_int64
         do i = 1_int64, n
             if (store%is_null(i)) cycle
-            call store%get(i, sv)
-            ! Trimmed for display only: a vector string column stores its values blank-padded to
-            ! the widest element, and printing that padding says nothing. Fortran's own comparison
-            ! blank-pads the shorter operand anyway, so trimming cannot change which value wins.
-            sv = trim(sv)
-            if (first) then
-                min_s = sv
-                max_s = sv
-                first = .false.
+            if (imin == 0_int64) then
+                imin = i
+                imax = i
             else
-                if (sv < min_s) min_s = sv
-                if (max_s < sv) max_s = sv
+                ! Compared by INDEX, never by value. `%compare` orders two elements without
+                ! materializing either, where `%get` allocates a deferred-length string per row --
+                ! about 0.11 s per 4 M elements, for a scan that only ever keeps two of them
+                ! (feature_risks.md Risk-60). Its ordering is Fortran's own `<`, blanks and all,
+                ! so this picks exactly the winners the previous value comparison did.
+                if (store%compare(i, imin) < 0) imin = i
+                if (store%compare(i, imax) > 0) imax = i
             end if
         end do
+        if (imin == 0_int64) return
+        ! Only the two winners are materialized. Trimmed for display only: a vector string column
+        ! stores its values blank-padded to the widest element, and printing that padding says
+        ! nothing. Fortran's own comparison blank-pads the shorter operand anyway, so trimming
+        ! cannot change which value won.
+        call store%get(imin, sv)
+        min_s = trim(sv)
+        call store%get(imax, sv)
+        max_s = trim(sv)
     end subroutine stat_{tag}
 """
 

@@ -2406,8 +2406,16 @@ depth ≥ 1 — rather than by a list of procedure names, so it cannot go blind 
 added. Confirmed to fire: reverting `%to_character` to the allocating form fails the lint stage with
 the right line, and restoring it clears.
 
-**The check is scoped to `src/parquet_strings.f90`, and that scope is a KNOWN GAP, not a judgement
-that the rest is clean.** S3's audit swept all of `src/*.f90` and found the shape alive in four
+**The check now covers all of `src/` as a RATCHET**, with a per-file count of the instances still to
+be converted: a file gaining one fails, and a count left too high after a fix fails too, so the list
+can only shrink and cannot go stale silently. **That widening revealed the S3 audit had undercounted
+badly — 17 instances, not 4.** The audit's regex required the destination to be the call's last
+argument, and the dominant real shape is `call store%get(i, s, allow_null=.true.)`, where it is not.
+Four are now fixed (the two sort-key extractors, `stat_str`, `stat_strv`); thirteen remain and are
+recorded in `KNOWN_REMAINING`. **The lesson is the general one: a hand-written audit regex is itself
+untested, and the only reason this was caught is that the check was widened rather than trusted.**
+
+**What the earlier, narrower scope was, and why it is worth remembering.** S3's audit swept all of `src/*.f90` and found the shape alive in four
 places in the module's *consumers*, on hotter paths than anything left inside it:
 `extract_col_string` and `extract_strcol` (`src/parquet_sorting_keys.f90`, **generated** — the fix is
 a `tools/generate_parquet_sorting.py` template edit), `stat_str`/`stat_strv`

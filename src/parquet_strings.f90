@@ -216,6 +216,7 @@ module parquet_strings
         procedure, private :: equals_i32               !! int32 specific of equals.
         procedure, private :: equals_i64               !! int64 specific of equals.
         generic :: equals => equals_i32, equals_i64    !! Whether element i equals str.
+        procedure :: compare                           !! Orders element i against element j.
         ! --- conversion / ownership ---
         procedure :: to_character                      !! Materialize the whole column as a char array.
         procedure :: clone                             !! Independent deep copy.
@@ -230,6 +231,7 @@ module parquet_strings
         procedure :: statistics                        !! Detailed metrics (optional out-args).
         ! --- interop hooks (advanced; for the Parquet read/write integration layer) ---
         procedure :: raw_buffers                       !! Export c_loc pointers to the internal buffers.
+        procedure :: copy_buffers                      !! Copy the offsets and packed payload into caller arrays.
         procedure :: append_buffers                    !! Bulk-append one row group from C buffers.
         ! --- finalization ---
         final :: finalize_column                       !! Deallocate all owned buffers.
@@ -2021,7 +2023,75 @@ contains
     ! Conversion / ownership
     ! ==================================================================================
     !
-    !> Materializes the whole column into a conventional Fortran character array `out`, each
+!> Orders element `i` against element `j`: -1 when i sorts first, +1 when j does, 0 when equal.
+    !!
+    !! **Exactly Fortran's own `<` on the two values**, blanks and all: the shorter element is
+    !! compared as though padded with blanks, so `"ab"` and `"ab  "` are equal and `"ab"` sorts before
+    !! `"abc"`. That is deliberate rather than incidental — it means a caller can replace
+    !! `call c%get(i, a); call c%get(j, b); if (a < b) ...` with this and get the same answer.
+    !!
+    !! **Why this exists: so that a min/max scan need not materialize every element.** Finding the
+    !! smallest and largest value by fetching each one through `%get` costs a heap allocation per row
+    !! — roughly 0.11 s per 4 M elements — where tracking the two winning *indices* through this and
+    !! fetching only those two at the end costs none. See `feature_risks.md` Risk-60.
+    !!
+    !! **Null elements are not special-cased.** A null is zero-width, so it compares as an empty
+    !! string and sorts first; a caller that needs nulls ordered differently must test `%is_null`
+    !! itself, exactly as it would around `%get`.
+    integer function compare(self, i, j) result(res)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(in) :: i                  !! 1-based index of the first element.
+        integer(int64), intent(in) :: j                  !! 1-based index of the second element.
+        integer(int64) :: ai, bi, aj, bj, li, lj, k, common
+        character(len=1) :: ci, cj
+        call check_index(self, i, "compare")
+        call check_index(self, j, "compare")
+        call elem_bounds(self, i, ai, bi)
+        call elem_bounds(self, j, aj, bj)
+        li = bi - ai + 1_int64
+        lj = bj - aj + 1_int64
+        common = min(li, lj)
+        res = 0
+        do k = 1_int64, common
+            ci = self%data(ai + k - 1_int64)
+            cj = self%data(aj + k - 1_int64)
+            if (ci /= cj) then
+                if (ci < cj) then
+                    res = -1
+                else
+                    res = 1
+                end if
+                return
+            end if
+        end do
+        ! Equal over the common prefix: the longer element's remaining bytes are compared against
+        ! blanks, which is what Fortran's own padding rule does.
+        if (li > lj) then
+            do k = common + 1_int64, li
+                if (self%data(ai + k - 1_int64) /= " ") then
+                    if (self%data(ai + k - 1_int64) < " ") then
+                        res = -1
+                    else
+                        res = 1
+                    end if
+                    return
+                end if
+            end do
+        else if (lj > li) then
+            do k = common + 1_int64, lj
+                if (self%data(aj + k - 1_int64) /= " ") then
+                    if (" " < self%data(aj + k - 1_int64)) then
+                        res = -1
+                    else
+                        res = 1
+                    end if
+                    return
+                end if
+            end do
+        end if
+    end function compare
+    !
+        !> Materializes the whole column into a conventional Fortran character array `out`, each
     !! element blank-padded to the longest element's length. A null element error stops by default;
     !! pass `null_value` to substitute a string for nulls.
     !!
@@ -2259,7 +2329,46 @@ contains
     ! Interop hooks (advanced; consumed by the Parquet read/write integration layer)
     ! ==================================================================================
     !
-    !> Exports c_loc pointers to the internal offsets/data/validity buffers plus counts, for the
+!> Copies this column's offsets and packed payload into caller-provided arrays.
+    !!
+    !! The **safe, allocation-free counterpart to `raw_buffers`**: same two buffers, copied rather
+    !! than pointed at. Use this when the destination has to own its bytes anyway — `raw_buffers`
+    !! hands back `c_loc` pointers whose validity depends on the *actual* argument carrying the
+    !! `TARGET` attribute all the way up the call chain, which is a precondition a caller several
+    !! frames away cannot check.
+    !!
+    !! **This exists so that bulk consumers never walk the column element by element.** Materializing
+    !! each element through `%get` costs one heap allocation, one fill, one copy and one free per row;
+    !! at 4 M elements that measured as roughly 0.11 s per allocation, and as 19-33 % of an entire
+    !! string sort in the consumer this was added for. The layout handed back is exactly the layout a
+    !! packed consumer wants, so the copy is two `memcpy`s rather than a loop.
+    !!
+    !! `offsets` must hold at least `size()+1` entries and `data` at least `character_size()` bytes;
+    !! both abort otherwise rather than truncating. Only those leading portions are written.
+    !!
+    !! **A null element is zero-width here, exactly as it is in the column** — `set_null` compacts the
+    !! payload — so a consumer that ignores validity gets an empty string for a null, which is what
+    !! `%get(..., allow_null=.true.)` would have given it.
+    subroutine copy_buffers(self, offsets, data)
+        class(parquet_string_column), intent(in) :: self !! the column.
+        integer(int64), intent(out) :: offsets(:)        !! receives size()+1 offsets; offsets(1) = 0.
+        character(len=1), intent(out) :: data(:)         !! receives character_size() payload bytes.
+        if (size(offsets, kind=int64) < self%nrows + 1_int64) then
+            error stop EP//"copy_buffers: the offsets array is shorter than size()+1"
+        end if
+        if (size(data, kind=int64) < self%nchars) then
+            error stop EP//"copy_buffers: the data array is shorter than character_size()"
+        end if
+        if (self%nrows >= 0_int64 .and. allocated(self%offsets)) then
+            offsets(1:self%nrows+1_int64) = self%offsets(1:self%nrows+1_int64)
+        else
+            ! An empty column may never have allocated its offsets at all.
+            if (size(offsets, kind=int64) >= 1_int64) offsets(1) = 0_int64
+        end if
+        if (self%nchars > 0_int64) data(1:self%nchars) = self%data(1:self%nchars)
+    end subroutine copy_buffers
+    !
+        !> Exports c_loc pointers to the internal offsets/data/validity buffers plus counts, for the
     !! Parquet writer to consume without materializing strings. The returned pointers are valid
     !! only until the next mutation of the column. `validity_ptr` is C_NULL_PTR when the column has
     !! no nulls; `data_ptr` is C_NULL_PTR when the payload is empty.

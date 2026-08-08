@@ -207,41 +207,11 @@ contains
     end procedure extract_ts
     !
     module procedure extract_strcol
-        integer(int64) :: k, n, total, pos, j, ln
-        character(len=:), allocatable :: s
-        logical :: any_null
+        integer(int64) :: n
         !
         n = values%size()
-        allocate(buf(1))
-        buf(1)%family = SK_STR
-        buf(1)%descending = descending
-        buf(1)%nulls_first = nulls_first
-        allocate(buf(1)%offsets(n + 1_int64))
-        buf(1)%offsets(1) = 0_int64
-        total = 0_int64
-        do k = 1_int64, n
-            total = total + values%length(k)
-            buf(1)%offsets(k + 1_int64) = total
-        end do
-        allocate(buf(1)%data(max(total, 1_int64)))
-        pos = 0_int64
-        any_null = .false.
-        do k = 1_int64, n
-            if (values%is_null(k)) any_null = .true.
-            call values%get(k, s, allow_null=.true.)
-            ln = int(len(s), int64)
-            do j = 1_int64, ln
-                buf(1)%data(pos + j) = s(j:j)
-            end do
-            pos = pos + ln
-        end do
-        if (any_null) then
-            allocate(buf(1)%valid(max(n, 1_int64)))
-            buf(1)%valid = 1_c_int8_t
-            do k = 1_int64, n
-                if (values%is_null(k)) buf(1)%valid(k) = 0_c_int8_t
-            end do
-        end if
+        call pack_string_store(values, n, descending, nulls_first, buf)
+        call string_store_valid_flags(values, n, buf)
     end procedure extract_strcol
     !
     module procedure extract_col
@@ -346,37 +316,79 @@ contains
     !> Packs a string column into the (offsets, data) pair the engine takes: row k occupies
     !! `data(offsets(k)+1 : offsets(k+1))`, with `offsets` 0-based because the C++ side indexes
     !! with it directly.
+    !!
+    !! Only ever reached for `PK_STRING` (the dispatch above checks the kind), and that kind stores a
+    !! `parquet_string_column` -- so this hands the whole job to `pack_string_store`, which is the
+    !! same worker the `parquet_string_column` entry point uses. Two entry points, one body: a sort
+    !! key must not depend on which of the two types the caller happened to hold.
     subroutine extract_col_string(col, n, descending, nulls_first, buf)
         type(parquet_column), intent(in) :: col                    !! the key column.
         integer(int64), intent(in) :: n                            !! row count.
         logical, intent(in) :: descending                          !! .true. sorts high to low.
         logical, intent(in) :: nulls_first                         !! .true. places nulls first.
         type(sort_key_buf), allocatable, intent(out) :: buf(:)     !! receives one key.
-        character(len=:), allocatable :: s
-        integer(int64) :: k, total, pos, j
+        type(parquet_string_column), pointer :: store
+        !
+        call col%string_column(store)
+        call pack_string_store(store, n, descending, nulls_first, buf)
+    end subroutine extract_col_string
+    !
+    !> Shared body behind both string-key entry points: packs `store` into `buf(1)`.
+    !!
+    !! **Two bulk copies, not a loop.** A `parquet_string_column` already holds exactly the layout a
+    !! sort key wants -- int64 offsets with `offsets(1) = 0`, and one packed payload -- so
+    !! `%copy_buffers` moves both in two `memcpy`s. The obvious implementation instead walks the
+    !! column calling `%get` per element, which allocates a deferred-length string, fills it, copies
+    !! it out and frees it, **once per row**; that measured at roughly 0.11 s per allocation per 4 M
+    !! elements, i.e. 19 % of a `parquet_string_column` sort and 33 % of a `parquet_column` one,
+    !! because the latter paid it twice. Do not reintroduce a per-element `%get` here; see
+    !! `feature_risks.md` Risk-60.
+    !!
+    !! **A null is zero-width in both layouts** (`set_null` compacts the payload), so the copy needs
+    !! no null special-casing -- a null row simply occupies an empty range, which is what the old
+    !! `%get(..., allow_null=.true.)` produced for it. Validity is carried separately, below.
+    subroutine pack_string_store(store, n, descending, nulls_first, buf)
+        type(parquet_string_column), intent(in) :: store           !! the packed string storage.
+        integer(int64), intent(in) :: n                            !! row count.
+        logical, intent(in) :: descending                          !! .true. sorts high to low.
+        logical, intent(in) :: nulls_first                         !! .true. places nulls first.
+        type(sort_key_buf), allocatable, intent(out) :: buf(:)     !! receives one key.
+        integer(int64) :: total
         !
         allocate(buf(1))
         buf(1)%family = SK_STR
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
+        total = store%character_size()
         allocate(buf(1)%offsets(n + 1_int64))
-        buf(1)%offsets(1) = 0_int64
-        total = 0_int64
-        do k = 1_int64, n
-            call col%get_at(k, s)
-            total = total + int(len(s), int64)
-            buf(1)%offsets(k + 1_int64) = total
-        end do
         allocate(buf(1)%data(max(total, 1_int64)))
-        pos = 0_int64
+        call store%copy_buffers(buf(1)%offsets, buf(1)%data)
+    end subroutine pack_string_store
+    !
+    !> Fills `buf(1)%valid` from a string store's nulls, if it has any.
+    !!
+    !! **Separate from `pack_string_store` on purpose.** The `parquet_column` entry point already
+    !! runs `col_valid_flags` after its extractor, so a packer that also filled `valid` would
+    !! allocate it twice and abort -- which is exactly what happened when the two string entry points
+    !! were first merged. Only the `parquet_string_column` entry point, which has no such follow-up,
+    !! calls this.
+    !!
+    !! A bit walk rather than a copy, because the engine takes one int8 per row where the column
+    !! packs eight rows per byte. `%null_count()` answers in O(1), so a null-free column skips the
+    !! array entirely -- and an unallocated `valid` is what tells the engine there are none.
+    subroutine string_store_valid_flags(store, n, buf)
+        type(parquet_string_column), intent(in) :: store !! the packed string storage.
+        integer(int64), intent(in) :: n                  !! row count.
+        type(sort_key_buf), intent(inout) :: buf(:)      !! the key to attach validity to.
+        integer(int64) :: k
+        !
+        if (store%null_count() <= 0_int64) return
+        allocate(buf(1)%valid(max(n, 1_int64)))
+        buf(1)%valid = 1_c_int8_t
         do k = 1_int64, n
-            call col%get_at(k, s)
-            do j = 1_int64, int(len(s), int64)
-                buf(1)%data(pos + j) = s(j:j)
-            end do
-            pos = pos + int(len(s), int64)
+            if (store%is_null(k)) buf(1)%valid(k) = 0_c_int8_t
         end do
-    end subroutine extract_col_string
+    end subroutine string_store_valid_flags
     !
     !> Splits a timestamp column into its (seconds, nanoseconds) pair of integer keys -- see
     !! `extract_ts` for why a timestamp becomes two keys rather than one.

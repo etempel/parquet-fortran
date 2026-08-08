@@ -1369,13 +1369,22 @@ unparsed from-scratch schema this guard exists to catch.
 
 ### The `parquet_strings` module
 
-`src/parquet_strings.f90` is an independent module (`use parquet_strings`; depends on
-`iso_fortran_env`/`iso_c_binding`, plus `parquet_settings` for one thing only — its two `print`
-procedures ask `parquet_output_is_suppressed`, because `verbosity="silent"` governs solicited output
-wherever it lives) providing `parquet_string_column` (Arrow-LargeUtf8-style
+`src/parquet_strings.f90` is a **near**-independent module (`use parquet_strings`) providing
+`parquet_string_column` (Arrow-LargeUtf8-style
 offsets+data+bit-packed-validity string storage) and `parquet_string` (a non-owning handle to
 one element). User guide: `doc/pages/string-columns.md`.
 
+- **"Independent" is a direction, not a fact, and the exceptions are enumerated.** It depends on
+  `iso_fortran_env`/`iso_c_binding`, and on exactly two things beyond them: `parquet_settings` (for
+  `parquet_output_is_suppressed`, because `verbosity="silent"` governs solicited output wherever it
+  lives, and for `parquet_get_string_threads`, because a thread cap is a setting for the same reason
+  every other thread cap is), and `omp_lib` under `#ifdef _OPENMP`, since its bulk rebuilds thread
+  internally. **Adding a third dependency is a decision, not a detail** — the value of this module
+  being reachable without the Arrow/Parquet C++ stack is what the rule protects, and each of the two
+  exceptions above was argued before it was taken. Consequence worth knowing when working here:
+  because the module reaches no `bind(C)` surface at all, the C++-side debug-hook convention is
+  unavailable to it, which is why its test hooks are public Fortran procedures (see "A Fortran-side
+  debug hook has to be PUBLIC, so prefer a C++ one").
 - **The module is `parquet_strings` (plural) on purpose.** A module and a type cannot share a
   name in gfortran (`public :: parquet_string` binds to the module, and the type declaration
   then conflicts). The user-facing *type* is `parquet_string`, so the *module* had to differ —
@@ -2156,6 +2165,15 @@ before being noticed:**
   `%materialize_all`; time any `%get` on its own line; keep the keep-it-live checksum outside every
   timed region and take it through `%col`. The same caution applies to any future accessor whose
   cost scales with rows.
+- **A reference has to be allocation-free, or it is not a reference.** An existing library operation
+  pressed into service as a "memcpy floor" measures its own allocation and first-touch page faults,
+  not bandwidth: `%clone` labelled that way came out **27-30x** slower than a genuine warm-buffer
+  copy of the same payload, and varied **5.6x between runs at the same size** on a large NUMA
+  machine, where a cold destination is dominated by faulting. Allocate **and fully write** both
+  buffers before the timer starts. **The falsifiable tell is worth remembering, because two
+  independent reviewers used it to reject the number: if the thing being compared comes out FASTER
+  than the "floor", the floor is wrong.** Every ratio taken against it is then meaningless in an
+  unknown direction, which is worse than having no reference at all.
 
 **To measure the committed baseline against the working tree**, `git stash push -- src tools`, rebuild,
 measure, then `git stash pop` — this keeps `app/`, `test/` and the fixtures in place, so the benchmark
@@ -2424,6 +2442,25 @@ one place: the documentation and environment-coverage checks both take their kno
 `parquet_print_settings`' own printed rows, so a new knob fails both together instead of needing two
 separate lists updated.
 
+**The same blindness applies to a one-off AUDIT, where nothing reports `[ok]` and there is no second
+chance to notice.** A hand-written search pattern used to answer "how many places do this?" is itself
+untested, and its answer is quoted afterwards as though it were a count. A grep over `src/` for a
+per-element allocation reported **4 sites**; converting the same question into a lint check over the
+same scope found **17**. The audit's regex required the destination to be the call's last argument,
+and the dominant real shape puts it second-to-last — so it saw the four instances that happened to
+match the form the pattern was written from. **Before quoting a count, run the pattern against a
+known instance you did NOT use to write it**, and prefer turning the audit into the check rather than
+reporting a number and building the check later; the check is the thing that gets re-run.
+
+**When the count is too large to fix at once, ratchet it rather than allow-list it.** An exemption
+list says "these are fine"; a ratchet says "these are debt, and it may only shrink". Record a
+per-file count of the remaining instances and fail on **both** directions — a file gaining one, and a
+count left too high after someone fixes one. That keeps a new instance in a file nobody listed
+visible, makes the list self-correcting instead of stale, and turns the remaining work into something
+a reader can see the size of. `check_no_per_element_string_alloc`'s `KNOWN_REMAINING` is the worked
+example; verify a new ratchet fires in both directions before trusting it, because the
+count-left-too-high half is the one that never fires on its own.
+
 ### Measuring test coverage
 
 Run `tools/coverage.sh` for per-file and total `src/` line coverage plus the uncovered line
@@ -2629,12 +2666,22 @@ interface entirely. **A hook over state that lives on the Fortran side has no su
 `parquet_table_cache`'s components are private to `parquet_tables`, so anything forcing them must be
 a public procedure in that module, visible to every `use parquet`.
 
+There are two groups of them, both accepted deliberately rather than by default.
 `parquet_debug_table_set_inflight` (`parquet_tables_parallel.f90`, declared in
-`tools/generate_parquet_tables.py`'s template) is the one instance, and it was accepted deliberately
-rather than by default: it forces the append/read in-flight counters so that the two concurrency
-aborts can be provoked from **one thread**, deterministically. Without it those aborts need two
+`tools/generate_parquet_tables.py`'s template) is the first: it forces the append/read in-flight
+counters so that the two concurrency aborts can be provoked from **one thread**, deterministically. Without it those aborts need two
 threads to overlap on demand, and a timing-dependent test is worse than no test — it passes on a
 quiet machine, fails on a busy one, and gets disabled. See `feature_risks.md` Risk-6.
+
+**The second group is `parquet_strings`' four** (`parquet_debug_set_string_min_bytes`,
+`parquet_debug_set_string_max_auto_threads`, `parquet_debug_string_row_ranges`,
+`parquet_debug_string_bulk_threads`), and they are what shows the rule below is a *preference* rather
+than a possibility: that module reaches no `bind(C)` surface at all by design, so the C++ route is
+not available to it at any price short of ending its independence. **Two of the four exist because a
+threshold no test-sized fixture can reach is a threshold no test exercises** — a 256 KiB payload floor
+and a 64-thread ceiling both sit far above anything a unit test builds, so without an override every
+test would silently take the path the constant was written to avoid (`feature_risks.md` Risk-49).
+Expect a new tuning constant to need one.
 
 Rules for a future one:
 

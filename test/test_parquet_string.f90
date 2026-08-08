@@ -65,7 +65,9 @@ contains
             new_unittest("diagnostics: clear, memory_usage, print, validity growth", test_diagnostics_extra), &
             new_unittest("capacity edge cases (empty, shrink, validity shrink)", test_capacity_edges), &
             new_unittest("thread row ranges cover every row and never share a validity byte", &
-                test_thread_row_ranges) &
+                test_thread_row_ranges), &
+            new_unittest("compare orders elements exactly as Fortran does", &
+                test_compare_matches_fortran) &
             ]
     end subroutine collect_tests_parquet_string
     !
@@ -1420,4 +1422,65 @@ contains
         call check(error, lo(1) == 1_int64 .and. hi(1) == 37_int64, "one range spans the whole column")
     end subroutine test_thread_row_ranges
     !
+
+    !> `%compare(i, j)` must agree with Fortran's own `<` on the two values, for every pair.
+    !!
+    !! **`%get` is the independent oracle here**, and legitimately so: `%compare` reads the payload
+    !! bytes directly and shares no code with it, so agreement between the two is a real cross-check
+    !! rather than a tautology. That is the whole point of the procedure -- callers replace
+    !! `get(i, a); get(j, b); a < b` with it to avoid two allocations per comparison, so anything
+    !! less than exact agreement is a behaviour change.
+    !!
+    !! The fixture is built around the cases where byte comparison and Fortran comparison DIFFER, and
+    !! those are all about blanks: "ab" and "ab  " are equal to Fortran and unequal byte-wise, and
+    !! "ab" sorts before "abc" only because the shorter is padded. A zero-length element and a null
+    !! (also zero-width) are included for the same reason.
+    subroutine test_compare_matches_fortran(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=:), allocatable :: a, b
+        integer(int64) :: i, j, n
+        integer :: got, want
+        logical :: ok
+        !
+        call col%append_string("ab")        ! shortest-ish first, per the project rule
+        call col%append_string("ab  ")      ! equal to "ab" under Fortran padding
+        call col%append_string("abc")
+        call col%append_string("")          ! zero length
+        call col%append_string("aa")
+        call col%append_string("b")
+        call col%append_string("ab a")      ! a blank INSIDE, which trimming would not remove
+        call col%append_null()              ! zero-width, so it compares as ""
+        n = col%size()
+        !
+        ok = .true.
+        do i = 1_int64, n
+            do j = 1_int64, n
+                call col%get(i, a, allow_null=.true.)
+                call col%get(j, b, allow_null=.true.)
+                want = 0
+                if (a < b) want = -1
+                if (b < a) want = 1
+                got = col%compare(i, j)
+                if (got /= want) ok = .false.
+            end do
+        end do
+        call check(error, ok, "compare(i,j) agrees with Fortran's < over every ordered pair")
+        if (allocated(error)) return
+        !
+        ! The specific pairs the fixture exists for, asserted individually so a failure names itself.
+        call check(error, col%compare(1_int64, 2_int64) == 0, "ab and 'ab  ' compare EQUAL, as Fortran does")
+        if (allocated(error)) return
+        call check(error, col%compare(1_int64, 3_int64) < 0, "ab sorts before abc (the shorter is blank-padded)")
+        if (allocated(error)) return
+        call check(error, col%compare(4_int64, 1_int64) < 0, "a zero-length element sorts before a non-empty one")
+        if (allocated(error)) return
+        call check(error, col%compare(8_int64, 4_int64) == 0, "a null is zero-width, so it compares equal to empty")
+        if (allocated(error)) return
+        call check(error, col%compare(7_int64, 3_int64) < 0, "'ab a' sorts before abc -- an interior blank is a real byte")
+        if (allocated(error)) return
+        call check(error, col%compare(2_int64, 2_int64) == 0, "an element compares equal to itself")
+    end subroutine test_compare_matches_fortran
+    !
+
 end module test_parquet_string

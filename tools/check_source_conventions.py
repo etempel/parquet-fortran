@@ -727,51 +727,92 @@ def check_no_per_element_shared_ptr():
 
 
 def check_no_per_element_string_alloc():
-    """No bulk operation in parquet_strings.f90 may materialize elements through `%get`/`%to_string`.
+    """No bulk loop anywhere in src/ may materialize string elements through `%get`/`%to_string`.
 
     Those return a `character(len=:), allocatable`, so calling one per element turns an O(payload)
     byte copy into one heap allocation, one fill, one copy and one free **per row**. Measured on
-    4 M elements / 70 MB: `%to_character` 0.168 s -> 0.038 s (4.3x) and `%build_from` 0.305 s ->
-    0.033 s (9.3x) once each copied straight out of the payload instead. The allocator was 71 % of
-    `%to_character`.
+    4 M elements: `%to_character` 0.168 s -> 0.038 s (4.3x), `%build_from` 0.305 s -> 0.033 s (9.3x),
+    and the sort-key extraction 1.31x-1.58x once it stopped doing this. One allocation per element
+    costs roughly 0.11 s per 4 M elements, and on a large machine per-element overhead measured
+    ~1.8x worse still.
 
     **Nothing fails when this comes back.** Results stay byte-identical, the suite stays green, and
-    the allocating form reads as ordinary idiomatic Fortran -- only a benchmark notices. That is
-    what makes it a lint check rather than a comment, and it is the Fortran twin of
+    the allocating form reads as ordinary idiomatic Fortran -- only a benchmark notices. That is what
+    makes it a lint check rather than a comment, and it is the Fortran twin of
     `check_no_per_element_shared_ptr` above (feature_risks.md Risk-60).
 
-    Scoped to `src/parquet_strings.f90` deliberately. The same shape survives in that module's
-    CONSUMERS -- `extract_col_string`/`extract_strcol` (via tools/generate_parquet_sorting.py),
-    `stat_str`/`stat_strv`, `parquet_check_qc_string_compact` -- where it is worth roughly 0.11 s
-    per allocation per 4 M elements, about a fifth of a string sort. Widening this check to `src/`
-    has to wait until those are fixed, or it fails the lint stage on known work. See
-    feature_string_parallel.md S3.
+    The rule is about the LOOP, not about `%get`, which is exactly right for its own job of returning
+    one element. Alternatives that need no allocation: `elem_bounds` inside `parquet_strings` itself,
+    `%copy_buffers` for a bulk consumer that wants the packed layout, and `%compare(i, j)` for a scan
+    that only needs an ordering.
 
-    The rule is about the LOOP, not about `%get`, which is exactly right for its own job of
-    returning one element. The bytes are already contiguous in `data(:)` and `elem_bounds` gives
-    their range in one subtraction.
+    **This is a RATCHET, not a clean-slate rule.** `KNOWN_REMAINING` below records how many instances
+    each file still has. A file gaining one fails the check; a file whose count drops fails it too,
+    with a note to lower the number. So the list can only shrink, a new consumer anywhere in `src/`
+    is caught immediately, and nothing goes stale silently -- which a bare allowlist would
+    (CLAUDE.md, "A static check that enumerates names goes stale silently").
+
+    The remaining entries are work, not exemptions. Two shapes among them are worth knowing before
+    picking one up: a loop that only needs an ORDERING can use `%compare(i, j)`, and one that wants
+    the whole packed payload can use `%copy_buffers`. The one genuine hold-out is
+    `parquet_check_qc_string_compact` (`parquet_write_string.f90`), whose loop needs each element's
+    VALUE to pass to `parquet_qc_string_satisfies` against a declared bound -- removing that
+    allocation needs a second comparison primitive and surgery on a qc helper shared with the padded
+    string path, behind three early-return guards. See feature_string_parallel.md S10.
     """
-    path = SRC / "parquet_strings.f90"
-    if not path.exists():
-        return ["src/parquet_strings.f90: not found -- this check needs updating"]
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    # file -> instances still to be converted. Lower a number when you fix one; never raise one.
+    KNOWN_REMAINING = {
+        "parquet_tables_access.f90": 13,
+        "parquet_write_string.f90": 3,
+        "parquet_sorting_unique.f90": 1,
+        "parquet_columns_string.f90": 1,
+    }
+    problems = []
+    found = {}
     call_re = re.compile(r"call\s+\w+(?:%\w+)*%(get_i32|get_i64|get|to_string)\s*\(", re.I)
     do_re = re.compile(r"^\s*(?:\w+\s*:\s*)?do\b", re.I)
     enddo_re = re.compile(r"^\s*end\s*do\b", re.I)
-    problems = []
-    depth = 0
-    for n, line in enumerate(lines, 1):
-        code = line.split("!", 1)[0]
-        if do_re.match(code):
-            depth += 1
-        elif enddo_re.match(code):
-            depth = max(0, depth - 1)
-        elif depth > 0 and call_re.search(code):
+    proc_re = re.compile(
+        r"^\s*(?:pure\s+|elemental\s+|impure\s+|recursive\s+|module\s+)*"
+        r"(?:subroutine|function)\s+(\w+)", re.I)
+    endproc_re = re.compile(r"^\s*end\s+(?:subroutine|function)\b", re.I)
+    # Only files that actually handle parquet_string_column storage can trip this; scanning all of
+    # src/ is deliberate, so a NEW consumer in a file nobody thought of is caught too.
+    for path in sorted(SRC.glob("*.f90")):
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        depth = 0
+        proc = ""
+        for n, line in enumerate(lines, 1):
+            code = line.split("!", 1)[0]
+            m = proc_re.match(code)
+            if m:
+                proc = m.group(1)
+            elif endproc_re.match(code):
+                proc = ""
+            if do_re.match(code):
+                depth += 1
+            elif enddo_re.match(code):
+                depth = max(0, depth - 1)
+            elif depth > 0 and call_re.search(code):
+                found.setdefault(path.name, []).append((n, proc or "this loop"))
+    for name, hits in sorted(found.items()):
+        allowed = KNOWN_REMAINING.get(name, 0)
+        if len(hits) > allowed:
+            for n, proc in hits[allowed:]:
+                problems.append(
+                    "src/%s:%d: `%s` materializes a string element through `%%get`/`%%to_string` "
+                    "inside a loop, which allocates a deferred-length string per row -- use "
+                    "`%%copy_buffers` for a bulk copy, `%%compare` for an ordering scan, or "
+                    "`elem_bounds` inside parquet_strings (see feature_risks.md Risk-60)"
+                    % (name, n, proc)
+                )
+    for name, allowed in sorted(KNOWN_REMAINING.items()):
+        actual = len(found.get(name, []))
+        if actual < allowed:
             problems.append(
-                "src/parquet_strings.f90:%d: a bulk loop materializes an element through "
-                "`%%get`/`%%to_string`, which allocates a deferred-length string per row -- copy "
-                "the payload bytes directly instead (`elem_bounds` gives the range; measured 4.3x "
-                "on %%to_character and 9.3x on %%build_from; see feature_risks.md Risk-60)" % n
+                "src/%s: only %d per-element string allocation(s) remain but "
+                "check_no_per_element_string_alloc's KNOWN_REMAINING still says %d -- lower it, so "
+                "the ratchet cannot slip back" % (name, actual, allowed)
             )
     return problems
 

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sorting by a string column is 1.3-1.6x faster**, and `parquet_string_column` gains two
+  primitives that made it possible: **`%copy_buffers(offsets, data)`**, a safe copy-out counterpart
+  to `%raw_buffers` for a consumer that wants the packed layout, and **`%compare(i, j)`**, which
+  orders two elements without materializing either (Fortran's own `<` semantics, blanks and all).
+  The sort-key extraction was walking the column with `%get` per element — one heap allocation per
+  row, paid twice on the `parquet_column` path — where the column already holds exactly the layout
+  the sort engine wants. Measured on 4 M elements: a `parquet_string_column` sort 0.566 s to 0.433 s,
+  a `parquet_column` sort 0.676 s to 0.427 s. The two entry points now share one body, so they can no
+  longer disagree. `parquet_table%print_stat` on a string column benefits from `%compare` the same
+  way. No answer changes.
 - **`parquet_set_string_threads(n)` / `parquet_get_string_threads()`**, and
   `parquet_string_threads()` reporting what one `parquet_string_column` bulk operation would
   resolve to here. This is the **within-one-column** thread axis: `parquet_set_table_threads` splits

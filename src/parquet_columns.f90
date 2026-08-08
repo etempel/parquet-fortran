@@ -120,6 +120,14 @@ module parquet_columns
         private
         integer :: kind = PK_NONE                      !! active PK_* discriminator.
         integer(int64) :: nrows = 0                    !! number of rows stored.
+        !> Rows the active storage is ALLOCATED for; always >= nrows, 0 when nothing is allocated.
+        !!
+        !! Growth is geometric (1.5x, `ensure_capacity`), so appending row by row is amortised O(1)
+        !! instead of the O(n^2) an exact-fit realloc per append would cost. The slack is invisible
+        !! to every caller because every read of a storage array is bounded by `1:nrows` -- an
+        !! UNBOUNDED read would return uninitialised tail elements, which is the one silent failure
+        !! this component introduces (see feature_risks.md).
+        integer(int64) :: cap = 0
         integer(int32) :: width = 1                    !! values per row; > 1 only for *_VEC kinds.
         logical :: has_nulls = .false.                 !! .true. while the bitmap is materialized.
         logical :: nulls_dirty = .true.                !! temporal kinds: the null cache needs a rescan.
@@ -153,6 +161,7 @@ module parquet_columns
         ! --- queries ---
         procedure :: kindof                            !! The active PK_* discriminator.
         procedure :: length                            !! Number of rows stored.
+        procedure :: capacity                          !! Rows the storage is allocated for (>= length()).
         procedure :: colwidth                          !! Values per row (1 for scalar kinds).
         procedure :: validity_bytes                    !! Bytes the null bitmap occupies (0 when sparse).
         procedure :: has_validity_storage               !! Whether nulling would still have to allocate.
@@ -178,8 +187,15 @@ module parquet_columns
         generic :: clear_null => clear_null_row, clear_null_elem
         procedure :: set_validity                      !! Write a whole per-ELEMENT validity mask in one pass.
         procedure :: compact_validity                  !! Drop the bitmap when no nulls remain.
+        ! --- capacity ---
+        procedure, private :: reserve_i32              !! int32 specific of reserve.
+        procedure, private :: reserve_i64              !! int64 specific of reserve.
+        !> Grows the storage capacity to hold at least `n` rows without changing the row count.
+        generic :: reserve => reserve_i32, reserve_i64
+        procedure :: shrink_to_fit                     !! Release capacity beyond the rows stored.
         ! --- structural mutation ---
         procedure :: append                            !! Append another column of identical kind/width.
+        procedure :: append_row_of                     !! Append one row of another column (internal; see below).
         procedure :: append_nulls                      !! Append n all-null rows.
         procedure :: paste                             !! Overwrite an existing row range from another column.
         procedure :: delete_by_mask                    !! Keep only rows whose mask entry is .true.
@@ -380,11 +396,68 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             character(len=*), intent(in) :: u            !! the unit string ("" clears).
         end subroutine set_unit
+        !> int32 form of `reserve`; converts and delegates.
+        module subroutine reserve_i32(self, n)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int32), intent(in) :: n              !! rows to make room for.
+        end subroutine reserve_i32
+        !> Grows the storage capacity to hold at least `n` rows, without changing the row count or
+        !! any value. A no-op when the capacity is already sufficient.
+        !!
+        !! The point of it is that the `n - length()` appends that follow perform **no** allocation
+        !! at all, turning even the amortised geometric growth into a single up-front one. Pair it
+        !! with `%shrink_to_fit` (reserve, fill, shrink) when the final row count is known ahead of
+        !! time.
+        !!
+        !! **It does not allocate exactly `n`.** Capacity goes to `max(n, 1.5*capacity())`, the same
+        !! rule an append follows, so reserving slightly more than the column already holds does not
+        !! shrink the allocation -- `%shrink_to_fit` is what does that. This matches
+        !! `parquet_string_column%reserve`, which shares the same growth primitive.
+        !!
+        !! Invalidates any pointer previously obtained from `%data_ptr` if it actually reallocates.
+        module subroutine reserve_i64(self, n)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: n              !! rows to make room for.
+        end subroutine reserve_i64
+        !> Releases capacity beyond the rows actually stored, so the column occupies exactly what it
+        !! holds. A no-op when there is no slack.
+        !!
+        !! Slack only ever comes from an append: every rebuild (`reindex`, `gather`,
+        !! `delete_by_mask`) allocates exact-fit, and so does reading a column from a file. So on a
+        !! column that has not been appended to this does nothing at all.
+        !!
+        !! Invalidates any pointer previously obtained from `%data_ptr` if it actually reallocates.
+        !!
+        !! `released` reports whether it did. The caller cannot work that out for itself without
+        !! knowing which of the three storage mechanisms the kind uses -- a string column's spare
+        !! capacity lives in its embedded store's offsets AND its byte payload, neither of which is
+        !! `cap` -- so the answer is produced here, where the kind is known. `parquet_table%compact`
+        !! needs it to decide whether to advance `%generation()`.
+        module subroutine shrink_to_fit(self, released)
+            class(parquet_column), intent(inout) :: self  !! the column.
+            logical, intent(out), optional :: released    !! .true. if anything was reallocated.
+        end subroutine shrink_to_fit
         !> Appends every row of `other`, which must have identical kind and width.
         module subroutine append(self, other)
             class(parquet_column), intent(inout) :: self !! the destination column.
             type(parquet_column), intent(in) :: other    !! the source column (unchanged).
         end subroutine append
+        !> Appends row `irow` of `other` as this column's next row, carrying that row's validity.
+        !!
+        !! **INTERNAL plumbing, public only because Fortran offers no narrower visibility** --
+        !! `parquet_tables` is a different module and cannot reach `parquet_column`'s private
+        !! components, and `%append(row)` needs exactly this to append one row without building a
+        !! one-row column and a one-row table first. Same reasoning as `reindex_trusted`, and it is
+        !! likewise absent from README.md's API overview.
+        !!
+        !! Kind and width are checked on every call even though the table layer has already
+        !! validated them: two integer comparisons against a call that copies a whole row, on a
+        !! procedure a caller who validated nothing can still reach.
+        module subroutine append_row_of(self, other, irow)
+            class(parquet_column), intent(inout) :: self !! the destination column.
+            type(parquet_column), intent(in) :: other    !! the source column (unchanged).
+            integer(int64), intent(in) :: irow           !! 1-based row of `other` to append.
+        end subroutine append_row_of
         !> Appends `n` all-null rows (allocating the bitmap if this is the first null).
         module subroutine append_nulls(self, n)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1413,6 +1486,28 @@ module parquet_columns
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: idx(:)         !! source row index per destination row.
         end subroutine gather_storage
+        !> Ensures the active storage is allocated for at least `need_rows` rows, preserving the
+        !! rows already stored. A no-op when `cap` is already sufficient.
+        !!
+        !! **The ONLY place capacity ever grows**, which is what keeps one growth policy in the
+        !! library rather than one per caller: `grow_storage` and `reserve` are both two lines on
+        !! top of it. Growth is geometric at 1.5x (`max(need_rows, cap + cap/2)`), so appending row
+        !! by row is amortised O(1) rather than the O(n^2) an exact-fit realloc per append costs.
+        !! `cap + cap/2` rather than `(3*cap)/2` cannot overflow on a very large capacity, and is
+        !! the same integer form `parquet_strings`' own `ensure_offsets_cap` uses.
+        !!
+        !! Does NOT touch `nrows`, and does not resize the validity bitmap -- `grow_storage` calls
+        !! `ensure_bitmap` after updating `nrows`, and `ensure_bitmap` sizes itself from `cap`.
+        module subroutine ensure_capacity(self, need_rows)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: need_rows      !! rows the storage must hold.
+        end subroutine ensure_capacity
+        !> Reallocates the active storage down to exactly `nrows` rows, releasing any spare
+        !! capacity. A no-op when there is none, and on the string kinds (whose own store carries
+        !! its capacity). The counterpart of `ensure_capacity`, and the only place capacity shrinks.
+        module subroutine shrink_storage(self)
+            class(parquet_column), intent(inout) :: self !! the column.
+        end subroutine shrink_storage
         !> Grows the active storage by `n` rows, preserving existing values. New rows hold
         !! unspecified values for numeric kinds and null elements for temporal kinds.
         module subroutine grow_storage(self, n)
@@ -1581,6 +1676,27 @@ contains
         integer(int64) :: res                     !! the row count.
         res = self%nrows
     end function length
+    !
+    !> Rows the active storage is allocated for. Always >= `length()`; the difference is spare
+    !! capacity that `%append` can fill without reallocating, and that `%shrink_to_fit` releases.
+    !!
+    !! **Reported in ROWS for every kind**, which is what makes `capacity() >= length()` a
+    !! meaningful comparison whatever the column holds. The two string kinds forward to the
+    !! embedded `parquet_string_column`, whose own capacity counts ELEMENTS -- so it is divided by
+    !! the width to get rows, exactly as `length()` counts rows rather than the `nrows*width`
+    !! elements a vector string column stores (RF6). A column with no kind yet reports 0.
+    !!
+    !! **Not `pure`, unlike `length`**, only because the string store's own `%capacity` is not.
+    function capacity(self) result(res)
+        class(parquet_column), intent(in) :: self !! the column.
+        integer(int64) :: res                     !! rows the storage is allocated for.
+        if (is_string_kind(self%kind)) then
+            res = 0_int64
+            if (allocated(self%str)) res = self%str%capacity()/int(self%width, int64)
+        else
+            res = self%cap
+        end if
+    end function capacity
     !
     !> Bytes currently occupied by the null bitmap — **0 for a null-free column**, which is the
     !! whole point of the sparse representation (R2): nothing is allocated until the column

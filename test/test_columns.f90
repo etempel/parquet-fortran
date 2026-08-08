@@ -55,6 +55,15 @@ contains
             new_unittest("append_values grows every kind", test_append_values), &
             new_unittest("append concatenates two columns and their nulls", test_append_column), &
             new_unittest("append_nulls adds all-null rows", test_append_nulls), &
+            new_unittest("capacity starts exact-fit on init and adopt", test_capacity_starts_exact), &
+            new_unittest("row-at-a-time append grows capacity geometrically", test_capacity_growth_geometric), &
+            new_unittest("a rebuild resets capacity to exact fit", test_capacity_rebuild_exact), &
+            new_unittest("reserve removes the reallocations that follow it", test_reserve_prevents_realloc), &
+            new_unittest("shrink_to_fit releases slack and reports it", test_shrink_to_fit), &
+            new_unittest("capacity >= length holds through every operation", test_capacity_invariant), &
+            new_unittest("spare capacity is invisible to every reader", test_capacity_invisible), &
+            new_unittest("a null-carrying column stays geometric too", test_capacity_with_nulls), &
+            new_unittest("append_row_of copies one row and its validity", test_append_row_of), &
             new_unittest("paste overwrites a row range in place", test_paste_values), &
             new_unittest("paste replaces the pasted range's validity", test_paste_validity), &
             new_unittest("reindex permutes values and validity together", test_reindex), &
@@ -2232,5 +2241,327 @@ contains
         call c%get_at(2_int64, s)
         call check(error, s == "qq", "the formerly null element must hold its new value")
     end subroutine test_string_set_all_keeps_nulls
+    !
+    ! ==================================================================================
+    ! Capacity (A.1): geometric growth, reserve, shrink_to_fit
+    !
+    ! Capacity is deliberately invisible through the value API, so a round-trip test proves
+    ! nothing here -- it passes just as happily against a column that reallocates on every
+    ! append. Every test below asserts an EFFECT: how many distinct capacities a run visits, or
+    ! that a reserve really did remove the reallocations that would otherwise follow it.
+    ! ==================================================================================
+    !
+    !> Reading a column from a file must not over-allocate, and both routes into a sized column
+    !! (`init` at a row count, `adopt` of a caller's array) are what the read paths use.
+    subroutine test_capacity_starts_exact(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c, v
+        integer(int32), allocatable :: a(:)
+        !
+        call c%init(PK_INT32, 100_int64)
+        call check(error, c%capacity() == 100_int64, "init must allocate exactly nrows, not more")
+        if (allocated(error)) return
+        allocate(a(37))
+        a = 7_int32
+        call v%adopt(a)
+        ! The adopted allocation IS the capacity: leaving it at 0 would break cap >= nrows and
+        ! make the next append reallocate a column that already had room.
+        call check(error, v%capacity() == 37_int64, "adopt must take the array's size as the capacity")
+        if (allocated(error)) return
+        call check(error, v%capacity() == v%length(), "an adopted column must start exact-fit")
+    end subroutine test_capacity_starts_exact
+    !
+    !> The point of the whole change: appending one row at a time must visit only a handful of
+    !! distinct capacities, not one per row.
+    subroutine test_capacity_growth_geometric(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer(int64) :: k, seen, last
+        character(len=32) :: got
+        !
+        call c%init(PK_INT32, 0_int64)
+        seen = 0_int64
+        last = -1_int64
+        do k = 1_int64, 1000_int64
+            call c%append_values([int(k, int32)])
+            if (c%capacity() /= last) then
+                seen = seen + 1_int64
+                last = c%capacity()
+            end if
+        end do
+        call check(error, c%length() == 1000_int64, "every appended row must be present")
+        if (allocated(error)) return
+        ! 1.5x growth from empty reaches 1000 in about 20 steps; exact-fit would be 1000. The
+        ! bound is loose on purpose -- what is being asserted is the change of complexity, not a
+        ! particular growth factor.
+        write(got, "(I0)") seen
+        call check(error, seen <= 40_int64, &
+            "1000 single-row appends must reallocate O(log n) times, not once per row; saw " // trim(got))
+        if (allocated(error)) return
+        call check(error, c%capacity() >= c%length(), "capacity must still cover every row")
+    end subroutine test_capacity_growth_geometric
+    !
+    !> Only `grow_storage` creates slack. Every rebuild allocates exact-fit, which is what hands
+    !! the memory back after a filter or a sort without the caller asking -- and what makes
+    !! `%shrink_to_fit` a no-op on anything but an appended-to column.
+    subroutine test_capacity_rebuild_exact(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        logical :: keep(10)
+        integer(int64) :: k
+        !
+        call c%init(PK_INT32, 0_int64)
+        ! Ten rows, not six: growing from empty the capacity runs 1, 2, 3, 4, 6, 9, 13, because
+        ! `cap/2` is 0 until the capacity reaches 2. Six appends therefore land exactly on a
+        ! capacity of 6 with no slack at all, and the test would be asserting nothing.
+        do k = 1_int64, 10_int64
+            call c%append_values([int(k, int32)])
+        end do
+        call check(error, c%capacity() > c%length(), "the appends must have left some slack to release")
+        if (allocated(error)) return
+        keep = [.true., .false., .true., .false., .true., .false., .true., .false., .true., .false.]
+        call c%delete_by_mask(keep)
+        call check(error, c%capacity() == c%length(), "delete_by_mask must leave the column exact-fit")
+        if (allocated(error)) return
+        call c%reindex([3_int64, 1_int64, 2_int64, 5_int64, 4_int64])
+        call check(error, c%capacity() == c%length(), "reindex must leave the column exact-fit")
+        if (allocated(error)) return
+        call c%gather([1_int64, 2_int64])
+        call check(error, c%capacity() == c%length(), "gather must leave the column exact-fit")
+    end subroutine test_capacity_rebuild_exact
+    !
+    !> A `capacity() >= n` assertion would pass against a `%reserve` that does nothing, because
+    !! the capacity is often already large enough. What actually has to hold is that the appends
+    !! which follow perform NO reallocation at all -- so that is what this asserts.
+    subroutine test_reserve_prevents_realloc(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer(int64) :: k, before
+        !
+        call c%init(PK_INT32, 0_int64)
+        call c%reserve(500_int64)
+        call check(error, c%capacity() >= 500_int64, "reserve must make room for the rows asked for")
+        if (allocated(error)) return
+        call check(error, c%length() == 0_int64, "reserve must not change the row count")
+        if (allocated(error)) return
+        before = c%capacity()
+        do k = 1_int64, 500_int64
+            call c%append_values([int(k, int32)])
+        end do
+        call check(error, c%capacity() == before, &
+            "the appends a reserve made room for must not reallocate at all")
+        if (allocated(error)) return
+        call check(error, c%length() == 500_int64, "every reserved row must still be appendable")
+        if (allocated(error)) return
+        ! Reserving below what is already held changes nothing.
+        call c%reserve(10_int64)
+        call check(error, c%capacity() == before, "a reserve below the current capacity must be a no-op")
+    end subroutine test_reserve_prevents_realloc
+    !
+    !> `released` is what `parquet_table%compact` uses to decide whether to advance the
+    !! generation counter, so it has to be exact rather than optimistic.
+    subroutine test_shrink_to_fit(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer(int64) :: k
+        integer(int32) :: v
+        logical :: released
+        !
+        call c%init(PK_INT32, 0_int64)
+        do k = 1_int64, 10_int64
+            call c%append_values([int(k*3_int64, int32)])
+        end do
+        call check(error, c%capacity() > c%length(), "ten single-row appends must leave slack")
+        if (allocated(error)) return
+        call c%shrink_to_fit(released)
+        call check(error, released, "shrink_to_fit must report that it released something")
+        if (allocated(error)) return
+        call check(error, c%capacity() == c%length(), "shrink_to_fit must leave the column exact-fit")
+        if (allocated(error)) return
+        ! Values survive the reallocation.
+        call c%get_at(4_int64, v)
+        call check(error, v == 12_int32, "shrink_to_fit must not disturb the values")
+        if (allocated(error)) return
+        ! A second call has nothing to do and must say so -- this is the no-op %compact relies on.
+        call c%shrink_to_fit(released)
+        call check(error, .not. released, "a shrink_to_fit with no slack must report released=.false.")
+    end subroutine test_shrink_to_fit
+    !
+    !> Invariant 1. Checked after every operation that touches storage, because a single path
+    !! that forgets `cap` leaves a column claiming room it does not have.
+    subroutine test_capacity_invariant(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c, other, cp
+        integer(int64) :: k
+        !
+        call c%init(PK_INT32, 4_int64)
+        call check(error, c%capacity() >= c%length(), "after init")
+        if (allocated(error)) return
+        call c%append_nulls(3_int64)
+        call check(error, c%capacity() >= c%length(), "after append_nulls")
+        if (allocated(error)) return
+        call other%init(PK_INT32, 5_int64)
+        call c%append(other)
+        call check(error, c%capacity() >= c%length(), "after append")
+        if (allocated(error)) return
+        call c%append_row_of(other, 2_int64)
+        call check(error, c%capacity() >= c%length(), "after append_row_of")
+        if (allocated(error)) return
+        call c%deep_copy(cp)
+        call check(error, cp%capacity() >= cp%length(), "after deep_copy (destination)")
+        if (allocated(error)) return
+        ! A copy is a fresh object and the caller has not asked for headroom, so a clone compacts
+        ! implicitly rather than inheriting the source's slack.
+        call check(error, cp%capacity() == cp%length(), "deep_copy must allocate exact-fit")
+        if (allocated(error)) return
+        call cp%move_from(c)
+        call check(error, cp%capacity() >= cp%length(), "after move_from (destination)")
+        if (allocated(error)) return
+        call check(error, c%capacity() == 0_int64, "move_from must reset the source's capacity")
+        if (allocated(error)) return
+        call cp%clear()
+        call check(error, cp%capacity() == 0_int64, "clear must reset the capacity to 0")
+        if (allocated(error)) return
+        ! And the string kinds, whose capacity comes from the embedded store rather than `cap`.
+        call other%clear()
+        call other%init(PK_STRING, 0_int64)
+        do k = 1_int64, 20_int64
+            call other%append_values(["ab"])
+        end do
+        call check(error, other%capacity() >= other%length(), "a string column's capacity must cover its rows")
+    end subroutine test_capacity_invariant
+    !
+    !> Invariant 3. The slack must never reach a reader: every storage read is bounded by the row
+    !! count, so an over-allocated column looks exactly like an exact-fit one.
+    subroutine test_capacity_invisible(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer(int32), pointer :: p(:)
+        logical, allocatable :: valid(:)
+        integer(int64) :: k
+        !
+        call c%init(PK_INT32, 0_int64)
+        do k = 1_int64, 5_int64
+            call c%append_values([int(k, int32)])
+        end do
+        call check(error, c%capacity() > c%length(), "the setup must actually leave slack to hide")
+        if (allocated(error)) return
+        call c%data_ptr(p)
+        call check(error, size(p, kind=int64) == 5_int64, "data_ptr must expose the rows, not the capacity")
+        if (allocated(error)) return
+        call check(error, all(p == [1_int32, 2_int32, 3_int32, 4_int32, 5_int32]), &
+            "the rows behind the pointer must be the ones appended")
+        if (allocated(error)) return
+        call c%set_null(3_int64)
+        call c%row_validity(valid)
+        call check(error, size(valid, kind=int64) == 5_int64, &
+            "row_validity must be sized by the row count, not the capacity")
+        if (allocated(error)) return
+        call check(error, .not. valid(3), "the null row must read back as null")
+    end subroutine test_capacity_invisible
+    !
+    !> The bitmap is sized from the CAPACITY, not the row count. Sizing it from `nrows` would
+    !! reallocate it on every append -- reintroducing the quadratic behaviour on any column that
+    !! happens to carry a null, with every value still correct and every other test still passing.
+    subroutine test_capacity_with_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer(int64) :: k, seen, last
+        logical, allocatable :: valid(:)
+        !
+        call c%init(PK_INT32, 0_int64)
+        seen = 0_int64
+        last = -1_int64
+        do k = 1_int64, 400_int64
+            call c%append_values([int(k, int32)])
+            ! Every third row null, so the bitmap exists from the very first rows and has to grow
+            ! alongside the storage rather than on its own schedule.
+            if (mod(k, 3_int64) == 0_int64) call c%set_null(k)
+            if (c%capacity() /= last) then
+                seen = seen + 1_int64
+                last = c%capacity()
+            end if
+        end do
+        call check(error, seen <= 40_int64, &
+            "a null-carrying column must grow geometrically too, not once per append")
+        if (allocated(error)) return
+        ! The bitmap must cover the CAPACITY, not merely the rows. This is the assertion that
+        ! catches a bitmap sized from `nrows`: the growth sequence puts 400 rows at a capacity of
+        ! 474, and those two fall in different 64-bit blocks -- so a bitmap sized from the row
+        ! count is measurably too small here, while every value and every null bit still reads
+        ! back correctly. Without this the mutation survives the whole suite.
+        call check(error, c%validity_bytes()*8_int64 >= c%capacity()*int(c%colwidth(), int64), &
+            "the validity bitmap must be sized from the capacity, not the row count")
+        if (allocated(error)) return
+        ! Every null bit must have survived every one of those reallocations.
+        call c%row_validity(valid)
+        call check(error, size(valid, kind=int64) == 400_int64, "the mask must cover every row")
+        if (allocated(error)) return
+        do k = 1_int64, 400_int64
+            if (mod(k, 3_int64) == 0_int64) then
+                if (valid(k)) then
+                    call check(error, .false., "a row set null must still read back null after growth")
+                    return
+                end if
+            else
+                if (.not. valid(k)) then
+                    call check(error, .false., "a row never nulled must not become null through growth")
+                    return
+                end if
+            end if
+        end do
+        call check(error, .true., "null bits survive geometric growth")
+    end subroutine test_capacity_with_nulls
+    !
+    !> `append_row_of` is the primitive that lets `%append(row)` copy one row instead of the whole
+    !! source column. Validity has to come with it, or a null row would append as a valid one.
+    subroutine test_append_row_of(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: src, dst
+        integer(int32) :: v
+        integer(int32) :: vec(3)
+        type(parquet_column) :: vsrc, vdst
+        character(len=:), allocatable :: s
+        type(parquet_column) :: ssrc, sdst
+        !
+        call src%init(PK_INT32, 4_int64)
+        call src%set_all([10_int32, 20_int32, 30_int32, 40_int32])
+        call src%set_null(3_int64)
+        call dst%init(PK_INT32, 0_int64)
+        call dst%append_row_of(src, 2_int64)
+        call dst%append_row_of(src, 3_int64)
+        call check(error, dst%length() == 2_int64, "each append_row_of must add exactly one row")
+        if (allocated(error)) return
+        call dst%get_at(1_int64, v)
+        call check(error, v == 20_int32, "the appended row must hold the source row's value")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(1_int64), "a valid source row must append as valid")
+        if (allocated(error)) return
+        call check(error, dst%is_null(2_int64), "a null source row must append as null")
+        if (allocated(error)) return
+        ! The source is untouched.
+        call check(error, src%length() == 4_int64, "append_row_of must not change the source")
+        if (allocated(error)) return
+        ! A vector kind copies the whole row's element vector.
+        call vsrc%init(PK_INT32_VEC, 2_int64, 3_int32)
+        call vsrc%set_at(2_int64, [7_int32, 8_int32, 9_int32])
+        call vdst%init(PK_INT32_VEC, 0_int64, 3_int32)
+        call vdst%append_row_of(vsrc, 2_int64)
+        call vdst%get_at(1_int64, vec)
+        call check(error, all(vec == [7_int32, 8_int32, 9_int32]), &
+            "a vector row must append every element of the row")
+        if (allocated(error)) return
+        ! And a string kind, which goes through the embedded store rather than an array.
+        call ssrc%init(PK_STRING, 3_int64)
+        call ssrc%set_all(["a  ", "bb ", "ccc"])
+        call sdst%init(PK_STRING, 0_int64)
+        call sdst%append_row_of(ssrc, 3_int64)
+        call sdst%append_row_of(ssrc, 1_int64)
+        call sdst%get_at(1_int64, s)
+        call check(error, s == "ccc", "a string row must append its own bytes")
+        if (allocated(error)) return
+        call sdst%get_at(2_int64, s)
+        call check(error, s == "a", "the second appended string row must be the one named")
+    end subroutine test_append_row_of
     !
 end module test_columns

@@ -653,6 +653,10 @@ contains
                 test_columns_append_kind_mismatch_aborts), &
             new_unittest("parquet_column append of a different vector width aborts", &
                 test_columns_append_width_mismatch_aborts), &
+            new_unittest("columns: append_row_of with a mismatched width aborts", &
+                test_columns_append_row_of_width_mismatch_aborts), &
+            new_unittest("table: append(row) validates every column before writing any", &
+                test_table_append_row_validates_first_aborts), &
             new_unittest("parquet_column paste of a different kind aborts", &
                 test_columns_paste_kind_mismatch_aborts), &
             new_unittest("parquet_column paste of a different vector width aborts", &
@@ -1634,6 +1638,29 @@ contains
             failure_message="appending a vector column of a different width was expected to abort", &
             required_stderr="parquet_columns: append: column widths differ")
     end subroutine test_columns_append_width_mismatch_aborts
+
+    subroutine test_columns_append_row_of_width_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_append_row_of_width_mismatch", &
+            expect_abort=.true., &
+            failure_message="appending one row of a different-width column was expected to abort", &
+            required_stderr="parquet_columns: append_row_of: column widths differ")
+    end subroutine test_columns_append_row_of_width_mismatch_aborts
+
+    !> Asserts the ORDER of a row append, not merely that it fails.
+    !>
+    !> The required message is the table layer's own compatibility error. A worker that appended
+    !> as it validated would abort from `parquet_columns` instead ("append_row_of: column kinds
+    !> differ") -- same exit status, different message, and one column already one row longer than
+    !> its neighbours. The message is the only thing that tells the two apart from outside the
+    !> process, which is why this asserts it rather than just the abort.
+    subroutine test_table_append_row_validates_first_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_append_row_validates_first", &
+            expect_abort=.true., &
+            failure_message="appending a row with an incompatible column was expected to abort", &
+            required_stderr="convert it first (%cast)")
+    end subroutine test_table_append_row_validates_first_aborts
 
     subroutine test_columns_paste_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

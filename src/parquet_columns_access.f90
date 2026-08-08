@@ -67,6 +67,9 @@ contains
         self%kind = PK_INT32
         self%width = 1_int32
         self%nrows = size(values, kind=int64)
+        ! The adopted allocation IS the capacity -- leaving `cap` at 0 would make the next append
+        ! reallocate a column that already has room, and would break the cap >= nrows invariant.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -124,6 +127,9 @@ contains
         self%kind = PK_INT64
         self%width = 1_int32
         self%nrows = size(values, kind=int64)
+        ! The adopted allocation IS the capacity -- leaving `cap` at 0 would make the next append
+        ! reallocate a column that already has room, and would break the cap >= nrows invariant.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -181,6 +187,9 @@ contains
         self%kind = PK_FLOAT32
         self%width = 1_int32
         self%nrows = size(values, kind=int64)
+        ! The adopted allocation IS the capacity -- leaving `cap` at 0 would make the next append
+        ! reallocate a column that already has room, and would break the cap >= nrows invariant.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -238,6 +247,9 @@ contains
         self%kind = PK_FLOAT64
         self%width = 1_int32
         self%nrows = size(values, kind=int64)
+        ! The adopted allocation IS the capacity -- leaving `cap` at 0 would make the next append
+        ! reallocate a column that already has room, and would break the cap >= nrows invariant.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -295,6 +307,9 @@ contains
         self%kind = PK_LOGICAL
         self%width = 1_int32
         self%nrows = size(values, kind=int64)
+        ! The adopted allocation IS the capacity -- leaving `cap` at 0 would make the next append
+        ! reallocate a column that already has room, and would break the cap >= nrows invariant.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -353,6 +368,9 @@ contains
         self%kind = PK_DATE
         self%width = 1_int32
         self%nrows = size(values, kind=int64)
+        ! The adopted allocation IS the capacity -- leaving `cap` at 0 would make the next append
+        ! reallocate a column that already has room, and would break the cap >= nrows invariant.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -412,6 +430,9 @@ contains
         self%kind = PK_TIME
         self%width = 1_int32
         self%nrows = size(values, kind=int64)
+        ! The adopted allocation IS the capacity -- leaving `cap` at 0 would make the next append
+        ! reallocate a column that already has room, and would break the cap >= nrows invariant.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -471,6 +492,9 @@ contains
         self%kind = PK_TIMESTAMP
         self%width = 1_int32
         self%nrows = size(values, kind=int64)
+        ! The adopted allocation IS the capacity -- leaving `cap` at 0 would make the next append
+        ! reallocate a column that already has room, and would break the cap >= nrows invariant.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -550,6 +574,8 @@ contains
         self%kind = PK_INT32_VEC
         self%width = int(size(values, 1), int32)
         self%nrows = size(values, 2, kind=int64)
+        ! See the scalar adopt above: the adopted allocation IS the capacity.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -626,6 +652,8 @@ contains
         self%kind = PK_INT64_VEC
         self%width = int(size(values, 1), int32)
         self%nrows = size(values, 2, kind=int64)
+        ! See the scalar adopt above: the adopted allocation IS the capacity.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -702,6 +730,8 @@ contains
         self%kind = PK_FLOAT32_VEC
         self%width = int(size(values, 1), int32)
         self%nrows = size(values, 2, kind=int64)
+        ! See the scalar adopt above: the adopted allocation IS the capacity.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -778,6 +808,8 @@ contains
         self%kind = PK_FLOAT64_VEC
         self%width = int(size(values, 1), int32)
         self%nrows = size(values, 2, kind=int64)
+        ! See the scalar adopt above: the adopted allocation IS the capacity.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -854,6 +886,8 @@ contains
         self%kind = PK_LOGICAL_VEC
         self%width = int(size(values, 1), int32)
         self%nrows = size(values, 2, kind=int64)
+        ! See the scalar adopt above: the adopted allocation IS the capacity.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -926,6 +960,8 @@ contains
         self%kind = PK_DATE_VEC
         self%width = int(size(values, 1), int32)
         self%nrows = size(values, 2, kind=int64)
+        ! See the scalar adopt above: the adopted allocation IS the capacity.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -999,6 +1035,8 @@ contains
         self%kind = PK_TIME_VEC
         self%width = int(size(values, 1), int32)
         self%nrows = size(values, 2, kind=int64)
+        ! See the scalar adopt above: the adopted allocation IS the capacity.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if
@@ -1072,6 +1110,8 @@ contains
         self%kind = PK_TIMESTAMP_VEC
         self%width = int(size(values, 1), int32)
         self%nrows = size(values, 2, kind=int64)
+        ! See the scalar adopt above: the adopted allocation IS the capacity.
+        self%cap = self%nrows
         if (present(unit)) then
             if (len_trim(unit) > 0) self%unit = trim(unit)
         end if

@@ -634,6 +634,13 @@ contains
                 call mine%top_n(["a"], int(mine%nrows()))
                 call mine%rename_column("a", "aa")
                 call mine%drop_column("b")
+                ! %compact and %reserve take the same table_check_not_shared guard, and are the
+                ! only two procedures in parquet_tables_mutate that reallocate storage -- so they
+                ! need the same negative control as their neighbours above. A guard that refused a
+                ! thread-private table here would make "reserve, fill, compact" unusable inside
+                ! exactly the per-thread slice pattern it is most useful in.
+                call mine%reserve(int(mine%nrows(), int32) + 50)
+                call mine%compact()
                 counts(g) = mine%nrows()
             end block
         end do

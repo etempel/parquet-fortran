@@ -59,6 +59,10 @@ contains
     module procedure clear
         self%kind = PK_NONE
         self%nrows = 0_int64
+        ! Reset alongside nrows, never left behind: a stale capacity on a column whose storage has
+        ! just been deallocated would make the next ensure_capacity believe there is room and skip
+        ! the allocation entirely.
+        self%cap = 0_int64
         self%width = 1_int32
         self%has_nulls = .false.
         self%nulls_dirty = .true.
@@ -99,6 +103,10 @@ contains
         call self%clear()
         self%kind = src%kind
         self%nrows = src%nrows
+        ! Moved with the arrays, not recomputed: the destination inherits the source's ALLOCATION,
+        ! so it inherits its capacity too. Deriving it from nrows instead would understate it and
+        ! the next append would reallocate storage that already had room.
+        self%cap = src%cap
         self%width = src%width
         self%has_nulls = src%has_nulls
         self%nulls_dirty = src%nulls_dirty
@@ -160,6 +168,62 @@ contains
         if (allocated(self%unit)) deallocate(self%unit)
         if (len_trim(u) > 0) self%unit = trim(u)
     end procedure set_unit
+    !
+    !> int32 form of `reserve`; converts and delegates.
+    module procedure reserve_i32
+        call self%reserve_i64(int(n, int64))
+    end procedure reserve_i32
+    !
+    !> Grows capacity to hold at least `n` rows without changing the row count (see the interface
+    !! in `parquet_columns.f90` for the full contract).
+    module procedure reserve_i64
+        if (n < 0_int64) error stop EP//"reserve: negative row count"
+        if (self%kind == PK_NONE) error stop EP//"reserve: column has no kind assigned"
+        if (is_string_kind(self%kind)) then
+            ! The string store indexes by ELEMENT, not by row (RF6), so a width-w column of n rows
+            ! needs n*w elements reserved. Characters are left to grow on their own: how many bytes
+            ! n rows will occupy is not knowable from a row count.
+            call self%str%reserve(n*int(self%width, int64), 0_int64)
+            return
+        end if
+        call ensure_capacity(self, n)
+        ! Only when the bitmap already exists. Reserving must not materialize one -- that would
+        ! defeat the sparse representation (R2) for a column that may never see a null.
+        if (self%has_nulls) call ensure_bitmap(self)
+    end procedure reserve_i64
+    !
+    !> Releases capacity beyond the rows stored (see the interface in `parquet_columns.f90`).
+    module procedure shrink_to_fit
+        integer(int64) :: need
+        if (present(released)) released = .false.
+        if (is_string_kind(self%kind)) then
+            if (.not. allocated(self%str)) return
+            ! Two independent buffers carry slack in a string store -- the offsets array and the
+            ! byte payload -- and either alone means there is something to release.
+            if (present(released)) then
+                released = self%str%capacity() > self%str%size() .or. &
+                    self%str%character_capacity() > self%str%character_size()
+            end if
+            call self%str%shrink_to_fit()
+            return
+        end if
+        if (present(released)) released = self%cap > self%nrows
+        call shrink_storage(self)
+        ! The bitmap is sized from `cap`, so shrinking the storage leaves it oversized too. Trim it
+        ! to what the rows actually need -- `ensure_bitmap` only ever grows, so this is the one
+        ! place it comes back down.
+        if (allocated(self%validity)) then
+            need = max(blocks_for(bits_needed(self)), 1_int64)
+            if (size(self%validity, kind=int64) > need) then
+                block
+                    integer(int64), allocatable :: tmp(:)
+                    allocate(tmp(need))
+                    tmp(1:need) = self%validity(1:need)
+                    call move_alloc(tmp, self%validity)
+                end block
+            end if
+        end if
+    end procedure shrink_to_fit
     !
     !> Appends every row of `other`, which must have identical kind and width.
     !!

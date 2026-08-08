@@ -375,6 +375,42 @@ contains
     !! too. `other` is deliberately NOT locked: it is the appending thread's own private table by
     !! construction, and locking two tables in one operation would introduce a lock-ordering
     !! problem (A appends B while B appends A) for no gain.
+    !> Whether slot `idx` of a column store is one an append can read values out of.
+    !!
+    !! The cache-level form of `table_mutable_column`, needed because a row handle carries a
+    !! `parquet_table_cache` pointer and not a table -- so the row path has no table to ask.
+    logical function cache_column_usable(cache, idx) result(ok)
+        type(parquet_table_cache), intent(in) :: cache !! the column store.
+        integer, intent(in) :: idx                     !! slot index.
+        ok = cache%cols(idx)%supported .and. cache%cols(idx)%residency == RES_FULL
+    end function cache_column_usable
+    !
+    !> The validation both append workers run before either of them mutates anything: every column
+    !! the source has must exist in the destination and be compatible with it.
+    !!
+    !! **One helper rather than a copy in each worker**, because these are the rules most damaging
+    !! to get subtly different between the two: a table append and a row append that disagreed
+    !! about which column mismatches are refused would be a difference nothing reports. Takes the
+    !! source's CACHE rather than a table so the row path, which only has a cache pointer, can use
+    !! it unchanged.
+    !!
+    !! Runs in full before a single value is written, which is rule 1 of this file's own header --
+    !! a mutation that aborts halfway leaves some columns longer than others, with no diagnostic
+    !! and no way back.
+    subroutine append_validate_source(self, src)
+        class(parquet_table), intent(in) :: self     !! the destination table.
+        type(parquet_table_cache), intent(in) :: src !! the source table's column store.
+        integer :: i, j
+        !
+        do j = 1, src%ncols
+            if (.not. cache_column_usable(src, j)) cycle
+            i = table_find(self, src%cols(j)%name)
+            if (i == 0) call append_unknown_column(self, src%cols(j)%name)
+            if (.not. table_mutable_column(self, i)) cycle
+            call append_check_compatible(self, i, src, j)
+        end do
+    end subroutine append_validate_source
+    !
     subroutine append_table_worker(self, other)
         class(parquet_table), intent(inout) :: self !! the table to grow.
         class(parquet_table), intent(in) :: other   !! the table whose rows are appended.
@@ -383,15 +419,7 @@ contains
         !
         call table_check_open(self, "append")
         call table_check_open(other, "append")
-        ! Two validation passes over `other`'s columns, both before anything is appended: every
-        ! column it has must exist here and be compatible.
-        do j = 1, other%cache%ncols
-            if (.not. table_mutable_column(other, j)) cycle
-            i = table_find(self, other%cache%cols(j)%name)
-            if (i == 0) call append_unknown_column(self, other%cache%cols(j)%name)
-            if (.not. table_mutable_column(self, i)) cycle
-            call append_check_compatible(self, i, other, j)
-        end do
+        call append_validate_source(self, other%cache)
         added = other%row_count
         ! Appending no rows adds nothing, so the table keeps its columns' storage and its file --
         ! but only after the compatibility checks above have run, so an incompatible zero-row
@@ -413,18 +441,66 @@ contains
         call table_detach(self)
     end subroutine append_table_worker
     !
-    module procedure table_append_row
-        type(parquet_table) :: one
+    !> The unlocked body of `%append(row)`, and the counterpart of `append_table_worker`.
+    !!
+    !! **Appends the row DIRECTLY, column by column.** It used to deep-copy every column of the
+    !! row's whole source table, delete all but one row of each, assemble a one-row
+    !! `parquet_table` from the pieces and append that -- so appending N rows out of a source of M
+    !! cost O(N*M) element copies plus a table's worth of allocation per row. `%append_row_of` on
+    !! `parquet_column` copies exactly the one row, so nothing here scales with the source's size.
+    !!
+    !! Every rule `append_table_worker` follows is followed here too, deliberately: the shared
+    !! validation above, the null fill for a column the row's table does not have, the refusal of a
+    !! column it has and this table does not, the skip of a column that is not resident, and the
+    !! row-count / generation / detach bookkeeping at the end.
+    subroutine append_row_worker(self, r)
+        class(parquet_table), intent(inout) :: self !! the table to grow.
+        type(parquet_table_row), intent(in) :: r    !! the row to append.
+        integer :: i, j, matched
         !
+        call table_check_open(self, "append")
+        ! With nothing in common there is no row to append -- every column would be null-filled,
+        ! which is %append_null_rows(1) said in a confusing way, and far more likely a mistake.
+        ! Counted over THIS table's columns, so it asks what the append would actually write.
+        matched = 0
+        do i = 1, self%cache%ncols
+            if (cache_find(r%cache, self%cache%cols(i)%name) > 0) matched = matched + 1
+        end do
+        if (matched == 0) error stop EP // "append: the row's table has no column in common " // &
+            "with this table, so there is nothing to append"
+        call append_validate_source(self, r%cache)
+        do i = 1, self%cache%ncols
+            if (.not. table_mutable_column(self, i)) cycle
+            j = cache_find(r%cache, self%cache%cols(i)%name)
+            ! A source column that is not resident is treated as ABSENT, exactly as the validation
+            ! above already treats it -- so this table's column is null-filled rather than being
+            ! handed a row index into storage that was never read. The two have to agree: a
+            ! validation that skips a column and an append loop that does not would write a row
+            ! from an empty column.
+            if (j > 0) then
+                if (.not. cache_column_usable(r%cache, j)) j = 0
+            end if
+            if (j == 0) then
+                call self%cache%cols(i)%values%append_nulls(1_int64)
+            else
+                call self%cache%cols(i)%values%append_row_of(r%cache%cols(j)%values, r%irow)
+            end if
+        end do
+        self%row_count = self%row_count + 1_int64
+        self%cache%generation = self%cache%generation + 1_int64
+        call table_detach(self)
+    end subroutine append_row_worker
+    !
+    module procedure table_append_row
         call table_check_open(self, "append")
         ! This is a public entry point, not an internal caller, so it takes the lock itself and
         ! goes to the worker -- never to table_append_table, which would acquire a second time and
-        ! deadlock. Building the one-row table happens inside the lock as well: it reads `self`'s
-        ! column list, which a concurrent append is in the middle of changing.
+        ! deadlock (an OpenMP simple lock is not recursive). Everything the worker does happens
+        ! inside the lock: it reads `self`'s column list, which a concurrent append is in the
+        ! middle of changing.
         call table_lock(self%cache)
         call append_begin(self)
-        call append_row_as_table(self, r, one)
-        call append_table_worker(self, one)
+        call append_row_worker(self, r)
         call append_end(self)
         call table_unlock(self%cache)
     end procedure table_append_row
@@ -480,30 +556,30 @@ contains
     !! mean different things with nothing recording it. A column with NO declared unit on either
     !! side is accepted, keeping the destination's -- an in-memory table built without `unit=` is
     !! ordinary and should not be unappendable.
-    subroutine append_check_compatible(self, i, other, j)
-        class(parquet_table), intent(in) :: self  !! the destination table.
-        integer, intent(in) :: i                  !! destination slot.
-        class(parquet_table), intent(in) :: other !! the source table.
-        integer, intent(in) :: j                  !! source slot.
+    subroutine append_check_compatible(self, i, src, j)
+        class(parquet_table), intent(in) :: self       !! the destination table.
+        integer, intent(in) :: i                       !! destination slot.
+        type(parquet_table_cache), intent(in) :: src   !! the source table's column store.
+        integer, intent(in) :: j                       !! source slot.
         character(len=:), allocatable :: sfx, mine, theirs
         character(len=32) :: got, want
         !
-        if (self%cache%cols(i)%values%kindof() /= other%cache%cols(j)%values%kindof()) then
+        if (self%cache%cols(i)%values%kindof() /= src%cols(j)%values%kindof()) then
             call parquet_kind_name(self%cache%cols(i)%values%kindof(), mine)
-            call parquet_kind_name(other%cache%cols(j)%values%kindof(), theirs)
+            call parquet_kind_name(src%cols(j)%values%kindof(), theirs)
             call table_context_suffix(self%cache, self%cache%cols(i)%name, sfx)
             error stop EP // "append: this column is " // mine // " here but " // theirs // &
                 " in the appended table; convert it first (%cast)" // sfx
         end if
-        if (self%cache%cols(i)%values%colwidth() /= other%cache%cols(j)%values%colwidth()) then
+        if (self%cache%cols(i)%values%colwidth() /= src%cols(j)%values%colwidth()) then
             write(want, "(I0)") self%cache%cols(i)%values%colwidth()
-            write(got, "(I0)") other%cache%cols(j)%values%colwidth()
+            write(got, "(I0)") src%cols(j)%values%colwidth()
             call table_context_suffix(self%cache, self%cache%cols(i)%name, sfx)
             error stop EP // "append: this column holds " // trim(want) // " values per row " // &
                 "here but " // trim(got) // " in the appended table" // sfx
         end if
         call self%cache%cols(i)%values%unit_string(mine)
-        call other%cache%cols(j)%values%unit_string(theirs)
+        call src%cols(j)%values%unit_string(theirs)
         if (len_trim(mine) > 0 .and. len_trim(theirs) > 0 .and. trim(mine) /= trim(theirs)) then
             call table_context_suffix(self%cache, self%cache%cols(i)%name, sfx)
             error stop EP // "append: this column is in '" // trim(mine) // "' here but '" // &
@@ -511,51 +587,5 @@ contains
                 "units" // sfx
         end if
     end subroutine append_check_compatible
-    !
-    !> Builds a one-row table from a row handle, so `%append(row)` can reuse `%append(table)`'s
-    !! compatibility rules rather than growing a second, subtly different set of them.
-    !!
-    !! This is what makes appending a row at a time slow in bulk: it costs a whole table's
-    !! machinery per row. The documented bulk idiom is `%clone_structure` -> fill -> `%append`.
-    subroutine append_row_as_table(self, r, one)
-        class(parquet_table), intent(in) :: self  !! the destination, for its column list.
-        type(parquet_table_row), intent(in) :: r  !! the row to copy.
-        type(parquet_table), intent(out) :: one   !! receives the one-row table.
-        integer :: i, src, matched
-        type(parquet_column) :: piece
-        !
-        matched = 0
-        do i = 1, self%cache%ncols
-            if (cache_find(r%cache, self%cache%cols(i)%name) > 0) matched = matched + 1
-        end do
-        ! With nothing in common there is no row to append -- every column would be null-filled,
-        ! which is %append_null_rows(1) said in a confusing way, and far more likely a mistake.
-        if (matched == 0) error stop EP // "append: the row's table has no column in common " // &
-            "with this table, so there is nothing to append"
-        call parquet_new_table(one)
-        do i = 1, self%cache%ncols
-            src = cache_find(r%cache, self%cache%cols(i)%name)
-            ! A column the row's own table does not have is left out entirely, so %append's
-            ! null-fill rule covers it -- one rule for a missing column, not two.
-            if (src == 0) cycle
-            call row_slice_one(r%cache%cols(src)%values, r%irow, piece)
-            call table_put_column(one, self%cache%cols(i)%name, piece)
-            call piece%clear()
-        end do
-    end subroutine append_row_as_table
-    !
-    !> Copies row `irow` of a column into a fresh one-row column of the same kind, width and unit.
-    subroutine row_slice_one(src, irow, out)
-        type(parquet_column), intent(in) :: src    !! the source column.
-        integer(int64), intent(in) :: irow         !! the row to take.
-        type(parquet_column), intent(out) :: out   !! receives the one-row column.
-        logical, allocatable :: keep(:)
-        !
-        call src%deep_copy(out)
-        allocate(keep(src%length()))
-        keep = .false.
-        keep(irow) = .true.
-        call out%delete_by_mask(keep)
-    end subroutine row_slice_one
     !
 end submodule parquet_tables_rowmutate

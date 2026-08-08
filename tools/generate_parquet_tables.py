@@ -780,6 +780,13 @@ def gen_table_type():
         procedure, private :: table_append_null_rows_i64 !! %append_null_rows specific, int64 count.
         !> Appends n all-null rows, to be filled in afterwards. Detaching.
         generic :: append_null_rows => table_append_null_rows_i32, table_append_null_rows_i64
+        ! --- capacity ---
+        procedure :: compact => table_compact         !! Release capacity appends left behind.
+        procedure, private :: table_reserve_i32       !! %reserve specific, int32 count.
+        procedure, private :: table_reserve_i64       !! %reserve specific, int64 count.
+        !> Makes room for n rows in every resident column, so the appends that follow do not
+        !! reallocate. %compact's counterpart; neither changes the row set, so neither detaches.
+        generic :: reserve => table_reserve_i32, table_reserve_i64
         ! --- copying ---
         procedure :: clone => table_clone                     !! Independent deep copy of this table.
         procedure :: clone_structure => table_clone_structure !! Empty table with the same columns.
@@ -2383,6 +2390,51 @@ def gen_spec_interfaces():
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int64), intent(in) :: n             !! rows to keep.
         end subroutine table_truncate_i64
+        !> Releases the spare storage capacity that appending left behind, so every resident
+        !! column occupies exactly the rows it holds.
+        !!
+        !! **A no-op on a table that has not been appended to.** Capacity only ever comes from an
+        !! append: reading a column from a file allocates exact-fit, and so does every rebuild
+        !! (`%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`), which hand their
+        !! memory back on their own. So this is safe to call unconditionally -- before
+        !! `parquet_write_table`, say -- and costs nothing when there is nothing to release. It is
+        !! not NEEDED before a write: the writer reads through a pointer that is already bounded by
+        !! the row count, so slack costs a write nothing.
+        !!
+        !! **It INVALIDATES every pointer obtained from `%col` and every row handle**, because it
+        !! reallocates storage. That makes it the one procedure in `parquet_tables_mutate` that
+        !! does so -- everything else there leaves the row set and the storage alone. It does NOT
+        !! detach: the row set is unchanged, so the table keeps its file and a column not yet read
+        !! can still be read afterwards.
+        !!
+        !! **`%generation()` advances only if something was actually released**, which is what
+        !! makes the no-op above observable: a caller following the documented
+        !! take-generation/compare/re-fetch pattern re-fetches only when a pointer really did die.
+        !!
+        !! Refused on a shared table, like every other mutation except `%append`.
+        module subroutine table_compact(self)
+            class(parquet_table), intent(inout) :: self !! the table.
+        end subroutine table_compact
+        !> int32 form of `%reserve`; converts and delegates.
+        module subroutine table_reserve_i32(self, n)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int32), intent(in) :: n             !! rows to make room for.
+        end subroutine table_reserve_i32
+        !> Makes room for `n` rows in every resident column without changing the row count, so the
+        !! appends that follow perform no allocation at all.
+        !!
+        !! The intended shape for building a table incrementally is `%reserve(n)` -> append ->
+        !! `%compact()`: growth is amortised O(1) without it, but reserving turns even that into a
+        !! single up-front allocation. `n` is the TOTAL row count to make room for, not an
+        !! increment, so reserving less than the table already holds does nothing.
+        !!
+        !! Shares `%compact`'s rules: it invalidates `%col` pointers and row handles if it
+        !! reallocates, advances `%generation()` only then, does not detach, and is refused on a
+        !! shared table.
+        module subroutine table_reserve_i64(self, n)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer(int64), intent(in) :: n             !! total rows to make room for.
+        end subroutine table_reserve_i64
         !> Appends every row of another table. `other`'s columns must be a SUBSET of this
         !! table's, with matching kinds, widths and units; a column this table has and `other`
         !! does not is filled with nulls. A column `other` has and this table does not is an

@@ -339,6 +339,11 @@ than silent data loss. Evicting a column that is not resident is a no-op.
 Eviction is **user-driven only**. Nothing in this library evicts on its own — there is no LRU and
 no memory budget — so what a table holds stays predictable from the calls you wrote.
 
+The one place a table holds slightly more than its rows need is after appending: storage grows
+geometrically, so an appended-to table can carry up to 1.5x its rows' worth until
+[`%compact()`](#adding-rows) releases it. A table read from a file, or one that has only been
+filtered or sorted, is allocated exactly to size.
+
 `%reload` only applies to a column that came from a file: reloading one built with `%add_column`
 is an error, since there is nothing to reload it from, as is reloading anything once the table has
 [detached](#what-detaching-means). It re-reads into the kind the column currently has, so a
@@ -1520,8 +1525,35 @@ column the batch has and this table does not is an error rather than being silen
 kind mismatch is an error too, and `%cast` is the way round it. There is no unit
 conversion, so appending "km/h" rows to an "m/s" column is refused.
 
-`%append(row)` adds one row from a `parquet_table_row` handle. It is convenient but slow in bulk —
-it costs a whole table's machinery per row — so prefer the batch form above for anything large.
+`%append(row)` adds one row from a `parquet_table_row` handle, copying just that row out of the
+handle's table. The batch form above is still cheaper per row — a row append takes the table's lock,
+advances the generation counter and detaches once per call — but it is no longer quadratic, so
+building a table a row at a time is a perfectly reasonable thing to do.
+
+Growing a table row by row costs nothing extra in allocation either: a column's storage grows
+**geometrically**, so a run of appends reallocates a handful of times rather than once per row. The
+price is that an appended-to table can hold up to 1.5x the storage its rows need. Two calls control
+that, and neither changes the row set, so neither detaches:
+
+```fortran
+call t%reserve(1000000)      ! one allocation up front, if the final size is known
+do i = 1, 1000000
+    call t%append(rows%row(i))
+end do
+call t%compact()             ! give the slack back
+```
+
+**Both invalidate every `%col` pointer and row handle into the table**, because both reallocate
+storage — they are the only two operations that do so without changing the row set. `%generation()`
+advances only when something actually moved, so the usual take-it-before / compare-it-after /
+re-fetch pattern re-fetches only when a pointer really did die.
+
+`%compact()` is a **no-op on a table that has not been appended to**: reading a column from a file
+allocates exactly what it holds, and so does every rebuild (`%filter_rows`, `%sort_by`, `%top_n`,
+`%delete_rows`, `%truncate`), which hand their memory back on their own. So it is safe to call
+unconditionally. It is *not* needed before `parquet_write_table` — the writer never sees the slack.
+`%reserve(n)` takes the total row count to make room for, not an increment, and reserving less than
+the table already holds does nothing.
 
 Appending a **zero-row** table is checked for compatibility exactly as any other append, and then
 does nothing at all — including not detaching. `%append_null_rows(0)` is the same.

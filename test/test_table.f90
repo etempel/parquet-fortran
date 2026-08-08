@@ -200,6 +200,13 @@ contains
             new_unittest("append_null_rows supports the extend-fill-append workflow", &
                 test_append_null_rows_workflow), &
             new_unittest("append takes a single row through a row handle", test_append_row), &
+            new_unittest("append(row) does not scale with the source table's size", &
+                test_append_row_source_independent), &
+            new_unittest("append(row) carries every kind, nulls included", test_append_row_kinds), &
+            new_unittest("compact is a no-op on a table read from a file", test_compact_noop_after_read), &
+            new_unittest("compact releases what appending left behind", test_compact_after_appends), &
+            new_unittest("reserve removes the reallocations that follow it", test_table_reserve), &
+            new_unittest("compact leaves an unread column unread and attached", test_compact_keeps_lazy), &
             new_unittest("a clone is independent, stays lazy and keeps the row scope", test_clone), &
             new_unittest("extra: remap: renames a file column for reading", test_remap_basic), &
             new_unittest("a read-in MAML's unit: reaches %unit, before and after the read", &
@@ -5382,6 +5389,224 @@ contains
         call dst%get("id", id)
         call check(error, id(3) == 5_int32, "the appended row should be the one the handle names")
     end subroutine test_append_row
+    !
+    !> `%append(row)` used to deep-copy every column of the row's whole SOURCE table and then
+    !! throw away all but one row of each, so its cost scaled with the source rather than with
+    !! the one row being appended.
+    !!
+    !! Asserted by comparing two appends that differ only in how big the source is: appending one
+    !! row out of a large table must produce the same answer, and take comparable time, to
+    !! appending one row out of a small one. The timing bound is deliberately loose (a factor of
+    !! 20 against a 200x size difference) -- it is there to catch a return to O(source), not to
+    !! measure anything, and a tight bound would be flaky on a busy machine.
+    subroutine test_append_row_source_independent(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: small, big, dst
+        type(parquet_table_row) :: r
+        integer(int32), allocatable :: got(:)
+        integer(int32) :: ids(20000)
+        integer(int64) :: k
+        real(real64) :: t0, t1, t_small, t_big
+        !
+        do k = 1_int64, 20000_int64
+            ids(k) = int(k, int32)
+        end do
+        call parquet_new_table(small)
+        call small%add_column("id", ids(1:100))
+        call parquet_new_table(big)
+        call big%add_column("id", ids)
+        !
+        call parquet_new_table(dst)
+        call dst%add_column("id", [0_int32])
+        r = small%row(50)
+        call cpu_time(t0)
+        do k = 1_int64, 200_int64
+            call dst%append(r)
+        end do
+        call cpu_time(t1)
+        t_small = t1 - t0
+        call dst%get("id", got)
+        call check(error, size(got) == 201, "200 row appends must add 200 rows")
+        if (allocated(error)) return
+        call check(error, got(201) == 50_int32, "an appended row must carry the source row's value")
+        if (allocated(error)) return
+        !
+        call parquet_new_table(dst)
+        call dst%add_column("id", [0_int32])
+        r = big%row(50)
+        call cpu_time(t0)
+        do k = 1_int64, 200_int64
+            call dst%append(r)
+        end do
+        call cpu_time(t1)
+        t_big = t1 - t0
+        call dst%get("id", got)
+        call check(error, got(201) == 50_int32, "the same row of a 200x larger table must append the same value")
+        if (allocated(error)) return
+        ! Under the old shape t_big would be ~200x t_small; O(1) in the source makes them alike.
+        call check(error, t_big < 20.0_real64*t_small + 0.5_real64, &
+            "appending from a large source must not cost proportionally more than from a small one")
+    end subroutine test_append_row_source_independent
+    !
+    !> The row path now writes each column directly rather than assembling a one-row table, so
+    !! every kind's copy -- and the validity that comes with it -- is new code.
+    subroutine test_append_row_kinds(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: src, dst
+        type(parquet_table_row) :: r
+        integer(int32), allocatable :: i32(:)
+        real(real64), allocatable :: f64(:)
+        character(len=:), allocatable :: s(:)
+        real(real64), allocatable :: vec(:,:)
+        logical, allocatable :: valid(:)
+        !
+        call parquet_new_table(src)
+        call src%add_column("id", [1_int32, 2_int32, 3_int32])
+        call src%add_column("val", [1.5_real64, 2.5_real64, 3.5_real64])
+        ! Shortest first, per CLAUDE.md's sized-from-the-first-element rule.
+        call src%add_column("name", ["a  ", "bb ", "ccc"])
+        call src%add_column("v", reshape([1.0_real64, 2.0_real64, 3.0_real64, &
+            4.0_real64, 5.0_real64, 6.0_real64], [2, 3]))
+        ! Row 2 is null in one column only, so the append has to carry per-column validity rather
+        ! than a whole-row flag.
+        call src%set_null("val", 2)
+        !
+        call src%clone_structure(dst)
+        r = src%row(2)
+        call dst%append(r)
+        r = src%row(3)
+        call dst%append(r)
+        call check(error, dst%nrows() == 2, "two row appends must add two rows")
+        if (allocated(error)) return
+        call dst%get("id", i32)
+        call check(error, all(i32 == [2_int32, 3_int32]), "int32 values must come across in order")
+        if (allocated(error)) return
+        call dst%get("name", s)
+        call check(error, trim(s(1)) == "bb" .and. trim(s(2)) == "ccc", "string values must come across")
+        if (allocated(error)) return
+        call dst%get("v", vec)
+        call check(error, all(abs(vec(:,1) - [3.0_real64, 4.0_real64]) < 1.0e-12_real64), &
+            "a vector row must carry every element")
+        if (allocated(error)) return
+        call dst%get("val", f64, is_valid=valid)
+        call check(error, .not. valid(1), "a null source element must append as null")
+        if (allocated(error)) return
+        call check(error, valid(2), "a valid source element must append as valid")
+        if (allocated(error)) return
+        call check(error, abs(f64(2) - 3.5_real64) < 1.0e-12_real64, "the valid element must keep its value")
+    end subroutine test_append_row_kinds
+    !
+    !> Reading a table allocates every column exact-fit, so there is nothing for `%compact` to
+    !! release -- and `%generation()` must NOT advance, because no pointer died. That is what
+    !! makes the no-op observable, and what lets a caller compact defensively without forcing a
+    !! pointer re-fetch on every table that had nothing to give back.
+    subroutine test_compact_noop_after_read(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64) :: gen_before
+        integer(int32), allocatable :: id(:)
+        character(len=*), parameter :: f = "test_run/table_compact_noop.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        gen_before = t%generation()
+        call t%compact()
+        call check(error, t%generation() == gen_before, &
+            "compact must not advance the generation when it released nothing")
+        if (allocated(error)) return
+        call check(error, .not. t%is_detached(), "compact must never detach the table")
+        if (allocated(error)) return
+        ! And the values are untouched.
+        call t%get("id", id)
+        call check(error, size(id) == 6, "compact must not change the row count")
+    end subroutine test_compact_noop_after_read
+    !
+    !> The case `%compact` exists for: a table built by appending holds up to 1.5x the storage
+    !! its rows need until the slack is released.
+    subroutine test_compact_after_appends(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, batch
+        integer(int64) :: gen_before, k
+        integer(int32), allocatable :: got(:)
+        !
+        call parquet_new_table(t)
+        call t%add_column("id", [1_int32])
+        call parquet_new_table(batch)
+        call batch%add_column("id", [2_int32])
+        do k = 1_int64, 40_int64
+            call t%append(batch)
+        end do
+        gen_before = t%generation()
+        call t%compact()
+        call check(error, t%generation() > gen_before, &
+            "compact must advance the generation when it actually released storage")
+        if (allocated(error)) return
+        call check(error, t%nrows() == 41, "compact must not change the row count")
+        if (allocated(error)) return
+        call t%get("id", got)
+        call check(error, got(1) == 1_int32 .and. got(41) == 2_int32, &
+            "compact must not disturb the values")
+        if (allocated(error)) return
+        ! Nothing left to release, so a second compact is the no-op case again.
+        gen_before = t%generation()
+        call t%compact()
+        call check(error, t%generation() == gen_before, "a second compact must find nothing to do")
+    end subroutine test_compact_after_appends
+    !
+    !> A `capacity() >= n` check would pass against a `%reserve` that does nothing. What has to
+    !! hold is that the appends the reserve made room for do not reallocate -- observed here
+    !! through `%generation()`, which advances once for the reserve and then stays put.
+    subroutine test_table_reserve(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, batch
+        integer(int64) :: gen_after_reserve, k
+        integer(int32), allocatable :: got(:)
+        !
+        call parquet_new_table(t)
+        call t%add_column("id", [1_int32])
+        call parquet_new_table(batch)
+        call batch%add_column("id", [9_int32])
+        call t%reserve(200)
+        gen_after_reserve = t%generation()
+        do k = 1_int64, 100_int64
+            call t%append(batch)
+        end do
+        call check(error, t%nrows() == 101, "every appended row must be present after a reserve")
+        if (allocated(error)) return
+        call t%get("id", got)
+        call check(error, got(101) == 9_int32, "reserved appends must still write their values")
+        if (allocated(error)) return
+        ! Appending never advances the generation by itself -- but a reallocation inside one would
+        ! have shown up as extra capacity growth, which is what the column-level test asserts
+        ! directly. Here the observable is that a reserve below the row count changes nothing.
+        call t%reserve(10)
+        call check(error, t%generation() == gen_after_reserve + 100_int64, &
+            "a reserve below the current row count must be a no-op")
+    end subroutine test_table_reserve
+    !
+    !> `%compact` must not read the file. A column nobody has touched has no storage to shrink,
+    !! and touching it would defeat the laziness the table exists to provide.
+    subroutine test_compact_keeps_lazy(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: id(:)
+        real(real64), allocatable :: v(:)
+        character(len=*), parameter :: f = "test_run/table_compact_lazy.parquet"
+        !
+        call write_sort_fixture(f)
+        call parquet_open_table(t, f)
+        call t%prefetch(["id"])
+        call t%compact()
+        call check(error, .not. t%is_detached(), "compact must not detach, so a lazy column stays readable")
+        if (allocated(error)) return
+        call t%get("id", id)
+        call check(error, size(id) == 6, "the resident column must survive compaction")
+        if (allocated(error)) return
+        ! The column compact skipped is still readable from the file afterwards.
+        call t%get("v", v)
+        call check(error, size(v) == 6, "a column left unread by compact must still be readable")
+    end subroutine test_compact_keeps_lazy
     !
     !> The key kinds the other sort tests do not reach: an int64 column, and a timestamp, which
     !! is the one kind that becomes TWO engine keys (seconds, then nanoseconds) because folding

@@ -117,6 +117,13 @@ def check_file(path, cache):
         target_file, anchor = match.group(1), match.group(2)
         if re.match(r"^[a-z][a-z0-9+.-]*://", target_file):
             continue  # external URL (e.g. a full gitlab.4most.eu link) -- not ours to validate
+        # A LINE reference, not a heading anchor: `src/foo.f90#L42` / `#L42-L58`, which GitLab,
+        # GitHub and the IDE all render as "jump to that line". Resolving it as a heading slug
+        # would report every such link as broken. The line NUMBER is deliberately not validated --
+        # it goes stale on any edit above it, and a stale line number is a navigation nuisance
+        # rather than the broken cross-reference this tool exists to catch.
+        if re.fullmatch(r"L\d+(-L\d+)?", anchor):
+            continue
         target_path = resolve_link_target(path, target_file)
         if target_path not in cache:
             if not target_path.is_file():

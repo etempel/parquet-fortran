@@ -794,6 +794,10 @@ program error_scenarios
         call scenario_columns_get_at_index_out_of_range()
     case ("columns_append_kind_mismatch")
         call scenario_columns_append_kind_mismatch()
+    case ("columns_append_row_of_width_mismatch")
+        call scenario_columns_append_row_of_width_mismatch()
+    case ("table_append_row_validates_first")
+        call scenario_table_append_row_validates_first()
     case ("columns_append_width_mismatch")
         call scenario_columns_append_width_mismatch()
     case ("string_column_reindex_length_mismatch")
@@ -1412,6 +1416,10 @@ program error_scenarios
         call scenario_table_resolve_width_in_parallel_single()
     case ("table_mutate_shared_in_parallel")
         call scenario_table_mutate_shared_in_parallel()
+    case ("table_compact_shared_in_parallel")
+        call scenario_table_compact_shared_in_parallel()
+    case ("table_reserve_negative")
+        call scenario_table_reserve_negative()
     case ("filter_bool_ordering")
         call scenario_filter_bool_ordering()
     case ("table_read_during_append")
@@ -9581,6 +9589,44 @@ contains
         print '(a,i0)', "unexpectedly appended a vector column of a different width, length=", a%length()
     end subroutine scenario_columns_append_width_mismatch
 
+    !> `%append_row_of` re-checks kind and width on every call, even though its only in-library
+    !! caller (the table's row append) has already validated both.
+    !!
+    !! It is a public binding -- Fortran offers no narrower visibility for something
+    !! `parquet_tables` has to reach -- so a caller who validated nothing can get here, and two
+    !! integer comparisons against a call that copies a whole row is the wrong place to save time.
+    !! Without this scenario, deleting the check is invisible: the table path validates first, so
+    !! every other test still passes.
+    subroutine scenario_columns_append_row_of_width_mismatch()
+        type(parquet_column) :: a, b
+        call a%init(PK_FLOAT64_VEC, 1_int64, width=3_int32)
+        call b%init(PK_FLOAT64_VEC, 1_int64, width=2_int32)
+        call a%append_row_of(b, 1_int64)   ! width 2 row into a width 3 column -> aborts
+        print '(a,i0)', "unexpectedly appended a row of a different width, length=", a%length()
+    end subroutine scenario_columns_append_row_of_width_mismatch
+
+    !> A row append validates EVERY column before writing ANY of them.
+    !!
+    !! The abort itself is not the point -- the point is WHICH abort. `a` matches, `b` does not,
+    !! and `b` is checked only after `a` would already have been appended if the worker validated
+    !! as it went. So the message proves the ordering: the validation message names the incompatible
+    !! column, while a worker that mutated first would get as far as appending `a` and then abort
+    !! from `parquet_columns` instead, leaving one column one row longer than the other -- a state
+    !! with no diagnostic and no way back.
+    subroutine scenario_table_append_row_validates_first()
+        type(parquet_table) :: dst, src
+        type(parquet_table_row) :: r
+        call parquet_new_table(dst)
+        call dst%add_column("a", [1_int32, 2_int32])
+        call dst%add_column("b", [1.0_real64, 2.0_real64])
+        call parquet_new_table(src)
+        call src%add_column("a", [7_int32])
+        call src%add_column("b", [9_int32])   ! int32 where dst holds float64
+        r = src%row(1)
+        call dst%append(r)   ! 'b' is incompatible -> aborts BEFORE 'a' is appended
+        print '(a,i0)', "unexpectedly appended an incompatible row, nrows=", dst%nrows()
+    end subroutine scenario_table_append_row_validates_first
+
     !> paste writes into rows that already exist, so -- unlike append -- a mismatched kind cannot
     !! be absorbed by growing the destination. It is the same check append makes, at the same
     !! point, for the same reason: the storage arrays being copied between are of different types.
@@ -10882,6 +10928,40 @@ contains
         !$omp end parallel
         print '(a,i0)', "unexpectedly dropped a column of a shared table in a region, ncols=", t%ncols()
     end subroutine scenario_table_mutate_shared_in_parallel
+
+    !> %compact reallocates every resident column's storage, so it is refused on a shared table
+    !! exactly as every other non-append mutation is.
+    !!
+    !! Worth its own scenario rather than being assumed to follow from
+    !! `scenario_table_mutate_shared_in_parallel`: %compact is the ONLY procedure in
+    !! `parquet_tables_mutate` that reallocates storage, so it is the only one there whose guard
+    !! protects pointer stability rather than the row set, and nothing else exercises that.
+    !! `test_table_private_mutation_allowed` (test/test_openmp.f90) is its negative control --
+    !! without that, a guard that fired unconditionally would pass this scenario while making
+    !! "reserve, fill, compact" unusable on a thread-private table.
+    subroutine scenario_table_compact_shared_in_parallel()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_omp_compact.parquet")
+        call parquet_open_table(t, "test_run/es_table_omp_compact.parquet")
+        call t%materialize_all()
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%compact()   ! reallocates storage under another thread's pointers -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly compacted a shared table in a region, nrows=", t%nrows()
+    end subroutine scenario_table_compact_shared_in_parallel
+
+    !> %reserve takes a row count, so a negative one is a caller error rather than a no-op --
+    !! silently treating it as 0 would hide a sign mistake in a computed argument.
+    subroutine scenario_table_reserve_negative()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_reserve_neg.parquet")
+        call parquet_open_table(t, "test_run/es_table_reserve_neg.parquet")
+        call t%materialize_all()
+        call t%reserve(-5)   ! not a row count -> aborts
+        print '(a,i0)', "unexpectedly reserved a negative row count, nrows=", t%nrows()
+    end subroutine scenario_table_reserve_negative
 
     !> %add_column reallocates cols(:), so it is guarded at table_new_slot -- the choke point every
     !! per-kind specific goes through, which is why one scenario covers all 18 of them.

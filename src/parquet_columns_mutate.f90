@@ -305,10 +305,15 @@ contains
         case default
             error stop EP//"gather_storage: column has no active storage"
         end select
+        ! A rebuild allocates EXACT-FIT and says so. Only grow_storage ever creates slack, which is
+        ! what makes %shrink_to_fit (and parquet_table's %compact) a no-op on any column that has
+        ! not been appended to -- so a %filter_rows or a %sort_by hands the memory back on its own
+        ! rather than waiting for a call the caller may never make.
+        self%cap = n
     end procedure gather_storage
     !
-    module procedure grow_storage
-        integer(int64) :: old, new
+    module procedure ensure_capacity
+        integer(int64) :: old, newcap
         integer(int32), allocatable :: tmp_i32(:)
         integer(int64), allocatable :: tmp_i64(:)
         real(real32), allocatable :: tmp_f32(:)
@@ -325,82 +330,188 @@ contains
         type(parquet_date), allocatable :: tmp_dtv(:,:)
         type(parquet_time), allocatable :: tmp_tmv(:,:)
         type(parquet_timestamp), allocatable :: tmp_tsv(:,:)
-        if (n < 0_int64) error stop EP//"grow_storage: negative row count"
-        if (n == 0_int64) return
+        if (need_rows <= self%cap) return
         old = self%nrows
-        new = old + n
+        ! Geometric, not exact-fit: see the interface's own doc-comment for why, and why the
+        ! `cap + cap/2` form is the one to keep.
+        newcap = max(need_rows, self%cap + self%cap/2_int64)
         select case (self%kind)
         case (PK_INT32)
-            allocate(tmp_i32(new))
+            allocate(tmp_i32(newcap))
             if (old > 0_int64) tmp_i32(1:old) = self%i32(1:old)
             call move_alloc(tmp_i32, self%i32)
         case (PK_INT64)
-            allocate(tmp_i64(new))
+            allocate(tmp_i64(newcap))
             if (old > 0_int64) tmp_i64(1:old) = self%i64(1:old)
             call move_alloc(tmp_i64, self%i64)
         case (PK_FLOAT32)
-            allocate(tmp_f32(new))
+            allocate(tmp_f32(newcap))
             if (old > 0_int64) tmp_f32(1:old) = self%f32(1:old)
             call move_alloc(tmp_f32, self%f32)
         case (PK_FLOAT64)
-            allocate(tmp_f64(new))
+            allocate(tmp_f64(newcap))
             if (old > 0_int64) tmp_f64(1:old) = self%f64(1:old)
             call move_alloc(tmp_f64, self%f64)
         case (PK_LOGICAL)
-            allocate(tmp_bool(new))
+            allocate(tmp_bool(newcap))
             if (old > 0_int64) tmp_bool(1:old) = self%bool(1:old)
             call move_alloc(tmp_bool, self%bool)
         case (PK_DATE)
-            allocate(tmp_dt(new))
+            allocate(tmp_dt(newcap))
             if (old > 0_int64) tmp_dt(1:old) = self%dt(1:old)
             call move_alloc(tmp_dt, self%dt)
         case (PK_TIME)
-            allocate(tmp_tm(new))
+            allocate(tmp_tm(newcap))
             if (old > 0_int64) tmp_tm(1:old) = self%tm(1:old)
             call move_alloc(tmp_tm, self%tm)
         case (PK_TIMESTAMP)
-            allocate(tmp_ts(new))
+            allocate(tmp_ts(newcap))
             if (old > 0_int64) tmp_ts(1:old) = self%ts(1:old)
             call move_alloc(tmp_ts, self%ts)
         case (PK_INT32_VEC)
-            allocate(tmp_i32v(self%width, new))
+            allocate(tmp_i32v(self%width, newcap))
             if (old > 0_int64) tmp_i32v(:, 1:old) = self%i32v(:, 1:old)
             call move_alloc(tmp_i32v, self%i32v)
         case (PK_INT64_VEC)
-            allocate(tmp_i64v(self%width, new))
+            allocate(tmp_i64v(self%width, newcap))
             if (old > 0_int64) tmp_i64v(:, 1:old) = self%i64v(:, 1:old)
             call move_alloc(tmp_i64v, self%i64v)
         case (PK_FLOAT32_VEC)
-            allocate(tmp_f32v(self%width, new))
+            allocate(tmp_f32v(self%width, newcap))
             if (old > 0_int64) tmp_f32v(:, 1:old) = self%f32v(:, 1:old)
             call move_alloc(tmp_f32v, self%f32v)
         case (PK_FLOAT64_VEC)
-            allocate(tmp_f64v(self%width, new))
+            allocate(tmp_f64v(self%width, newcap))
             if (old > 0_int64) tmp_f64v(:, 1:old) = self%f64v(:, 1:old)
             call move_alloc(tmp_f64v, self%f64v)
         case (PK_LOGICAL_VEC)
-            allocate(tmp_boolv(self%width, new))
+            allocate(tmp_boolv(self%width, newcap))
             if (old > 0_int64) tmp_boolv(:, 1:old) = self%boolv(:, 1:old)
             call move_alloc(tmp_boolv, self%boolv)
         case (PK_DATE_VEC)
-            allocate(tmp_dtv(self%width, new))
+            allocate(tmp_dtv(self%width, newcap))
             if (old > 0_int64) tmp_dtv(:, 1:old) = self%dtv(:, 1:old)
             call move_alloc(tmp_dtv, self%dtv)
         case (PK_TIME_VEC)
-            allocate(tmp_tmv(self%width, new))
+            allocate(tmp_tmv(self%width, newcap))
             if (old > 0_int64) tmp_tmv(:, 1:old) = self%tmv(:, 1:old)
             call move_alloc(tmp_tmv, self%tmv)
         case (PK_TIMESTAMP_VEC)
-            allocate(tmp_tsv(self%width, new))
+            allocate(tmp_tsv(self%width, newcap))
             if (old > 0_int64) tmp_tsv(:, 1:old) = self%tsv(:, 1:old)
             call move_alloc(tmp_tsv, self%tsv)
         case (PK_STRING, PK_STRING_VEC)
-            ! the string store grows through its own append path (DD1)
+            ! the string store carries its own capacity (parquet_strings' ensure_*_cap), so `cap`
+            ! is meaningless here and %capacity/%reserve/%shrink_to_fit forward to it instead
             continue ! GCOVR_EXCL_LINE -- gcov attribution artifact: a bare `continue` no-op
         case default
-            error stop EP//"grow_storage: column has no active storage"
+            error stop EP//"ensure_capacity: column has no active storage"
         end select
-        self%nrows = new
+        self%cap = newcap
+    end procedure ensure_capacity
+    !
+    module procedure shrink_storage
+        integer(int64) :: n
+        integer(int32), allocatable :: tmp_i32(:)
+        integer(int64), allocatable :: tmp_i64(:)
+        real(real32), allocatable :: tmp_f32(:)
+        real(real64), allocatable :: tmp_f64(:)
+        logical, allocatable :: tmp_bool(:)
+        type(parquet_date), allocatable :: tmp_dt(:)
+        type(parquet_time), allocatable :: tmp_tm(:)
+        type(parquet_timestamp), allocatable :: tmp_ts(:)
+        integer(int32), allocatable :: tmp_i32v(:,:)
+        integer(int64), allocatable :: tmp_i64v(:,:)
+        real(real32), allocatable :: tmp_f32v(:,:)
+        real(real64), allocatable :: tmp_f64v(:,:)
+        logical, allocatable :: tmp_boolv(:,:)
+        type(parquet_date), allocatable :: tmp_dtv(:,:)
+        type(parquet_time), allocatable :: tmp_tmv(:,:)
+        type(parquet_timestamp), allocatable :: tmp_tsv(:,:)
+        if (self%cap <= self%nrows) return
+        n = self%nrows
+        select case (self%kind)
+        case (PK_INT32)
+            allocate(tmp_i32(n))
+            if (n > 0_int64) tmp_i32(1:n) = self%i32(1:n)
+            call move_alloc(tmp_i32, self%i32)
+        case (PK_INT64)
+            allocate(tmp_i64(n))
+            if (n > 0_int64) tmp_i64(1:n) = self%i64(1:n)
+            call move_alloc(tmp_i64, self%i64)
+        case (PK_FLOAT32)
+            allocate(tmp_f32(n))
+            if (n > 0_int64) tmp_f32(1:n) = self%f32(1:n)
+            call move_alloc(tmp_f32, self%f32)
+        case (PK_FLOAT64)
+            allocate(tmp_f64(n))
+            if (n > 0_int64) tmp_f64(1:n) = self%f64(1:n)
+            call move_alloc(tmp_f64, self%f64)
+        case (PK_LOGICAL)
+            allocate(tmp_bool(n))
+            if (n > 0_int64) tmp_bool(1:n) = self%bool(1:n)
+            call move_alloc(tmp_bool, self%bool)
+        case (PK_DATE)
+            allocate(tmp_dt(n))
+            if (n > 0_int64) tmp_dt(1:n) = self%dt(1:n)
+            call move_alloc(tmp_dt, self%dt)
+        case (PK_TIME)
+            allocate(tmp_tm(n))
+            if (n > 0_int64) tmp_tm(1:n) = self%tm(1:n)
+            call move_alloc(tmp_tm, self%tm)
+        case (PK_TIMESTAMP)
+            allocate(tmp_ts(n))
+            if (n > 0_int64) tmp_ts(1:n) = self%ts(1:n)
+            call move_alloc(tmp_ts, self%ts)
+        case (PK_INT32_VEC)
+            allocate(tmp_i32v(self%width, n))
+            if (n > 0_int64) tmp_i32v(:, 1:n) = self%i32v(:, 1:n)
+            call move_alloc(tmp_i32v, self%i32v)
+        case (PK_INT64_VEC)
+            allocate(tmp_i64v(self%width, n))
+            if (n > 0_int64) tmp_i64v(:, 1:n) = self%i64v(:, 1:n)
+            call move_alloc(tmp_i64v, self%i64v)
+        case (PK_FLOAT32_VEC)
+            allocate(tmp_f32v(self%width, n))
+            if (n > 0_int64) tmp_f32v(:, 1:n) = self%f32v(:, 1:n)
+            call move_alloc(tmp_f32v, self%f32v)
+        case (PK_FLOAT64_VEC)
+            allocate(tmp_f64v(self%width, n))
+            if (n > 0_int64) tmp_f64v(:, 1:n) = self%f64v(:, 1:n)
+            call move_alloc(tmp_f64v, self%f64v)
+        case (PK_LOGICAL_VEC)
+            allocate(tmp_boolv(self%width, n))
+            if (n > 0_int64) tmp_boolv(:, 1:n) = self%boolv(:, 1:n)
+            call move_alloc(tmp_boolv, self%boolv)
+        case (PK_DATE_VEC)
+            allocate(tmp_dtv(self%width, n))
+            if (n > 0_int64) tmp_dtv(:, 1:n) = self%dtv(:, 1:n)
+            call move_alloc(tmp_dtv, self%dtv)
+        case (PK_TIME_VEC)
+            allocate(tmp_tmv(self%width, n))
+            if (n > 0_int64) tmp_tmv(:, 1:n) = self%tmv(:, 1:n)
+            call move_alloc(tmp_tmv, self%tmv)
+        case (PK_TIMESTAMP_VEC)
+            allocate(tmp_tsv(self%width, n))
+            if (n > 0_int64) tmp_tsv(:, 1:n) = self%tsv(:, 1:n)
+            call move_alloc(tmp_tsv, self%tsv)
+        case default
+            ! Nothing to shrink: the string kinds carry capacity in their own store, and a column
+            ! with no kind has no storage. Neither is an error -- %shrink_to_fit is a request to
+            ! release what can be released, not an assertion that there is something to release.
+            return
+        end select
+        self%cap = n
+    end procedure shrink_storage
+    !
+    module procedure grow_storage
+        if (n < 0_int64) error stop EP//"grow_storage: negative row count"
+        if (n == 0_int64) return
+        ! Two lines on top of ensure_capacity, which is the only place capacity grows. The string
+        ! kinds reach here too and ensure_capacity is a no-op for them -- their storage grows
+        ! through parquet_string_column's own append path (DD1) -- but nrows must still advance.
+        call ensure_capacity(self, self%nrows + n)
+        self%nrows = self%nrows + n
         if (self%has_nulls) call ensure_bitmap(self)
     end procedure grow_storage
     !
@@ -513,6 +624,92 @@ contains
             error stop EP//"append_storage: column has no active storage"
         end select
     end procedure append_storage
+    !
+    module procedure append_row_of
+        integer(int64) :: at, w, e, src_base, dst_base
+        if (self%kind /= other%kind) error stop EP//"append_row_of: column kinds differ"
+        if (self%width /= other%width) error stop EP//"append_row_of: column widths differ"
+        if (irow < 1_int64 .or. irow > other%nrows) then
+            error stop EP//"append_row_of: source row index out of range"
+        end if
+        w = int(self%width, int64)
+        select case (self%kind)
+        case (PK_INT32)
+            call grow_storage(self, 1_int64)
+            self%i32(self%nrows) = other%i32(irow)
+        case (PK_INT64)
+            call grow_storage(self, 1_int64)
+            self%i64(self%nrows) = other%i64(irow)
+        case (PK_FLOAT32)
+            call grow_storage(self, 1_int64)
+            self%f32(self%nrows) = other%f32(irow)
+        case (PK_FLOAT64)
+            call grow_storage(self, 1_int64)
+            self%f64(self%nrows) = other%f64(irow)
+        case (PK_LOGICAL)
+            call grow_storage(self, 1_int64)
+            self%bool(self%nrows) = other%bool(irow)
+        case (PK_DATE)
+            call grow_storage(self, 1_int64)
+            self%dt(self%nrows) = other%dt(irow)
+        case (PK_TIME)
+            call grow_storage(self, 1_int64)
+            self%tm(self%nrows) = other%tm(irow)
+        case (PK_TIMESTAMP)
+            call grow_storage(self, 1_int64)
+            self%ts(self%nrows) = other%ts(irow)
+        case (PK_INT32_VEC)
+            call grow_storage(self, 1_int64)
+            self%i32v(:, self%nrows) = other%i32v(:, irow)
+        case (PK_INT64_VEC)
+            call grow_storage(self, 1_int64)
+            self%i64v(:, self%nrows) = other%i64v(:, irow)
+        case (PK_FLOAT32_VEC)
+            call grow_storage(self, 1_int64)
+            self%f32v(:, self%nrows) = other%f32v(:, irow)
+        case (PK_FLOAT64_VEC)
+            call grow_storage(self, 1_int64)
+            self%f64v(:, self%nrows) = other%f64v(:, irow)
+        case (PK_LOGICAL_VEC)
+            call grow_storage(self, 1_int64)
+            self%boolv(:, self%nrows) = other%boolv(:, irow)
+        case (PK_DATE_VEC)
+            call grow_storage(self, 1_int64)
+            self%dtv(:, self%nrows) = other%dtv(:, irow)
+        case (PK_TIME_VEC)
+            call grow_storage(self, 1_int64)
+            self%tmv(:, self%nrows) = other%tmv(:, irow)
+        case (PK_TIMESTAMP_VEC)
+            call grow_storage(self, 1_int64)
+            self%tsv(:, self%nrows) = other%tsv(:, irow)
+        case (PK_STRING, PK_STRING_VEC)
+            ! One flat store of nrows*width elements, row i at (i-1)*width + 1 .. i*width (RF6).
+            ! append_from copies one element without materializing it as a Fortran string.
+            do e = 1_int64, w
+                call self%str%append_from(other%str, (irow - 1_int64)*w + e)
+            end do
+            self%nrows = self%nrows + 1_int64
+            return
+        case default
+            error stop EP//"append_row_of: column has no active storage"
+        end select
+        ! Validity, element by element, exactly as `append` carries it for a whole column: the
+        ! temporal kinds hold their null state inside the element (so the value copy above already
+        ! moved it, and only the cache needs invalidating), while a bitmap kind has to copy bits --
+        ! and only when the source row actually has one, so a null-free append allocates nothing.
+        if (is_temporal_kind(self%kind)) then
+            self%nulls_dirty = .true.
+        else if (other%has_nulls) then
+            src_base = (irow - 1_int64)*w
+            dst_base = (self%nrows - 1_int64)*w
+            do e = 1_int64, w
+                if (bit_test(other%validity, src_base + e)) then
+                    call ensure_bitmap(self)
+                    call bit_set(self%validity, dst_base + e)
+                end if
+            end do
+        end if
+    end procedure append_row_of
     !
     module procedure paste_storage
         select case (self%kind)

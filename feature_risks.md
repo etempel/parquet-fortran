@@ -130,6 +130,7 @@ something a reader is expected to have.
 | [Risk-63](#risk-63--replacing-an-in-place-compactions-byte-loop-with-an-array-section-costs-a-heap-temporary-per-element) | Replacing an in-place compaction's byte loop with an array section costs a heap temporary per element | 3 — not testable |
 | [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null) | Two threads pasting adjacent row groups share a validity bitmap block and lose a null | 4 — covered |
 | [Risk-65](#risk-65--a-guard-claimed-after-the-state-it-protects-is-a-guard-that-loses-the-race) | A guard claimed after the state it protects is a guard that loses the race | 4 — covered |
+| [Risk-67](#risk-67--an-unbounded-read-of-a-parquet_column-storage-array-returns-uninitialised-slack) | An unbounded read of a `parquet_column` storage array returns uninitialised slack | 4 — covered |
 
 ---
 
@@ -137,7 +138,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-66**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-68**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2653,3 +2654,50 @@ replace the FINAL with explicit calls; do not add an allocatable component to `w
 not read a green `concurrent_calls_into_shared_*` run as evidence that this area is healthy — that
 scenario passed throughout the entire period the bug existed. Its negative control is the test that
 has teeth, exactly as Risk-6 records for the table layer's own guards.
+
+### Risk-67 — An unbounded read of a `parquet_column` storage array returns uninitialised slack
+
+`parquet_column` allocates its storage **geometrically** (`ensure_capacity`, 1.5x) so that appending
+row by row is amortised O(1) rather than the O(n²) an exact-fit reallocation per append costs. The
+consequence is that `size(self%i32)` is no longer `self%nrows` — it is `self%cap`, which is `>= nrows`
+and usually strictly greater.
+
+**Every read of a storage array must therefore be bounded by `1:nrows`.** They all are today
+(`data_ptr_i32` is `p => self%i32(1:self%nrows)`, `set_all_i32` is `self%i32(1:self%nrows) = values`,
+`copy_storage` slices both sides), and the bound was audited across all four generated
+`parquet_columns_*.f90` files plus the hand-written ones when the capacity was introduced. But before
+that change the bound was *decorative*: `size(...)` and `nrows` were the same number, so a procedure
+that forgot it worked anyway. Any such procedure — an old one nobody re-checked, or a new one written
+from the pre-capacity habit — now reads whatever the allocator happened to leave in the tail.
+
+**The failure is quiet in the worst way.** There is no abort, no shape mismatch and no bounds
+violation, because the memory is genuinely allocated and genuinely part of the array. A caller gets
+extra rows that were never appended, holding arbitrary values, and a `size(p)` taken from the pointer
+reports the capacity rather than the row count — so even a length check agrees with itself. Only the
+values are wrong, and only sometimes: a column whose capacity happens to equal its row count (one
+read from a file, or one just rebuilt by `%filter_rows`/`%sort_by`/`%gather`) behaves perfectly,
+which is most columns in most tests.
+
+Two related invariants hold the same design up, and breaking either is equally quiet:
+
+- **`cap >= nrows` always.** `clear` resets it to 0, `move_from` moves it with the arrays, `adopt`
+  takes it from the adopted allocation, `deep_copy` allocates exact-fit. A path that sets `nrows`
+  without setting `cap` leaves the column claiming room it does not have, and the next write past
+  the old end corrupts the heap.
+- **`ensure_bitmap` sizes the validity bitmap from `cap`, not from `nrows`.** Sizing it from the row
+  count reallocates the bitmap on every single append while the storage reallocates only
+  geometrically — silently restoring the O(n²) behaviour on any column that carries a null, with
+  every value and every null bit still correct.
+
+**Test.** `spare capacity is invisible to every reader` and `capacity >= length holds through every
+operation` (`test/test_columns.f90`) cover the first two; `a null-carrying column stays geometric
+too` covers the bitmap, and it is the one whose shape matters. Asserting the null bits still read
+back correctly is *not* enough — that passes against a bitmap sized from `nrows`. It asserts
+`validity_bytes()*8 >= capacity()*colwidth()` instead, and the fixture is chosen so 400 rows sit at
+a capacity of 474, which fall in different 64-bit blocks; without that the mutation survives the
+whole suite, as it did on the first attempt.
+
+**What this forbids.** Do not add a storage read without an explicit `1:nrows` bound, however
+obviously "the whole array" is meant. Do not use `size(self%<comp>)` as a row count — `self%nrows` is
+the row count and `%capacity()` is the allocation. And do not "simplify" `ensure_bitmap` back to
+`bits_needed(self)`: it looks like the tighter, more careful expression, and it is the bug.

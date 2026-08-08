@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Building a table row by row is no longer quadratic**, and `parquet_column` gains the capacity
+  controls that make it so: **`%capacity()`**, **`%reserve(n)`** and **`%shrink_to_fit()`**, with
+  **`parquet_table%reserve(n)`** and **`parquet_table%compact()`** as the whole-table forms. A
+  column's storage grew exact-fit, reallocating and copying every row on every append, so appending
+  `N` rows cost `O(N^2)` — and `%append(row)` additionally deep-copied every column of the row's
+  whole *source* table and then discarded all but one row of each, costing another `O(source rows)`
+  per call. Storage now grows geometrically (1.5x, matching `parquet_string_column`), and a row
+  append copies just that row, so appending is amortised O(1) in both. Reading a file still
+  allocates exactly the rows it holds, and every rebuild (`%filter_rows`, `%sort_by`, `%top_n`,
+  `%delete_rows`, `%truncate`) still hands its memory back — so `%compact()` is a no-op on anything
+  but a table that has been appended to, and is safe to call unconditionally. The price of the
+  slack is that an appended-to table can hold up to 1.5x its rows' worth of storage until
+  `%compact()` releases it; `%reserve(n)` up front turns even the amortised growth into a single
+  allocation. `%compact` and `%reserve` are the only two operations that reallocate storage without
+  changing the row set: they invalidate outstanding `%col` pointers and row handles (and advance
+  `%generation()` only when they actually released or reserved something) but never detach the
+  table. No answer changes.
+
 - **Sorting by a string column is 1.3-1.6x faster**, and `parquet_string_column` gains two
   primitives that made it possible: **`%copy_buffers(offsets, data)`**, a safe copy-out counterpart
   to `%raw_buffers` for a consumer that wants the packed layout, and **`%compare(i, j)`**, which

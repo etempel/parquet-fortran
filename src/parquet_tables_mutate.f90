@@ -13,6 +13,16 @@
 !! such operation lives in the other file. A new procedure added here must preserve that property
 !! -- if it cannot, it belongs next door.
 !!
+!! **The file split tracks the ROW SET, not pointer stability, and `%compact`/`%reserve` are what
+!! make the difference visible.** Everywhere else the two coincide: a row-structural change
+!! reallocates storage, so it both detaches and invalidates every `%col` pointer, while nothing
+!! here did either. `%compact` and `%reserve` reallocate storage *without* changing the row set --
+!! so they belong here (they detach nothing, and a column not yet read can still be read
+!! afterwards) and yet they DO invalidate every outstanding pointer and row handle. They are the
+!! only two procedures in this file that do. Pointer invalidation is therefore the union of
+!! "changes the row set" and "reallocates storage", and only the first half decides which file a
+!! procedure lives in.
+!!
 !! The per-kind `%set_element` writers are generated rather than written here; they live in
 !! `parquet_tables_access.f90` alongside `%set`, whose shape they follow.
 submodule (parquet_tables) parquet_tables_mutate
@@ -146,6 +156,65 @@ contains
         if (idx == 0) return
         call self%cache%cols(idx)%values%compact_validity()
     end procedure table_compact_validity
+    !
+    ! ---- capacity --------------------------------------------------------------------------
+    !
+    !> Releases the spare capacity appending left behind (see the interface in
+    !! `parquet_tables.f90` for the full contract).
+    module procedure table_compact
+        integer :: i
+        logical :: released, any_released
+        !
+        ! Refused on a shared table for the same reason every other storage change is: it
+        ! reallocates under any pointer another thread is holding. %append is the one mutation a
+        ! shared table permits, and it takes the lock instead -- so compaction happens after the
+        ! parallel region closes, not inside it.
+        call table_check_not_shared(self, "compact")
+        call table_check_open(self, "compact")
+        any_released = .false.
+        do i = 1, self%cache%ncols
+            ! A column that was never read has no storage to shrink, and touching it here would
+            ! read the file for no reason -- exactly what %compact exists to avoid paying for.
+            if (.not. table_mutable_column(self, i)) cycle
+            call self%cache%cols(i)%values%shrink_to_fit(released)
+            if (released) any_released = .true.
+        end do
+        ! Advanced ONLY when something actually moved. %generation() is the documented way for a
+        ! caller to find out whether a %col pointer is still good ("take it before, compare it
+        ! after, re-fetch if it moved"), so bumping it here when nothing was reallocated would
+        ! force a needless re-fetch on every table that had nothing to release -- which is every
+        ! table that has not been appended to. This is also what makes the no-op case testable.
+        if (any_released) self%cache%generation = self%cache%generation + 1_int64
+    end procedure table_compact
+    !
+    module procedure table_reserve_i32
+        call self%reserve(int(n, int64))
+    end procedure table_reserve_i32
+    !
+    !> Makes room for `n` rows in every resident column (see the interface in
+    !! `parquet_tables.f90`).
+    module procedure table_reserve_i64
+        integer :: i
+        character(len=32) :: got
+        !
+        call table_check_not_shared(self, "reserve")
+        call table_check_open(self, "reserve")
+        if (n < 0_int64) then
+            write(got, "(I0)") n
+            error stop EP // "reserve: cannot reserve " // trim(got) // " rows"
+        end if
+        ! `n` is the TOTAL row count to make room for, not an increment, so a reserve below what
+        ! the table already holds is a no-op rather than a shrink -- %compact is what shrinks.
+        if (n <= self%row_count) return
+        do i = 1, self%cache%ncols
+            if (.not. table_mutable_column(self, i)) cycle
+            call self%cache%cols(i)%values%reserve(n)
+        end do
+        ! Reserving reallocates, so it invalidates pointers exactly as %compact does, and advances
+        ! the generation for the same reason. Unconditional here: the early return above has
+        ! already handled every case in which nothing can move.
+        self%cache%generation = self%cache%generation + 1_int64
+    end procedure table_reserve_i64
     !
     ! ---- column-structural ----------------------------------------------------------------
     !

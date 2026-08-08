@@ -1294,6 +1294,19 @@ Two consequences for future work here:
   `parquet_tables_rowmutate.f90` next to the others, and its doc-comment should say it detaches.
   The file/`%col` split (`..._mutate.f90` never changes the row set, `..._rowmutate.f90` always
   does) is what keeps the rule checkable by looking at which file a procedure is in.
+- **The file split tracks the ROW SET, not pointer stability, and `%compact`/`%reserve` are the
+  two places that differ.** Everywhere else the two coincide, which is why the split reads as
+  though it decided both: a row-structural change reallocates storage, so it detaches *and*
+  invalidates every pointer, while nothing in `..._mutate.f90` did either. `%compact` and
+  `%reserve` reallocate storage *without* changing the row set — so they live in
+  `..._mutate.f90` (they detach nothing, and a column not yet read is still readable afterwards)
+  and yet they do invalidate every outstanding `%col` pointer and row handle. So: **pointer
+  invalidation is the union of "changes the row set" and "reallocates storage"; only the first
+  half decides which file a procedure goes in.** A new procedure in `..._mutate.f90` that
+  reallocates must say so in its doc-comment, and should advance `%generation()` only when it
+  actually reallocated — that counter is the documented way a caller finds out whether its
+  pointer died, so bumping it unconditionally forces a needless re-fetch on every call that
+  changed nothing.
 - **A row-structural mutation skips a column that is not resident** (`table_mutable_column`)
   rather than refusing to run, which is what lets a lazy table drop rows without first reading
   every column it has. The skipped column is then unreadable for good, and the detach guard

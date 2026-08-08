@@ -146,9 +146,16 @@ contains
     end procedure ensure_validity
     !
     module procedure ensure_bitmap
-        integer(int64) :: need, have
+        integer(int64) :: need, have, want_bits
         integer(int64), allocatable :: tmp(:)
-        need = max(blocks_for(bits_needed(self)), 1_int64)
+        ! Sized from the storage CAPACITY, not from the row count. Sizing it from `nrows` would
+        ! reallocate the bitmap on every single append even though the storage itself only
+        ! reallocates geometrically -- reintroducing exactly the O(n^2) behaviour `cap` exists to
+        ! remove, on a column that happens to carry a null, with every test still passing. The
+        ! extra blocks are zero-filled below, so rows in the spare capacity read as valid if a
+        ! later append ever brings them into range.
+        want_bits = max(self%cap, self%nrows)*int(self%width, int64)
+        need = max(blocks_for(want_bits), 1_int64)
         if (.not. allocated(self%validity)) then
             allocate(self%validity(need))
             self%validity = 0_int64

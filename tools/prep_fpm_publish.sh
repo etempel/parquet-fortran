@@ -105,6 +105,7 @@ REMOVE_PATHS=(
     tools/coverage.sh
     tools/coverage_cpp.sh
     tools/fix_ford_page_links.sh
+    tools/fpm_lto.sh
     tools/generate_fixtures.cpp
     tools/generate_parquet_columns.py
     tools/generate_parquet_tables.py

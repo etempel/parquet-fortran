@@ -83,6 +83,7 @@ working rules).
   - [Running a single test suite/test](#running-a-single-test-suitetest)
   - [Error scenarios are pre-run in parallel](#error-scenarios-are-pre-run-in-parallel)
   - [Tests run concurrently: never share a fixture file path between two tests](#tests-run-concurrently-never-share-a-fixture-file-path-between-two-tests)
+  - [An intermittent test failure has THREE causes](#an-intermittent-test-failure-has-three-causes-and-the-third-is-not-concurrency-at-all)
   - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
   - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
   - [A test that asserts a REFUSAL must say what to assert when the refusal lifts](#a-test-that-asserts-a-refusal-must-say-what-to-assert-when-the-refusal-lifts)
@@ -1552,6 +1553,28 @@ implicit — a shell there starts in the ifx environment:
 - **gfortran**: `source /opt/fortran/activate_gcc.sh`. Switches to gcc-toolset-14 (gfortran/g++
   14.2.1) and sets `FPM_FC=gfortran`.
 
+**Both activations need help to survive being sourced NON-INTERACTIVELY, and the gfortran one needs
+two commands rather than one:**
+
+```bash
+source /opt/fortran/activate_gcc.sh </dev/null >/dev/null 2>&1
+source /opt/rh/gcc-toolset-14/enable      # REQUIRED -- the line above is not sufficient
+```
+
+Without the redirection the script's trailing interactive subshell exits immediately with no tty and
+everything after it runs under the *system* toolchain, while the variables it exported beforehand make
+the shell look correctly configured; without the second line `gfortran` stays at **11.5.0**, which is
+the miscompilation hazard below. Both were confirmed on machine B by a run that checked
+`gfortran --version` before building — which is the only thing that catches either.
+
+**`ld.lld` is NOT on the `PATH` the ifx activation sets, and `-ipo` cannot link this library without
+it.** `activate_qmost_env.sh` adds `/opt/intel/oneapi/compiler/2026.1/bin`; the linker lives one
+directory further down, at `/opt/intel/oneapi/compiler/2026.1/bin/compiler/ld.lld`. Without it an
+`-ipo` build of this library dies with **8087 undefined `<module>_mp_<proc>_` references**, which
+reads as a defect in this project and is not (the system `ld`'s gold plugin cannot parse oneAPI's
+bitcode). Extend `PATH` explicitly, and note that a tool gated on `command -v ld.lld` will silently
+decline here — see "A wrapper must fail rather than degrade" below.
+
 **DANGER on machine B: the system `gfortran` is 11.5.0, which is BELOW this project's minimum of 13
 and will silently miscompile it.** In the ifx environment `/usr/bin/gfortran` (11.5.0) is what
 `gfortran` resolves to, so anyone overriding `FPM_FC=gfortran` there without first sourcing
@@ -1590,9 +1613,17 @@ command line *replaces* rather than appends, producing `fatal error: 'arrow/api.
 which reads like a missing dependency rather than a flag mistake. Append when a flag must be added:
 `FPM_FFLAGS="${FPM_FFLAGS:-} -flto"`.
 
-**Link-time optimisation links cleanly on all three** (verified with a minimal mixed Fortran/C++
-`bind(C)` program): `-flto` for gfortran + g++, and **`-ipo`** — not `-flto` — for ifx + icpx.
-`flang-mp-22` + `clang++-mp-22` links `-flto` too, on machine C.
+**A minimal mixed Fortran/C++ `bind(C)` program links under LTO on all three** — `-flto` for
+gfortran + g++, **`-ipo`** (not `-flto`) for ifx + icpx, and `-flto` for `flang-mp-22` +
+`clang++-mp-22` on machine C.
+
+**That is NOT the same as "the library links", and an earlier version of this note said it was.**
+Machine B's `--lto-probe` passed while the real `-ipo` build of this library failed with the 8087
+undefined references described above. The probe links objects **directly**; the actual failure
+mechanism is a static ARCHIVE of bitcode objects being read by the system linker, which the probe
+never builds. So the probe answers "can these two compilers emit and consume LTO objects at all",
+never "can this library be built that way" — see "A pre-flight probe is evidence only if it
+reproduces the real build's structure" below, which is the generalised form of the same trap.
 
 **A flang build here is SERIAL-ONLY, and that is a property of the installation rather than of this
 code.** MacPorts' `flang-mp-22` ships **no `omp_lib.mod` at all** — confirmed with a three-line
@@ -1629,13 +1660,24 @@ plugin-capable ARCHIVER, and without one it silently does nothing.** Under `-flt
 holds intermediate representation rather than finished code. An archiver that cannot read that IR
 indexes only what it can see, so the linker takes the machine-code half of a fat object and performs
 no cross-module optimisation — **the build succeeds, the tests pass, and the measurement is of an
-ordinary build with bigger objects.** There is no error and no warning. Intel ships `xiar`, GCC
-ships `gcc-ar` (a wrapper adding `-plugin liblto_plugin`); `fpm` archives with plain `ar` unless
-`FPM_AR` says otherwise. **On Linux, binutils `ar` usually loads the plugin itself; on macOS the
+ordinary build with bigger objects.** There is no error and no warning. GCC ships `gcc-ar` (a
+wrapper adding `-plugin liblto_plugin`); `fpm` archives with plain `ar` unless `FPM_AR` says
+otherwise. **On Linux, binutils `ar` usually loads the plugin itself; on macOS the
 default `ar` is Apple's cctools `ar`, which cannot** — so both macOS machines need
 `FPM_AR=gcc-ar-mp-<N>` for a GCC LTO build to mean anything. The tell is the archive size: machine
 C's `libparquet-fortran.a` came out **14.2 MB under `-flto` against 5.2 MB plain** while still full
 of ordinary text symbols under `nm`, and measured no gain anywhere.
+
+**On Intel, do NOT go looking for `xiar`: it does not exist in oneAPI 2026.1 at all** (`find
+/opt/intel/oneapi -name xiar` finds nothing on machine B), having been retired in favour of
+`llvm-ar` in the same `bin/compiler` directory as `ld.lld`. Two consequences, and the second was
+measured rather than assumed: a warning telling someone to source `setvars.sh` so that `xiar`
+appears names **a fix that cannot work**, and the archiver is not the load-bearing half on Intel
+anyway — with `ld.lld` on `PATH` and plain `ar` archiving, `-ipo` on machine B linked cleanly and
+still halved the temporal-validity figure, i.e. real interprocedural optimisation happened. `ld.lld`
+is what `-ipo` needs; the archiver choice is a refinement. **A tooling warning is a claim like any
+other**: B spent two extra probe runs falsifying this one rather than letting it qualify a whole
+campaign's numbers, which was the right call and is the pattern to copy.
 `tools/benchmark_stage7.sh` selects the archiver for both compiler families and warns when it cannot
 find one; `tools/machine_report.sh` reports which archivers exist. **Check the archiver before
 reporting any LTO result, in either direction** — "LTO changes nothing here" is exactly what a
@@ -1649,6 +1691,20 @@ way, which is deliberate (`FPM_CXXFLAGS` carries `-stdlib=libc++`, which MacPort
 reject). Read `tools/machine_report.sh`'s `fc`/`cc` lines rather than assuming a matched pair, and
 say which pair a figure came from — the same-family (`gfortran-mp-15` + `g++-mp-15`) and
 mixed-family builds are different experiments.
+
+**A mixed-family build cannot do CROSS-LANGUAGE LTO at all, whatever the archiver, because the two
+halves emit incompatible IR.** Verified on machine A by inspecting the `-flto` objects directly: the
+Fortran one carries GCC's `__wrapper_sects`/`__wrapper_names`/`__wrapper_index` Mach-O sections
+(GIMPLE, in a *fat* object that also has a real `__text`), while `file` reports the C++ one as
+`LLVM bitcode, wrapper`. No linker optimises across GCC GIMPLE and LLVM bitcode. **So the archiver
+advice above is necessary but not sufficient on macOS** — machine A re-measured `-flto` with
+`FPM_AR=gcc-ar-mp-15` genuinely in effect (confirmed: fpm really does invoke it, and the archive went
+from 4.6 MB / 2830 text symbols to 13.8 MB / 2144) and still measured **no change on any item at a 3%
+noise floor**, including the one item where machine B's same-family builds show a clean 2x. Two
+consequences: an LTO figure from either macOS machine says nothing about an LTO figure from a
+same-family toolchain, and "we set the archiver, so LTO was working" is not a conclusion the archiver
+alone supports. Check what the *objects* contain (`file`, `otool -l | grep sectname`) before claiming
+either way.
 
 ### Writing benchmarking instructions for another machine
 
@@ -1709,7 +1765,35 @@ fpm keeps the objects apart in its own per-compiler subdirectory, but the `find 
 lookup does not, and one of the two binaries is then chosen arbitrarily. The trap is the same one
 the separate trees exist to close, re-opened along an axis nobody was thinking about. Until a
 wrapper includes the compiler in its tree name, **run a second toolchain through it without
-`--test`**, or point `FPM_BUILD_DIR` somewhere of your own.
+`--test`**, or point `FPM_BUILD_DIR` somewhere of your own. Both remote machines hit this
+independently — one deleted the trees by hand between toolchains, the other declined to run a second
+compiler at all rather than risk it.
+
+**A pre-flight probe is evidence only if it reproduces the real build's STRUCTURE.** A cheap probe
+that link-tests a few objects answers a question about the *compilers*; it cannot answer a question
+about the *library* unless it is built the same way. `tools/machine_report.sh --lto-probe` passed on
+machine B while the real `-ipo` build of this library failed to link, because the failure lives in a
+static archive of bitcode objects and the probe never archives anything. The failure mode is the
+worst available: a probe that passes is read as clearance, so the campaign proceeds and the eventual
+error looks like a defect in the library rather than in the check. So when adding or trusting a
+probe, ask what the real build does that the probe does not — an archive, a mixed compiler family, a
+particular linker — and either reproduce it or say plainly what the probe does not cover.
+
+**A wrapper must FAIL rather than degrade when it cannot engage the configuration it was asked
+for.** `tools/benchmark_stage7.sh` gates `-fuse-ld=lld` on `command -v ld.lld`, warns when it is
+absent, and continues — so on machine B, where the documented activation script does not put it on
+`PATH` (see the machine table above), the campaign's headline fix silently did nothing and the run
+reproduced the exact failure the fix existed to remove. A warning on stderr, hundreds of lines above
+the eventual error, is not a defence. **Two rules follow:** resolve a companion tool relative to the
+compiler that owns it (`"$(dirname "$(command -v ifx)")/compiler/ld.lld"`) rather than trusting
+`PATH`, and when a requested configuration cannot be assembled, exit nonzero — a run that could not
+do what was asked is not a slower run, it is a different one.
+
+**When tooling is fixed mid-campaign, every figure taken before the fix is suspect.** A measurement
+is of whatever the tooling actually did, not of what it was meant to do, so a number carried forward
+across a tooling change is a number filed against a build that never ran. Re-run it or label it, and
+prefer re-running: this is the same reasoning as the "what changed since the earlier commit" step,
+applied to the harness instead of the source.
 
 ### Compiler & language gotchas
 
@@ -2639,6 +2723,76 @@ in the obvious way is unaffected. `test/run_tester.f90`'s `suite_is_safe_to_para
 a whole suite from that parallelism, but reach for it only when the suite genuinely cannot run
 concurrently — narrowing the guard is the better fix, since the suite's parallelism is itself an
 ongoing regression check.
+
+### An intermittent test failure has THREE causes, and the third is not concurrency at all
+
+The section above supplies two explanations for a test that fails once and then passes ten times — a
+data race, and two tests sharing a fixture path — and both are so well documented here that they are
+the obvious first guesses. **A test that reads memory the library never wrote is the third, and it
+looks exactly like the other two from the outside.** Both natural guesses were tried and were wrong
+on the one instance found so far.
+
+**The shape to recognise.** A `null` numeric row's *value* bytes are unspecified by design
+(`grow_rows`, `src/parquet_columns_structural.f90`, and `%init`'s documented contract), so a column
+created all-null and never written holds whatever the allocator left there. A test that then compares
+such a column **against itself** — which is a sound and deliberate technique used widely in
+`test/test_table_codegen.f90`, where one test pins the whole-column values and a second sweeps the
+indexed/range accessor forms against them — passes for essentially any bit pattern, because `x - x`
+is `0`. **Except for a NaN**: `NaN - NaN` is `NaN` and every comparison against it is false. So the
+test passes or fails according to what was last on that heap page, at a rate low enough (1 in 6 full
+runs, then 10 clean reruns) to be dismissed as a flake.
+
+**The instrument that turns it deterministic, and it is worth keeping.** An `LD_PRELOAD` shim
+filling every `malloc` block with a chosen byte; `FILL_BYTE=0xFF` is the interesting one, because
+`0xFFFFFFFFFFFFFFFF` is a NaN as `real64` and `0xFFFFFFFF` is a NaN as `real32`, so **every
+uninitialized float in the process reads as NaN**:
+
+```c
+/* Only decides what UNSPECIFIED memory contains; never changes a value the program writes. */
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <string.h>
+#include <stdlib.h>
+static void *(*real_malloc)(size_t);
+static int fill = -1;
+void *malloc(size_t n) {
+    if (!real_malloc) real_malloc = dlsym(RTLD_NEXT, "malloc");
+    if (fill < 0) { const char *e = getenv("FILL_BYTE"); fill = e ? (int)strtol(e, 0, 0) : 0xFF; }
+    void *p = real_malloc(n);
+    if (p) memset(p, fill, n);
+    return p;
+}
+```
+
+Under it the failure was 100% reproducible and the whole suite came back **1411 passed / exactly 1
+failed** — the same test, the same column, nothing else — which is both the diagnosis and the proof
+that the instance was isolated. **Its limits matter:** gfortran's `allocate` goes through `malloc`,
+so column storage is covered, but stack-resident automatic arrays and anything from
+`calloc`/`realloc` are **not**, so a clean whole-suite run under it is strong evidence and not a
+proof. It is Linux-only (`LD_PRELOAD`); the macOS equivalent is `DYLD_INSERT_LIBRARIES` plus
+`DYLD_FORCE_FLAT_NAMESPACE`, untested here.
+
+**Three rules follow, and the third is the one that generalises furthest:**
+
+- **A self-comparison is only as strong as the data varies.** Filling the offending column with a
+  single constant cures the NaN unsoundness and leaves the range accessors unable to detect a
+  misalignment — a grade-A defect traded for a grade-B one. Use row-distinct values, and verify that
+  choice by mutation (a misaligned range accessor must fail), rather than asserting it in a comment.
+- **Grade the assertions rather than fixing only the one that failed.** The audit that followed
+  sorted every assertion in the affected test into *unsound* (compares undefined data with itself),
+  *vacuous on values* (asserts only a `size()` or an `is_null()` — six of these, which would pass
+  against a **wrong answer**, not merely against garbage, and which the NaN instrument cannot see at
+  all) and *weakened* (fixture values repeating with period 2, so an off-by-even misalignment is
+  invisible). Only the first two were worth fixing; the third was left deliberately, since fixing it
+  means changing fixture values other tests assert against, for a reduction in strength rather than
+  an unsound assertion. Copy the grading, not just the fix.
+- **Uninitialized value bytes do NOT reach the output file, and that question is closed** — do not
+  re-suspect it. Writing the same all-null column under four different heap fills produced two
+  byte-identical files, and the files that differed differed in exactly **4 bytes**, all part of a
+  creation timestamp in the metadata. Parquet stores no values for null entries at all (only
+  definition levels record nullness), confirmed with `pyarrow`: the chunk is 23 bytes with
+  `null_count=6`, and six `real64` values cannot fit in 23 bytes. Valgrind agrees — 0
+  uninitialised-value errors on the write path.
 
 ### Every `check()` call needs its own message
 

@@ -192,6 +192,23 @@ extern "C" int cxx_add(int a, int b) {
     return a + b + static_cast<int>(v.size()) - 2;
 }
 EOF
+    # Pick the archiver the REAL build would use for this compiler family, so the probe's archive is
+    # built the same way tools/benchmark_stage7.sh builds the library's. Plain `ar` is the fallback
+    # and is itself informative: on macOS it is Apple cctools ar, which has no LTO plugin, so a probe
+    # that passes with it has demonstrated linking and NOT interprocedural optimisation.
+    probe_archiver() {  # $1 = fortran compiler
+        local f="$1" maj cand
+        maj="$("$f" -dumpversion 2>/dev/null | cut -d. -f1)"
+        case "$("$f" --version 2>&1 | head -1)" in
+            *ifx*|*Intel*|*flang*|*clang*) set -- "llvm-ar-mp-$maj" "llvm-ar-$maj" "llvm-ar" ;;
+            *)                             set -- "gcc-ar-mp-$maj" "gcc-ar-$maj" "gcc-ar" ;;
+        esac
+        for cand in "$@"; do
+            if command -v "$cand" >/dev/null 2>&1; then printf '%s' "$cand"; return 0; fi
+        done
+        printf 'ar'
+    }
+
     # A SKIPPED PROBE AND A PASSED PROBE MUST NOT LOOK ALIKE. This used to `return 0` silently when
     # either compiler was missing, so an arm that never ran was indistinguishable from one that was
     # never written -- and on machine C the flang arm was quietly skipped (the compiler was there
@@ -204,14 +221,24 @@ EOF
         if ! command -v "$x" >/dev/null 2>&1; then
             echo "-- $f + $x, $flag $*: SKIPPED -- '$x' not found on PATH"; echo; return 0
         fi
-        echo "-- $f + $x, $flag $* --"
+        # THE PROBE ARCHIVES, because linking loose objects is not what the real build does and
+        # cannot see the failure that actually occurs. fpm builds a STATIC LIBRARY and links that;
+        # under -ipo/-flto its members hold IR, and it is the archive-plus-system-linker pair that
+        # breaks. An earlier version of this probe linked m.o and c.o directly, passed on machine B,
+        # and the real -ipo build of the library then died with 8087 undefined references -- a pass
+        # that was read as clearance. Reproduce the structure or the probe answers a different
+        # question than the one being asked.
+        local arname
+        arname="$(probe_archiver "$f")"
+        echo "-- $f + $x, $flag $*  (archiving with $arname) --"
         ( cd "$d" \
           && "$f" -O2 "$flag" -c m.f90 -o m.o \
           && "$x" -O2 "$flag" -std=c++20 -c c.cpp -o c.o \
-          && "$f" -O2 "$flag" "$@" m.o c.o -lstdc++ -o probe \
+          && "$arname" -rs libprobe.a m.o c.o >/dev/null 2>&1 \
+          && "$f" -O2 "$flag" "$@" -o probe -L. -lprobe -lstdc++ \
           && ./probe ) 2>&1 | tail -4
         echo "   exit: $?  (expect 'lto probe ok: 42' and 0)"
-        rm -f "$d"/*.o "$d/probe"
+        rm -f "$d"/*.o "$d/libprobe.a" "$d/probe"
     }
     # ifx emits LLVM bitcode under -ipo; the system linker may be unable to read it, so the
     # Intel-supplied lld is tried as well. Report BOTH outcomes -- which one works is the thing a

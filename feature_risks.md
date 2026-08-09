@@ -132,6 +132,7 @@ something a reader is expected to have.
 | [Risk-65](#risk-65--a-guard-claimed-after-the-state-it-protects-is-a-guard-that-loses-the-race) | A guard claimed after the state it protects is a guard that loses the race | 4 — covered |
 | [Risk-67](#risk-67--an-unbounded-read-of-a-parquet_column-storage-array-returns-uninitialised-slack) | An unbounded read of a `parquet_column` storage array returns uninitialised slack | 4 — covered |
 | [Risk-68](#risk-68--a-qc-bound-is-parsed-into-float64-so-a-bound-past-253-is-silently-rounded) | A qc bound is parsed into `float64`, so a bound past 2^53 is silently rounded | 4 — covered |
+| [Risk-69](#risk-69--a-test-that-compares-a-never-written-column-with-itself-passes-on-the-heaps-luck) | A test that compares a never-written column with itself passes on the heap's luck | 2 — proposed |
 
 ---
 
@@ -139,15 +140,84 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-69**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-70**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
 
-*Nothing here.* Every entry this section held has been implemented and moved to section 4 — which is
-where a proposal goes once its test exists, carrying its number with it. A risk belongs here when
-someone has decided it is testable and said what to assert, but has not written the test yet, and
-only for as long as that is true.
+A risk belongs here when someone has decided it is testable and said what to assert, but has not
+written the test yet, and only for as long as that is true. Once the test exists the entry moves to
+section 4, carrying its number with it.
+
+### Risk-69 — A test that compares a never-written column with itself passes on the heap's luck
+
+**What breaks.** A `null` numeric row's *value* bytes are unspecified by design. `grow_rows`
+(`src/parquet_columns_structural.f90`) sets the validity bits and writes no values, matching `%init`'s
+documented contract, and its own comment says so: new rows are *"unspecified-but-valid for the numeric
+ones"*. A column created all-null and never written therefore holds whatever the allocator last left
+on those pages.
+
+A test that then compares such a column **against itself** — one accessor form against another, which
+is a deliberate and widely used technique in `test/test_table_codegen.f90` — is asserting `x - x == 0`
+over undefined bytes. **That holds for every bit pattern except a NaN.** `NaN - NaN` is `NaN` and every
+comparison against a NaN is false, so the assertion passes or fails according to what the allocator
+handed back. The library is behaving exactly as documented throughout; only the test is unsound.
+
+**Why the failure is quiet, and worse than quiet.** It is *intermittent*. The one instance found
+failed **once in six full suite runs** and then passed ten reruns in a row, which is indistinguishable
+from a flake and is triaged as one. Both natural explanations for an intermittent failure in this
+project — a data race, and two tests sharing a fixture path (see CLAUDE.md's "Tests run concurrently")
+— are documented well enough to be the obvious first guesses, and both were tried here and were wrong.
+The failure also reports whichever accessor form happened to touch a NaN row, so its *message* moves
+between runs, which reads as nondeterminism in the library rather than in the fixture.
+
+**What this forbids.**
+
+- **Do not sweep a column the library never wrote.** If a test reads a column's values at all, fill
+  it first. The rule generalises past `null` rows: any storage the library documents as
+  unspecified-but-valid is not comparable, including a column's spare capacity (Risk-67).
+- **Fill it with ROW-DISTINCT values, never a constant.** A constant fill cures the NaN unsoundness
+  and simultaneously destroys the sweep's ability to detect a misaligned range accessor — trading an
+  unsound assertion for a vacuous one. Verified by mutation rather than asserted: with a constant
+  fill a deliberately misaligned range accessor was **not caught**; with `0.5_real64*i` it was.
+- **Do not "fix" this in the library by zero-filling `grow_rows`.** It would contradict a documented
+  contract, add a `memset` to a path CLAUDE.md already flags as allocation-sensitive, and mask genuine
+  "read of a null value" bugs instead of surfacing them.
+- **An assertion that checks only `size(...)` or only `is_null()` is not a weaker version of this
+  problem — it is a different one, and the NaN instrument cannot see it.** Six such assertions were
+  found alongside the original defect; each would have passed against a *wrong answer*, not merely
+  against garbage. When auditing for this risk, grade every assertion in the affected test rather than
+  fixing only the one that failed.
+
+**Test — proposed.** The instance is fixed and mutation-tested (`test/test_table_codegen.f90`, commit
+`a4ff042`: `flux` is filled with row-distinct values before the accessor sweep, and six size-only /
+null-only assertions were strengthened to compare values; three deliberate misalignments were
+confirmed caught). **What is not covered is a future test reintroducing the pattern**, and nothing
+static can see it — the assertion is well-formed and the memory is genuinely allocated.
+
+The proposed scenario is the instrument that found it: run the **whole suite** with an `LD_PRELOAD`
+shim that fills every `malloc` block with `0xFF`, so every uninitialized `real32`/`real64` reads as a
+NaN. Under it the original defect was **100% reproducible** (1411 passed / exactly 1 failed, the same
+test every time) and after the fix the same run is **1412 / 0**. The shim is recorded in CLAUDE.md's
+"An intermittent test failure has THREE causes".
+
+Two things to settle before implementing it, which is why this is a proposal rather than a test:
+
+- **Where it runs.** `LD_PRELOAD` is Linux-only, so this is a CI-image job rather than something
+  `fpm test` can do; the macOS equivalent (`DYLD_INSERT_LIBRARIES` + `DYLD_FORCE_FLAT_NAMESPACE`) is
+  untested here. A periodic or manual job may be the right shape rather than a per-commit one.
+- **What it proves.** gfortran's `allocate` goes through `malloc`, so column storage is covered, but
+  stack-resident automatic arrays and anything from `calloc`/`realloc` are **not**. A clean run is
+  strong evidence and not a proof, and the entry should say so rather than being read as closing the
+  class.
+
+**A related question is CLOSED and should not be re-opened.** These undefined bytes do **not** reach
+the output file. Writing the same all-null column under four different heap fills produced two
+byte-identical files, and the files that differed differed in exactly **4 bytes** — a creation
+timestamp in the MAML metadata. Parquet stores no values for null entries (only definition levels
+record nullness), confirmed with `pyarrow`: the chunk is 23 bytes with `null_count=6`, and six
+`real64` values cannot fit in 23 bytes. Valgrind reports 0 uninitialised-value errors on that write
+path.
 
 ## 3. Risks not testable
 

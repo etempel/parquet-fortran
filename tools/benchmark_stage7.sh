@@ -28,15 +28,21 @@
 # otherwise. They are the same idea with different spellings; passing the wrong
 # one is silently accepted by some drivers and ignored.
 #
-# ifx additionally needs a different ARCHIVER. fpm builds a static library with
-# plain `ar` (verified: `ar -rs .../libparquet-fortran.a ...`), but under -ipo
-# an Intel object file holds intermediate representation rather than finished
-# code, and plain `ar` produces an archive the linker cannot optimise across --
-# so the build either fails at link time or, worse, succeeds having quietly done
-# no interprocedural optimisation at all, which would make an -ipo measurement a
-# measurement of nothing. Intel ships `xiar` for this. fpm takes FPM_AR (or
-# --archiver), so this script sets it for the ifx LTO build only; the plain build
-# and every non-Intel build keep whatever archiver fpm would have chosen.
+# ifx additionally needs a different LINKER, and that is the load-bearing part:
+# under -ipo an Intel object holds LLVM bitcode rather than finished code, and the
+# system GNU ld's plugin usually cannot read it, so the link dies with thousands
+# of undefined references. oneAPI ships a matching ld.lld -- beside the compiler
+# rather than on PATH -- and this script finds it there and fails outright if it
+# cannot, because an -ipo run that silently fell back is not a slower run, it is a
+# different one.
+#
+# The ARCHIVER is a refinement rather than a requirement on Intel: machine B
+# measured -ipo with plain `ar` and still got real interprocedural optimisation.
+# Note `xiar` no longer exists in oneAPI 2026.1 (retired in favour of llvm-ar), so
+# any advice to source setvars.sh until it appears cannot be followed. GCC is the
+# opposite case -- there a plugin-less archiver silently disables LTO with no error
+# at all, which is why gcc-ar is chosen when available. fpm takes FPM_AR, so this
+# script sets it for the LTO build only; the plain build keeps fpm's own choice.
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -119,6 +125,7 @@ done
 # Pick the right link-time-optimisation flag, and the archiver/linker that go with it.
 LTO_AR=""
 LTO_LD=""
+fc_major="$("$fc" -dumpversion 2>/dev/null | cut -d. -f1)"
 if "$fc" --version 2>&1 | head -1 | grep -qi "ifx\|intel"; then
     LTO_FLAG="-ipo"
     # -ipo makes ifx emit LLVM BITCODE objects, and the system GNU ld's gold plugin is built
@@ -128,22 +135,51 @@ if "$fc" --version 2>&1 | head -1 | grep -qi "ifx\|intel"; then
     # bug in this project and is not. oneAPI ships a matching ld.lld next to ifx, so selecting it
     # is what makes -ipo usable at all. Measured on machine B: 8087 undefined references without
     # this, clean link and a full passing test suite with it.
+    #
+    # RESOLVE IT RELATIVE TO THE COMPILER, not from PATH. Machine B's own documented activation
+    # script (activate_qmost_env.sh) puts .../compiler/2026.1/bin on PATH while ld.lld lives one
+    # directory further down, in .../bin/compiler -- so a `command -v ld.lld` gate declines there,
+    # -fuse-ld=lld is silently never passed, and the run reproduces the exact failure this flag
+    # exists to remove. That happened, and the warning printed hundreds of lines earlier was no
+    # defence at all.
+    lld_dir=""
     if command -v ld.lld >/dev/null 2>&1; then
         LTO_LD="-fuse-ld=lld"
     else
-        echo "WARNING: ifx detected but 'ld.lld' is not on PATH." >&2
-        echo "  -ipo emits LLVM bitcode objects that the system linker's plugin may be too old to" >&2
-        echo "  read, giving thousands of undefined <module>_mp_<proc>_ references at link time." >&2
-        echo "  If the LTO build fails that way, source the oneAPI environment so ld.lld is found." >&2
+        fc_bin="$(dirname "$(command -v "$fc" 2>/dev/null || echo /nonexistent)")"
+        for cand in "$fc_bin/compiler" "$fc_bin/../bin/compiler" "$fc_bin/../bin-llvm"; do
+            if [ -x "$cand/ld.lld" ]; then lld_dir="$(cd "$cand" && pwd)"; break; fi
+        done
+        if [ -n "$lld_dir" ]; then
+            echo "note: ld.lld found beside the compiler but not on PATH; adding $lld_dir" >&2
+            PATH="$lld_dir:$PATH"; export PATH
+            LTO_LD="-fuse-ld=lld"
+        fi
     fi
-    if command -v xiar >/dev/null 2>&1; then
-        LTO_AR="xiar"
-    else
-        echo "WARNING: ifx detected but 'xiar' is not on PATH." >&2
-        echo "  Under -ipo, plain 'ar' archives IR objects in a form the linker cannot" >&2
-        echo "  optimise across, so the LTO build may fail to link or may silently do no" >&2
-        echo "  interprocedural optimisation -- making its numbers meaningless." >&2
-        echo "  Source the oneAPI environment (setvars.sh) so xiar is available, then rerun." >&2
+    # FAIL rather than degrade. A run that could not assemble the configuration it was asked for is
+    # not a slower run, it is a different one -- and its output is indistinguishable from a result.
+    if [ -z "$LTO_LD" ] && [ "$MODE" != "plain" ]; then
+        echo "ERROR: ifx detected, LTO requested, and 'ld.lld' could not be found." >&2
+        echo "  -ipo emits LLVM bitcode objects that the system linker's plugin is typically too" >&2
+        echo "  old to read, giving thousands of undefined <module>_mp_<proc>_ references -- which" >&2
+        echo "  reads as a defect in this library and is not." >&2
+        echo "  Looked on PATH and beside the compiler ($fc_bin/compiler, ../bin/compiler)." >&2
+        echo "  Put oneAPI's linker directory on PATH and rerun, e.g.:" >&2
+        echo "    export PATH=\"/opt/intel/oneapi/compiler/<ver>/bin/compiler:\$PATH\"" >&2
+        echo "  Refusing to measure an -ipo build that cannot link. Use --plain to skip LTO." >&2
+        exit 2
+    fi
+    # NOT xiar: it does not exist in oneAPI 2026.1 at all (Intel retired it), so warning about its
+    # absence names a fix that cannot work. llvm-ar in the same bin/compiler directory replaces it.
+    # This is a refinement rather than a requirement on Intel -- machine B measured -ipo with plain
+    # `ar` archiving and still got real interprocedural optimisation (the temporal-validity figure
+    # halved), so ld.lld above is the load-bearing half and this is not.
+    for cand in llvm-ar xiar; do
+        if command -v "$cand" >/dev/null 2>&1; then LTO_AR="$cand"; break; fi
+    done
+    if [ -z "$LTO_AR" ]; then
+        echo "note: neither llvm-ar nor xiar found; archiving -ipo objects with plain 'ar'." >&2
+        echo "  Measured as working on machine B; the link, not the archive, is what -ipo needs." >&2
     fi
 else
     LTO_FLAG="-flto"
@@ -159,7 +195,6 @@ else
     # gfortran-mp-15), then a plain gcc-ar, and warn rather than silently measuring nothing.
     # flang is LLVM, not GCC: its IR is LLVM bitcode and llvm-ar is what reads it, so asking for
     # gcc-ar there would warn about the wrong missing tool and name a fix that cannot work.
-    fc_major="$("$fc" -dumpversion 2>/dev/null | cut -d. -f1)"
     if "$fc" --version 2>&1 | head -1 | grep -qi "flang\|clang"; then
         ar_family="llvm-ar"
         ar_cands="llvm-ar-mp-${fc_major} llvm-ar-${fc_major} llvm-ar"
@@ -179,6 +214,12 @@ else
     fi
 fi
 
+# A tag identifying the TOOLCHAIN, so a second compiler cannot land in the first one's tree. See
+# run_one's own comment for why sharing a tree between compilers is a false-green rather than a mess.
+FC_TAG="$(basename "$fc")"
+[ -n "$fc_major" ] && FC_TAG="$FC_TAG-$fc_major"
+FC_TAG="$(printf '%s' "$FC_TAG" | tr -c 'A-Za-z0-9._-' '_')"
+
 run_one() {  # $1 = "plain" | "lto"
     local label="$1"
     local ff="${FPM_FFLAGS:-}" cf="${FPM_CXXFLAGS:-}" lf="${FPM_LDFLAGS:-}"
@@ -194,7 +235,14 @@ run_one() {  # $1 = "plain" | "lto"
     # inside build/ would make the STANDALONE runner ambiguous long after this script exited,
     # trading one false-green for another. The suite writes its fixtures to test_run/ top level,
     # so a subdirectory here cannot collide with them.
-    local bdir="test_run/s7-$label"
+    #
+    # THE TAG ALSO CARRIES THE COMPILER, because per-configuration alone was not enough. fpm keeps
+    # different compilers' OBJECTS apart in its own per-compiler subdirectory, but the `find … |
+    # head -n 1` lookup above does not -- so a second toolchain run into the same tree leaves two
+    # error_scenarios binaries and one is chosen arbitrarily, which is a false green rather than an
+    # error. Machine B hit this and deleted the trees by hand between ifx and gfortran; machine C
+    # declined to run a second compiler at all because of it.
+    local bdir="test_run/s7-$FC_TAG-$label"
     if [ "$label" = "lto" ]; then
         ff="$ff $LTO_FLAG"; cf="$cf $LTO_FLAG"; lf="$lf $LTO_FLAG${LTO_LD:+ $LTO_LD}"
         echo "###################### BUILD: $label ($LTO_FLAG${LTO_LD:+ $LTO_LD}${LTO_AR:+, FPM_AR=$LTO_AR}) ######################"
@@ -216,17 +264,17 @@ run_one() {  # $1 = "plain" | "lto"
         if [ "$RUN_TESTS" -eq 1 ]; then
             echo
             echo "-------- full test suite under this build ($label) --------"
-            if fpm test > "test_run/s7-test-$label.log" 2>&1; then
-                echo "fpm test            : PASS ($(grep -c PASSED "test_run/s7-test-$label.log") assertions)"
+            if fpm test > "test_run/s7-test-$FC_TAG-$label.log" 2>&1; then
+                echo "fpm test            : PASS ($(grep -c PASSED "test_run/s7-test-$FC_TAG-$label.log") assertions)"
             else
                 echo "fpm test            : *** FAIL *** -- last 40 lines:"
-                tail -40 "test_run/s7-test-$label.log"
+                tail -40 "test_run/s7-test-$FC_TAG-$label.log"
             fi
-            if ./tools/run_error_scenarios.sh > "test_run/s7-scen-$label.log" 2>&1; then
+            if ./tools/run_error_scenarios.sh > "test_run/s7-scen-$FC_TAG-$label.log" 2>&1; then
                 echo "error scenarios     : PASS"
             else
                 echo "error scenarios     : *** FAIL *** -- last 30 lines:"
-                tail -30 "test_run/s7-scen-$label.log"
+                tail -30 "test_run/s7-scen-$FC_TAG-$label.log"
             fi
         fi
     )
@@ -240,7 +288,7 @@ case "$MODE" in
 esac
 
 echo "Left in place for inspection, all under the already-git-ignored test_run/:"
-echo "  test_run/s7-plain/  test_run/s7-lto/     (build trees, as applicable)"
+echo "  test_run/s7-$FC_TAG-plain/  test_run/s7-$FC_TAG-lto/   (build trees, as applicable)"
 echo "  test_run/s7-test-*.log  test_run/s7-scen-*.log   (suite output)"
 echo "They are outside build/, so the ordinary fpm build and tools/run_error_scenarios.sh are"
 echo "unaffected. Remove them with: rm -rf test_run/s7-*"

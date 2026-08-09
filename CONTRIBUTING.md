@@ -106,53 +106,73 @@ FPM_LDFLAGS="${FPM_LDFLAGS:-} -flto" fpm install --profile release
 Note the `${VAR:-}` prefixes: a bare assignment would discard the Arrow include and link paths those
 variables normally carry.
 
-**On ifx, also set `FPM_AR=xiar`.** fpm archives the static library with plain `ar`; under `-ipo` an
-Intel object file holds intermediate representation, and plain `ar` produces an archive the linker
-cannot optimise across — so the build either fails at link time or, worse, succeeds having quietly
-done no interprocedural optimisation at all. `xiar` ships with oneAPI.
+**Two companion tools matter as much as the flag itself, and getting either wrong is silent.**
+
+- **A plugin-capable ARCHIVER.** fpm archives the static library with plain `ar`; under LTO an object
+  holds intermediate representation, and an archiver that cannot read it indexes only the machine-code
+  half — so the build **succeeds, passes its tests, and does no interprocedural optimisation at all**.
+  There is no error and no warning. Set `FPM_AR=gcc-ar` (or `gcc-ar-mp-<N>` under MacPorts) for
+  GCC, `FPM_AR=llvm-ar` for flang/Intel. On Linux, binutils `ar` usually loads the plugin itself; on
+  macOS the default `ar` is Apple cctools `ar`, which cannot — so a macOS GCC build **needs** this.
+  The tell is the archive size: 14.2 MB under `-flto` against 5.2 MB plain, still full of ordinary
+  text symbols under `nm`, is a disabled LTO build.
+- **On ifx, the LINKER, and this one fails loudly rather than silently.** `-ipo` emits LLVM bitcode
+  that the system `ld`'s plugin generally cannot read, giving **thousands of undefined
+  `<module>_mp_<proc>_` references** — which reads as a defect in this library and is not. oneAPI
+  ships a matching `ld.lld`, but it sits in `<oneapi>/compiler/<ver>/bin/**compiler**/`, which the
+  usual environment scripts do **not** put on `PATH`. Add that directory and pass `-fuse-ld=lld`.
+
+**Do not go looking for `xiar`: it does not exist in oneAPI 2026.1**, having been retired in favour of
+`llvm-ar`. Advice to source `setvars.sh` until it appears cannot be followed. It is also not the
+load-bearing piece on Intel — `-ipo` with plain `ar` was measured doing real interprocedural
+optimisation, once `ld.lld` was in play.
 
 **Exporting those variables permanently affects EVERY build, including `--profile debug`** — fpm
-applies them whatever the profile (and even with no profile at all). That is rarely wanted: LTO
-makes a debug build slow to link and inlines across translation units, which is exactly what a
-`-fcheck=bounds` backtrace needs left alone. To get LTO on release builds only, wrap `fpm` in a
-shell function that adds the flags when it sees `--profile release`:
+applies them whatever the profile (and even with no profile at all). That is rarely wanted: LTO makes
+a debug build slow to link and inlines across translation units, which is exactly what a
+`-fcheck=bounds` backtrace needs left alone.
+
+**`tools/fpm_lto.sh` handles all of the above.** It is a shell function that wraps `fpm`, adds the
+flags only when it sees `--profile release`, appends to rather than replaces the `FPM_*FLAGS`, picks
+the right archiver for the compiler family, puts oneAPI's `ld.lld` on `PATH` when it is needed, and
+**refuses to build** rather than hand back a silently LTO-less measurement. Activate it by sourcing
+it from your shell startup file (`~/.zprofile`, `~/.bashrc`, ...):
 
 ```bash
-export PF_LTO=1        # opt in; unset or 0 makes the wrapper a no-op
-
-fpm() {
-    local a prev="" use=0 lto="" ar=""
-    if [ "${PF_LTO:-0}" != "1" ]; then command fpm "$@"; return; fi
-    for a in "$@"; do
-        if [ "$prev" = "--profile" ] && [ "$a" = "release" ]; then use=1; fi
-        if [ "$a" = "--profile=release" ]; then use=1; fi
-        prev="$a"
-    done
-    if [ "$use" -eq 0 ]; then command fpm "$@"; return; fi
-    case "$(${FPM_FC:-gfortran} --version 2>&1 | head -1)" in
-        *ifx*|*Intel*|*IFX*) lto="-ipo"; ar="xiar" ;;
-        *)                   lto="-flto" ;;
-    esac
-    if [ -n "$ar" ] && ! command -v "$ar" >/dev/null 2>&1; then
-        echo "fpm: $lto requested but '$ar' is not on PATH -- interprocedural" >&2
-        echo "     optimisation would be silently skipped. Source setvars.sh first." >&2
-        return 1
-    fi
-    if [ -n "$ar" ]; then
-        env FPM_AR="$ar" FPM_FFLAGS="${FPM_FFLAGS:-} $lto" \
-            FPM_CXXFLAGS="${FPM_CXXFLAGS:-} $lto" \
-            FPM_LDFLAGS="${FPM_LDFLAGS:-} $lto" fpm "$@"
-    else
-        env FPM_FFLAGS="${FPM_FFLAGS:-} $lto" \
-            FPM_CXXFLAGS="${FPM_CXXFLAGS:-} $lto" \
-            FPM_LDFLAGS="${FPM_LDFLAGS:-} $lto" fpm "$@"
-    fi
-}
+source /path/to/parquet-fortran/tools/fpm_lto.sh
+export PF_LTO=1        # opt in; omit this line and the wrapper is inert
 ```
 
-Verified under both zsh and bash 3.2 (macOS's default): `fpm build --profile release` gets the flag,
-`fpm build --profile debug` gets none. It picks `-ipo` or `-flto` from whatever `FPM_FC` names, so
-one copy works on every machine. `env` is what runs the real binary, so the function cannot recurse.
+Run it rather than sourcing it to see the activation hint and a dry run of what it would select for
+the toolchain in hand:
+
+```bash
+tools/fpm_lto.sh
+```
+
+Sourcing without `PF_LTO=1` changes nothing, so it can live in a startup file permanently and be
+enabled per session with `PF_LTO=1`. `PF_LTO=0 fpm build --profile release` turns it off for one
+command. The script's own header carries the full rationale; read it before changing it.
+
+**On macOS the gain may be zero however carefully this is set up, and that is structural rather than
+a misconfiguration.** The normal macOS build is mixed-family (gfortran + Apple clang), so the Fortran
+objects carry GCC GIMPLE while the C++ object is LLVM bitcode — two IRs no linker can optimise
+across. Measured on an arm64 machine with `gcc-ar` genuinely in effect and a 3% noise floor: **no
+change on any item.** A same-family toolchain (`gfortran` + `g++`, or `ifx` + `icpx`) is where LTO has
+actually been observed to help here, and even there the only clear gain was on one operation.
+
+Verified under both zsh and bash 3.2 (macOS's default), by driving it against a stub `fpm` on `PATH`
+and reading the environment it passes through — ten cases across the two shells: `--profile release`
+and `--profile=release` get the flag **and** `FPM_AR`; `--profile debug`, an unset `PF_LTO` and
+`PF_LTO=0` get neither; and a machine with no plugin-capable archiver gets a refusal and exit 1
+rather than a silently LTO-less build. `env` is what runs the real binary, so the function cannot
+recurse.
+
+Testing it in both shells was not a formality: an earlier draft collected the archiver candidates in
+a single space-separated variable and looped over it unquoted, which works in bash and **silently
+finds nothing in zsh** — that shell does not word-split an unquoted parameter expansion — so it
+refused to build on a machine that had the archiver installed. Hence `pf_first_on_path`, which takes
+the candidates as separate arguments.
 
 **One consequence worth knowing before installing that wrapper.** Any script that builds a
 release-profile baseline to compare an LTO build against — `tools/benchmark_stage7.sh` is the one in
@@ -332,6 +352,12 @@ link-tests a minimal mixed Fortran/C++ program per toolchain in a few seconds. I
 is safe to run anywhere. `tools/benchmark_template.md` is the template for a run on another machine:
 copy it to a `feature_*.md` file, fill in the campaign, and the machine that runs it writes its
 report back into that same file.
+
+`tools/fpm_lto.sh` is the odd one out here: it is **sourced**, not executed, and installs an opt-in
+`fpm` wrapper that builds `--profile release` with link-time optimisation (see
+[Building with link-time optimisation](#building-with-link-time-optimisation)). Running it instead
+prints how to activate it plus a dry run of what it would select on this machine, so it is safe to
+invoke to find out what it does.
 
 **Which machine a measurement was taken on is part of the result.** CLAUDE.md's
 "The three machines available for testing" lists the three reference machines, what each one

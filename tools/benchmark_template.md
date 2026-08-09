@@ -42,6 +42,9 @@ say so explicitly in §1 when you do.)
       both hashes below; never ask anyone to patch or `git stash` on the far machine.
 - [ ] Fill in **§2** with any environment activation this machine needs, if you know it. If you do
       not, say so — §2 tells the runner how to find out and record it.
+- [ ] **Say what size of effect the campaign is looking for**, so the runner can tell from Step 3b's
+      noise floor whether their machine can answer it at all. A campaign chasing 5% on a machine with
+      a 12% floor is not a run worth taking.
 - [ ] Delete this section, and delete any §5 report skeleton fields that do not apply.
 - [ ] Make one copy per machine, suffixed with the machine's name
       (`feature_<campaign>_A.md`, `feature_<campaign>_B.md`, …), and carry each to its machine
@@ -132,8 +135,15 @@ tools/machine_report.sh --lto-probe
 ```
 
 That builds and links a tiny mixed Fortran/C++ program with LTO, per available toolchain, in about
-fifteen seconds — so "LTO cannot link here" is discovered now rather than several minutes into a
-run. Record whatever it prints, including failures.
+fifteen seconds. Record whatever it prints, **including failures, and including passes**.
+
+> **A pass here is NOT clearance.** The probe links a couple of objects directly; the real build
+> links a static *archive*, and on one machine that difference was the whole failure — the probe
+> passed while the real LTO build died with 8087 undefined references. So read a pass as "these two
+> compilers can emit and consume LTO objects", never as "this library will build that way", and if
+> the real build then fails, **that is a result about the toolchain, not a defect in the library**.
+> The general rule: a pre-flight probe is evidence only to the extent it reproduces what the real
+> build actually does.
 
 ### Step 3 — run it
 
@@ -146,6 +156,37 @@ everything:
 
 If the campaign names more than one toolchain or environment, do one run per toolchain, **each in a
 fresh shell** — activation scripts leak into one another otherwise — and keep the outputs separate.
+
+**Let the machine settle between runs, and say that you did.** A run's own test phase spawns
+hundreds of subprocesses, so a second run started straight afterwards is measured against a machine
+still draining — which biases *one arm* rather than adding symmetric noise, and best-of-N does not
+remove it. On Linux:
+
+```bash
+until [ "$(awk '{print int($1)}' /proc/loadavg)" -lt 2 ]; do sleep 20; done
+```
+
+### Step 3b — measure this machine's noise floor
+
+**Required, and it takes one extra command.** Without it, nobody reading the report can tell a real
+difference from this machine's own scatter — and the scatter is routinely larger than the effect
+being measured. One machine recorded the *same binary* at 118.84, 133.02 and 151.87 ms for one
+figure, a **28% spread**, with best-of-7 rounds already applied.
+
+Re-run the *same* configuration a second time, back to back, changing nothing:
+
+```bash
+<command from §1, ideally reduced to a couple of items> 2>&1 | tee test_run/<campaign>-noise.log
+```
+
+Report the largest relative difference you see between the two runs of the identical build. That
+number is the floor: **any difference in the campaign's own results smaller than it must be reported
+as "indistinguishable from zero", not as a small win or a small regression.** One machine's first
+round appeared to show a 30% regression that vanished entirely on the second — reporting round 1
+alone would have recorded a large effect that does not exist.
+
+If the campaign's whole question sits below the floor, that is itself the finding: say so, and say
+what kind of machine would be needed to answer it.
 
 ### Step 4 — write the report into this file
 
@@ -193,6 +234,16 @@ was believed for a while.
   many-core/NUMA machine is a *poor* instrument for small differences — this project has recorded
   5.6x run-to-run variation at one size on such a machine — so it is best used for scaling
   questions, with small deltas taken on a quiet workstation.
+- **Quote a measured noise floor, never an assumed one** (Step 3b). "Best of N rounds" is not a
+  substitute: it removes upward spikes within a run, not the drift between runs, and it does nothing
+  at all about an *ordered* bias where one arm ran after something heavy. A report whose deltas are
+  smaller than its own floor has measured that the question needs a better instrument — which is a
+  legitimate and useful result, and much better than a number that will be believed.
+- **A tooling warning is a claim, and claims can be wrong.** If the run prints a warning that would
+  qualify its numbers ("without tool X this measures nothing"), it is worth one short extra run to
+  find out whether it is true before letting it caveat everything. One campaign's warning named a
+  vendor tool that had been *retired* — so it could never be satisfied — and the run was fine
+  without it.
 - **Do not compare figures across machines unless the campaign says they are comparable.** Different
   Arrow versions, thread counts and architectures all change results independently. Report the
   numbers; let whoever set the campaign do the attribution.
@@ -214,6 +265,13 @@ Two things follow that are easy to get wrong:
   they record what was asked, not just what was answered.
 - **Do not add another machine's numbers to your copy**, even if you have them. Each file holds one
   machine's results; the comparison is made once, at analysis time, across all of them.
+
+**For whoever runs the campaign: never overwrite a RETURNED copy with a new master.** A returned
+file is a record — of which commit that machine ran, under which environment, with which deviations
+— and copying a fresh master over it destroys exactly the provenance the report exists to carry. One
+machine had to reconstruct its own earlier run's commit from `git log -- tools/<wrapper>` because its
+previous copy had been overwritten. **A new campaign gets new filenames**, even when the instructions
+barely changed; the old copies stay where they are.
 
 ---
 
@@ -269,6 +327,11 @@ the two runs directly comparable, or did the measured code change in between?
 
 **Deviations from the run sheet** — anything not done exactly as written, and why. Write "none" if
 there were none.
+
+**Measured noise floor** *(Step 3b — required)* — the largest relative difference between two runs of
+the *identical* build, the figure it was taken on, and the resulting rule for reading everything
+below, e.g. *"12% on S7-1; treat any difference under that as indistinguishable from zero."* If the
+campaign's own deltas fall below it, say so explicitly rather than reporting them as small effects.
 
 **Results** — paste the tool's own output verbatim in a fenced block, then add a short paragraph
 saying what it shows. Verbatim first: a summary can be re-derived from raw output, but raw output

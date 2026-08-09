@@ -247,10 +247,12 @@ which an interprocedural build makes more rather than less likely to surface.
 `FPM_FC`/`FPM_CXX`/`FPM_*FLAGS` are read from the environment and **appended to, never replaced** —
 on every machine this project is built on they already carry Arrow's include and link paths.
 
-**To run this (or any other measurement) on the reference machines, see
-[BENCHMARKING.md](BENCHMARKING.md)** — it lists the three machines and what each one isolates, how to
-activate either toolchain on machine B, the two hazards there that silently invalidate a result, and
-the ready-to-paste run sheets.
+**Which machine a measurement was taken on is part of the result.** CLAUDE.md's
+"The three machines available for testing" lists the three reference machines, what each one
+isolates (one pair differs only in architecture, another only in compiler), how to activate either
+toolchain on the multi-compiler one, and two hazards there that silently invalidate a run — a
+`gfortran` below this project's minimum, and an exported `-ffree-line-length-none`. Read it before
+quoting a figure from anywhere but your own machine.
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
 writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`

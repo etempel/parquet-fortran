@@ -82,7 +82,6 @@ fi
 # shell script out from under its own interpreter is a fragile pattern, so it's left in place --
 # one small maintainer-only script left in the tarball is an accepted trade-off.
 REMOVE_PATHS=(
-    BENCHMARKING.md
     CLAUDE.md
     CONTRIBUTING.md
     feature_risks.md

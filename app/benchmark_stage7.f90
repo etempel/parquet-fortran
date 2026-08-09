@@ -105,10 +105,15 @@ contains
             call one_size(SIZES(k))
         end do
         print "(A)", ""
-        print "(A)", "  NOTE: a fused figure near or below ~0.5 ns/element means the compiler is"
-        print "(A)", "  ALREADY vectorising the loop the error stop was assumed to block -- in"
-        print "(A)", "  which case A.12's premise does not hold on this toolchain and the item"
-        print "(A)", "  should be dropped here, whatever it does elsewhere."
+        print "(A)", "  HOW TO READ THIS. A.12 assumed the error stop blocks vectorisation, so the"
+        print "(A)", "  question is whether it actually does on THIS toolchain. Compare the fused"
+        print "(A)", "  figure against one element per clock cycle (0.3 ns on a 3.2 GHz core, 0.25"
+        print "(A)", "  on 4 GHz): comfortably under that means several elements are retiring per"
+        print "(A)", "  cycle and the loop is already vectorised, so the premise does not hold and"
+        print "(A)", "  the item should be dropped here. Do not read a single threshold off this"
+        print "(A)", "  line -- the ratio columns are the decision, and a fused figure ABOVE one"
+        print "(A)", "  element per cycle with ratios still below 1 means something other than"
+        print "(A)", "  vectorisation is the limit and is worth saying so in the write-up."
     end subroutine gate_s7_2
 
     !> One row of the S7-2 table.

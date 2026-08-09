@@ -193,10 +193,11 @@ contains
         !
         n = self%nrows
         if (n <= 0_int64) return
-        ! Case 1. any_null is O(1) for a column that never had a null set, so this costs nothing
-        ! on the common path -- and refreshes the temporal kinds' cache, which is why `self` is
-        ! intent(inout) here just as it is on any_null itself.
-        if (.not. self%any_null()) return
+        ! Case 1. O(1) for a column that never had a null set, so it costs nothing on the common
+        ! path. Goes through any_null_view rather than the type-bound any_null because this
+        ! procedure is intent(in): see the interface's own note in parquet_columns.f90 for why that
+        ! matters more than the cache refresh it gives up.
+        if (.not. any_null_view(self)) return
         allocate(valid(n))
         valid = .true.
         w = int(self%width, int64)
@@ -291,7 +292,7 @@ contains
         !
         n = self%nrows
         if (n <= 0_int64) return
-        if (.not. self%any_null()) return
+        if (.not. any_null_view(self)) return
         w = int(self%width, int64)
         allocate(valid(w, n))
         valid = .true.
@@ -678,6 +679,51 @@ contains
     !
     !> Recomputes a temporal column's cached "has at least one null" flag (the O(n) scan the
     !! cache exists to avoid repeating).
+    !> `any_null` for a caller that holds the column by `intent(in)`.
+    !!
+    !! Identical answer, and identical cost on every kind but one. The type-bound `any_null` is
+    !! `intent(inout)` solely so that a temporal column can refresh its null cache while answering;
+    !! that one word put the whole bulk-validity API out of reach of every read-only consumer,
+    !! which then fell back to `is_null(i)` per row -- measured at ~20 ms on a 4M-row sort key,
+    !! against ~2 ms for the word walk it was avoiding.
+    !!
+    !! So this reads the cache when it is clean and scans when it is dirty, rather than writing it.
+    !! The only thing given up is that a dirty temporal column stays dirty; the next `any_null`
+    !! call refreshes it as before, and nothing depends on the refresh happening here.
+    logical function any_null_view(self) result(res)
+        class(parquet_column), intent(in) :: self !! the column.
+        integer(int64) :: k, nbits, nblk
+        res = .false.
+        if (self%nrows <= 0_int64) return
+        if (is_string_kind(self%kind)) then
+            if (allocated(self%str)) res = self%str%null_count() > 0_int64
+            return
+        end if
+        if (is_temporal_kind(self%kind)) then
+            if (.not. self%nulls_dirty) then
+                res = self%nulls_cached
+                return
+            end if
+            do k = 1_int64, self%nrows
+                if (self%is_null(k)) then
+                    res = .true.
+                    return
+                end if
+            end do
+            return
+        end if
+        if (.not. self%has_nulls) return
+        if (.not. allocated(self%validity)) return
+        nbits = bits_needed(self)
+        nblk = min(blocks_for(nbits), size(self%validity, kind=int64))
+        do k = 1_int64, nblk
+            if (self%validity(k) /= 0_int64) then
+                res = .true.
+                return
+            end if
+        end do
+    end function any_null_view
+    !
     subroutine rescan_temporal_nulls(self)
         class(parquet_column), intent(inout) :: self !! the temporal column.
         integer(int64) :: k

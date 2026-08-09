@@ -550,8 +550,16 @@ module parquet_columns
         !! argument (F2018 15.5.2.12), so the common no-nulls case costs no allocation and no scan
         !! at all rather than a mask that is uniformly `.true.`. Callers must therefore test
         !! `allocated(valid)` and not assume a mask came back.
+        !! **`intent(in)`, deliberately.** It used to be `intent(inout)` so that the temporal kinds'
+        !! null cache could be refreshed in passing, and that single word made the whole procedure
+        !! unreachable from anything holding a column by `intent(in)` -- which includes
+        !! `pf_argsort(column)` and every other read-only consumer, each of which was left calling
+        !! `is_null(i)` once per row instead. The cache is an optimisation for `any_null`, never a
+        !! correctness requirement, so this reads it when it is clean and scans when it is dirty
+        !! rather than writing it. Widening an argument's intent this way is source-compatible:
+        !! every call that compiled before still does.
         module subroutine row_validity(self, valid)
-            class(parquet_column), intent(inout) :: self  !! the column (null cache may be refreshed).
+            class(parquet_column), intent(in) :: self     !! the column.
             logical, allocatable, intent(out) :: valid(:) !! per-row mask, or unallocated when no nulls.
         end subroutine row_validity
         !> Fills `valid` with one entry per ELEMENT, shaped `(width, nrows)`: the column's true
@@ -567,8 +575,10 @@ module parquet_columns
         !! bytes -- for a wide column, orders of magnitude more than the bitmap it is built from.
         !! Ask for it when the whole mask is genuinely needed; use `is_null(i, e)` for a few
         !! elements.
+        !!
+        !! `intent(in)` for the same reason `row_validity` is -- see its note.
         module subroutine element_validity(self, valid)
-            class(parquet_column), intent(inout) :: self    !! the column (null cache may be refreshed).
+            class(parquet_column), intent(in) :: self       !! the column.
             logical, allocatable, intent(out) :: valid(:,:) !! (element, row) mask, or unallocated when no nulls.
         end subroutine element_validity
         !> Writes a whole per-ELEMENT validity mask in one pass: `.false.` marks that element null.

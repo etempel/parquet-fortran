@@ -57,6 +57,7 @@ contains
         resident = resident(1:n)
         if (n > 0) call table_colwork_clone(self%cache, out%cache, resident)
         out%cache%ncols = self%cache%ncols
+        call cache_name_index_rebuild(out%cache)
         out%detached = self%detached
         out%regime = self%regime
         out%row_lo = self%row_lo
@@ -143,6 +144,7 @@ contains
             out%cache%cols(n)%residency = RES_FULL
         end do
         out%cache%ncols = n
+        call cache_name_index_rebuild(out%cache)
         ! The result is an in-memory table, not a detached one: it was never attached to a file
         ! in the first place, which is the same state parquet_new_table leaves a table in.
         out%detached = .false.

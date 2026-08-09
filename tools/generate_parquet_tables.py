@@ -369,6 +369,30 @@ module parquet_tables
     type :: parquet_table_cache
         type(parquet_table_column), allocatable :: cols(:) !! descriptor slots; `ncols` are live.
         integer :: ncols = 0                               !! live slot count (cols may be longer).
+        !> `cols(1:ncols)`'s slot indices, ordered by column NAME, so `cache_find` can bisect
+        !! instead of scanning. Every value accessor resolves a name through `cache_find`, so on a
+        !! wide table that scan is most of the cost of a `%get_element` call.
+        !!
+        !! **Maintained EAGERLY, by the mutations that change the column set** -- never rebuilt
+        !! lazily inside a lookup. `cache_find` takes the cache `intent(in)` precisely so that
+        !! concurrent readers of a shared table need no atomics (see `readers_active`); a lookup
+        !! that rebuilt this would be a write on that path, and two threads reallocating one
+        !! array is heap corruption rather than a stale answer.
+        !!
+        !! **A stale or absent index can never produce a wrong answer**, only a slow one:
+        !! `cache_find` re-checks the name at the slot it lands on and falls back to the linear
+        !! scan if it does not match. That is what makes a forgotten rebuild site a performance
+        !! bug a benchmark catches, rather than a silently wrong column.
+        integer, allocatable :: name_order(:)
+        !> `name_order`'s entries' sort keys: the first 7 bytes of each name, packed big-endian
+        !! into an integer and blank-padded, so the bisection above compares INTEGERS out of one
+        !! contiguous array instead of chasing a deferred-length `character` allocation per probe.
+        !! That is the difference between beating the linear scan and merely matching it: the scan
+        !! walks `cols` in order and prefetches well, while a bisection over the names alone jumps
+        !! about and misses. Seven bytes rather than eight keeps every key positive, so a plain
+        !! signed comparison orders them; names sharing a 7-byte prefix tie, and the search falls
+        !! back to comparing the names themselves for those.
+        integer(int64), allocatable :: name_key(:)
         type(parquet_reader), allocatable :: reader        !! present iff the table is file-backed.
         logical :: reads_started = .false.                 !! .true. once any column has been read.
         !> Bumped by every structural change, so a caller can tell whether a pointer it holds may
@@ -2713,6 +2737,20 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
             integer, intent(out) :: idx                  !! slot index.
         end subroutine row_resolve
+        !> Rebuilds `cache%name_order` from scratch, for a change that can reorder or renumber
+        !! slots -- a drop, a rename, a clone, a reset. An append uses `cache_name_index_insert`
+        !! instead, because rebuilding per appended column would make opening an n-column file
+        !! cost O(n^2 log n) name comparisons.
+        module subroutine cache_name_index_rebuild(cache)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+        end subroutine cache_name_index_rebuild
+        !> Inserts slot `slot` into `cache%name_order`, keeping it sorted by name. O(log n)
+        !! comparisons plus an integer shift, so building the index one column at a time as a file
+        !! is opened stays O(n log n) comparisons overall.
+        module subroutine cache_name_index_insert(cache, slot)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+            integer, intent(in) :: slot                       !! the newly added slot index.
+        end subroutine cache_name_index_insert
         !> Resolves `name` to its 1-based slot index in `cache`, or 0 when absent. The one place
         !! a name becomes an index, shared by the table and by a row handle.
         module function cache_find(cache, name) result(idx)

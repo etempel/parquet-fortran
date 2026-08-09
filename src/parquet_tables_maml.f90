@@ -533,6 +533,7 @@ contains
         cache%cols(cache%ncols)%name = name
         cache%cols(cache%ncols)%file_name = file_name
         cache%cols(cache%ncols)%file_source = .true.
+        call cache_name_index_insert(cache, cache%ncols)
     end subroutine add_file_slot
     !
     !> Whether any remap entry declares `name` as an INTERNAL name (i.e. claims that name for

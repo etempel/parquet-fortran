@@ -256,6 +256,7 @@ contains
                 call move_table_column(cache%cols(k), cache%cols(k + 1))
             end do
             cache%ncols = cache%ncols - 1
+            call cache_name_index_rebuild(cache)
             return
         end do
     end subroutine drop_shadowed_row_index
@@ -474,6 +475,7 @@ contains
         table%row_hi = 0
         allocate(table%cache%cols(COL_HEADROOM))
         table%cache%ncols = 0
+        call cache_name_index_rebuild(table%cache)
     end procedure parquet_new_table
     !
     module procedure reader_row_group_bounds
@@ -658,6 +660,9 @@ contains
         cache%cols(n)%file_source = .false.
         cache%cols(n)%supported = .true.
         cache%cols(n)%residency = RES_EMPTY
+        ! Eagerly, here rather than in cache_find: the lookup takes the cache intent(in) so that
+        ! concurrent readers need no atomics, and rebuilding inside it would break that.
+        call cache_name_index_insert(cache, n)
         idx = n
     end procedure table_new_slot
     !

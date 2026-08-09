@@ -1528,69 +1528,86 @@ contains
     # ---- parquet_column sub-extractors (plain contained procedures) ----
     w('''    !> Reads every integer-valued scalar kind of a column as int64 -- including logical and the
     !! two date/time kinds, whose stored values order exactly as the values they represent.
+    !!
+    !! **The kind switch is above the loop, and each arm is one whole-array assignment through
+    !! `%data_ptr`** rather than a per-row `%get_at`. The obvious shape -- switch inside the loop --
+    !! costs a `%kindof()` call, a `select case`, and an un-inlinable `%get_at` (which itself calls
+    !! `check_kind` and `check_index`) on every row, for a decision that cannot change between rows.
+    !! `col` needs the `target` attribute for `%data_ptr`'s own `target` dummy to yield a pointer
+    !! that stays associated after it returns; the pointer is used only within this procedure, which
+    !! is what the standard guarantees when the ultimate actual argument is not itself a target.
     subroutine extract_col_integer(col, n, descending, nulls_first, buf)
-        type(parquet_column), intent(in) :: col                    !! the key column.
+        type(parquet_column), intent(in), target :: col            !! the key column.
         integer(int64), intent(in) :: n                            !! row count.
         logical, intent(in) :: descending                          !! .true. sorts high to low.
         logical, intent(in) :: nulls_first                         !! .true. places nulls first.
         type(sort_key_buf), allocatable, intent(out) :: buf(:)     !! receives one key.
-        integer(int64) :: k
-        integer(int32) :: v32
-        logical :: b
-        type(parquet_date) :: d
-        type(parquet_time) :: tm
+        integer(int32), pointer :: p32(:)
+        integer(int64), pointer :: p64(:)
+        logical, pointer :: pb(:)
+        type(parquet_date), pointer :: pd(:)
+        type(parquet_time), pointer :: pt(:)
         !
         allocate(buf(1))
         buf(1)%family = SK_INT
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%ints(max(n, 1_int64)))
-        buf(1)%ints = 0_int64
-        do k = 1_int64, n
-            select case (col%kindof())
-            case (PK_INT32)
-                call col%get_at(k, v32)
-                buf(1)%ints(k) = int(v32, int64)
-            case (PK_INT64)
-                call col%get_at(k, buf(1)%ints(k))
-            case (PK_LOGICAL)
-                call col%get_at(k, b)
-                buf(1)%ints(k) = merge(1_int64, 0_int64, b)
-            case (PK_DATE)
-                call col%get_at(k, d)
-                buf(1)%ints(k) = int(d%raw(), int64)
-            case default
-                call col%get_at(k, tm)
-                buf(1)%ints(k) = tm%raw()
-            end select
-        end do
+        ! No pre-zero pass: every one of the n elements is written below, and the single padding
+        ! element that `max(n, 1)` adds when n == 0 is the only one that needs initialising.
+        if (n <= 0_int64) then
+            buf(1)%ints = 0_int64
+            return
+        end if
+        select case (col%kindof())
+        case (PK_INT32)
+            call col%data_ptr(p32)
+            buf(1)%ints(1:n) = int(p32(1:n), int64)
+        case (PK_INT64)
+            call col%data_ptr(p64)
+            buf(1)%ints(1:n) = p64(1:n)
+        case (PK_LOGICAL)
+            call col%data_ptr(pb)
+            buf(1)%ints(1:n) = merge(1_int64, 0_int64, pb(1:n))
+        case (PK_DATE)
+            call col%data_ptr(pd)
+            buf(1)%ints(1:n) = int(pd(1:n)%raw(), int64)   ! %raw is elemental
+        case default
+            call col%data_ptr(pt)
+            buf(1)%ints(1:n) = pt(1:n)%raw()               ! %raw is elemental
+        end select
     end subroutine extract_col_integer
     !
     !> Reads a float32 or float64 column as real64. NaNs pass straight through: the engine tiers
     !! them itself, exactly as it does for a read-time sort.
+    !!
+    !! Kind switch above the loop and one whole-array assignment per arm -- see
+    !! `extract_col_integer` for why, and for why `col` carries `target`.
     subroutine extract_col_real(col, n, descending, nulls_first, buf)
-        type(parquet_column), intent(in) :: col                    !! the key column.
+        type(parquet_column), intent(in), target :: col            !! the key column.
         integer(int64), intent(in) :: n                            !! row count.
         logical, intent(in) :: descending                          !! .true. sorts high to low.
         logical, intent(in) :: nulls_first                         !! .true. places nulls first.
         type(sort_key_buf), allocatable, intent(out) :: buf(:)     !! receives one key.
-        integer(int64) :: k
-        real(real32) :: r32
+        real(real32), pointer :: p32(:)
+        real(real64), pointer :: p64(:)
         !
         allocate(buf(1))
         buf(1)%family = SK_REAL
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%reals(max(n, 1_int64)))
-        buf(1)%reals = 0.0_real64
-        do k = 1_int64, n
-            if (col%kindof() == PK_FLOAT32) then
-                call col%get_at(k, r32)
-                buf(1)%reals(k) = real(r32, real64)
-            else
-                call col%get_at(k, buf(1)%reals(k))
-            end if
-        end do
+        if (n <= 0_int64) then
+            buf(1)%reals = 0.0_real64
+            return
+        end if
+        if (col%kindof() == PK_FLOAT32) then
+            call col%data_ptr(p32)
+            buf(1)%reals(1:n) = real(p32(1:n), real64)
+        else
+            call col%data_ptr(p64)
+            buf(1)%reals(1:n) = p64(1:n)
+        end if
     end subroutine extract_col_real
     !
     !> Packs a string column into the (offsets, data) pair the engine takes: row k occupies
@@ -1672,26 +1689,36 @@ contains
     !
     !> Splits a timestamp column into its (seconds, nanoseconds) pair of integer keys -- see
     !! `extract_ts` for why a timestamp becomes two keys rather than one.
+    !!
+    !! Reaches the elements through `%data_ptr` rather than a per-row `%get_at` -- see
+    !! `extract_col_integer` for why, and for why `col` carries `target`. This one keeps a row loop
+    !! (rather than one whole-array assignment per key) because `%get_raw` yields the two halves
+    !! together: splitting it into two elemental array calls would either walk the column twice or
+    !! need an int32 temporary the whole length of the column, to save an elemental call the
+    !! compiler can already inline.
     subroutine extract_col_timestamp(col, n, descending, nulls_first, buf)
-        type(parquet_column), intent(in) :: col                    !! the key column.
+        type(parquet_column), intent(in), target :: col            !! the key column.
         integer(int64), intent(in) :: n                            !! row count.
         logical, intent(in) :: descending                          !! .true. sorts high to low.
         logical, intent(in) :: nulls_first                         !! .true. places nulls first.
         type(sort_key_buf), allocatable, intent(out) :: buf(:)     !! receives two keys.
         integer(int64) :: k, s
         integer(int32) :: ns
-        type(parquet_timestamp) :: ts
+        type(parquet_timestamp), pointer :: pts(:)
         !
         allocate(buf(2))
         buf(:)%family = SK_INT
         buf(:)%descending = descending
         buf(:)%nulls_first = nulls_first
         allocate(buf(1)%ints(max(n, 1_int64)), buf(2)%ints(max(n, 1_int64)))
-        buf(1)%ints = 0_int64
-        buf(2)%ints = 0_int64
+        if (n <= 0_int64) then
+            buf(1)%ints = 0_int64
+            buf(2)%ints = 0_int64
+            return
+        end if
+        call col%data_ptr(pts)
         do k = 1_int64, n
-            call col%get_at(k, ts)
-            call ts%get_raw(s, ns)
+            call pts(k)%get_raw(s, ns)
             buf(1)%ints(k) = s
             buf(2)%ints(k) = int(ns, int64)
         end do
@@ -1717,6 +1744,14 @@ contains
         integer :: ik
         logical :: any_null
         !
+        ! O(1), and it answers the question the scan below was asking. A bitmap kind that has
+        ! never had a null set allocates no bitmap at all, so there is nothing to look at -- which
+        ! turns the null-free case, the common one, from a full pass of n un-inlinable %is_null
+        ! calls into a single test. The temporal kinds answer .true. unconditionally (their null
+        ! state lives inside the element, not in a bitmap), so they fall through to the scan on
+        ! their own without needing a kind test here; that is the right answer for them, since a
+        ! scan is genuinely the only way to know.
+        if (.not. col%has_validity_storage()) return
         any_null = .false.
         do k = 1_int64, n
             if (col%is_null(k)) then

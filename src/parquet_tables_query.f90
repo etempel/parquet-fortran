@@ -101,17 +101,185 @@ contains
         idx = cache_find(self%cache, name)
     end procedure table_find
     !
+    !> The first 7 bytes of `s`, packed big-endian into an integer and blank-padded to 7 -- the
+    !! bisection key `cache%name_key` holds. Blank padding (32) matches how Fortran itself pads the
+    !! shorter operand when comparing two names, so ordering by this key agrees with ordering by
+    !! the names for every pair whose first 7 bytes differ. `iachar`/`llt` are used throughout
+    !! rather than `<`, so the key and the string comparisons share one collating sequence.
+    pure function name_sort_key(s) result(k)
+        character(len=*), intent(in) :: s !! the (already trimmed) column name.
+        integer(int64) :: k               !! packed prefix key, always positive.
+        integer :: i, n
+        !
+        k = 0_int64
+        n = min(len(s), 7)
+        do i = 1, n
+            k = k*256_int64 + int(iachar(s(i:i)), int64)
+        end do
+        do i = n + 1, 7
+            k = k*256_int64 + 32_int64
+        end do
+    end function name_sort_key
+    !
+    !> `.true.` when column `a`'s name sorts before name `b` under the (key, name) order the
+    !! index is built and searched with. Taking the key first is what lets the search compare
+    !! integers; the name breaks a 7-byte-prefix tie.
+    pure function name_before(ka, na, kb, nb) result(res)
+        integer(int64), intent(in) :: ka  !! first name's prefix key.
+        character(len=*), intent(in) :: na !! first name.
+        integer(int64), intent(in) :: kb  !! second name's prefix key.
+        character(len=*), intent(in) :: nb !! second name.
+        logical :: res                    !! .true. if (ka, na) sorts before (kb, nb).
+        !
+        if (ka /= kb) then
+            res = ka < kb
+        else
+            res = llt(na, nb)
+        end if
+    end function name_before
+    !
     module procedure cache_find
-        integer :: i
+        integer :: lo, hi, mid, j, nq
+        integer(int64) :: qkey
         !
         idx = 0
-        do i = 1, cache%ncols
-            if (cache%cols(i)%name == trim(name)) then
-                idx = i
+        if (cache%ncols <= 0) return
+        ! Hoisted: `trim(name)` is loop-invariant, and leaving it inside the comparison relies on
+        ! the optimiser noticing (gfortran does at -O3; a -O0 build does not).
+        nq = len_trim(name)
+        ! Bisect the name-ordered index when there is one. This deliberately does NOT trust it:
+        ! the name at the slot the search lands on is compared before the index is returned, and a
+        ! search that finds nothing falls through to the linear scan below. So an index left stale
+        ! by a column-set mutation that forgot to maintain it costs a scan and never returns the
+        ! wrong column -- see parquet_table_cache%name_order for why that safety net is the design
+        ! rather than an afterthought.
+        if (allocated(cache%name_order) .and. allocated(cache%name_key)) then
+            if (size(cache%name_order) >= cache%ncols .and. size(cache%name_key) >= cache%ncols) then
+                qkey = name_sort_key(name(1:nq))
+                lo = 1
+                hi = cache%ncols
+                do while (lo <= hi)
+                    mid = (lo + hi)/2
+                    ! Integer probe first: on a table whose names differ within 7 bytes -- almost
+                    ! all of them -- this resolves every step but the last without touching a
+                    ! name at all.
+                    if (cache%name_key(mid) < qkey) then
+                        lo = mid + 1
+                    else if (cache%name_key(mid) > qkey) then
+                        hi = mid - 1
+                    else
+                        j = cache%name_order(mid)
+                        if (j < 1 .or. j > cache%ncols) exit
+                        if (cache%cols(j)%name == name(1:nq)) then
+                            idx = j
+                            return
+                        else if (llt(cache%cols(j)%name, name(1:nq))) then
+                            lo = mid + 1
+                        else
+                            hi = mid - 1
+                        end if
+                    end if
+                end do
+            end if
+        end if
+        do j = 1, cache%ncols
+            if (cache%cols(j)%name == name(1:nq)) then
+                idx = j
                 return
             end if
         end do
     end procedure cache_find
+    !
+    module procedure cache_name_index_rebuild
+        integer :: n, i, k, lo, hi, mid
+        integer(int64) :: key
+        !
+        n = cache%ncols
+        if (allocated(cache%name_order)) then
+            if (size(cache%name_order) < n) deallocate(cache%name_order)
+        end if
+        if (allocated(cache%name_key)) then
+            if (size(cache%name_key) < n) deallocate(cache%name_key)
+        end if
+        if (.not. allocated(cache%name_order)) allocate(cache%name_order(max(n, 1)))
+        if (.not. allocated(cache%name_key)) allocate(cache%name_key(max(n, 1)))
+        if (n <= 0) return
+        ! Binary insertion sort: O(n log n) key/name comparisons -- the expensive part -- against
+        ! O(n^2) moves of two integers, which for a column count never matter. Written out here
+        ! rather than reached for from parquet_sorting, so the table layer does not gain a
+        ! dependency on the sorting module for one internal index.
+        cache%name_order(1) = 1
+        cache%name_key(1) = name_sort_key(cache%cols(1)%name)
+        do i = 2, n
+            key = name_sort_key(cache%cols(i)%name)
+            lo = 1
+            hi = i - 1
+            do while (lo <= hi)
+                mid = (lo + hi)/2
+                if (name_before(cache%name_key(mid), cache%cols(cache%name_order(mid))%name, &
+                                key, cache%cols(i)%name)) then
+                    lo = mid + 1
+                else
+                    hi = mid - 1
+                end if
+            end do
+            do k = i - 1, lo, -1
+                cache%name_order(k + 1) = cache%name_order(k)
+                cache%name_key(k + 1) = cache%name_key(k)
+            end do
+            cache%name_order(lo) = i
+            cache%name_key(lo) = key
+        end do
+    end procedure cache_name_index_rebuild
+    !
+    module procedure cache_name_index_insert
+        integer :: n, lo, hi, mid, k, newcap
+        integer(int64) :: key
+        integer, allocatable :: bigger(:)
+        integer(int64), allocatable :: bigkey(:)
+        !
+        n = cache%ncols
+        ! Only the "appended the last slot, and the index already describes the ones before it"
+        ! case can be handled incrementally. Anything else means the caller is out of step with
+        ! the index, and a full rebuild is both correct and cheap at that point.
+        if (slot /= n .or. n < 1) then
+            call cache_name_index_rebuild(cache)
+            return
+        end if
+        if (.not. allocated(cache%name_order) .or. .not. allocated(cache%name_key)) then
+            call cache_name_index_rebuild(cache)
+            return
+        end if
+        if (size(cache%name_order) < n .or. size(cache%name_key) < n) then
+            ! Grow geometrically, mirroring how cols(:) itself grows in table_new_slot -- growing
+            ! by one would make a long %add_column loop quadratic in allocations, and would send
+            ! every append down the rebuild path above.
+            newcap = max(8, 2*size(cache%name_order), n)
+            allocate(bigger(newcap), bigkey(newcap))
+            bigger(1:n - 1) = cache%name_order(1:n - 1)
+            bigkey(1:n - 1) = cache%name_key(1:n - 1)
+            call move_alloc(bigger, cache%name_order)
+            call move_alloc(bigkey, cache%name_key)
+        end if
+        key = name_sort_key(cache%cols(slot)%name)
+        lo = 1
+        hi = n - 1
+        do while (lo <= hi)
+            mid = (lo + hi)/2
+            if (name_before(cache%name_key(mid), cache%cols(cache%name_order(mid))%name, &
+                            key, cache%cols(slot)%name)) then
+                lo = mid + 1
+            else
+                hi = mid - 1
+            end if
+        end do
+        do k = n - 1, lo, -1
+            cache%name_order(k + 1) = cache%name_order(k)
+            cache%name_key(k + 1) = cache%name_key(k)
+        end do
+        cache%name_order(lo) = slot
+        cache%name_key(lo) = key
+    end procedure cache_name_index_insert
     !
     module procedure table_column_kind
         integer :: idx

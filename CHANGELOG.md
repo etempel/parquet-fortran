@@ -459,6 +459,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Resolving a column by name on a wide table no longer scans every column.** Every value
+  accessor — `%get`, `%col`, `%set`, `%is_null`, `%get_element`, a row handle's `%get` — reaches its
+  column through one lookup, and that lookup compared the requested name against each column's in
+  turn. The table now keeps its column names in a sorted index, maintained by the operations that
+  change the column set, and bisects it; the search compares a packed integer prefix of each name
+  out of one contiguous array, touching the names themselves only where two share their first seven
+  bytes. Measured on an 8-core M1 Pro over a 40-column table, best of five warmed rounds at
+  `--profile release`, ns per `%get_element` call: reading four columns scattered through the table
+  103.8 to 25.4 (**4.1x**), the last-added column 181.4 to 23.4 (**7.8x**). The cost is a flat
+  ~6-7 ns that bisection pays whatever the table's width, so a program that only ever reads the
+  *first*-added column of a wide table is **1.4x slower** (16.7 to 24.0 ns) — the one access pattern
+  a linear scan wins. A lookup remains a pure read, so concurrent readers of a shared table still
+  need no synchronisation, and a stale index can only ever cost a scan, never return a wrong
+  column. No answer changes.
+- **Extracting a sort key from a `parquet_column` no longer switches on the column's type once per
+  row.** `pf_sort`/`pf_argsort`/`%sort_by` over a `parquet_column` read the column one element at a
+  time through a call that re-tested the kind, re-checked the index and could not be inlined, then
+  overwrote a buffer it had just zeroed. The type is now decided once and each arm is a single
+  whole-array read of the column's storage. A null-free column also stops scanning for nulls it
+  cannot have: whether any exist is answered from the column's own state rather than by testing
+  every row. Measured over 2 M rows, best of five warmed rounds at `--profile release`: an `int32`
+  column 26.2 ms to 16.9 ms (**1.55x**). A `float64` column is unchanged end-to-end, the comparison
+  sort dominating it by two orders of magnitude. Identical orderings, including nulls and NaNs.
 - **Filtering and read-side quality control on a string column no longer allocate per row.** Both
   built a `std::string` out of the string view they already had, purely to make a comparison —
   a malloc, a copy and a free for every row of the column. The comparison is now made on the view

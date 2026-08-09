@@ -304,7 +304,11 @@ contains
             new_unittest("a predefined column drops with force=, and a plain one without it", &
                 test_drop_predefined_with_force), &
             new_unittest("add_column trims a character array, and %get is sized to the real values", &
-                test_add_column_chr_trims) &
+                test_add_column_chr_trims), &
+            new_unittest("column lookup is exact for prefixes, shared key prefixes and misses", &
+                test_lookup_name_index), &
+            new_unittest("column lookup stays correct across every column-set mutation", &
+                test_lookup_index_after_mutations) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -7788,5 +7792,107 @@ contains
         call t%get_element("name", 1_int64, one)
         call check(error, len(one) == 10, "%set_element takes a SCALAR, whose trailing blanks are the caller's own")
     end subroutine test_add_column_chr_trims
+    !
+    !> `cache_find` bisects a name-ordered index (A.7) instead of scanning, so the cases a
+    !! bisection gets wrong where a scan cannot are what this asserts: a name that is a strict
+    !! PREFIX of another (Fortran blank-pads the shorter operand, so `flux` and `flux_err` must not
+    !! be confused), names sharing the whole 7-byte packed sort key (which forces the search onto
+    !! its name-comparison tie-break), names deliberately added OUT of alphabetical order, and a
+    !! miss -- which must still answer "absent" rather than whichever slot the search happened to
+    !! land on. Every lookup here goes through the same `cache_find` every value accessor uses.
+    subroutine test_lookup_name_index(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        ! Reverse-alphabetical insertion, a prefix pair, and three names agreeing on their first
+        ! seven bytes (the packed key) but differing after it.
+        character(len=*), parameter :: NAMES(9) = [character(len=9) :: &
+            "zulu     ", "flux_err ", "flux     ", "abcdefgh1", "abcdefgh2", &
+            "abcdefgh3", "mike     ", "alpha    ", "a        "]
+        real(real64) :: vals(4)
+        real(real64), allocatable :: got(:)
+        integer :: i
+        logical :: found
+        !
+        vals = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call parquet_new_table(t)
+        do i = 1, size(NAMES)
+            call t%add_column(trim(NAMES(i)), vals * real(i, real64))
+        end do
+        call check(error, t%ncols() == size(NAMES), "every distinct name got its own column")
+        if (allocated(error)) return
+        ! Each name must resolve to the column that was added under it, not merely to some column.
+        do i = 1, size(NAMES)
+            call t%get(trim(NAMES(i)), got)
+            call check(error, abs(got(1) - real(i, real64)) < 1.0e-12_real64, &
+                "'" // trim(NAMES(i)) // "' resolves to its own column")
+            if (allocated(error)) return
+        end do
+        ! A miss must be reported as one. `found=` is the non-aborting form of the same lookup.
+        call check(error, .not. t%has_column("flux_er"), "a strict prefix of a real name is absent")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("abcdefgh4"), "a 7-byte-key sibling that was never added is absent")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("zzz"), "a name past every column is absent")
+        if (allocated(error)) return
+        call t%get("nope", got, found=found)
+        call check(error, .not. found, "%get with found= reports a miss rather than aborting")
+    end subroutine test_lookup_name_index
+    !
+    !> The name index is maintained EAGERLY by each column-set mutation, so a mutation that forgot
+    !! to maintain it would leave lookups answering from a stale order. Each mutation below is a
+    !! separate maintenance site: append (%add_column), remove-and-renumber (%drop_column), a
+    !! rename that changes sort position while leaving `ncols` alone, and a clone that rebuilds a
+    !! second cache from scratch. After each, every surviving name must still resolve to its own
+    !! column and every removed one must be absent.
+    subroutine test_lookup_index_after_mutations(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t, c
+        real(real64) :: vals(3)
+        real(real64), allocatable :: got(:)
+        !
+        vals = [10.0_real64, 20.0_real64, 30.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("mid", vals * 1.0_real64)
+        call t%add_column("aaa", vals * 2.0_real64)
+        call t%add_column("zzz", vals * 3.0_real64)
+        call t%add_column("bbb", vals * 4.0_real64)
+        ! Append: the newest column must be findable, and the existing ones must not have moved.
+        call t%get("bbb", got)
+        call check(error, abs(got(1) - 40.0_real64) < 1.0e-12_real64, "an appended column resolves")
+        if (allocated(error)) return
+        call t%get("mid", got)
+        call check(error, abs(got(1) - 10.0_real64) < 1.0e-12_real64, "an earlier column still resolves after an append")
+        if (allocated(error)) return
+        ! Drop: every slot above the dropped one shifts down, so the whole index is renumbered.
+        call t%drop_column("aaa")
+        call check(error, .not. t%has_column("aaa"), "a dropped column is absent")
+        if (allocated(error)) return
+        call t%get("zzz", got)
+        call check(error, abs(got(1) - 30.0_real64) < 1.0e-12_real64, "a column above the dropped one still resolves")
+        if (allocated(error)) return
+        call t%get("mid", got)
+        call check(error, abs(got(1) - 10.0_real64) < 1.0e-12_real64, "a column below the dropped one still resolves")
+        if (allocated(error)) return
+        ! Rename: `ncols` does not change, only the sort position -- the one column-set change
+        ! with no size signal to notice it by.
+        call t%rename_column("zzz", "aab")
+        call check(error, .not. t%has_column("zzz"), "the old name is gone after a rename")
+        if (allocated(error)) return
+        call t%get("aab", got)
+        call check(error, abs(got(1) - 30.0_real64) < 1.0e-12_real64, "the new name resolves to the renamed column")
+        if (allocated(error)) return
+        call t%get("mid", got)
+        call check(error, abs(got(1) - 10.0_real64) < 1.0e-12_real64, "an untouched column survives a rename")
+        if (allocated(error)) return
+        ! Clone: a second cache, built from scratch, needs its own index.
+        call t%clone(c)
+        call c%get("aab", got)
+        call check(error, abs(got(1) - 30.0_real64) < 1.0e-12_real64, "a clone resolves a renamed column")
+        if (allocated(error)) return
+        call c%get("bbb", got)
+        call check(error, abs(got(1) - 40.0_real64) < 1.0e-12_real64, "a clone resolves an appended column")
+        if (allocated(error)) return
+        call check(error, .not. c%has_column("aaa"), "a clone does not resurrect a dropped column")
+    end subroutine test_lookup_index_after_mutations
     !
 end module test_table

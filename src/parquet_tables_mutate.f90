@@ -319,6 +319,9 @@ contains
             if (allocated(slot%rg_loaded)) deallocate(slot%rg_loaded)
         end associate
         self%cache%ncols = self%cache%ncols - 1
+        ! A drop shifts every slot above it down by one, so the whole name index is renumbered --
+        ! an incremental fix-up would have to touch most of it anyway.
+        call cache_name_index_rebuild(self%cache)
         self%cache%generation = self%cache%generation + 1_int64
     end procedure table_drop_column
     !
@@ -356,6 +359,10 @@ contains
         ! Only the INTERNAL name changes. file_name is what a later first touch reads from, so a
         ! renamed but still-unread file-backed column keeps working.
         self%cache%cols(idx)%name = trim(new_name)
+        ! The slot keeps its index but changes its sort position, so the index is rebuilt rather
+        ! than patched: this is the one column-set change that leaves `ncols` untouched, which is
+        ! exactly why it would be easy to forget.
+        call cache_name_index_rebuild(self%cache)
         self%cache%generation = self%cache%generation + 1_int64
     end procedure table_rename_column
     !

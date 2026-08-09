@@ -133,6 +133,7 @@ something a reader is expected to have.
 | [Risk-67](#risk-67--an-unbounded-read-of-a-parquet_column-storage-array-returns-uninitialised-slack) | An unbounded read of a `parquet_column` storage array returns uninitialised slack | 4 — covered |
 | [Risk-68](#risk-68--a-qc-bound-is-parsed-into-float64-so-a-bound-past-253-is-silently-rounded) | A qc bound is parsed into `float64`, so a bound past 2^53 is silently rounded | 4 — covered |
 | [Risk-69](#risk-69--a-test-that-compares-a-never-written-column-with-itself-passes-on-the-heaps-luck) | A test that compares a never-written column with itself passes on the heap's luck | 2 — proposed |
+| [Risk-70](#risk-70--an-intentinout-temporal-setter-that-skips-a-component-leaves-a-reused-element-stale) | An `intent(inout)` temporal setter that skips a component leaves a REUSED element stale | 4 — covered |
 
 ---
 
@@ -140,7 +141,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-70**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-71**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2811,3 +2812,63 @@ down to the comparison so an exact integer bound can be parsed as one — which 
 `parquet_qc_numeric_bound`'s two schema-validation callers as well, and is a change to make
 deliberately rather than in passing.
 
+
+### Risk-70 — An `intent(inout)` temporal setter that skips a component leaves a REUSED element stale
+
+**What breaks.** Every setter on `parquet_date`/`parquet_time`/`parquet_timestamp`
+(`src/parquet_temporal.f90`) takes `class(...), intent(inout) :: self` rather than `intent(out)`.
+That is deliberate and is worth real money — a *polymorphic* `intent(out)` dummy makes the compiler
+default-initialise the element through the runtime on every elemental call, and a type-bound
+procedure's passed-object dummy has to be polymorphic, so an elemental setter pays it per element.
+Measured on machine A over a 4M-row whole-column read: the construction loop went **12.3 ms →
+3.4 ms** (date, 3.6x) and **17.2 ms → 5.7 ms** (timestamp, 2.9x), taking the whole date-column read
+from 23.6 ms to 14.8 ms.
+
+The cost is an obligation moved from the compiler into the source. `intent(out)` reset **every**
+component for free; under `intent(inout)` a component a setter does not assign keeps whatever the
+element held **before**. So a setter that misses one silently returns a half-updated element to any
+caller that reuses the variable — which the read path does for every row of every temporal column,
+since it fills a caller-supplied array whose elements may already hold values.
+
+**Why it is quiet.** Nothing fails to compile and nothing aborts. A fresh element is
+default-initialised, so every test that sets a *new* variable passes; only a **reused** element
+differs, and only in the component that was skipped. The read path is the worst case precisely
+because it is invisible there: rows come back with plausible values, and a stale nanosecond part on
+a timestamp is a real instant, just the wrong one.
+
+**The converse is equally load-bearing.** A setter with a caught-failure path that `return`s without
+assigning `self` — `%parse` with a `success` argument, and `ts_set_date_time`'s null propagation —
+must **keep** `intent(out)`, because that is exactly what makes a failed or null-propagating call
+yield a *null* element rather than a stale one. `date_parse`'s own doc-comment ("or null on caught
+failure") is a promise made entirely by `intent(out)`. Four procedures are in this class today
+(`date_parse`, `time_parse`, `ts_parse`, `ts_set_date_time`) and converting any of them for speed
+would be a silent correctness regression, not an optimisation.
+
+**Test.** Two halves, because neither covers the other.
+
+*Dynamic:* `a setter leaves no component of a REUSED element stale` (`test/test_temporal.f90`) sets
+an element to one state, sets it again to a different state, and requires the result to be
+indistinguishable from the same call on a fresh element — with a second assertion pinning the
+expected value, since `reused == fresh` alone passes when an assignment is deleted from both. The
+sharp cases are "set a timestamp with a nanosecond part, then one without", scalar and whole-array.
+Seven mutations dropping an individual component assignment are each caught.
+
+*Static:* `check_temporal_setters_assign_all` (`tools/check_source_conventions.py`) requires every
+`intent(inout)` setter to assign every component of its type, or to delegate to one that does, and
+requires every `intent(out)` one to have a caught-failure return justifying it. **This is the half
+that covers a component added in future**, which no existing test can. Both the component list and
+the setter list are derived from `parquet_temporal.f90` itself, so a new component or a new setter is
+covered with no edit to the check; it reports "gone blind" rather than passing if the declaration
+shape moves out from under it. Verified to fire in all five directions, including the
+component-added-later case (which fails on every setter of that type at once) and both blinding
+cases.
+
+**What this forbids.** Do not add a component to any of these three types without assigning it in
+every `intent(inout)` setter — the static check will say so, and it is not a formality. Do not
+convert one of the four `intent(out)` survivors for consistency or for speed. And do not "simplify"
+a `%set_null` body back to an empty one: those bodies exist only because `intent(inout)` no longer
+resets anything, and the three of them are the one place where the value components are **not**
+observable from outside (all three raw accessors hard-code 0 for a null element, and every other
+accessor aborts on null), so a mutation removing them survives the test suite by being a genuine
+semantic no-op *today*. They are kept as defence for the day an accessor exposes them, and the test's
+doc-comment says so rather than pretending the assertion covers them.

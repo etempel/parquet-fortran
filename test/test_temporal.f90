@@ -43,6 +43,7 @@ contains
             new_unittest("timestamp difference (diff_ns/diff_seconds) and ns-offset arithmetic", test_ts_arithmetic), &
             new_unittest("unit-conversion convenience constants", test_unit_constants), &
             new_unittest("whole-array elemental operations", test_elemental_arrays), &
+            new_unittest("a setter leaves no component of a REUSED element stale", test_setters_leave_nothing_stale), &
             new_unittest("Arrow cross-validation of civil<->days math", test_arrow_cross_validation) &
             ]
     end subroutine collect_tests_parquet_temporal
@@ -863,6 +864,138 @@ contains
         call check(error, .not. ts(1)%is_null() .and. ts(2)%is_null() .and. .not. ts(3)%is_null(), &
             "elemental parse null pattern")
     end subroutine test_elemental_arrays
+    !
+    !> Every setter on these three types takes `class(...), intent(inout) :: self`, NOT
+    !> `intent(out)`. That is a deliberate optimisation -- a polymorphic `intent(out)` dummy makes
+    !> the compiler default-initialise the element through the runtime on every elemental call,
+    !> which measured 3.6x on a whole date-column read -- and it moves an obligation from the
+    !> compiler to the source: `intent(out)` reset every component for free, whereas under
+    !> `intent(inout)` any component a setter does not assign silently keeps its PREVIOUS value.
+    !>
+    !> So each case below sets an element to one state, sets it again to a different state, and
+    !> requires the result to be indistinguishable from the same call on a FRESH element. Two
+    !> assertions per case, because either alone is weak: `reused == fresh` alone passes when an
+    !> assignment is deleted (both elements then hold the same wrong thing), and the expected-value
+    !> check alone passes when only the reuse path is broken.
+    !>
+    !> The nanosecond cases are the sharp ones. `parquet_timestamp` is the only type here with a
+    !> component that a *later* call can legitimately need to clear rather than overwrite, so
+    !> "set to a value with a nanosecond part, then to one without" is where a missing assignment
+    !> actually shows up. `tools/check_source_conventions.py`'s `check_temporal_setters_assign_all`
+    !> is the other half of this guard, and the one that covers a component added in future.
+    !>
+    !> **What a `%set_null` case can and cannot assert, because it is easy to write a check here
+    !> that tests nothing.** All three raw accessors hard-code 0 for a null element
+    !> (`date_raw`/`time_raw`/`ts_get_raw` each return zeros without reading the value component)
+    !> and every other accessor aborts on null, so a null element's value components are NOT
+    !> OBSERVABLE through the public API at all. An assertion that they read back as 0 after
+    !> `%set_null` therefore passes against any implementation whatsoever -- including one that
+    !> leaves them stale -- and three deliberate mutations dropping exactly those resets survived
+    !> such assertions before they were removed. The value resets inside `%set_null` are kept
+    !> because they restore what `intent(out)` used to give for free and because the static check
+    !> requires them, but they are DEFENSIVE: only the validity flag is checkable from here, so
+    !> only the validity flag is checked.
+    subroutine test_setters_leave_nothing_stale(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_date) :: d_fresh, d_reused
+        type(parquet_time) :: t_fresh, t_reused
+        type(parquet_timestamp) :: s_fresh, s_reused
+        integer(int64) :: sec_f, sec_r
+        integer(int32) :: ns_f, ns_r
+
+        ! ---- date%set_raw over a previously-set element ----
+        call d_reused%set_raw(12345_int32)
+        call d_reused%set_raw(777_int32)
+        call d_fresh%set_raw(777_int32)
+        call check(error, d_fresh%raw() == 777_int32 .and. .not. d_fresh%is_null(), &
+            "date%set_raw on a fresh element must give day 777, non-null")
+        if (allocated(error)) return
+        call check(error, d_reused%raw() == d_fresh%raw() .and. &
+            (d_reused%is_null() .eqv. d_fresh%is_null()), &
+            "date%set_raw must leave a reused element identical to a fresh one")
+        if (allocated(error)) return
+
+        ! ---- date%set_raw over a NULLED element: valid must come back ----
+        call d_reused%set_null()
+        call d_reused%set_raw(777_int32)
+        call check(error, .not. d_reused%is_null() .and. d_reused%raw() == 777_int32, &
+            "date%set_raw after set_null must mark the element valid again")
+        if (allocated(error)) return
+
+        ! ---- date%set_null over a set element ----
+        call d_reused%set_raw(999_int32)
+        call d_reused%set_null()
+        call check(error, d_reused%is_null(), &
+            "date%set_null on a previously-set element must mark it null")
+        if (allocated(error)) return
+
+        ! ---- time%set_raw over a previously-set element ----
+        call t_reused%set_raw(123456789_int64)
+        call t_reused%set_raw(42_int64)
+        call t_fresh%set_raw(42_int64)
+        call check(error, t_fresh%raw() == 42_int64 .and. .not. t_fresh%is_null(), &
+            "time%set_raw on a fresh element must give 42 ns, non-null")
+        if (allocated(error)) return
+        call check(error, t_reused%raw() == t_fresh%raw() .and. &
+            (t_reused%is_null() .eqv. t_fresh%is_null()), &
+            "time%set_raw must leave a reused element identical to a fresh one")
+        if (allocated(error)) return
+        call t_reused%set_raw(5_int64)
+        call t_reused%set_null()
+        call check(error, t_reused%is_null(), &
+            "time%set_null on a previously-set element must mark it null")
+        if (allocated(error)) return
+
+        ! ---- timestamp%set_raw: the nanosecond part must be OVERWRITTEN, not merged ----
+        call s_reused%set_raw(1000_int64, 123456789_int32)
+        call s_reused%set_raw(2000_int64, 0_int32)
+        call s_fresh%set_raw(2000_int64, 0_int32)
+        call s_fresh%get_raw(sec_f, ns_f)
+        call s_reused%get_raw(sec_r, ns_r)
+        call check(error, sec_f == 2000_int64 .and. ns_f == 0_int32, &
+            "timestamp%set_raw on a fresh element must give (2000, 0)")
+        if (allocated(error)) return
+        call check(error, sec_r == sec_f .and. ns_r == ns_f, &
+            "timestamp%set_raw must clear a nanosecond part left by an earlier call")
+        if (allocated(error)) return
+
+        ! ---- timestamp%set_unix: same, through the unit-scaling path the reader uses ----
+        call s_reused%set_unix(1500000_int64, parquet_unit_micros)   ! 1.5 s -> ns part 500000000
+        call s_reused%set_unix(3000000_int64, parquet_unit_micros)   ! 3.0 s -> ns part 0
+        call s_fresh%set_unix(3000000_int64, parquet_unit_micros)
+        call s_fresh%get_raw(sec_f, ns_f)
+        call s_reused%get_raw(sec_r, ns_r)
+        call check(error, sec_f == 3_int64 .and. ns_f == 0_int32, &
+            "timestamp%set_unix(3000000, micros) on a fresh element must give (3, 0)")
+        if (allocated(error)) return
+        call check(error, sec_r == sec_f .and. ns_r == ns_f, &
+            "timestamp%set_unix must clear a nanosecond part left by an earlier call")
+        if (allocated(error)) return
+
+        ! ---- timestamp%set_null over a fully-populated element ----
+        call s_reused%set_raw(99_int64, 999999999_int32)
+        call s_reused%set_null()
+        call check(error, s_reused%is_null(), &
+            "timestamp%set_null on a previously-set element must mark it null")
+        if (allocated(error)) return
+
+        ! ---- and the same through an ARRAY, which is the shape the read path uses ----
+        block
+            type(parquet_timestamp) :: arr(4)
+            integer(int64) :: as(4)
+            integer(int32) :: an(4)
+            integer :: i
+            call arr%set_unix([1500000_int64, 2500000_int64, 3500000_int64, 4500000_int64], &
+                parquet_unit_micros)
+            call arr%set_unix([1000000_int64, 2000000_int64, 3000000_int64, 4000000_int64], &
+                parquet_unit_micros)
+            do i = 1, 4
+                call arr(i)%get_raw(as(i), an(i))
+            end do
+            call check(error, all(an == 0_int32) .and. all(as == [1_int64, 2_int64, 3_int64, 4_int64]), &
+                "an elemental whole-array set_unix must clear every element's stale ns part")
+        end block
+    end subroutine test_setters_leave_nothing_stale
     !
     !> Cross-validates this module's pure-Fortran civil<->days math against Arrow's vendored
     !> copy of the same (Hinnant date.h) algorithm, via two test-only parquet_debug_* hooks in

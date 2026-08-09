@@ -31,6 +31,27 @@
 !! element. This module depends only on intrinsic modules (`iso_fortran_env`,
 !! `ieee_arithmetic`); it has no dependency on any other module in this library (the
 !! read/write integration layer depends on it, never the reverse).
+!!
+!! **Why the setters take `intent(inout)` rather than `intent(out)`, and the obligation that
+!! creates.** A POLYMORPHIC `intent(out)` dummy is not free: the compiler default-initialises the
+!! element through the runtime on entry, and a type-bound procedure's passed-object dummy has to be
+!! polymorphic, so an elemental setter pays that per element. Measured on a 4M-row whole-column
+!! read: the construction loop cost 12.3 ms with `intent(out)` and 3.4 ms with `intent(inout)`
+!! (3.6x), taking the whole date-column read from 23.5 ms to 14.5 ms. The same change on the
+!! timestamp setters took its loop from 17.2 ms to 5.7 ms.
+!!
+!! The cost of that is an obligation moved from the compiler to this source: `intent(out)` reset
+!! EVERY component for free, whereas under `intent(inout)` a component a setter does not assign
+!! keeps whatever the element held before. So **every `intent(inout)` setter here must assign every
+!! component of its type**, and adding a component to one of these types means revisiting all of
+!! them. `tools/check_source_conventions.py`'s `check_temporal_setters_assign_all` enforces exactly
+!! that, deriving both the component list and the setter list from this file so a new component or
+!! a new setter is covered without editing the check.
+!!
+!! The converse is equally load-bearing and is enforced too: a setter with a caught-failure path
+!! that RETURNS without assigning `self` -- `%parse` with a `success` argument, and
+!! `ts_set_date_time`'s null propagation -- must KEEP `intent(out)`, because that is precisely what
+!! makes a failed or null-propagating call yield a null element rather than a stale one.
 module parquet_temporal
     use, intrinsic :: iso_fortran_env, only : int32, int64, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_is_nan
@@ -577,7 +598,7 @@ contains
     !> Sets the element from civil fields (proleptic Gregorian), validating month, day, and the
     !! representable range; marks it valid.
     impure elemental subroutine date_set(self, year, month, day)
-        class(parquet_date), intent(out) :: self !! receives the date (marked valid).
+        class(parquet_date), intent(inout) :: self !! receives the date (marked valid).
         integer(int32), intent(in) :: year       !! calendar year.
         integer(int32), intent(in) :: month      !! month, 1..12.
         integer(int32), intent(in) :: day        !! day of month, 1..days_in_month.
@@ -657,12 +678,14 @@ contains
     !
     !> Marks the element null.
     impure elemental subroutine date_set_null(self)
-        class(parquet_date), intent(out) :: self !! the element (reset to the null state).
+        class(parquet_date), intent(inout) :: self !! the element (reset to the null state).
+        self%days = 0_int32
+        self%valid = .false.
     end subroutine date_set_null
     !
     !> Sets the raw day count directly (interop/advanced accessor; marks the element valid).
     impure elemental subroutine date_set_raw(self, days)
-        class(parquet_date), intent(out) :: self !! receives the value (marked valid).
+        class(parquet_date), intent(inout) :: self !! receives the value (marked valid).
         integer(int32), intent(in) :: days       !! days since 1970-01-01 (the Parquet DATE value).
         self%days = days
         self%valid = .true.
@@ -678,7 +701,7 @@ contains
     !
     !> int32 specific of set_mjd; see the set_mjd generic.
     impure elemental subroutine date_set_mjd_i32(self, mjd)
-        class(parquet_date), intent(out) :: self !! receives the date (marked valid).
+        class(parquet_date), intent(inout) :: self !! receives the date (marked valid).
         integer(int32), intent(in) :: mjd        !! integer Modified Julian Date.
         call date_set_mjd_i64(self, int(mjd, int64))
     end subroutine date_set_mjd_i32
@@ -686,7 +709,7 @@ contains
     !> int64 specific of set_mjd: sets the element from an integer Modified Julian Date
     !! (MJD 0 = 1858-11-17); aborts if out of the representable range.
     impure elemental subroutine date_set_mjd_i64(self, mjd)
-        class(parquet_date), intent(out) :: self !! receives the date (marked valid).
+        class(parquet_date), intent(inout) :: self !! receives the date (marked valid).
         integer(int64), intent(in) :: mjd        !! integer Modified Julian Date.
         integer(int64) :: d64
         d64 = mjd - MJD_UNIX_EPOCH
@@ -900,7 +923,7 @@ contains
     !> Sets the element from validated time-of-day fields; marks it valid. Leap seconds
     !! (second == 60) are not representable (Parquet/Arrow TIME does not support them).
     impure elemental subroutine time_set(self, hour, minute, second, nanosecond)
-        class(parquet_time), intent(out) :: self         !! receives the time (marked valid).
+        class(parquet_time), intent(inout) :: self         !! receives the time (marked valid).
         integer(int32), intent(in) :: hour               !! hour, 0..23.
         integer(int32), intent(in) :: minute             !! minute, 0..59.
         integer(int32), intent(in) :: second             !! second, 0..59.
@@ -983,13 +1006,15 @@ contains
     !
     !> Marks the element null.
     impure elemental subroutine time_set_null(self)
-        class(parquet_time), intent(out) :: self !! the element (reset to the null state).
+        class(parquet_time), intent(inout) :: self !! the element (reset to the null state).
+        self%nanoseconds = 0_int64
+        self%valid = .false.
     end subroutine time_set_null
     !
     !> Sets the raw nanoseconds-since-midnight directly (interop/advanced accessor; marks the
     !! element valid); aborts on a value outside a day.
     impure elemental subroutine time_set_raw(self, nanoseconds)
-        class(parquet_time), intent(out) :: self  !! receives the value (marked valid).
+        class(parquet_time), intent(inout) :: self  !! receives the value (marked valid).
         integer(int64), intent(in) :: nanoseconds !! nanoseconds since midnight, [0, 86400e9 - 1].
         if (nanoseconds < 0_int64 .or. nanoseconds >= NS_PER_DAY) then
             error stop EP//"nanoseconds-of-day out of range in parquet_time%set_raw"
@@ -1188,7 +1213,7 @@ contains
     !> Civil-fields specific of the set generic: sets the element from
     !! (year, month, day, hour, minute, second[, nanosecond]), validated; marks it valid.
     impure elemental subroutine ts_set_civil(self, year, month, day, hour, minute, second, nanosecond)
-        class(parquet_timestamp), intent(out) :: self      !! receives the instant (marked valid).
+        class(parquet_timestamp), intent(inout) :: self      !! receives the instant (marked valid).
         integer(int32), intent(in) :: year                 !! calendar year.
         integer(int32), intent(in) :: month                !! month, 1..12.
         integer(int32), intent(in) :: day                  !! day of month.
@@ -1300,13 +1325,16 @@ contains
     !
     !> Marks the element null.
     impure elemental subroutine ts_set_null(self)
-        class(parquet_timestamp), intent(out) :: self !! the element (reset to the null state).
+        class(parquet_timestamp), intent(inout) :: self !! the element (reset to the null state).
+        self%seconds = 0_int64
+        self%nanoseconds = 0_int32
+        self%valid = .false.
     end subroutine ts_set_null
     !
     !> Sets the raw (seconds, nanoseconds) pair directly (interop/advanced accessor; marks the
     !! element valid); aborts on a nanosecond part outside the normalized 0..999999999 range.
     impure elemental subroutine ts_set_raw(self, seconds, nanoseconds)
-        class(parquet_timestamp), intent(out) :: self !! receives the value (marked valid).
+        class(parquet_timestamp), intent(inout) :: self !! receives the value (marked valid).
         integer(int64), intent(in) :: seconds         !! whole seconds since 1970-01-01T00:00:00.
         integer(int32), intent(in) :: nanoseconds     !! nanosecond-of-second part, 0..999999999.
         if (nanoseconds < 0 .or. int(nanoseconds, int64) >= NS_PER_SECOND) then
@@ -1333,7 +1361,7 @@ contains
     !
     !> int32 specific of set_unix; see ts_set_unix_i64.
     impure elemental subroutine ts_set_unix_i32(self, value, unit)
-        class(parquet_timestamp), intent(out) :: self !! receives the value (marked valid).
+        class(parquet_timestamp), intent(inout) :: self !! receives the value (marked valid).
         integer(int32), intent(in) :: value           !! Unix time in `unit`.
         integer, intent(in) :: unit                   !! one of the parquet_unit_* constants.
         call ts_set_unix_i64(self, int(value, int64), unit)
@@ -1344,7 +1372,7 @@ contains
     !! is not stored (the internal representation is always the canonical seconds+nanoseconds
     !! pair). Always exact; marks the element valid.
     impure elemental subroutine ts_set_unix_i64(self, value, unit)
-        class(parquet_timestamp), intent(out) :: self !! receives the value (marked valid).
+        class(parquet_timestamp), intent(inout) :: self !! receives the value (marked valid).
         integer(int64), intent(in) :: value           !! Unix time in `unit`.
         integer, intent(in) :: unit                   !! one of the parquet_unit_* constants.
         integer(int64) :: scale, q, r
@@ -1398,7 +1426,7 @@ contains
     !! the representable range. real64 only by design -- real32 would silently lose precision
     !! (~2 s resolution in the current era) and is deliberately not accepted.
     impure elemental subroutine ts_set_mjd(self, mjd)
-        class(parquet_timestamp), intent(out) :: self !! receives the instant (marked valid).
+        class(parquet_timestamp), intent(inout) :: self !! receives the instant (marked valid).
         real(real64), intent(in) :: mjd               !! Modified Julian Date (fractional days).
         real(real64) :: dd, frac
         integer(int64) :: d64, ns_of_day
@@ -1442,7 +1470,7 @@ contains
     !! and real64-only rationale as set_mjd. Note the coarser real64 resolution at JD
     !! magnitudes (~50 microseconds in the current era).
     impure elemental subroutine ts_set_jd(self, jd)
-        class(parquet_timestamp), intent(out) :: self !! receives the instant (marked valid).
+        class(parquet_timestamp), intent(inout) :: self !! receives the instant (marked valid).
         real(real64), intent(in) :: jd                !! Julian Date (fractional days).
         if (ieee_is_nan(jd)) error stop EP//"NaN passed to parquet_timestamp%set_jd"
         call ts_set_mjd(self, jd - JD_MJD_OFFSET)

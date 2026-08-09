@@ -459,6 +459,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Reading a `parquet_date` column is 1.6x faster**, and every temporal read is cheaper, from a
+  one-word change repeated across the setters. `parquet_date`/`parquet_time`/`parquet_timestamp`
+  declared their setters' passed-object dummy `class(...), intent(out)`, which makes the compiler
+  default-initialise the element through the runtime on entry — and since these setters are
+  `elemental` and the read path calls one per row, that reset was paid per element and cost several
+  times the work the setter itself does. **They now take `intent(inout)` and assign every component
+  explicitly**, which is the same thing the reset was doing, done once. Measured over a 4 M-row
+  whole-column read: the element-construction loop 12.3 → 3.4 ms for `date` (**3.6x**) and
+  17.2 → 5.7 ms for `timestamp` (**2.9x**), taking the whole date-column read from 23.6 ms to
+  14.8 ms and the timestamp column from 55.1 ms to 52 ms. Nothing about the API changes — the
+  argument is still definable, still a setter, and every value is identical. The four procedures
+  with a caught-failure path (`%parse` on all three types, and `parquet_timestamp%set(date, time)`)
+  deliberately **keep** `intent(out)`, because that reset is exactly what makes a failed parse or a
+  null input yield a null element rather than a stale one.
+
 - **Sorting a `parquet_column` that contains nulls is up to 5.5x faster**, from two independent
   changes that compound. Extracting the sort key's validity walked the column **twice** with a
   per-row `%is_null` — up to 2n un-inlinable calls, each re-checking the index and re-dispatching

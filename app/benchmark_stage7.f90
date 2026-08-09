@@ -11,6 +11,7 @@ program benchmark_stage7
     !! toolchain provenance every number here has to be read against. Running the bare executable
     !! without a profile measures an unoptimised build and is meaningless.
     use parquet
+    use iso_c_binding, only: c_int8_t, c_int32_t, c_int64_t
     use iso_fortran_env, only: int32, int64, real32, real64, compiler_version
 #ifdef _OPENMP
     use omp_lib, only: omp_get_max_threads
@@ -20,6 +21,14 @@ program benchmark_stage7
     integer, parameter :: REP = 7                    !! rounds per measurement; the best is reported
     character(len=64) :: only                        !! --only=<item>, or "all"
     integer :: nthreads
+
+    !> Layout-identical local twin of `parquet_date`, whose own components are private. Used only by
+    !> S7-3's impure-versus-class experiment; see `gate_s7_3_purity` for why a replication is needed
+    !> and what ties it back to the shipped figure.
+    type :: bench_date
+        integer(int32) :: days = 0_int32 !! days since 1970-01-01.
+        logical :: valid = .false.       !! .false. = null.
+    end type bench_date
 
     call parse_args(only)
     nthreads = 1
@@ -37,6 +46,7 @@ program benchmark_stage7
 
     if (want("s7-2")) call gate_s7_2()
     if (want("s7-1")) call gate_s7_1()
+    if (want("s7-3")) call gate_s7_3()
     if (want("s7-4")) call gate_s7_4()
     if (want("s7-5")) call gate_s7_5()
     if (want("s7-6")) call gate_s7_6()
@@ -506,6 +516,373 @@ contains
             best = min(best, (t1 - t0)*1.0e3_real64)
         end do
     end function sort_with_nulls
+
+    ! =============================================================================================
+    ! S7-3 (A.11) -- THE GATE, and it can retire the item outright.
+    !
+    ! The eleven read-side temporal loops build one element per call: `%set_raw` for date/time,
+    ! `%set_unix` for timestamp (which additionally divides and takes a modulo per element, by a
+    ! divisor that is constant for the whole column). What that costs is bounded by the gap between
+    ! reading a temporal column and reading the SAME PHYSICAL COLUMN as a plain integer -- same byte
+    ! count, same Arrow decode, same file. Whatever separates them is the element construction, and
+    ! nothing else.
+    !
+    ! The two pairings are chosen so the physical type matches exactly:
+    !
+    !   timestamp[us] <-> int64   (both INT64 physical)
+    !   date          <-> int32   (both INT32 physical)
+    !
+    ! and the two columns of each pair are written holding the IDENTICAL integers, so encoded size,
+    ! dictionary behaviour and page layout match as closely as a real file allows.
+    !
+    ! Read the gap, not the ratio alone: a large ratio on a cheap read is worth less than a small
+    ! ratio on an expensive one, and it is the absolute milliseconds that any later change competes
+    ! against. If the gap is small, the read is Arrow-decode-dominated and S7-3 drops with no source
+    ! change at all -- which is the outcome this gate exists to be able to reach.
+    ! =============================================================================================
+    subroutine gate_s7_3()
+        integer(int64), parameter :: N = 4000000_int64
+        character(len=*), parameter :: file = "test_run/bench_s7_3.parquet"
+        real(real64) :: t_i64, t_ts, t_i32, t_date
+        call write_temporal_pairs(file, N)
+        t_i64  = read_ms(file, "i64",  N, 1)
+        t_ts   = read_ms(file, "ts",   N, 2)
+        t_i32  = read_ms(file, "i32",  N, 3)
+        t_date = read_ms(file, "date", N, 4)
+        print "(A)", ""
+        print "(A)", "S7-3 (A.11) temporal element construction, 4M rows, whole-column read"
+        print "(A)", "  Each pair is the same physical column type holding the same integers, so"
+        print "(A)", "  the GAP is the per-element construction and nothing else. ms, best of 7."
+        print "(A)", ""
+        print "(A,F9.2)", "  int64        (memcpy-ish)      : ", t_i64
+        print "(A,F9.2)", "  timestamp[us] (%set_unix)      : ", t_ts
+        print "(A,F9.2,A,F6.2,A)", "    gap                          : ", t_ts - t_i64, &
+            "   (ratio ", t_ts/max(t_i64, 1.0e-9_real64), ")"
+        print "(A)", ""
+        print "(A,F9.2)", "  int32        (memcpy-ish)      : ", t_i32
+        print "(A,F9.2)", "  date          (%set_raw)       : ", t_date
+        print "(A,F9.2,A,F6.2,A)", "    gap                          : ", t_date - t_i32, &
+            "   (ratio ", t_date/max(t_i32, 1.0e-9_real64), ")"
+        call gate_s7_3_loops(N, t_ts - t_i64, t_date - t_i32)
+    end subroutine gate_s7_3
+
+    !> Decomposes the gap above. The end-to-end gap is NOT the per-element loop alone: the temporal
+    !> read also allocates an `n`-element scratch buffer Arrow decodes into, and *always* allocates a
+    !> validity buffer, where the numeric read decodes straight into the caller's array and allocates
+    !> no validity buffer at all unless one was asked for. So the loop measured here is a LOWER bound
+    !> on the gap, and the difference is the buffers. Both are S7-3's target, but they want different
+    !> fixes, which is why they are separated before anything is written.
+    !>
+    !> The shipped loop and each candidate run over the same pre-populated buffers in this same file,
+    !> so none of them pays a cross-module call the others do not. **The tie-down that makes this
+    !> evidence rather than three confident numbers** (CLAUDE.md: a benchmark that replicates library
+    !> code is untested code) is that the shipped row must come in at or below the end-to-end gap
+    !> passed in; it is printed alongside for exactly that check.
+    subroutine gate_s7_3_loops(n, gap_ts, gap_date)
+        integer(int64), intent(in) :: n     !! element count.
+        real(real64), intent(in) :: gap_ts  !! measured end-to-end timestamp gap, ms.
+        real(real64), intent(in) :: gap_date!! measured end-to-end date gap, ms.
+        integer(c_int32_t), allocatable :: days(:)
+        integer(c_int64_t), allocatable :: vals(:)
+        integer(c_int8_t), allocatable :: valid(:)
+        type(parquet_date), allocatable :: d(:)
+        type(parquet_timestamp), allocatable :: ts(:)
+        integer(int64) :: i
+        integer :: r
+        real(real64) :: t0, t1, b_ship, b_elem, b_two, b_guard, b_ship_date
+        allocate(days(n), vals(n), valid(n), d(n), ts(n))
+        do i = 1_int64, n
+            days(i) = int(mod(i, 14600_int64), c_int32_t)
+            vals(i) = mod(i, 14600_int64)*86400000000_int64 + mod(i*7919_int64, 86400000000_int64)
+            valid(i) = 1_c_int8_t
+        end do
+        call d%set_raw(days)                    ! warm both destinations' pages before any timing
+        call ts%set_unix(vals, parquet_unit_micros)
+
+        ! ---- date ----
+        b_ship = huge(1.0_real64); b_elem = b_ship; b_two = b_ship; b_guard = b_ship
+        do r = 1, REP
+            call tick(t0)
+            do i = 1_int64, n
+                if (valid(i) /= 0_c_int8_t) then
+                    call d(i)%set_raw(days(i))
+                else
+                    call d(i)%set_null()
+                end if
+            end do
+            call tick(t1); b_ship = min(b_ship, (t1 - t0)*1.0e3_real64)
+            call tick(t0)
+            call d%set_raw(days)
+            call tick(t1); b_elem = min(b_elem, (t1 - t0)*1.0e3_real64)
+            call tick(t0)
+            call d%set_raw(days)
+            do i = 1_int64, n
+                if (valid(i) == 0_c_int8_t) call d(i)%set_null()
+            end do
+            call tick(t1); b_two = min(b_two, (t1 - t0)*1.0e3_real64)
+            call tick(t0)
+            call d%set_raw(days)
+            if (any(valid == 0_c_int8_t)) then
+                do i = 1_int64, n
+                    if (valid(i) == 0_c_int8_t) call d(i)%set_null()
+                end do
+            end if
+            call tick(t1); b_guard = min(b_guard, (t1 - t0)*1.0e3_real64)
+        end do
+        print "(A)", ""
+        print "(A)", "  -- gap decomposition: the CONSTRUCTION LOOP alone, over ready buffers --"
+        print "(A)", "     (shipped must be <= the end-to-end gap above; the rest is the buffers)"
+        print "(A,F9.2,A,F9.2,A)", "  date  shipped  per-element call : ", b_ship, &
+            "    of a ", gap_date, " ms gap"
+        print "(A,F9.2)", "  date  elemental whole-array      : ", b_elem
+        print "(A,F9.2)", "  date  elemental + null fix-up    : ", b_two
+        print "(A,F9.2)", "  date  elemental + any() guard    : ", b_guard
+        b_ship_date = b_ship
+
+        ! ---- timestamp ----
+        b_ship = huge(1.0_real64); b_elem = b_ship; b_two = b_ship; b_guard = b_ship
+        do r = 1, REP
+            call tick(t0)
+            do i = 1_int64, n
+                if (valid(i) /= 0_c_int8_t) then
+                    call ts(i)%set_unix(vals(i), parquet_unit_micros)
+                else
+                    call ts(i)%set_null()
+                end if
+            end do
+            call tick(t1); b_ship = min(b_ship, (t1 - t0)*1.0e3_real64)
+            call tick(t0)
+            call ts%set_unix(vals, parquet_unit_micros)
+            call tick(t1); b_elem = min(b_elem, (t1 - t0)*1.0e3_real64)
+            call tick(t0)
+            call ts%set_unix(vals, parquet_unit_micros)
+            do i = 1_int64, n
+                if (valid(i) == 0_c_int8_t) call ts(i)%set_null()
+            end do
+            call tick(t1); b_two = min(b_two, (t1 - t0)*1.0e3_real64)
+            call tick(t0)
+            call ts%set_unix(vals, parquet_unit_micros)
+            if (any(valid == 0_c_int8_t)) then
+                do i = 1_int64, n
+                    if (valid(i) == 0_c_int8_t) call ts(i)%set_null()
+                end do
+            end if
+            call tick(t1); b_guard = min(b_guard, (t1 - t0)*1.0e3_real64)
+        end do
+        print "(A)", ""
+        print "(A,F9.2,A,F9.2,A)", "  ts    shipped  per-element call : ", b_ship, &
+            "    of a ", gap_ts, " ms gap"
+        print "(A,F9.2)", "  ts    elemental whole-array      : ", b_elem
+        print "(A,F9.2)", "  ts    elemental + null fix-up    : ", b_two
+        print "(A,F9.2)", "  ts    elemental + any() guard    : ", b_guard
+        call gate_s7_3_bandwidth(n)
+        call gate_s7_3_purity(n, b_ship_date)
+    end subroutine gate_s7_3_loops
+
+    !> Falsifies (or confirms) the reading that the construction loop is memory-bound rather than
+    !> call- or arithmetic-bound. Each reference below moves exactly the bytes the matching loop
+    !> above moves, with NO arithmetic and no procedure call of any kind -- a plain strided store.
+    !> If a loop is at or near its reference, no rewrite that still writes those bytes can help,
+    !> whatever it does about calls or divisors; if it is far above, the arithmetic is real.
+    !>
+    !> Note what a positive result would mean for A.11 specifically: its stated target is a division
+    !> and a modulo per element. `set_unix` does both and `set_raw` does neither, so if the timestamp
+    !> loop reaches a HIGHER byte rate than the date loop, the divisor cannot be what limits it.
+    subroutine gate_s7_3_bandwidth(n)
+        integer(int64), intent(in) :: n !! element count.
+        integer(int64), allocatable :: dst8(:), dst16(:), src8(:)
+        integer(int32), allocatable :: src4(:)
+        integer(int64) :: i
+        integer :: r
+        real(real64) :: t0, t1, b8, b16
+        allocate(dst8(n), dst16(2*n), src4(n), src8(n))
+        dst8 = 0_int64; dst16 = 0_int64; src4 = 1_int32; src8 = 1_int64
+        b8 = huge(1.0_real64); b16 = b8
+        do r = 1, REP
+            call tick(t0)                                   ! date's traffic: read 4B, write 8B
+            do i = 1_int64, n
+                dst8(i) = int(src4(i), int64)
+            end do
+            call tick(t1); b8 = min(b8, (t1 - t0)*1.0e3_real64)
+            call tick(t0)                                   ! timestamp's traffic: read 8B, write 16B
+            do i = 1_int64, n
+                dst16(2*i-1) = src8(i)
+                dst16(2*i) = 0_int64
+            end do
+            call tick(t1); b16 = min(b16, (t1 - t0)*1.0e3_real64)
+        end do
+        print "(A)", ""
+        print "(A)", "  -- reference: the same bytes moved, no call and no arithmetic --"
+        print "(A,F9.2)", "  date-shaped  store 8B/elem      : ", b8
+        print "(A,F9.2)", "  ts-shaped    store 16B/elem     : ", b16
+    end subroutine gate_s7_3_bandwidth
+
+
+    !> The construction loop is 10-15x off the bytes it moves, so something per element is real.
+    !> Two attributes of the shipped setters can each explain that, and they imply COMPLETELY
+    !> different fixes, so this separates them before either is attempted:
+    !>
+    !>   * `impure` -- an impure elemental procedure must be called once per element in array
+    !>     order, which blocks vectorisation and inlining. If this is the cause, the fix is one
+    !>     word on each setter whose body permits it.
+    !>   * `class` -- the passed-object dummy of a type-bound procedure MUST be polymorphic per the
+    !>     standard, so if this is the cause the fix cannot be a type-bound procedure at all, and
+    !>     the plan's option 1 (a bulk, non-type-bound entry point) is the only route.
+    !>
+    !> `bench_date` replicates `parquet_date`'s layout because that type's components are private.
+    !> A replication is untested code (CLAUDE.md), so the tie-down is the FIRST row: the impure+class
+    !> twin must reproduce the shipped figure printed above. If it does not, no other row here means
+    !> anything and the replication is wrong, not the library.
+    subroutine gate_s7_3_purity(n, shipped_ms)
+        integer(int64), intent(in) :: n        !! element count.
+        real(real64), intent(in) :: shipped_ms !! the shipped date loop's measured ms, for the tie-down.
+        integer(int32), allocatable :: days(:)
+        type(bench_date), allocatable :: d(:)
+        integer(int64) :: i
+        integer :: r
+        real(real64) :: t0, t1, b_ic, b_pc, b_it, b_pt
+        allocate(days(n), d(n))
+        do i = 1_int64, n
+            days(i) = int(mod(i, 14600_int64), int32)
+        end do
+        call set_ic(d, days)                                ! warm the destination's pages
+        b_ic = huge(1.0_real64); b_pc = b_ic; b_it = b_ic; b_pt = b_ic
+        do r = 1, REP
+            call tick(t0); call set_ic(d, days); call tick(t1)
+            b_ic = min(b_ic, (t1 - t0)*1.0e3_real64)
+            call tick(t0); call set_ici(d, days); call tick(t1)
+            b_pc = min(b_pc, (t1 - t0)*1.0e3_real64)
+            call tick(t0); call set_pci(d, days); call tick(t1)
+            b_it = min(b_it, (t1 - t0)*1.0e3_real64)
+            call tick(t0); call set_pt(d, days); call tick(t1)
+            b_pt = min(b_pt, (t1 - t0)*1.0e3_real64)
+        end do
+        print "(A)", ""
+        print "(A)", "  -- why: impure vs class, on a layout-identical local twin of parquet_date --"
+        print "(A,F9.2,A,F9.2,A)", "  impure elemental, class(t)      : ", b_ic, &
+            "    (tie-down: shipped was ", shipped_ms, ")"
+        print "(A,F9.2)", "  impure elemental, class, inout  : ", b_pc
+        print "(A,F9.2)", "  PURE   elemental, class, inout  : ", b_it
+        print "(A,F9.2)", "  PURE   elemental, type,  out    : ", b_pt
+        print "(A)", "  (pure + class + intent(out) is not expressible: the standard forbids a"
+        print "(A)", "   polymorphic intent(out) dummy in a pure procedure, so if purity is what"
+        print "(A)", "   matters the fix cannot stay a type-bound procedure with intent(out).)"
+    end subroutine gate_s7_3_purity
+
+    !> The four twins. Each writes exactly what `date_set_raw` writes; they differ only in the two
+    !> attributes under test. `intent(out)` is kept because the shipped setter has it and it is not
+    !> free -- it default-initialises the element on entry.
+    impure elemental subroutine set_ic(self, days)
+        class(bench_date), intent(out) :: self !! receives the value.
+        integer(int32), intent(in) :: days     !! day count.
+        self%days = days
+        self%valid = .true.
+    end subroutine set_ic
+
+    !> `intent(inout)` rather than `intent(out)`: the cell above cannot be made pure, because a pure
+    !! procedure may not have a POLYMORPHIC INTENT(OUT) dummy (gfortran rejects it outright, per the
+    !! standard). Since both components are assigned unconditionally, dropping to `intent(inout)` is
+    !! semantically identical here and is what makes the pure cell below expressible at all.
+    impure elemental subroutine set_ici(self, days)
+        class(bench_date), intent(inout) :: self !! receives the value.
+        integer(int32), intent(in) :: days       !! day count.
+        self%days = days
+        self%valid = .true.
+    end subroutine set_ici
+
+    pure elemental subroutine set_pci(self, days)
+        class(bench_date), intent(inout) :: self !! receives the value.
+        integer(int32), intent(in) :: days       !! day count.
+        self%days = days
+        self%valid = .true.
+    end subroutine set_pci
+
+    pure elemental subroutine set_pt(self, days)
+        type(bench_date), intent(out) :: self !! receives the value.
+        integer(int32), intent(in) :: days    !! day count.
+        self%days = days
+        self%valid = .true.
+    end subroutine set_pt
+
+    !> Writes the S7-3 fixture: four columns, `N` rows, paired so that `i64` holds exactly the
+    !> microsecond values `ts` represents and `i32` exactly the day counts `date` represents.
+    subroutine write_temporal_pairs(file, n)
+        character(len=*), intent(in) :: file !! output path.
+        integer(int64), intent(in) :: n      !! row count.
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        integer(int32), allocatable :: i32(:)
+        integer(int64), allocatable :: i64(:)
+        type(parquet_date), allocatable :: d(:)
+        type(parquet_timestamp), allocatable :: ts(:)
+        integer(int64) :: i
+        allocate(i32(n), i64(n), d(n), ts(n))
+        do i = 1_int64, n
+            ! Spread over ~40 years of days and the matching microseconds, so neither column is
+            ! degenerate enough for the dictionary encoder to change the comparison.
+            i32(i) = int(mod(i, 14600_int64), int32)
+            i64(i) = mod(i, 14600_int64)*86400000000_int64 + mod(i*7919_int64, 86400000000_int64)
+            call d(i)%set_raw(i32(i))
+            call ts(i)%set_unix(i64(i), parquet_unit_micros)
+        end do
+        call schema%init("s7_3_pairs")
+        call schema%add_field("i32", "int32")
+        call schema%add_field("i64", "int64")
+        call schema%add_field("date", "date")
+        call schema%add_field("ts", "timestamp[us]")
+        call parquet_parse_maml(schema)
+        call parquet_open_writer(writer, file, schema=schema)
+        call parquet_write_column(writer, "i32", i32)
+        call parquet_write_column(writer, "i64", i64)
+        call parquet_write_column(writer, "date", d)
+        call parquet_write_column(writer, "ts", ts)
+        call parquet_close_writer(writer)
+    end subroutine write_temporal_pairs
+
+    !> Best-of-REP ms for a whole-column read of `col` from `file`. `which` selects the destination
+    !> array's type; a fresh reader per round keeps every round identical, and the destination is
+    !> written through once before the timer so no round pays its first-touch page faults.
+    real(real64) function read_ms(file, col, n, which) result(best)
+        character(len=*), intent(in) :: file !! fixture path.
+        character(len=*), intent(in) :: col  !! column name.
+        integer(int64), intent(in) :: n      !! row count.
+        integer, intent(in) :: which         !! 1 = int64, 2 = timestamp, 3 = int32, 4 = date.
+        type(parquet_reader) :: reader
+        integer(int32), allocatable :: b32(:)
+        integer(int64), allocatable :: b64(:)
+        type(parquet_date), allocatable :: bd(:)
+        type(parquet_timestamp), allocatable :: bts(:)
+        integer :: r
+        real(real64) :: t0, t1
+        select case (which)
+        case (1)
+            allocate(b64(n)); b64 = 0_int64
+        case (2)
+            allocate(bts(n)); call bts(:)%set_null()
+        case (3)
+            allocate(b32(n)); b32 = 0_int32
+        case (4)
+            allocate(bd(n)); call bd(:)%set_null()
+        end select
+        best = huge(1.0_real64)
+        do r = 1, REP
+            call parquet_open_reader(reader, file)
+            call tick(t0)
+            select case (which)
+            case (1)
+                call parquet_read_column(reader, col, b64)
+            case (2)
+                call parquet_read_column(reader, col, bts)
+            case (3)
+                call parquet_read_column(reader, col, b32)
+            case (4)
+                call parquet_read_column(reader, col, bd)
+            end select
+            call tick(t1)
+            call parquet_close_reader(reader)
+            best = min(best, (t1 - t0)*1.0e3_real64)
+        end do
+    end function read_ms
 
     ! =============================================================================================
     ! S7-4 (A.10) -- baseline for per-element validity dispatch on the TEMPORAL kinds.

@@ -2004,6 +2004,39 @@ applied to the harness instead of the source.
   from the previous use unless the open body is rewritten to unconditionally reset every single
   component itself — a much larger, easier-to-get-subtly-wrong change than it first appears.
   Prefer keeping `intent(out)` and solving misuse-prevention some other way.
+- **That reset is NOT free when the dummy is POLYMORPHIC, and on an elemental setter it costs
+  several times the work the setter does.** `class(t), intent(out)` makes the compiler
+  default-initialise the element *through the runtime* on entry, because the dynamic type is not
+  known statically — so an `elemental` setter pays it per element, and a type-bound procedure has
+  no way out, since its passed-object dummy must be polymorphic. Measured on `parquet_temporal`'s
+  read path over 4M rows: the construction loop cost **12.3 ms** with `intent(out)` and **3.4 ms**
+  with `intent(inout)` (3.6x; timestamp 17.2 → 5.7 ms), taking a whole date-column read from
+  23.6 ms to 14.8 ms. Isolating it on a layout-identical twin gives the shape exactly — `class` +
+  `intent(out)` is the slow cell, while `class` + `intent(inout)`, `type` + `intent(out)` and
+  `pure` + `type` are all within noise of a plain store, so **neither `class` nor `impure` is the
+  cause on its own; the combination is.** Note the fourth cell does not exist: a pure procedure may
+  not have a polymorphic `intent(out)` dummy at all, so "make it `pure`" is not available as a fix
+  for a type-bound setter.
+
+  **The fix is `intent(inout)`, and it moves an obligation from the compiler to the source**: every
+  component must then be assigned by hand, or a *reused* element silently keeps its previous value
+  in whatever was missed. Two rules follow, and the second is the one that protects correctness
+  rather than speed:
+
+  - A setter that assigns every component on every path may take `intent(inout)`. If it has an
+    empty body that relied on the reset (a `%set_null`), give it an explicit body matching the
+    declared initialisers.
+  - **A setter with a caught-failure path that `return`s without assigning must KEEP
+    `intent(out)`** — that reset is what makes a failed `%parse`, or a null-propagating
+    `%set(date, time)`, yield a *null* element instead of a stale one. Converting one of those for
+    speed is a silent correctness regression.
+
+  Enforce it statically rather than by review: `check_temporal_setters_assign_all`
+  (`tools/check_source_conventions.py`) derives both the component list and the setter list from
+  the source, so a component added later fails on every setter of that type at once. See
+  `feature_risks.md` Risk-70. **Do not reach for the whole-array elemental call as an alternative
+  fix** — measured after the change, `call arr%set_unix(vals, unit)` was **3.2x slower** than the
+  indexed loop it would replace, so the win is in the dummy's intent, not in the call shape.
 - **The previous bullet's "resets every component for free" is the documented standard behavior,
   but this project has one confirmed, empirically-reproduced counterexample — don't treat it as an
   absolute guarantee for a correctness-critical `logical` component.** `parquet_table` (finalizable,

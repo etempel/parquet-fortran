@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks twelve structural invariants of this repository that no compiler and no runtime test sees.
+"""Checks structural invariants of this repository that no compiler and no runtime test sees.
 
 Each one protects a property whose violation compiles cleanly, passes the whole test suite, and
 fails somewhere else entirely -- in a user's program, on another compiler, or in a coverage report.
@@ -79,6 +79,26 @@ That is what makes them worth a static check rather than a test:
  12. src/ is a single C++ translation unit (CLAUDE.md's TU-split note).
      Every process-global in parquet_wrapper.cpp is a file-scope `static`, so a second `.cpp` would
      get its own copy of each. Not a ban on splitting -- the note firing at the moment someone does.
+
+ 13. Every `intent(inout)` temporal setter assigns every component (feature_risks.md Risk-70).
+     The setters on parquet_date/parquet_time/parquet_timestamp take `class(...), intent(inout)`
+     rather than `intent(out)`, because a POLYMORPHIC `intent(out)` dummy makes the compiler
+     default-initialise the element through the runtime on every elemental call -- measured at 3.6x
+     on a whole date-column read. That trade moves an obligation from the compiler to the source:
+     `intent(out)` reset every component for free, whereas under `intent(inout)` a component a
+     setter does not assign silently keeps the element's PREVIOUS value. Adding a component to one
+     of these types is what makes that bite, and it bites in every setter at once. Both sides are
+     derived from the source here -- the component list from the type declaration, the setter list
+     from the declarations themselves -- so a new component or a new setter is covered with no edit.
+
+     The check also enforces the converse, which is the half that protects correctness rather than
+     speed: a setter with a caught-failure `return` that leaves `self` unassigned must KEEP
+     `intent(out)`, because that is precisely what makes a failed `%parse` (or a null-propagating
+     `%set`) yield a null element instead of a stale one.
+
+The numbered notes above are the ones whose rationale needs more than a line; they are NOT the
+complete list, and deliberately carry no count, because a hardcoded one drifts silently every time a
+check is added (this docstring said "twelve" while CHECKS held fifteen). `--list` prints all of them.
 
 Usage:
     tools/check_source_conventions.py            # run every check
@@ -886,6 +906,111 @@ def check_scenario_list_is_complete():
     ]
 
 
+#: The element-domain file whose setters trade `intent(out)` for `intent(inout)`, and the types in
+#: it that rule applies to. Components are read from the declarations, never listed here.
+TEMPORAL_FILE = SRC / "parquet_temporal.f90"
+TEMPORAL_TYPES = ("parquet_date", "parquet_time", "parquet_timestamp")
+
+
+def temporal_setters():
+    """Every elemental subroutine in TEMPORAL_FILE whose passed-object dummy is one of the temporal
+    types, with its declared intent and body.
+
+    Yields `(name, lineno, type_name, intent, body_text)`. Derived entirely from the source: no
+    procedure is named in this file, so a setter added later is covered without an edit here.
+    """
+    lines = TEMPORAL_FILE.read_text().split("\n")
+    header = re.compile(r"^\s{4}(?:impure\s+)?elemental\s+subroutine\s+(\w+)")
+    dummy = re.compile(r"class\((parquet_\w+)\),\s*intent\((out|inout)\)\s*::\s*self")
+    name = None
+    for i, line in enumerate(lines):
+        match = header.match(line)
+        if match:
+            name, start, body = match.group(1), i + 1, []
+            continue
+        if name is None:
+            continue
+        if re.match(r"^\s{4}end\s+subroutine\s+%s\b" % re.escape(name), line):
+            text = "\n".join(body)
+            found = dummy.search(text)
+            if found and found.group(1) in TEMPORAL_TYPES:
+                yield name, start, found.group(1), found.group(2), text
+            name = None
+        else:
+            body.append(line)
+
+
+def check_temporal_setters_assign_all():
+    """feature_risks.md Risk-70 -- an `intent(inout)` setter must leave no component stale."""
+    problems = []
+    if not TEMPORAL_FILE.exists():
+        return ["%s: not found -- this check needs updating" % TEMPORAL_FILE]
+    components = {}
+    for type_name in TEMPORAL_TYPES:
+        body = type_body_lines(TEMPORAL_FILE, type_name)
+        if body is None:
+            return [
+                "%s: could not find `type :: %s` -- this check needs updating"
+                % (TEMPORAL_FILE.relative_to(REPO_ROOT), type_name)
+            ]
+        names = []
+        for _, line in body:
+            found = re.match(r"^\s+(?:integer|logical|real|character)[^:]*::\s*(\w+)", strip_comment(line))
+            if found:
+                names.append(found.group(1))
+        components[type_name] = names
+    setters = list(temporal_setters())
+    if not setters:
+        # An empty result means the declarations moved, not that the invariant holds -- see
+        # CLAUDE.md, "A static check that enumerates names goes stale silently".
+        return [
+            "%s: found no elemental temporal setter at all -- the declaration shape changed and "
+            "this check has gone blind" % TEMPORAL_FILE.relative_to(REPO_ROOT)
+        ]
+    for name, lineno, type_name, intent, body in setters:
+        code = "\n".join(strip_comment(line) for line in body.split("\n"))
+        returns = re.search(r"\breturn\b", code) is not None
+        if intent == "out":
+            # Keeping intent(out) is only justified by a path that returns without assigning self.
+            if not returns:
+                problems.append(
+                    "%s:%d: `%s` has no caught-failure return, so its `class(%s), intent(out) :: "
+                    "self` costs a per-element runtime default-initialisation for nothing -- use "
+                    "intent(inout) and assign every component (see CLAUDE.md, \"A polymorphic "
+                    "intent(out) dummy is not free\")"
+                    % (TEMPORAL_FILE.relative_to(REPO_ROOT), lineno, name, type_name)
+                )
+            continue
+        if returns:
+            problems.append(
+                "%s:%d: `%s` is `intent(inout)` but has a path that RETURNS without assigning "
+                "self -- that path used to yield a null element and now yields a stale one. "
+                "Restore intent(out), or assign every component before returning."
+                % (TEMPORAL_FILE.relative_to(REPO_ROOT), lineno, name)
+            )
+            continue
+        # Delegating to another setter with `self` as the actual argument assigns everything the
+        # callee assigns; the callee is checked in its own right, so that discharges the obligation.
+        if re.search(r"call\s+\w+\s*\(\s*self\s*,", code):
+            continue
+        missing = [c for c in components[type_name] if not re.search(r"self%%%s\s*=" % re.escape(c), code)]
+        if missing:
+            problems.append(
+                "%s:%d: `%s` takes `class(%s), intent(inout) :: self` but never assigns %s -- "
+                "under intent(inout) that component keeps whatever the element held before, so a "
+                "reused element comes back stale. Assign every component, or delegate to a setter "
+                "that does (feature_risks.md Risk-70)."
+                % (
+                    TEMPORAL_FILE.relative_to(REPO_ROOT),
+                    lineno,
+                    name,
+                    type_name,
+                    ", ".join("`%s`" % c for c in missing),
+                )
+            )
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -902,6 +1027,7 @@ CHECKS = (
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
+    ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
 )
 
 

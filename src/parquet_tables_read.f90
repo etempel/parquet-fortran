@@ -693,11 +693,17 @@ contains
             ! all resident is still a quiet no-op -- which is what %materialize_all means there.
             call table_check_not_detached(cache, sc, cache%cols(i)%name, "materialize_all")
         end do
+        ! Guarded so that a build WITHOUT OpenMP compiles: `parallel_prefetch_ok` already answers
+        ! .false. there, so this branch is dead either way -- but the reference to
+        ! `materialize_marked_parallel` still has to resolve, and that procedure needs `omp_lib`.
+        ! The serial loop below is the fallback, and is what such a build runs unconditionally.
+#ifdef _OPENMP
         if (parallel_prefetch_ok(cache, sc, want)) then
             call materialize_marked_parallel(cache, sc, want)
             call table_read_exit(cache)
             return
         end if
+#endif
         prev_top = ""
         do i = 1, cache%ncols
             if (.not. materialize_wanted(cache, want, i)) cycle
@@ -987,6 +993,13 @@ contains
         end do
     end subroutine count_top_level_groups
     !
+    ! The whole procedure is inside `#ifdef _OPENMP`, not just its `use omp_lib`, because its body
+    ! calls omp_get_thread_num/omp_get_max_threads throughout and drives an `!$omp parallel` region
+    ! -- so there is nothing left of it to compile once OpenMP is out. Its only caller is guarded to
+    ! match, and falls through to the serial loop. The guard opens BEFORE the doc-comment block so
+    ! that the `!>` stays adjacent to the procedure it documents in the preprocessed source; a
+    ! doc-comment left behind by a removed procedure would attach itself to whatever followed.
+#ifdef _OPENMP
     !> Reads the marked columns on several threads, one top-level name at a time.
     !!
     !! Each thread drives its OWN reader, opened on the same file: a `parquet_reader` is not safe
@@ -1116,6 +1129,7 @@ contains
             if (reader_open(t)) call parquet_close_reader(readers(t))
         end do
     end subroutine materialize_marked_parallel
+#endif
     !
     module procedure table_materialize_every
         call table_check_open(self, "materialize_all")

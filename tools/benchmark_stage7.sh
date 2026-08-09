@@ -157,16 +157,25 @@ else
     # 14.2 MB archive against 5.2 MB plain, still full of ordinary text symbols, and measured no gain
     # anywhere. Prefer a versioned gcc-ar matching the compiler (MacPorts ships gcc-ar-mp-15 beside
     # gfortran-mp-15), then a plain gcc-ar, and warn rather than silently measuring nothing.
-    gcc_major="$("$fc" -dumpversion 2>/dev/null | cut -d. -f1)"
-    for cand in "gcc-ar-mp-${gcc_major}" "gcc-ar-${gcc_major}" gcc-ar; do
+    # flang is LLVM, not GCC: its IR is LLVM bitcode and llvm-ar is what reads it, so asking for
+    # gcc-ar there would warn about the wrong missing tool and name a fix that cannot work.
+    fc_major="$("$fc" -dumpversion 2>/dev/null | cut -d. -f1)"
+    if "$fc" --version 2>&1 | head -1 | grep -qi "flang\|clang"; then
+        ar_family="llvm-ar"
+        ar_cands="llvm-ar-mp-${fc_major} llvm-ar-${fc_major} llvm-ar"
+    else
+        ar_family="gcc-ar"
+        ar_cands="gcc-ar-mp-${fc_major} gcc-ar-${fc_major} gcc-ar"
+    fi
+    for cand in $ar_cands; do
         if command -v "$cand" >/dev/null 2>&1; then LTO_AR="$cand"; break; fi
     done
     if [ -z "$LTO_AR" ]; then
-        echo "WARNING: no gcc-ar found; the LTO build will archive with '$(command -v ar)'." >&2
+        echo "WARNING: no $ar_family found; the LTO build will archive with '$(command -v ar)'." >&2
         echo "  If that archiver has no LTO plugin (Apple's cctools ar has none), the static" >&2
         echo "  library keeps IR the linker will not use, so the build quietly does NO" >&2
         echo "  interprocedural optimisation and its numbers are a measurement of nothing." >&2
-        echo "  Install/expose gcc-ar (MacPorts: gcc-ar-mp-<N>) and rerun before trusting -flto." >&2
+        echo "  Install/expose $ar_family (MacPorts: ${ar_family}-mp-<N>) and rerun before trusting -flto." >&2
     fi
 fi
 

@@ -211,6 +211,12 @@ reasons, and both are easy to get wrong in the direction of "add the flag to be 
   which still aborts (exit 134) because several threads really do enter the reader at once. An
   earlier version of this section prescribed `FPM_FFLAGS="-fopenmp" fpm test`; that was redundant,
   and `.gitlab-ci.yml` has had the same redundant flag removed.
+  **This holds for gfortran and ifx, and NOT for flang** — on fpm 0.13.0 alpha the metapackage
+  contributes no `-fopenmp` at all under `FPM_FC=flang-mp-22`, which the same `--show-model` command
+  shows directly (the flags line carries only `-cpp` and the `-I` paths, where gfortran's carries
+  `-fopenmp`). So the "setting nothing at all" advice above is compiler-specific; on flang the build
+  fails at `use omp_lib` rather than quietly running serially. See the flang note under
+  [The three machines available for testing](#the-three-machines-available-for-testing).
 - **`FPM_FFLAGS` clobbers what the environment exported, but it does NOT suppress fpm's profile
   flags — the missing `-O`/`-fcheck=bounds` comes from omitting `--profile`.** Setting it on a
   command line replaces whatever the environment already exports (a dev machine typically puts
@@ -1586,6 +1592,37 @@ which reads like a missing dependency rather than a flag mistake. Append when a 
 
 **Link-time optimisation links cleanly on all three** (verified with a minimal mixed Fortran/C++
 `bind(C)` program): `-flto` for gfortran + g++, and **`-ipo`** — not `-flto` — for ifx + icpx.
+`flang-mp-22` + `clang++-mp-22` links `-flto` too, on machine C.
+
+**A flang build here is SERIAL-ONLY, and that is a property of the installation rather than of this
+code.** MacPorts' `flang-mp-22` ships **no `omp_lib.mod` at all** — confirmed with a three-line
+standalone program (`use omp_lib` under `-fopenmp` fails identically, so this is nothing to do with
+fpm or with this project), and the only `omp_lib.mod` anywhere under `/opt/local` belongs to GCC. So
+on machines A and C:
+
+- **with** `-fopenmp`, a flang build cannot get past the first `use omp_lib` inside an
+  `#ifdef _OPENMP` — nothing to be done from this repository;
+- **without** it — which is what fpm actually does under flang, since the metapackage contributes no
+  `-fopenmp` there — every OpenMP block is preprocessed away and **the library builds cleanly**
+  (verified: `FPM_FC=flang-mp-22 fpm build --profile release` succeeds, and `nm` finds no
+  `materialize_marked_parallel` in the object, against 2 occurrences in the gfortran one).
+
+So **"flang can build this" and "flang can build this with threads" are different claims here**, and
+any flang measurement taken on these machines is of the serial paths. Do not read a flang build
+failure as a portability defect without first checking whether the toolchain has the module.
+
+**That serial build only became possible once a latent portability bug was fixed**, and the shape is
+worth keeping in mind for any future OpenMP-dependent procedure: `materialize_marked_parallel`
+(`src/parquet_tables_read.f90`) had an **unguarded** `use omp_lib` while all 21 other OpenMP uses in
+that file sat inside `#ifdef _OPENMP`, so a no-OpenMP build failed to compile instead of taking the
+serial fallback the guards exist to provide — invisible on gfortran and ifx, where the metapackage
+always supplies the flag. **The whole procedure is now guarded, not just its `use`**: its body calls
+`omp_get_thread_num`/`omp_get_max_threads` throughout and drives an `!$omp parallel` region, so
+nothing of it survives OpenMP's removal. Two details to copy rather than rediscover — the guard opens
+**above** the `!>` doc-comment block, so a doc-comment is never left behind to attach itself to the
+next procedure; and **the caller is guarded to match**, because `parallel_prefetch_ok` already
+answering `.false.` without OpenMP makes the branch dead but does *not* stop the reference from
+having to resolve.
 
 **But linking is not optimising: an LTO build across this library's STATIC LIBRARY also needs a
 plugin-capable ARCHIVER, and without one it silently does nothing.** Under `-flto`/`-ipo` an object
@@ -1663,6 +1700,16 @@ compiler version rather than assume activation worked. And any wrapper that buil
 configurations must give each its own `FPM_BUILD_DIR` **outside** `build/`, or
 `tools/run_error_scenarios.sh`'s `find … -name error_scenarios | head -n 1` can test the wrong
 binary and report a false green.
+
+**That build-tree name must vary by COMPILER as well as by configuration, and an existing wrapper
+probably gets this wrong.** `tools/benchmark_stage7.sh` names its trees for the configuration alone
+(`test_run/s7-plain`, `test_run/s7-lto`) regardless of `FPM_FC`, so running it a second time under a
+different Fortran compiler drops that compiler's `error_scenarios` binary into the *same* tree —
+fpm keeps the objects apart in its own per-compiler subdirectory, but the `find … | head -n 1`
+lookup does not, and one of the two binaries is then chosen arbitrarily. The trap is the same one
+the separate trees exist to close, re-opened along an axis nobody was thinking about. Until a
+wrapper includes the compiler in its tree name, **run a second toolchain through it without
+`--test`**, or point `FPM_BUILD_DIR` somewhere of your own.
 
 ### Compiler & language gotchas
 

@@ -97,6 +97,7 @@ REMOVE_PATHS=(
     tools/build_ci_test_image.sh
     tools/check_arrow_release.sh
     tools/machine_report.sh
+    tools/check_s7_9.sh
     tools/check_bindc_boundary.py
     tools/check_doc_anchors.py
     tools/check_source_conventions.py

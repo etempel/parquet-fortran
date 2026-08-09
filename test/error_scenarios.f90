@@ -7274,9 +7274,10 @@ contains
     end subroutine scenario_write_float_to_int32_non_integral_and_out_of_range
 
     !> Writing a NaN to an integer schema column: there is no integer a NaN could become, so it
-    !> takes the non-integral path. Covers `parquet_is_whole_number`'s NaN branch, which nothing
-    !> else reaches -- note the branch is defensive rather than load-bearing (see that function's
-    !> doc-comment), so this scenario pins the MESSAGE a user gets, not the branch's necessity.
+    !> takes the non-integral path, because `anint(NaN)` is a NaN and a NaN equals nothing --
+    !> including itself. Pins the message a user gets, and pins it against any S7-9-style rewrite:
+    !> a replacement that reaches an `int(NaN, int64)` conversion has undefined behaviour here,
+    !> and one that classes a NaN as whole would let it through to be written as garbage.
     subroutine scenario_write_float_nan_to_int32()
         use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
         type(parquet_schema) :: schema
@@ -7295,11 +7296,12 @@ contains
     end subroutine scenario_write_float_nan_to_int32
 
     !> A LARGE NEGATIVE out-of-int64-range float must report the range error, not the
-    !> integrality one. Its positive twin above cannot see this: `parquet_is_whole_number`
-    !> takes `abs` before its 2**52 magnitude arm, and without that `abs` a large negative
-    !> value misses the arm and reaches an `int(x, int64)` conversion that is out of range --
-    !> which answers "not whole" and produces the wrong message. Removing the `abs` leaves
-    !> every other scenario in this file green, which is why this one exists.
+    !> integrality one, and its positive twin above cannot see the difference. This matters for
+    !> any S7-9-style rewrite of the integrality test: such a test needs a magnitude arm, and if
+    !> that arm is not taken on the ABSOLUTE value, a large negative misses it and falls into an
+    !> out-of-range `int()` conversion -- which answers "not whole" and produces the wrong
+    !> message here while leaving every other scenario in this file green. Verified to catch
+    !> exactly that defect in a candidate implementation.
     subroutine scenario_write_float_to_int64_negative_out_of_range()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer

@@ -84,6 +84,8 @@ contains
             new_unittest("element nulls are addressable on every vector kind", test_element_nulls_all_kinds), &
             new_unittest("row queries mean any element null", test_row_query_is_any_element), &
             new_unittest("element_validity reports the true per-element state", test_element_validity), &
+            new_unittest("row_validity and element_validity agree on the temporal kinds", &
+                test_temporal_validity_masks), &
             new_unittest("set_validity writes a whole mask and only adds nulls", test_set_validity), &
             new_unittest("modify_nulls= protects elements, not whole rows", test_modify_nulls_is_element_wise), &
             new_unittest("element nulls survive sort, delete and append", test_element_nulls_survive_mutation), &
@@ -2007,6 +2009,135 @@ contains
         call check(error, c%is_null(1_int64, 1_int64) .and. c%is_null(1_int64, 2_int64) .and. &
             c%is_null(1_int64, 3_int64), "set_null(i) must still null every element of the row")
     end subroutine test_row_query_is_any_element
+    !
+    !> The TEMPORAL arms of row_validity/element_validity/set_validity, which nothing else reaches.
+    !!
+    !! These kinds keep their null state in the element rather than in the column's bitmap, so they
+    !! take a separate branch from every other kind -- and that branch is now specialised per kind
+    !! (six arms, scalar and vector) rather than routed through the generic per-element `%is_null`.
+    !! Six near-identical arms is exactly the shape where one gets the wrong component or the wrong
+    !! index order and nothing notices, so this asserts each one's actual answer rather than only
+    !! that a mask came back.
+    !!
+    !! The vector case is the load-bearing half: a row is null when ANY of its elements is, so a row
+    !! with exactly one null element must be marked invalid by `row_validity` while `element_validity`
+    !! marks only that element. Substituting `all` for `any` leaves every scalar assertion green.
+    subroutine test_temporal_validity_masks(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        type(parquet_date) :: d(3), dv(2, 3)
+        type(parquet_time) :: tm(3)
+        type(parquet_timestamp) :: ts(3), tsv(2, 3)
+        logical, allocatable :: rowmask(:), emask(:,:)
+        integer :: i, e
+        !
+        ! ---- scalar date: row 2 null ----
+        do i = 1, 3
+            call d(i)%set(2026, 7, 20 + i)
+        end do
+        call c%init(PK_DATE, 3_int64)
+        call c%set_all(d)
+        call c%set_null(2_int64)
+        call c%row_validity(rowmask)
+        call check(error, allocated(rowmask), "date: row_validity must allocate once a null exists")
+        if (allocated(error)) return
+        call check(error, rowmask(1) .and. .not. rowmask(2) .and. rowmask(3), &
+            "date: row_validity must mark exactly the nulled row")
+        if (allocated(error)) return
+        call c%element_validity(emask)
+        call check(error, size(emask, 1) == 1 .and. size(emask, 2) == 3, &
+            "date: element_validity must be shaped (1, nrows) for a scalar column")
+        if (allocated(error)) return
+        call check(error, emask(1, 1) .and. .not. emask(1, 2) .and. emask(1, 3), &
+            "date: element_validity must mark exactly the nulled row's only element")
+        if (allocated(error)) return
+        !
+        ! ---- scalar time: row 3 null, so a wrong arm cannot pass by reusing date's answer ----
+        do i = 1, 3
+            call tm(i)%set(i, 2*i, 3*i)
+        end do
+        call c%init(PK_TIME, 3_int64)
+        call c%set_all(tm)
+        call c%set_null(3_int64)
+        call c%row_validity(rowmask)
+        call check(error, rowmask(1) .and. rowmask(2) .and. .not. rowmask(3), &
+            "time: row_validity must mark exactly the nulled row")
+        if (allocated(error)) return
+        !
+        ! ---- scalar timestamp: row 1 null ----
+        do i = 1, 3
+            call ts(i)%set(2026, 1, i, 3, 4, 5)
+        end do
+        call c%init(PK_TIMESTAMP, 3_int64)
+        call c%set_all(ts)
+        call c%set_null(1_int64)
+        call c%row_validity(rowmask)
+        call check(error, .not. rowmask(1) .and. rowmask(2) .and. rowmask(3), &
+            "timestamp: row_validity must mark exactly the nulled row")
+        if (allocated(error)) return
+        !
+        ! ---- vector date, width 2: ONE element of row 2 null ----
+        do i = 1, 3
+            do e = 1, 2
+                call dv(e, i)%set(2026, 7, 10 + i + e)
+            end do
+        end do
+        call c%init(PK_DATE_VEC, 3_int64, width=2_int32)
+        call c%set_all(dv)
+        call c%set_null(2_int64, 1_int64)
+        call c%row_validity(rowmask)
+        call check(error, rowmask(1) .and. .not. rowmask(2) .and. rowmask(3), &
+            "date_vec: a row with ANY null element must be marked invalid (any, not all)")
+        if (allocated(error)) return
+        call c%element_validity(emask)
+        call check(error, size(emask, 1) == 2 .and. size(emask, 2) == 3, &
+            "date_vec: element_validity must be shaped (width, nrows)")
+        if (allocated(error)) return
+        call check(error, .not. emask(1, 2) .and. emask(2, 2), &
+            "date_vec: element_validity must mark ONLY the nulled element of that row")
+        if (allocated(error)) return
+        call check(error, all(emask(:, 1)) .and. all(emask(:, 3)), &
+            "date_vec: element_validity must leave untouched rows entirely valid")
+        if (allocated(error)) return
+        !
+        ! ---- vector timestamp, width 2: the SECOND element of row 3 null, so an (e,i)/(i,e)
+        !      index swap in the arm cannot pass by symmetry ----
+        do i = 1, 3
+            do e = 1, 2
+                call tsv(e, i)%set(2026, 2, i, e, 4, 5)
+            end do
+        end do
+        call c%init(PK_TIMESTAMP_VEC, 3_int64, width=2_int32)
+        call c%set_all(tsv)
+        call c%set_null(3_int64, 2_int64)
+        call c%row_validity(rowmask)
+        call check(error, rowmask(1) .and. rowmask(2) .and. .not. rowmask(3), &
+            "timestamp_vec: a row with ANY null element must be marked invalid")
+        if (allocated(error)) return
+        call c%element_validity(emask)
+        call check(error, emask(1, 3) .and. .not. emask(2, 3), &
+            "timestamp_vec: element_validity must mark ONLY element 2 of row 3")
+        if (allocated(error)) return
+        !
+        ! ---- set_validity's temporal arm: writing a mask back must reproduce it ----
+        call c%init(PK_TIMESTAMP_VEC, 3_int64, width=2_int32)
+        call c%set_all(tsv)
+        if (allocated(emask)) deallocate(emask)
+        allocate(emask(2, 3))
+        emask = .true.
+        emask(2, 1) = .false.
+        emask(1, 3) = .false.
+        call c%set_validity(emask)
+        deallocate(emask)
+        call c%element_validity(emask)
+        call check(error, emask(1, 1) .and. .not. emask(2, 1), &
+            "timestamp_vec: set_validity must null element 2 of row 1 and leave element 1 valid")
+        if (allocated(error)) return
+        call check(error, .not. emask(1, 3) .and. emask(2, 3), &
+            "timestamp_vec: set_validity must null element 1 of row 3 and leave element 2 valid")
+        if (allocated(error)) return
+        call check(error, all(emask(:, 2)), "timestamp_vec: set_validity must leave row 2 untouched")
+    end subroutine test_temporal_validity_masks
     !
     !> element_validity reports the per-element truth, where row_validity summarises it.
     subroutine test_element_validity(error)

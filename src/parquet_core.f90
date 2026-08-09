@@ -1212,7 +1212,6 @@ module parquet_core
     public :: parquet_read_column_chunk
     public :: parquet_read_array_row_mode
     public :: parquet_read_array_element_mode
-    public :: parquet_is_whole_number
 
     ! ---- Schema / column-info / table-metadata plumbing ----
     interface
@@ -3725,59 +3724,6 @@ module parquet_core
     end interface
 
 contains
-
-    !> Whether `x` is an exact whole number — the integrality test every float-to-integer
-    !> conversion in this library asks before converting. `.false.` for a NaN (there is no integer
-    !> a NaN could become) and `.true.` for +/-Infinity and for every finite value of magnitude
-    !> 2**52 or greater, both of which then fail the caller's own range check. Agrees with the
-    !> `x /= anint(x)` form it replaces on every input, verified across the full boundary sweep in
-    !> `test/test_writing.f90`.
-    !>
-    !> **This exists to avoid `anint`, and that is the whole point of it.** `anint` on `real64`
-    !> means round-half-away-from-zero, for which x86-64 has no SSE/AVX instruction — so the
-    !> compiler emits a **libm `round()` call per element**, measured at roughly ten times the cost
-    !> of the surrounding conversion and confirmed by an undefined `round` in the object file.
-    !> aarch64 has `FRINTA` and never paid it, which is why this was invisible on the development
-    !> machine. Every operation below has a baseline SSE2 encoding, so no libm call is possible.
-    !>
-    !> Two details are load-bearing, and both are pinned by error scenarios rather than by argument.
-    !> **`abs` first**, so the `int()` round trip only ever sees a non-negative value — without it a
-    !> large NEGATIVE value misses the magnitude arm below and reaches an out-of-range conversion,
-    !> which answers "not whole" and reports the wrong error
-    !> (`write_float_to_int64_negative_out_of_range`; its positive twin cannot see this).
-    !> **The `>= 2**52` arm is a guard, not a fast path**: every `real64` of that magnitude is
-    !> already an exact integer, and it is also what keeps `int(a, int64)` inside int64's range
-    !> (`write_float_to_int64_out_of_range`).
-    !>
-    !> **The NaN test is deliberately defensive and is NOT what produces the right answer** — worth
-    !> stating, because deleting it changes no result and no test, so a future reader will wonder.
-    !> A NaN compares unequal to everything including itself, so the final comparison answers
-    !> `.false.` — the correct answer — whatever `int()` returned. What the test buys is that
-    !> `int(NaN, int64)` is never evaluated at all: that conversion is undefined in Fortran, and
-    !> relying on today's platforms happening to saturate is a worse bargain than one branch.
-    !>
-    !> Do not "simplify" this to `aint` (the same libm call, via `trunc`) or to the magic-constant
-    !> form `((a + 2**52) - 2**52) == a`: the latter is correct arithmetic but Fortran permits a
-    !> processor to evaluate any mathematically equivalent expression, and `(a + c) - c` is
-    !> mathematically `a`, so the whole test may be folded away. A truncation is not an identity
-    !> and cannot be.
-    pure logical function parquet_is_whole_number(x) result(whole)
-        use ieee_arithmetic, only: ieee_is_nan
-        real(real64), intent(in) :: x !! value to test.
-        real(real64), parameter :: two52 = 4503599627370496.0_real64 !! 2**52, the last real64 with fractional bits.
-        real(real64) :: a
-
-        whole = .false.
-        if (ieee_is_nan(x)) return
-        a = abs(x)
-        if (a >= two52) then
-            whole = .true.
-            return
-        end if
-        ! Exact equality on purpose, and one of the accepted -Wcompare-reals sites: the question is
-        ! whether the truncation changed anything at all, which no epsilon can express.
-        whole = real(int(a, int64), real64) == a
-    end function parquet_is_whole_number
 
     !> Appends one AND-combined filter expression; see parquet_filter's own doc
     !> comment for the rule grammar. Unvalidated here -- the reader parses and

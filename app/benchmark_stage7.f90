@@ -40,6 +40,7 @@ program benchmark_stage7
     if (want("s7-4")) call gate_s7_4()
     if (want("s7-5")) call gate_s7_5()
     if (want("s7-6")) call gate_s7_6()
+    if (want("s7-9")) call gate_s7_9()
     print "(A)", "=================================================================="
     print "(A)", " end of stage 7 measurements"
     print "(A)", "=================================================================="
@@ -115,6 +116,133 @@ contains
         print "(A)", "  element per cycle with ratios still below 1 means something other than"
         print "(A)", "  vectorisation is the limit and is worth saying so in the write-up."
     end subroutine gate_s7_2
+
+    !> S7-9 -- the integrality test, old form against the shipped one.
+    !!
+    !! S7-2's table above CANNOT answer this: it replicates the conversion loop inside this program,
+    !! so it measures whatever this file writes rather than what the library does. This gate is the
+    !! A/B of the actual change -- the same fused loop twice, differing only in how it asks "is this
+    !! value a whole number".
+    !!
+    !! `anint` on real64 means round-half-away-from-zero, for which x86-64 has no SSE/AVX
+    !! instruction, so the compiler emits a libm `round()` CALL PER ELEMENT. aarch64 has FRINTA and
+    !! pays nothing, which is why this gate is expected to show ~1.0 there and a large ratio on
+    !! x86-64. The `new` column calls parquet_is_whole_number across a module boundary, which is if
+    !! anything pessimistic: the library's own call sites sit inside parquet_core's own tree.
+    subroutine gate_s7_9()
+        integer(int64), parameter :: SIZES(3) = [1000000_int64, 16000000_int64, 64000000_int64]
+        real(real64), allocatable :: src(:)
+        integer(int32), allocatable :: d32(:)
+        integer(int64), allocatable :: d64(:)
+        real(real64) :: old32, new32, old64, new64
+        integer(int64) :: i, n
+        integer :: k
+        print "(A)", ""
+        print "(A)", "S7-9 the float-to-integer integrality test: shipped anint vs a round-trip candidate"
+        print "(A)", "  ns per element, whole fused loop (integrality + range + convert)."
+        print "(A)", "  ratio > 1 means the CANDIDATE is faster than the anint form the library ships."
+        print "(A)", ""
+        print "(A)", "        n  anint32  cand32  ratio  anint64  cand64  ratio"
+        do k = 1, size(SIZES)
+            n = SIZES(k)
+            if (allocated(src)) deallocate(src, d32, d64)
+            allocate(src(n), d32(n), d64(n))
+            do i = 1_int64, n
+                src(i) = real(mod(i, 1000_int64), real64)
+            end do
+            d32 = 0_int32 ; d64 = 0_int64          ! prewarm both destinations (first-touch faults)
+            call bench_whole(src, d32, d64, old32, new32, old64, new64)
+            print "(I9,6F8.2)", n, old32, new32, old32/new32, old64, new64, old64/new64
+        end do
+        print "(A)", ""
+        print "(A)", "  HOW TO READ THIS. aarch64 has FRINTA, one instruction with anint's exact"
+        print "(A)", "  semantics, and measures ratio ~0.4 -- i.e. the candidate LOSES there, badly."
+        print "(A)", "  x86-64 has no such instruction and emits a libm round() CALL PER ELEMENT"
+        print "(A)", "  (confirmed by an undefined `round` in the object), so the ratio is expected"
+        print "(A)", "  to be well above 1. If it is, the two targets want different code and the"
+        print "(A)", "  change has to be made per-architecture rather than unconditionally; if it"
+        print "(A)", "  is not, S7-9 is dropped outright. Either way this gate, not the mechanism,"
+        print "(A)", "  is what decides it."
+    end subroutine gate_s7_9
+
+    !> Both integrality forms, both target widths, best of REP rounds.
+    subroutine bench_whole(src, d32, d64, old32, new32, old64, new64)
+        real(real64), intent(in) :: src(:)       !! source values, all whole and in range.
+        integer(int32), intent(inout) :: d32(:)  !! preallocated int32 destination.
+        integer(int64), intent(inout) :: d64(:)  !! preallocated int64 destination.
+        real(real64), intent(out) :: old32       !! ns/element, anint form, to int32.
+        real(real64), intent(out) :: new32       !! ns/element, shipped form, to int32.
+        real(real64), intent(out) :: old64       !! ns/element, anint form, to int64.
+        real(real64), intent(out) :: new64       !! ns/element, shipped form, to int64.
+        real(real64), parameter :: LO32 = -real(huge(0_int32), real64) - 1.0_real64
+        real(real64), parameter :: HI32 = real(huge(0_int32), real64)
+        real(real64), parameter :: LO64 = -9.2233720368547758e18_real64
+        real(real64), parameter :: HI64 = 9.2233720368547758e18_real64
+        integer(int64) :: i, n
+        integer :: r
+        real(real64) :: t0, t1
+        n = size(src, kind=int64)
+        old32 = huge(1.0_real64) ; new32 = huge(1.0_real64)
+        old64 = huge(1.0_real64) ; new64 = huge(1.0_real64)
+        do r = 1, REP
+            call tick(t0)
+            do i = 1_int64, n
+                if (src(i) /= anint(src(i))) error stop "integrality"
+                if (src(i) < LO32 .or. src(i) > HI32) error stop "range"
+                d32(i) = int(src(i), kind=int32)
+            end do
+            call tick(t1)
+            old32 = min(old32, (t1 - t0)*1.0e9_real64/real(n, real64))
+            call tick(t0)
+            do i = 1_int64, n
+                if (.not. whole_roundtrip(src(i))) error stop "integrality"
+                if (src(i) < LO32 .or. src(i) > HI32) error stop "range"
+                d32(i) = int(src(i), kind=int32)
+            end do
+            call tick(t1)
+            new32 = min(new32, (t1 - t0)*1.0e9_real64/real(n, real64))
+            call tick(t0)
+            do i = 1_int64, n
+                if (src(i) /= anint(src(i))) error stop "integrality"
+                if (src(i) < LO64 .or. src(i) >= HI64) error stop "range"
+                d64(i) = int(src(i), kind=int64)
+            end do
+            call tick(t1)
+            old64 = min(old64, (t1 - t0)*1.0e9_real64/real(n, real64))
+            call tick(t0)
+            do i = 1_int64, n
+                if (.not. whole_roundtrip(src(i))) error stop "integrality"
+                if (src(i) < LO64 .or. src(i) >= HI64) error stop "range"
+                d64(i) = int(src(i), kind=int64)
+            end do
+            call tick(t1)
+            new64 = min(new64, (t1 - t0)*1.0e9_real64/real(n, real64))
+        end do
+    end subroutine bench_whole
+
+    !> The CANDIDATE integrality test S7-9 proposes: no `anint`, so no libm call on x86-64.
+    !!
+    !! Deliberately local to this program rather than called from the library. Two reasons, and
+    !! both would otherwise corrupt the measurement: the library ships the `anint` form (this is
+    !! the gate that decides whether it should), and a cross-module call to a library helper is
+    !! not inlined, which on aarch64 cost more than the whole loop being measured.
+    !!
+    !! No NaN test, and none is needed: a NaN satisfies neither `>=` nor `<`, so it falls through
+    !! both arms and keeps `.false.` -- the right answer -- while never reaching the `int()`
+    !! conversion, which would be undefined for it. Written as two ordered comparisons rather than
+    !! an `else` precisely because they are NOT exhaustive under IEEE.
+    pure logical function whole_roundtrip(x) result(whole)
+        real(real64), intent(in) :: x !! value to test.
+        real(real64), parameter :: two52 = 4503599627370496.0_real64 !! last real64 with fractional bits.
+        real(real64) :: a
+        whole = .false.
+        a = abs(x)
+        if (a >= two52) then
+            whole = .true.
+        else if (a < two52) then
+            whole = real(int(a, int64), real64) == a
+        end if
+    end function whole_roundtrip
 
     !> One row of the S7-2 table.
     subroutine one_size(n)

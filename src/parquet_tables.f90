@@ -67,7 +67,7 @@ module parquet_tables
         parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
         parquet_get_metadata_items, parquet_get_qc_columns, parquet_get_physical_row_indices, &
         parquet_get_column_time_info, parquet_size_auto, parquet_reader_adopt_transform, &
-        parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, parquet_is_whole_number
+        parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
     ! The table layer's two solicited printers (%print_stat) and its own warnings go through the
     ! library's output channels rather than printing directly, so verbosity/message_stream apply
     ! here as everywhere -- see tools/check_source_conventions.py's `no direct printing` check.

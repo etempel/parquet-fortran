@@ -2449,12 +2449,13 @@ contains
     !> rewrite of it would most plausibly go wrong. The reject side (non-integral, out of range,
     !> and the ordering between them) is covered by error scenarios, since each of those aborts.
     !>
-    !> Why this exists as its own test: `parquet_is_whole_number` (parquet_core.f90) replaced an
-    !> `x /= anint(x)` form to avoid a per-element libm call on x86-64, and it is built from an
-    !> `abs`, a 2**52 magnitude arm and an integer round trip -- three places a boundary can be
-    !> got wrong by one. Every value below is a whole number that MUST be accepted; a mistake in
-    !> any of the three shows up here as a spurious "non-integral" abort rather than as a wrong
-    !> value, which no round-trip assertion would catch.
+    !> Why this exists as its own test: the integrality check is `src(i) /= anint(src(i))`, and
+    !> replacing it is an open proposal (S7-9 -- `anint` costs a libm call per element on x86-64,
+    !> which `app/benchmark_stage7.f90 --only=s7-9` measures). Every candidate replacement is built
+    !> from a magnitude test and some form of round trip, i.e. several places a boundary can be got
+    !> wrong by one. Every value below is a whole number that MUST be accepted, so a mistake shows
+    !> up as a spurious "non-integral" abort rather than as a wrong value -- which no round-trip
+    !> assertion would catch. Written BEFORE any such change, which is the useful order.
     subroutine test_write_float_to_int_boundary_values(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema

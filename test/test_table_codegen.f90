@@ -539,6 +539,12 @@ contains
         type(parquet_time), pointer :: w_tm(:), o_tm, r_tm(:)
         type(parquet_timestamp), pointer :: w_ts(:), o_ts, r_ts(:)
         integer, parameter :: LO = 2, HI = 5
+        ! `parquet_timestamp` has no null-safe elemental value FUNCTION (`to_unix`/`to_mjd` abort on
+        ! a null operand, as does `==`), so its values are compared through the elemental
+        ! `%get_raw` SUBROUTINE, which yields zeros for a null element rather than aborting.
+        integer(int64) :: ts_sec_a(HI - LO + 1), ts_sec_b(HI - LO + 1), ts_sec1, ts_sec2
+        integer(int32) :: ts_ns_a(HI - LO + 1), ts_ns_b(HI - LO + 1), ts_ns1, ts_ns2
+        integer :: i
         !
         call write_codegen_fixture(f)
         call t%init(f)
@@ -586,6 +592,19 @@ contains
         call check_f64_forms(error, t%dec(), t%dec(3), t%dec(3_int64), t%dec(LO, HI), &
             t%dec(int(LO, int64), int(HI, int64)), "dec")
         if (allocated(error)) return
+        ! `flux` is `source: computed`, so the generated type creates it with every row null and
+        ! nothing has written a value into it. A null numeric row's VALUE bytes are unspecified by
+        ! design (see `grow_rows` in parquet_columns_structural.f90), and every assertion below
+        ! compares one accessor form against another -- i.e. undefined memory against ITSELF. That
+        ! holds for ordinary garbage, since x - x is 0, but NOT for a NaN: NaN - NaN is NaN and
+        ! every comparison against it is false, so the sweep failed whenever the allocator happened
+        ! to hand back a page whose bytes read as NaN. Give it defined values first.
+        !
+        ! The values must be ROW-DISTINCT, not a single repeated constant: with every element equal
+        ! the range forms would agree even if they returned the wrong rows, which would trade this
+        ! problem for a silently weaker test.
+        w_f64 => t%flux()
+        w_f64 = [(0.5_real64*i, i = 1, NROW)]
         call check_f64_forms(error, t%flux(), t%flux(3), t%flux(3_int64), t%flux(LO, HI), &
             t%flux(int(LO, int64), int(HI, int64)), "flux")
         if (allocated(error)) return
@@ -648,22 +667,44 @@ contains
         if (allocated(error)) return
         o_tm => t%obstime(3_int64);      call check(error, o_tm%second() == w_tm(3)%second(), "obstime(3_int64)")
         if (allocated(error)) return
+        ! The size is asserted first and separately, then the VALUES. Size alone would pass against
+        ! a range form that returned entirely the wrong rows; and the two cannot share one `.and.`
+        ! expression, because Fortran does not short-circuit and `all(a == b)` on mismatched shapes
+        ! would be an out-of-bounds read before the size test could reject it.
         r_tm => t%obstime(LO, HI)
-        call check(error, size(r_tm) == HI - LO + 1, "obstime(lo,hi)")
+        call check(error, size(r_tm) == HI - LO + 1, "obstime(lo,hi) should span the row range")
+        if (allocated(error)) return
+        call check(error, all(r_tm%raw() == w_tm(LO:HI)%raw()), "obstime(lo,hi)")
         if (allocated(error)) return
         r_tm => t%obstime(int(LO, int64), int(HI, int64))
-        call check(error, size(r_tm) == HI - LO + 1, "obstime(lo,hi) int64")
+        call check(error, size(r_tm) == HI - LO + 1, "obstime(lo,hi) int64 should span the row range")
+        if (allocated(error)) return
+        call check(error, all(r_tm%raw() == w_tm(LO:HI)%raw()), "obstime(lo,hi) int64")
         if (allocated(error)) return
         w_ts => t%obsstamp()
-        o_ts => t%obsstamp(3);           call check(error, o_ts%is_null() .eqv. w_ts(3)%is_null(), "obsstamp(3)")
+        ! Comparing only `is_null()` here would reduce to `.false. .eqv. .false.` for this fixture,
+        ! which passes for ANY row index -- so the raw (seconds, nanoseconds) pair is compared too.
+        o_ts => t%obsstamp(3)
+        call o_ts%get_raw(ts_sec1, ts_ns1)
+        call w_ts(3)%get_raw(ts_sec2, ts_ns2)
+        call check(error, ts_sec1 == ts_sec2 .and. ts_ns1 == ts_ns2, "obsstamp(3)")
         if (allocated(error)) return
-        o_ts => t%obsstamp(3_int64);     call check(error, o_ts%is_null() .eqv. w_ts(3)%is_null(), "obsstamp(3_int64)")
+        o_ts => t%obsstamp(3_int64)
+        call o_ts%get_raw(ts_sec1, ts_ns1)
+        call check(error, ts_sec1 == ts_sec2 .and. ts_ns1 == ts_ns2, "obsstamp(3_int64)")
         if (allocated(error)) return
         r_ts => t%obsstamp(LO, HI)
-        call check(error, size(r_ts) == HI - LO + 1, "obsstamp(lo,hi)")
+        call check(error, size(r_ts) == HI - LO + 1, "obsstamp(lo,hi) should span the row range")
+        if (allocated(error)) return
+        call r_ts%get_raw(ts_sec_a, ts_ns_a)
+        call w_ts(LO:HI)%get_raw(ts_sec_b, ts_ns_b)
+        call check(error, all(ts_sec_a == ts_sec_b) .and. all(ts_ns_a == ts_ns_b), "obsstamp(lo,hi)")
         if (allocated(error)) return
         r_ts => t%obsstamp(int(LO, int64), int(HI, int64))
-        call check(error, size(r_ts) == HI - LO + 1, "obsstamp(lo,hi) int64")
+        call check(error, size(r_ts) == HI - LO + 1, "obsstamp(lo,hi) int64 should span the row range")
+        if (allocated(error)) return
+        call r_ts%get_raw(ts_sec_a, ts_ns_a)
+        call check(error, all(ts_sec_a == ts_sec_b) .and. all(ts_ns_a == ts_ns_b), "obsstamp(lo,hi) int64")
         if (allocated(error)) return
         !
         ! --- the string scalar's int64 index forms (the int32 ones are covered above)

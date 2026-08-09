@@ -249,7 +249,12 @@ module parquet_columns
         procedure, private :: clear_null_elem           !! clear_null specific taking a row and an element.
         !> Marks row `i` valid, or with `e` just element `e` of it.
         generic :: clear_null => clear_null_row, clear_null_elem
-        procedure :: set_validity                      !! Write a whole per-ELEMENT validity mask in one pass.
+        procedure, private :: set_validity_elems       !! set_validity specific, per-ELEMENT (width, nrows) mask.
+        procedure, private :: set_validity_rows        !! set_validity specific, per-ROW mask.
+        !> Writes a whole validity mask in one pass. A rank-2 `(width, nrows)` mask is per ELEMENT;
+        !! a rank-1 `(nrows)` mask is per ROW, marking every element of a `.false.` row null -- the
+        !! same row/element pairing `%set_null` and `%is_null` already use.
+        generic :: set_validity => set_validity_elems, set_validity_rows
         procedure :: compact_validity                  !! Drop the bitmap when no nulls remain.
         ! --- capacity ---
         procedure, private :: reserve_i32              !! int32 specific of reserve.
@@ -576,10 +581,23 @@ module parquet_columns
         !! Only ever ADDS nulls -- an element whose entry is `.true.` is left exactly as it is, so
         !! this composes with a mask describing only part of what the caller knows, and never
         !! resurrects a value that was already null.
-        module subroutine set_validity(self, valid)
+        module subroutine set_validity_elems(self, valid)
             class(parquet_column), intent(inout) :: self !! the column.
             logical, intent(in) :: valid(:,:)            !! (element, row); .false. marks that element null.
-        end subroutine set_validity
+        end subroutine set_validity_elems
+        !> Writes a whole per-ROW validity mask in one pass: `.false.` marks every element of that
+        !! row null, exactly as `set_null(i)` does for one row.
+        !!
+        !! The rank-1 form of `set_validity`, and the bulk counterpart of `set_null(i)`. It exists
+        !! because replaying a row mask with one type-bound call per null row is what every
+        !! materializer and every `%set(..., is_valid=)` was doing; this writes the bitmap a word at
+        !! a time instead. `valid` must have exactly `nrows` entries.
+        !!
+        !! Only ever ADDS nulls, on the same terms as the rank-2 form.
+        module subroutine set_validity_rows(self, valid)
+            class(parquet_column), intent(inout) :: self !! the column.
+            logical, intent(in) :: valid(:)              !! one entry per row; .false. marks the row null.
+        end subroutine set_validity_rows
         !> Marks every element of row `i` null, allocating the bitmap on first use (R2).
         module subroutine set_null_row(self, i)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -870,6 +888,44 @@ module parquet_columns
             integer(int64), intent(inout) :: map(:) !! the bitmap.
             integer(int64), intent(in) :: b         !! 1-based bit index.
         end subroutine bit_clear
+        !> Sets every bit in the 1-based inclusive range `lo .. hi`, a word at a time.
+        !!
+        !! The bulk counterpart of `bit_set`, for the several places that mark a *contiguous run* of
+        !! elements null. Doing it one bit at a time costs a call that cannot be inlined plus a
+        !! divide and a `mod` per bit; here the interior words are stored whole and only the two
+        !! ragged ends are masked. A range that does not start or end on a word boundary is the
+        !! normal case, not an edge case -- `width` need not divide 64 -- so both ends are handled,
+        !! and a range lying inside one word is handled by the first end alone.
+        pure module subroutine bits_set_range(map, lo, hi)
+            integer(int64), intent(inout) :: map(:) !! the bitmap.
+            integer(int64), intent(in) :: lo        !! first 1-based bit to set.
+            integer(int64), intent(in) :: hi        !! last 1-based bit to set; < lo sets nothing.
+        end subroutine bits_set_range
+        !> Clears every bit in the 1-based inclusive range `lo .. hi`, a word at a time. The
+        !! counterpart of `bits_set_range`, kept separate for the same reason `bit_clear` is
+        !! separate from `bit_set`.
+        pure module subroutine bits_clear_range(map, lo, hi)
+            integer(int64), intent(inout) :: map(:) !! the bitmap.
+            integer(int64), intent(in) :: lo        !! first 1-based bit to clear.
+            integer(int64), intent(in) :: hi        !! last 1-based bit to clear; < lo clears nothing.
+        end subroutine bits_clear_range
+        !> Copies the bit run `src_lo .. src_lo+nbits-1` of `src` onto `dst_lo ..` of `dst`,
+        !! REPLACING the destination bits rather than merging into them.
+        !!
+        !! The two runs need not be aligned to each other: the destination is walked a word at a
+        !! time and each word is assembled from the one or two source words that overlap it, which
+        !! is what makes this useful for `append`/`paste`, where the destination offset is whatever
+        !! the existing row count happens to be. `merge_only_set` keeps the destination's own set
+        !! bits (an OR rather than a replace), which is what `append` wants and `paste` does not --
+        !! see their own doc-comments for why those two differ.
+        pure module subroutine bits_copy_range(dst, dst_lo, src, src_lo, nbits, merge_only_set)
+            integer(int64), intent(inout) :: dst(:) !! destination bitmap.
+            integer(int64), intent(in) :: dst_lo    !! first 1-based destination bit.
+            integer(int64), intent(in) :: src(:)    !! source bitmap.
+            integer(int64), intent(in) :: src_lo    !! first 1-based source bit.
+            integer(int64), intent(in) :: nbits     !! how many bits to copy; <= 0 copies nothing.
+            logical, intent(in) :: merge_only_set   !! .true. ORs into the destination instead of replacing.
+        end subroutine bits_copy_range
         !> Ensures the bitmap exists and covers every element, zero-filling new blocks (0 = valid),
         !! and marks the column bitmap-backed.
         module subroutine ensure_bitmap(self)

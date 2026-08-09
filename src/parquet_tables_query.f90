@@ -746,9 +746,9 @@ contains
             error stop EP // trim(proc) // ": is_valid has " // trim(got) // " entries but the " // &
                 "table has " // trim(want) // " rows" // sfx
         end if
-        do i = 1_int64, self%row_count
-            if (.not. is_valid(i)) call self%cache%cols(idx)%values%set_null(i)
-        end do
+        ! The rank-1 (per-ROW) %set_validity writes the bitmap a word at a time; the loop this
+        ! replaces was one type-bound call per null row.
+        call self%cache%cols(idx)%values%set_validity(is_valid)
     end procedure table_apply_valid
     !
     module procedure table_apply_valid_rows
@@ -763,6 +763,8 @@ contains
             error stop EP // trim(proc) // ": is_valid has " // trim(got) // " entries but the " // &
                 "selection has " // trim(want) // " rows" // sfx
         end if
+        ! Kept per row, unlike table_apply_valid above: `rows` selects a SCATTERED set, so there
+        ! is no contiguous mask over the column for the bulk setter to take.
         do k = 1_int64, size(rows, kind=int64)
             if (.not. is_valid(k)) call self%cache%cols(idx)%values%set_null(rows(k))
         end do
@@ -798,11 +800,7 @@ contains
             error stop EP // trim(proc) // ": is_valid is shaped " // trim(got) // " but the " // &
                 "column is " // trim(want) // " (width x rows)" // sfx
         end if
-        do i = 1_int64, self%row_count
-            do e = 1_int64, w
-                if (.not. is_valid(e, i)) call self%cache%cols(idx)%values%set_null(i, e)
-            end do
-        end do
+        call self%cache%cols(idx)%values%set_validity(is_valid)
     end procedure table_apply_valid_elem
     !
     module procedure table_apply_valid_rows_elem

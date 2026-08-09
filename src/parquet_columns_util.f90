@@ -22,6 +22,9 @@
 !! library takes no stdlib dependency for it.
 submodule (parquet_columns) parquet_columns_util
     implicit none
+    !> Every bit of a validity word set. Written as `not(0)` rather than `-1` because gfortran
+    !! range-checks a negative literal of this kind, and because "all bits" is what it means here.
+    integer(int64), parameter :: ALL_BITS = not(0_int64)
 contains
     !
     !> Aborts unless the column's active kind is exactly `expected`.
@@ -113,6 +116,108 @@ contains
         blk = k/BITS_PER_BLOCK + 1_int64
         map(blk) = ibclr(map(blk), int(mod(k, BITS_PER_BLOCK)))
     end procedure bit_clear
+    !
+    module procedure bits_set_range
+        integer(int64) :: k0, k1, w0, w1, b0, b1, w
+        integer(int64) :: mask
+        !
+        if (hi < lo) return
+        k0 = lo - 1_int64                       ! 0-based first bit
+        k1 = hi - 1_int64                       ! 0-based last bit
+        w0 = k0/BITS_PER_BLOCK + 1_int64
+        w1 = k1/BITS_PER_BLOCK + 1_int64
+        b0 = mod(k0, BITS_PER_BLOCK)
+        b1 = mod(k1, BITS_PER_BLOCK)
+        if (w0 == w1) then
+            ! Wholly inside one word: set bits b0..b1 of it and nothing else.
+            map(w0) = ior(map(w0), range_mask(b0, b1))
+            return
+        end if
+        map(w0) = ior(map(w0), range_mask(b0, BITS_PER_BLOCK - 1_int64))
+        do w = w0 + 1_int64, w1 - 1_int64
+            map(w) = ALL_BITS                   ! whole interior words, no masking at all
+        end do
+        map(w1) = ior(map(w1), range_mask(0_int64, b1))
+    end procedure bits_set_range
+    !
+    module procedure bits_clear_range
+        integer(int64) :: k0, k1, w0, w1, b0, b1, w
+        !
+        if (hi < lo) return
+        k0 = lo - 1_int64
+        k1 = hi - 1_int64
+        w0 = k0/BITS_PER_BLOCK + 1_int64
+        w1 = k1/BITS_PER_BLOCK + 1_int64
+        b0 = mod(k0, BITS_PER_BLOCK)
+        b1 = mod(k1, BITS_PER_BLOCK)
+        if (w0 == w1) then
+            map(w0) = iand(map(w0), not(range_mask(b0, b1)))
+            return
+        end if
+        map(w0) = iand(map(w0), not(range_mask(b0, BITS_PER_BLOCK - 1_int64)))
+        do w = w0 + 1_int64, w1 - 1_int64
+            map(w) = 0_int64
+        end do
+        map(w1) = iand(map(w1), not(range_mask(0_int64, b1)))
+    end procedure bits_clear_range
+    !
+    module procedure bits_copy_range
+        integer(int64) :: i, n, dk, sk, dw, db, taken, chunk, sw, sb, piece, mask
+        !
+        if (nbits <= 0_int64) return
+        n = 0_int64
+        do while (n < nbits)
+            dk = dst_lo - 1_int64 + n
+            dw = dk/BITS_PER_BLOCK + 1_int64
+            db = mod(dk, BITS_PER_BLOCK)
+            ! How much of this destination word this pass can fill.
+            chunk = min(BITS_PER_BLOCK - db, nbits - n)
+            ! Gather `chunk` source bits starting at src_lo+n into the low bits of `piece`. The
+            ! run can straddle two source words, so it is taken in at most two bites rather than
+            ! assuming any alignment between the two bitmaps.
+            piece = 0_int64
+            taken = 0_int64
+            do while (taken < chunk)
+                sk = src_lo - 1_int64 + n + taken
+                sw = sk/BITS_PER_BLOCK + 1_int64
+                sb = mod(sk, BITS_PER_BLOCK)
+                i = min(BITS_PER_BLOCK - sb, chunk - taken)
+                piece = ior(piece, ishft(low_bits(ishft(src(sw), -sb), i), taken))
+                taken = taken + i
+            end do
+            mask = ishft(low_bits(ALL_BITS, chunk), db)
+            if (merge_only_set) then
+                dst(dw) = ior(dst(dw), iand(ishft(piece, db), mask))
+            else
+                dst(dw) = ior(iand(dst(dw), not(mask)), iand(ishft(piece, db), mask))
+            end if
+            n = n + chunk
+        end do
+    end procedure bits_copy_range
+    !
+    !> The low `n` bits of `v`; `n >= 64` returns `v` unchanged. Written out because
+    !! `ishft(x, -64)` is undefined for a 64-bit integer, so the obvious mask expression
+    !! `not(ishft(-1, n))` cannot be used at the full width.
+    pure function low_bits(v, n) result(res)
+        integer(int64), intent(in) :: v !! the value.
+        integer(int64), intent(in) :: n !! how many low bits to keep.
+        integer(int64) :: res           !! `v` with every bit at or above `n` cleared.
+        if (n >= BITS_PER_BLOCK) then
+            res = v
+        else if (n <= 0_int64) then
+            res = 0_int64
+        else
+            res = iand(v, not(ishft(ALL_BITS, int(n))))
+        end if
+    end function low_bits
+    !
+    !> A word with bits `b0 .. b1` (0-based, inclusive) set and every other bit clear.
+    pure function range_mask(b0, b1) result(res)
+        integer(int64), intent(in) :: b0 !! first bit position.
+        integer(int64), intent(in) :: b1 !! last bit position.
+        integer(int64) :: res            !! the mask.
+        res = ishft(low_bits(ALL_BITS, b1 - b0 + 1_int64), int(b0))
+    end function range_mask
     !
     !> Ensures the bitmap exists and covers every element of the column, zero-filling any new
     !! blocks so that added rows start out valid.

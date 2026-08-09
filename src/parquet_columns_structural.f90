@@ -250,15 +250,11 @@ contains
         end if
         if (other%has_nulls) then
             call ensure_bitmap(self)
-            do k = 1_int64, n
-                src_base = (k - 1_int64)*w
-                dst_base = (old + k - 1_int64)*w
-                do e = 1_int64, w
-                    if (bit_test(other%validity, src_base + e)) then
-                        call bit_set(self%validity, dst_base + e)
-                    end if
-                end do
-            end do
+            ! Both runs are contiguous -- `n` whole rows from the front of `other` onto `n` whole
+            ! rows at the end of `self` -- so this is one bit-run copy rather than `n*w` calls that
+            ! each redo the divide and the `mod`. MERGE, not replace: the destination rows were
+            ! just grown and are all-valid, and merging is `%append`'s documented rule.
+            call bits_copy_range(self%validity, old*w + 1_int64, other%validity, 1_int64, n*w, .true.)
         end if
     end procedure append
     !
@@ -280,9 +276,11 @@ contains
             return
         end if
         call ensure_bitmap(self)
-        do k = old + 1_int64, self%nrows
-            call self%set_null(k)
-        end do
+        ! The appended rows are one contiguous run of n*width bits, so they are filled a word at a
+        ! time. The loop this replaces was a type-bound `%set_null` per row, each one redoing
+        ! `check_index` and the kind `select case` before touching a single bit.
+        call bits_set_range(self%validity, old*int(self%width, int64) + 1_int64, &
+                            self%nrows*int(self%width, int64))
     end procedure append_nulls
     !
     !> Overwrites the existing row range `at .. at+count-1` with rows of `src` (see the full
@@ -325,27 +323,16 @@ contains
         w = int(self%width, int64)
         if (src%has_nulls) then
             call ensure_bitmap(self)
-            do k = 1_int64, n
-                src_base = (f + k - 2_int64)*w
-                dst_base = (at + k - 2_int64)*w
-                do e = 1_int64, w
-                    if (bit_test(src%validity, src_base + e)) then
-                        call bit_set(self%validity, dst_base + e)
-                    else
-                        call bit_clear(self%validity, dst_base + e)
-                    end if
-                end do
-            end do
+            ! REPLACE, not merge -- a valid source element clears a null the destination already
+            ! had. That is `%paste`'s documented rule and the one place it differs from `%append`,
+            ! so the two calls below differ only in this final argument.
+            call bits_copy_range(self%validity, (at - 1_int64)*w + 1_int64, &
+                                 src%validity, (f - 1_int64)*w + 1_int64, n*w, .false.)
         else if (self%has_nulls) then
             ! Every source element is valid, so the destination range must end up all-valid too.
             ! Skipped entirely when this column has no bitmap: there is then nothing to clear,
             ! and materializing one just to write zeros into it would defeat the sparse design.
-            do k = 1_int64, n
-                dst_base = (at + k - 2_int64)*w
-                do e = 1_int64, w
-                    call bit_clear(self%validity, dst_base + e)
-                end do
-            end do
+            call bits_clear_range(self%validity, (at - 1_int64)*w + 1_int64, (at - 1_int64 + n)*w)
         end if
     end procedure paste
     !
@@ -553,7 +540,7 @@ contains
     subroutine gather_validity(self, idx)
         class(parquet_column), intent(inout) :: self !! the column.
         integer(int64), intent(in) :: idx(:)         !! source row index per destination row.
-        integer(int64) :: n, k, e, w, src_base, dst_base, nbits
+        integer(int64) :: n, k, e, w, nbits, dst_word, blk, nblk, base, nb, b, row
         integer(int64), allocatable :: new_map(:)
         if (.not. self%has_nulls) return
         if (.not. allocated(self%validity)) return
@@ -563,13 +550,43 @@ contains
         nbits = n*w
         allocate(new_map(max(blocks_for(nbits), 1_int64)))
         new_map = 0_int64
-        do k = 1_int64, n
-            src_base = (idx(k) - 1_int64)*w
-            dst_base = (k - 1_int64)*w
-            do e = 1_int64, w
-                if (bit_test(self%validity, src_base + e)) call bit_set(new_map, dst_base + e)
+        ! A permutation, so the SOURCE rows are scattered and only the destination is sequential.
+        ! That rules out a run copy -- but each destination WORD can still be built whole in a
+        ! register and stored once, instead of a `bit_set` call per set bit. Walking by destination
+        ! word rather than by row is what makes the bit position `b` immediately available, with no
+        ! divide in the inner loop.
+        nblk = blocks_for(nbits)
+        if (w == 1_int64) then
+            ! The overwhelmingly common case, and worth its own loop: with one element per row the
+            ! destination element index IS the row index, so the row/element split below -- two
+            ! integer divisions per element -- disappears entirely.
+            do blk = 1_int64, nblk
+                dst_word = 0_int64
+                base = (blk - 1_int64)*BITS_PER_BLOCK
+                nb = min(BITS_PER_BLOCK, nbits - base)
+                do b = 0_int64, nb - 1_int64
+                    if (bit_test(self%validity, idx(base + b + 1_int64))) then
+                        dst_word = ibset(dst_word, int(b))
+                    end if
+                end do
+                new_map(blk) = dst_word
             end do
-        end do
+        else
+            do blk = 1_int64, nblk
+                dst_word = 0_int64
+                base = (blk - 1_int64)*BITS_PER_BLOCK
+                nb = min(BITS_PER_BLOCK, nbits - base)
+                do b = 0_int64, nb - 1_int64
+                    k = base + b                          ! 0-based destination element
+                    row = k/w + 1_int64
+                    e = k - (row - 1_int64)*w + 1_int64
+                    if (bit_test(self%validity, (idx(row) - 1_int64)*w + e)) then
+                        dst_word = ibset(dst_word, int(b))
+                    end if
+                end do
+                new_map(blk) = dst_word
+            end do
+        end if
         call move_alloc(new_map, self%validity)
     end subroutine gather_validity
     !

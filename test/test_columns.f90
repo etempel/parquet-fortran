@@ -88,7 +88,9 @@ contains
             new_unittest("modify_nulls= protects elements, not whole rows", test_modify_nulls_is_element_wise), &
             new_unittest("element nulls survive sort, delete and append", test_element_nulls_survive_mutation), &
             new_unittest("a character ARRAY trims, a scalar does not", test_string_array_trims_scalar_does_not), &
-            new_unittest("set_all preserves null elements under modify_nulls=.false.", test_string_set_all_keeps_nulls) &
+            new_unittest("set_all preserves null elements under modify_nulls=.false.", test_string_set_all_keeps_nulls), &
+            new_unittest("bulk validity is exact at every width, across block boundaries", &
+                test_bulk_validity_widths) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -2564,4 +2566,197 @@ contains
         call check(error, s == "a", "the second appended string row must be the one named")
     end subroutine test_append_row_of
     !
+    !> The bulk validity paths (A.8) write the null bitmap a 64-bit WORD at a time instead of a bit
+    !! at a time, which makes the boundaries the thing to test: a run that starts or ends part-way
+    !! through a word, a run that lies entirely inside one word, and a run that spans several.
+    !!
+    !! Widths 1, 3, 8, 16, 64 and 65 are chosen so that some DO divide 64 and some do not — an
+    !! implementation that only handles whole blocks, or that assumes a row never straddles a word,
+    !! passes every width-64 case and fails the others. Row counts are picked to put the operations
+    !! across a block boundary rather than inside one. Every assertion compares against a mask this
+    !! test computes itself, never against a second call into the same machinery.
+    subroutine test_bulk_validity_widths(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        integer, parameter :: WIDTHS(6) = [1, 3, 8, 16, 64, 65]
+        integer :: iw, w
+        !
+        do iw = 1, size(WIDTHS)
+            w = WIDTHS(iw)
+            call one_width(error, w)
+            if (allocated(error)) return
+        end do
+    end subroutine test_bulk_validity_widths
+    !
+    !> One width's worth of `test_bulk_validity_widths`.
+    subroutine one_width(error, w)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        integer, intent(in) :: w                            !! elements per row.
+        type(parquet_column) :: c, other
+        integer(int32), allocatable :: vals(:,:)
+        logical, allocatable :: want(:,:), got(:,:)
+        integer(int64) :: n, i, e
+        character(len=16) :: ws
+        !
+        write(ws, "(A,I0)") "width=", w
+        n = 100_int64                       ! 100*w elements: several words for every width here
+        allocate(vals(w, n))
+        do i = 1_int64, n
+            do e = 1_int64, int(w, int64)
+                vals(e, i) = int(i*100_int64 + e, int32)
+            end do
+        end do
+        ! Width 1 is a SCALAR column, not a one-wide vector one -- `init` rejects a vector kind of
+        ! width 1 outright. It still matters most here, being what almost every real column is, so
+        ! it is swept alongside the rest and `fill` picks the kind.
+        ! ---- 1. append_nulls: a contiguous run whose ends are ragged for most widths ----
+        call c%clear()
+        call fill(c, vals, n, w)
+        call c%append_nulls(7_int64)
+        allocate(want(w, n + 7_int64))
+        want = .true.
+        want(:, n + 1_int64:) = .false.
+        call expect_mask(error, c, want, trim(ws)//" append_nulls marks exactly the appended rows")
+        if (allocated(error)) return
+        deallocate(want)
+        ! ---- 2. set_validity, per ELEMENT: first and last rows null, plus a block-boundary row ----
+        call c%clear()
+        call fill(c, vals, n, w)
+        allocate(want(w, n))
+        want = .true.
+        want(1, 1) = .false.                            ! first element of the first row
+        want(w, n) = .false.                            ! last element of the last row
+        want(:, 64_int64/max(int(w, int64), 1_int64) + 1_int64) = .false.  ! astride a word boundary
+        call c%set_validity(want)
+        call expect_mask(error, c, want, trim(ws)//" set_validity writes exactly the element mask")
+        if (allocated(error)) return
+        ! ---- 3. set_validity, per ROW: whole rows, including the first and the last ----
+        call c%clear()
+        call fill(c, vals, n, w)
+        block
+            logical, allocatable :: rowmask(:)
+            allocate(rowmask(n))
+            rowmask = .true.
+            rowmask(1) = .false.
+            rowmask(n) = .false.
+            rowmask(65) = .false.
+            call c%set_validity(rowmask)
+            want = .true.
+            do i = 1_int64, n
+                if (.not. rowmask(i)) want(:, i) = .false.
+            end do
+        end block
+        call expect_mask(error, c, want, trim(ws)//" a per-ROW mask nulls every element of its rows")
+        if (allocated(error)) return
+        ! ---- 4. append: the source's nulls land at the right offset in the destination ----
+        call other%clear()
+        call fill(other, vals, n, w)
+        call other%set_null(1_int64)
+        call other%set_null(n)
+        call other%set_null(33_int64, 1_int64)
+        call c%clear()
+        call fill(c, vals, n, w)
+        call c%set_null(2_int64)
+        call c%append(other)
+        deallocate(want)
+        allocate(want(w, 2_int64*n))
+        want = .true.
+        want(:, 2) = .false.                            ! the destination's own null survives
+        want(:, n + 1_int64) = .false.                  ! other's row 1
+        want(:, 2_int64*n) = .false.                    ! other's last row
+        want(1, n + 33_int64) = .false.                 ! other's single null element
+        call expect_mask(error, c, want, trim(ws)//" append places the source's nulls at the right offset")
+        if (allocated(error)) return
+        ! ---- 5. paste REPLACES the pasted range's validity, it does not merge into it ----
+        call c%clear()
+        call fill(c, vals, n, w)
+        call c%set_null(40_int64)                       ! inside the range about to be pasted over
+        call c%set_null(5_int64)                        ! outside it, must survive
+        call other%clear()
+        call fill(other, vals, n, w)
+        call other%set_null(3_int64)                    ! becomes destination row 32
+        call c%paste(other, 30_int64, 1_int64, 20_int64)
+        deallocate(want)
+        allocate(want(w, n))
+        want = .true.
+        want(:, 5) = .false.
+        want(:, 32) = .false.
+        call expect_mask(error, c, want, trim(ws)//" paste replaces the pasted range's validity")
+        if (allocated(error)) return
+        ! ---- 6. reindex: a permutation carries each row's own element mask with it ----
+        call c%clear()
+        call fill(c, vals, n, w)
+        call c%set_null(1_int64)
+        call c%set_null(64_int64)
+        call c%set_null(65_int64)
+        call c%set_null(n, 1_int64)
+        block
+            integer(int64), allocatable :: perm(:)
+            logical, allocatable :: before(:,:)
+            allocate(perm(n))
+            do i = 1_int64, n
+                perm(i) = n - i + 1_int64               ! reverse
+            end do
+            call c%element_validity(before)
+            call c%reindex(perm)
+            want = .true.
+            do i = 1_int64, n
+                want(:, i) = before(:, perm(i))
+            end do
+        end block
+        call expect_mask(error, c, want, trim(ws)//" reindex carries each row's element mask")
+        if (allocated(error)) return
+        if (allocated(got)) deallocate(got)
+    end subroutine one_width
+    !
+    !> Initialises `c` to hold `vals` at width `w`, choosing the scalar kind at width 1 and the
+    !! vector kind above it, so one sweep can cover both.
+    subroutine fill(c, vals, n, w)
+        type(parquet_column), intent(inout) :: c   !! the column to build.
+        integer(int32), intent(in) :: vals(:,:)    !! (element, row) values.
+        integer(int64), intent(in) :: n            !! row count.
+        integer, intent(in) :: w                   !! elements per row.
+        !
+        if (w == 1) then
+            call c%init(PK_INT32, n)
+            call c%set_all(vals(1, :))
+        else
+            call c%init(PK_INT32_VEC, n, w)
+            call c%set_all(vals)
+        end if
+    end subroutine fill
+    !
+    !> Asserts a column's per-element validity equals `want`, reporting the first disagreement by
+    !! (element, row) rather than just "a mask differs" — with six widths and six operations, a
+    !! bare failure would say almost nothing about which boundary broke.
+    subroutine expect_mask(error, c, want, what)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_column), intent(inout) :: c            !! the column to inspect.
+        logical, intent(in) :: want(:,:)                    !! expected (element, row) validity.
+        character(len=*), intent(in) :: what                !! message prefix.
+        logical, allocatable :: got(:,:)
+        integer(int64) :: i, e
+        character(len=64) :: where_s
+        !
+        call c%element_validity(got)
+        if (.not. allocated(got)) then
+            ! An unallocated mask is the documented "no nulls at all" answer.
+            call check(error, all(want), what//" (column reports no nulls)")
+            return
+        end if
+        if (size(got, 1) /= size(want, 1) .or. size(got, 2) /= size(want, 2)) then
+            call check(error, .false., what//" (mask shape differs)")
+            return
+        end if
+        do i = 1_int64, size(want, 2, kind=int64)
+            do e = 1_int64, size(want, 1, kind=int64)
+                if (got(e, i) .neqv. want(e, i)) then
+                    write(where_s, "(A,I0,A,I0,A)") " at (element ", e, ", row ", i, ")"
+                    call check(error, .false., what//trim(where_s))
+                    return
+                end if
+            end do
+        end do
+        call check(error, .true., what)
+    end subroutine expect_mask
+
 end module test_columns

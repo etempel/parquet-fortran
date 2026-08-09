@@ -4428,9 +4428,10 @@ def mat_impl(k):
     tmp_alloc = "tmp(nrows)" if rank == 1 else "tmp(wdt, nrows)"
     valid_alloc = "valid(nrows)" if rank == 1 else "valid(wdt, nrows)"
     if rank == 1:
-        null_loop = """                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do"""
+        # The rank-1 (per-ROW) form of %set_validity, which writes the bitmap a word at a time.
+        # The loop this replaces was one type-bound call per null row, each redoing check_index
+        # and the kind select case before touching a single bit.
+        null_loop = "                call col%set_validity(valid)"
         decls = "        integer(int64) :: i"
     else:
         # Arrow reports per-ELEMENT validity for a vector column, and parquet_column stores it
@@ -4576,10 +4577,8 @@ def matchunk_impl(k):
     tmp_alloc = "tmp(nrows)" if rank == 1 else "tmp(wdt, nrows)"
     valid_alloc = "valid(nrows)" if rank == 1 else "valid(wdt, nrows)"
     # Rank 2 hands the per-ELEMENT mask over whole; see mat_*'s own note for why.
-    null_loop = ("                do i = 1, nrows\n"
-                 "                    if (.not. valid(i)) call col%set_null(i)\n"
-                 "                end do") if rank == 1 else (
-                 "                call col%set_validity(valid)")
+    # Both ranks now hand the whole mask over: rank 1 is per ROW, rank 2 per ELEMENT.
+    null_loop = "                call col%set_validity(valid)"
     idecl = "        integer(int64) :: i\n" if rank == 1 else ""
     return f"""    module procedure matchunk_{tag}
         {decl}, allocatable :: tmp{dims(rank)}

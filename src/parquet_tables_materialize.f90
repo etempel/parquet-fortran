@@ -37,9 +37,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -67,9 +65,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -97,9 +93,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -127,9 +121,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -157,9 +149,7 @@ contains
             ! reports Nulls may still have none among the rows actually read (a filter can remove
             ! them), and one vectorised all() beats nrows type-bound calls that do nothing.
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column(reader, name, tmp)
@@ -436,9 +426,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -460,9 +448,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -484,9 +470,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -508,9 +492,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)
@@ -532,9 +514,7 @@ contains
             call parquet_read_column_chunk(reader, name, rg, tmp, is_valid=valid)
             call col%adopt(tmp, unit)
             if (.not. all(valid)) then
-                do i = 1, nrows
-                    if (.not. valid(i)) call col%set_null(i)
-                end do
+                call col%set_validity(valid)
             end if
         else
             call parquet_read_column_chunk(reader, name, rg, tmp)

@@ -459,6 +459,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Null tracking is written a 64-bit word at a time instead of a bit at a time**, which is what
+  most of the bulk validity operations were doing — one un-inlinable call per element, each redoing
+  a division and a modulo to find the bit it wanted, and in two cases a full type-bound dispatch per
+  row on top. Appending null rows, appending a null-bearing column, pasting over a row range,
+  reordering rows, and replaying a mask onto a column (which every table materializer and every
+  `%set(..., is_valid=)` does) all now work on whole words, masking only the ragged ends of a run.
+  `parquet_column%set_validity` additionally accepts a **rank-1 per-row mask** alongside the
+  existing rank-2 `(width, nrows)` element one, marking every element of a `.false.` row null — the
+  same row/element pairing `%set_null` and `%is_null` already use — so a row mask no longer has to
+  be replayed one call at a time. Measured on an 8-core M1 Pro over a 4 M-row `int32` column, best
+  of five warmed rounds at `--profile release`: `%append_nulls` 21.73 ms to 0.66 ms (**33x**),
+  `%paste` over the whole column 12.11 ms to 0.65 ms (**19x**), `%append` of a null-bearing column
+  7.71 ms to 1.31 ms (**5.9x**), a per-row mask replay 4.57 ms to 2.88 ms (**1.59x**), a per-element
+  mask 8.63 ms to 5.68 ms (**1.52x**), and `%reindex` — which permutes values as well as validity —
+  20.19 ms to 16.12 ms (**1.25x**). Validity answers are unchanged, including `%paste`'s rule that
+  it replaces the pasted range's validity where `%append` merges into fresh rows.
 - **Resolving a column by name on a wide table no longer scans every column.** Every value
   accessor — `%get`, `%col`, `%set`, `%is_null`, `%get_element`, a row handle's `%get` — reaches its
   column through one lookup, and that lookup compared the requested name against each column's in

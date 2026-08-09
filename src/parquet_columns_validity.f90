@@ -293,8 +293,8 @@ contains
     !! Only ever ADDS nulls. An element whose entry is `.true.` is left exactly as it is, so this
     !! composes with a mask describing only part of what the caller knows and never resurrects a
     !! value that was already null.
-    module procedure set_validity
-        integer(int64) :: i, e, n, w, base
+    module procedure set_validity_elems
+        integer(int64) :: i, e, n, w, base, k, blk, cur, word
         logical :: any_false
         !
         n = self%nrows
@@ -321,14 +321,76 @@ contains
             end do
         case default
             call ensure_bitmap(self)
+            ! One store per 64 elements instead of a call per null. The destination bit index runs
+            ! monotonically with (i, e), so the word being built is written out only when the walk
+            ! crosses into the next one. ORed in, never assigned, because this only ever ADDS
+            ! nulls -- see the interface's own note.
+            word = 0_int64
+            cur = 1_int64
             do i = 1_int64, n
-                base = (i - 1_int64)*w
                 do e = 1_int64, w
-                    if (.not. valid(e, i)) call bit_set(self%validity, base + e)
+                    k = (i - 1_int64)*w + e - 1_int64
+                    blk = k/BITS_PER_BLOCK + 1_int64
+                    if (blk /= cur) then
+                        if (word /= 0_int64) self%validity(cur) = ior(self%validity(cur), word)
+                        word = 0_int64
+                        cur = blk
+                    end if
+                    if (.not. valid(e, i)) word = ibset(word, int(mod(k, BITS_PER_BLOCK)))
                 end do
             end do
+            if (word /= 0_int64) self%validity(cur) = ior(self%validity(cur), word)
         end select
-    end procedure set_validity
+    end procedure set_validity_elems
+    !
+    module procedure set_validity_rows
+        integer(int64) :: n, w, i, k, blk, cur, word
+        character(len=32) :: got, want
+        logical :: any_false
+        !
+        n = self%nrows
+        w = int(self%width, int64)
+        if (size(valid, kind=int64) /= n) then
+            write(got, "(I0)") size(valid, kind=int64)
+            write(want, "(I0)") n
+            error stop EP//"set_validity: mask has "//trim(got)//" entries but the column has "// &
+                trim(want)//" rows"
+        end if
+        if (n <= 0_int64) return
+        any_false = .not. all(valid)
+        if (.not. any_false) return
+        select case (self%kind)
+        case (PK_NONE)
+            error stop EP//"set_validity: column has no kind assigned"
+        case (PK_STRING, PK_STRING_VEC, PK_DATE, PK_TIME, PK_TIMESTAMP, &
+              PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
+            ! No bitmap: these carry their null state in the element itself, so the per-row setter
+            ! is the only route -- and it is already the whole-row one, so nothing is lost.
+            do i = 1_int64, n
+                if (.not. valid(i)) call self%set_null(i)
+            end do
+        case default
+            call ensure_bitmap(self)
+            ! A false row marks all w of its elements, which for w > 1 is a short contiguous run;
+            ! the word accumulator handles that and the usual w == 1 without a special case.
+            word = 0_int64
+            cur = 1_int64
+            do i = 1_int64, n
+                if (.not. valid(i)) then
+                    do k = (i - 1_int64)*w, i*w - 1_int64
+                        blk = k/BITS_PER_BLOCK + 1_int64
+                        if (blk /= cur) then
+                            if (word /= 0_int64) self%validity(cur) = ior(self%validity(cur), word)
+                            word = 0_int64
+                            cur = blk
+                        end if
+                        word = ibset(word, int(mod(k, BITS_PER_BLOCK)))
+                    end do
+                end if
+            end do
+            if (word /= 0_int64) self%validity(cur) = ior(self%validity(cur), word)
+        end select
+    end procedure set_validity_rows
     !
     !> Marks EVERY element of row `i` null.
     !!

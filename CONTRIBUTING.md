@@ -7,6 +7,7 @@ This file covers developing, testing, and extending this repository itself. If y
 - [AI assistance](#ai-assistance)
 - [Conventions](#conventions)
 - [Building and testing this repository](#building-and-testing-this-repository)
+  - [Building with link-time optimisation](#building-with-link-time-optimisation)
   - [Running a single test suite/test](#running-a-single-test-suitetest)
   - [Running the error-path tests](#running-the-error-path-tests)
   - [Regenerating the test fixtures](#regenerating-the-test-fixtures)
@@ -89,6 +90,75 @@ creates multiple `build/gfortran_<hash>/` directories, one of which
 `--skip` over the heavier `fpm clean --all`: `--all` also discards external dependencies, forcing a
 `test-drive` re-download that's never the cause of this particular symptom, whereas `--skip` fixes
 the same stale-binary problem without that extra cost.
+
+### Building with link-time optimisation
+
+**No fpm profile enables it.** `--profile release` supplies
+`-O3 -Wimplicit-interface -fPIC -fmax-errors=1 -funroll-loops -fcoarray=single` and nothing more, so
+`-flto` (gfortran/flang) or `-ipo` (ifx) has to be added by hand. fpm *appends* `FPM_FFLAGS` and
+friends to the profile flags rather than replacing them, so adding it is straightforward:
+
+```bash
+FPM_FFLAGS="${FPM_FFLAGS:-} -flto" FPM_CXXFLAGS="${FPM_CXXFLAGS:-} -flto" \
+FPM_LDFLAGS="${FPM_LDFLAGS:-} -flto" fpm install --profile release
+```
+
+Note the `${VAR:-}` prefixes: a bare assignment would discard the Arrow include and link paths those
+variables normally carry.
+
+**On ifx, also set `FPM_AR=xiar`.** fpm archives the static library with plain `ar`; under `-ipo` an
+Intel object file holds intermediate representation, and plain `ar` produces an archive the linker
+cannot optimise across — so the build either fails at link time or, worse, succeeds having quietly
+done no interprocedural optimisation at all. `xiar` ships with oneAPI.
+
+**Exporting those variables permanently affects EVERY build, including `--profile debug`** — fpm
+applies them whatever the profile (and even with no profile at all). That is rarely wanted: LTO
+makes a debug build slow to link and inlines across translation units, which is exactly what a
+`-fcheck=bounds` backtrace needs left alone. To get LTO on release builds only, wrap `fpm` in a
+shell function that adds the flags when it sees `--profile release`:
+
+```bash
+export PF_LTO=1        # opt in; unset or 0 makes the wrapper a no-op
+
+fpm() {
+    local a prev="" use=0 lto="" ar=""
+    if [ "${PF_LTO:-0}" != "1" ]; then command fpm "$@"; return; fi
+    for a in "$@"; do
+        if [ "$prev" = "--profile" ] && [ "$a" = "release" ]; then use=1; fi
+        if [ "$a" = "--profile=release" ]; then use=1; fi
+        prev="$a"
+    done
+    if [ "$use" -eq 0 ]; then command fpm "$@"; return; fi
+    case "$(${FPM_FC:-gfortran} --version 2>&1 | head -1)" in
+        *ifx*|*Intel*|*IFX*) lto="-ipo"; ar="xiar" ;;
+        *)                   lto="-flto" ;;
+    esac
+    if [ -n "$ar" ] && ! command -v "$ar" >/dev/null 2>&1; then
+        echo "fpm: $lto requested but '$ar' is not on PATH -- interprocedural" >&2
+        echo "     optimisation would be silently skipped. Source setvars.sh first." >&2
+        return 1
+    fi
+    if [ -n "$ar" ]; then
+        env FPM_AR="$ar" FPM_FFLAGS="${FPM_FFLAGS:-} $lto" \
+            FPM_CXXFLAGS="${FPM_CXXFLAGS:-} $lto" \
+            FPM_LDFLAGS="${FPM_LDFLAGS:-} $lto" fpm "$@"
+    else
+        env FPM_FFLAGS="${FPM_FFLAGS:-} $lto" \
+            FPM_CXXFLAGS="${FPM_CXXFLAGS:-} $lto" \
+            FPM_LDFLAGS="${FPM_LDFLAGS:-} $lto" fpm "$@"
+    fi
+}
+```
+
+Verified under both zsh and bash 3.2 (macOS's default): `fpm build --profile release` gets the flag,
+`fpm build --profile debug` gets none. It picks `-ipo` or `-flto` from whatever `FPM_FC` names, so
+one copy works on every machine. `env` is what runs the real binary, so the function cannot recurse.
+
+**One consequence worth knowing before installing that wrapper.** Any script that builds a
+release-profile baseline to compare an LTO build against — `tools/benchmark_stage7.sh` is the one in
+this repository — would have its *baseline* silently become an LTO build too, and the two columns
+would agree for a reason that has nothing to do with LTO. That script therefore refuses to start if
+it finds an LTO flag already in the environment; set `PF_LTO=0` for such a run.
 
 ### Running a single test suite/test
 
@@ -244,8 +314,24 @@ tools/benchmark_stage7.sh --both --test
 a result, and this project has four documented ifx codegen bugs that appear only at `-O1` and above,
 which an interprocedural build makes more rather than less likely to surface.
 
+**Link-time optimisation is not part of any fpm profile.** `--profile release` supplies
+`-O3 -Wimplicit-interface -fPIC -fmax-errors=1 -funroll-loops -fcoarray=single` and nothing more, so
+`-flto` (or `-ipo` on ifx) has to be added explicitly — the script appends it to the three
+`FPM_*FLAGS` variables, which fpm adds to the profile flags rather than replacing them. On ifx it
+additionally sets `FPM_AR=xiar`: fpm archives the static library with plain `ar`, and under `-ipo`
+that produces an archive the linker cannot optimise across, so the build either fails or silently
+does no interprocedural optimisation at all.
+
 `FPM_FC`/`FPM_CXX`/`FPM_*FLAGS` are read from the environment and **appended to, never replaced** —
 on every machine this project is built on they already carry Arrow's include and link paths.
+
+`tools/machine_report.sh` prints everything needed to identify a machine and its toolchain — CPU,
+SIMD, memory, every compiler on `PATH`, **which compilers fpm will actually use**, Arrow's version,
+the already-exported `FPM_*` variables, and the load — and with `--lto-probe` additionally
+link-tests a minimal mixed Fortran/C++ program per toolchain in a few seconds. It builds nothing and
+is safe to run anywhere. `tools/benchmark_template.md` is the template for a run on another machine:
+copy it to a `feature_*.md` file, fill in the campaign, and the machine that runs it writes its
+report back into that same file.
 
 **Which machine a measurement was taken on is part of the result.** CLAUDE.md's
 "The three machines available for testing" lists the three reference machines, what each one

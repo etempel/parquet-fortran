@@ -66,6 +66,7 @@ working rules).
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
 - [Build & compiler notes](#build--compiler-notes)
   - [The three machines available for testing](#the-three-machines-available-for-testing)
+  - [Writing benchmarking instructions for another machine](#writing-benchmarking-instructions-for-another-machine)
   - [Compiler & language gotchas](#compiler--language-gotchas)
   - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
   - [gcovr <7.1 cannot parse gcov output for a 10,000+ line file](#gcovr-71-cannot-parse-gcov-output-for-a-10000-line-file)
@@ -1585,6 +1586,57 @@ which reads like a missing dependency rather than a flag mistake. Append when a 
 
 **Link-time optimisation links cleanly on all three** (verified with a minimal mixed Fortran/C++
 `bind(C)` program): `-flto` for gfortran + g++, and **`-ipo`** — not `-flto` — for ifx + icpx.
+
+### Writing benchmarking instructions for another machine
+
+Measurements regularly have to be taken somewhere other than the machine the work is being done on —
+a different architecture, a different compiler, a different core count. There is **no Docker and no
+shared filesystem**, so this always means: someone carries instructions to that machine and runs
+them by hand. Four rules make that repeatable, and they apply to *any* machine, not only the three
+listed above.
+
+- **Start from `tools/benchmark_template.md`.** It is the committed, machine-agnostic template:
+  what the instruction-writer must fill in, the steps the runner follows, the rules that apply to
+  every run, and the report skeleton. Do not write a run sheet from scratch, and do not edit the
+  template with one campaign's details.
+- **The instantiated instructions go in `feature_*.md`** (repository root), which is git-ignored —
+  it is working material, carried between machines **by hand**, and must never reach the published
+  package. **One instructions file is prepared per campaign**, named for the question rather than for
+  a machine (`feature_benchmark_stage7.md`); **each machine then gets its own copy suffixed with the
+  machine's name** (`..._A.md`, `..._B.md`), writes its report into that copy, and returns it.
+  Machines run independently and may run concurrently — there is nothing to merge. **The analysis
+  happens once, when every copy is back**, reading them side by side; that is why each report must
+  carry full provenance even when it feels redundant, and why a machine is not asked to compare
+  itself against another.
+- **Everything the run EXECUTES belongs in the repository** — a program under `app/`, a wrapper
+  under `tools/` — so it travels by `git pull` and cannot drift between machines. Never paste code
+  into the instruction file for someone to copy. Whatever is being measured must be **committed and
+  pushed first**, which inverts this file's usual "leave it uncommitted on `main`" rule; for a
+  before/after comparison push both commits and have the same command run on each.
+- **The report is written back into the machine's own copy of the instructions file**, which is then
+  returned under the name it was given — instructions and report together, since the instructions
+  are what make the report interpretable later. **A run that is compared against an earlier one at a
+  different commit must first check what changed** (`git diff --stat <old>..<new> -- app src tools`)
+  and record the answer; without it, figures get filed against a build they were not taken on. The template's §5 skeleton says what a report must contain — provenance from
+  `tools/machine_report.sh`, whether it built and passed *before* any timing, deviations, verbatim
+  output, and what the run does not settle.
+
+`tools/machine_report.sh` is the companion: a read-only toolchain report (CPU, SIMD, memory, every
+compiler on `PATH`, **what fpm will actually use**, Arrow, the already-exported `FPM_*` variables,
+load) plus an optional `--lto-probe` that link-tests a minimal mixed Fortran/C++ program per
+toolchain in seconds. Have every run start with it; "the environment was already set up" is not
+reproducible, and its `fc`/`cc` lines are the only authoritative answer to which compilers fpm picks
+— fpm derives C and C++ from the Fortran compiler's *family*, so the first `g++` on `PATH` is
+frequently not the one that builds `src/parquet_wrapper.cpp`.
+
+**Two failure modes worth designing against, both already encountered.** An environment activation
+script may not survive being sourced non-interactively (one ends by spawning an interactive
+subshell, which exits immediately with no tty, leaving the *system* toolchain active while its
+exported variables make the shell look correctly configured) — so a run sheet must verify the
+compiler version rather than assume activation worked. And any wrapper that builds two
+configurations must give each its own `FPM_BUILD_DIR` **outside** `build/`, or
+`tools/run_error_scenarios.sh`'s `find … -name error_scenarios | head -n 1` can test the wrong
+binary and report a false green.
 
 ### Compiler & language gotchas
 

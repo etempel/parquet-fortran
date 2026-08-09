@@ -2449,18 +2449,26 @@ extern "C"
 			// category as the closing-brace gcov artifact documented elsewhere in this file, just
 			// a different line shape (a variable initialization immediately followed by a lambda
 			// definition, rather than a closing brace after a [[noreturn]] call).
+			// data_min/data_max stay std::string -- they outlive the loop, and the views they
+			// would otherwise hold point into an array this function does not own. Everything
+			// else takes the view directly: `scan` used to be handed a std::string built from it
+			// per row, i.e. an allocator round trip per element to compare a few bytes.
 			std::string data_min, data_max;
-			auto scan = [&](const std::string &v)
+			auto scan = [&](std::string_view v)
 			{
 				n_valid++;
 				if (!any_valid) { data_min = v; data_max = v; any_valid = true; }
-				else { data_min = std::min(data_min, v); data_max = std::max(data_max, v); }
+				else
+				{
+					if (v < data_min) data_min = v;
+					if (v > data_max) data_max = v;
+				}
 				bool ok = true;
-				if (rule.has_min) ok = ok && compare_op<std::string>(v, rule.min_raw, min_cmp);
-				if (rule.has_max) ok = ok && compare_op<std::string>(v, rule.max_raw, max_cmp);
+				if (rule.has_min) ok = ok && compare_op<std::string_view>(v, rule.min_raw, min_cmp);
+				if (rule.has_max) ok = ok && compare_op<std::string_view>(v, rule.max_raw, max_cmp);
 				if (!ok) n_violate++;
 			};
-			for (int64_t i = 0; i < n; ++i) if (!acc.is_null(i)) scan(std::string(acc.get_view(i)));
+			for (int64_t i = 0; i < n; ++i) if (!acc.is_null(i)) scan(acc.get_view(i));
 			if (!any_valid || n_violate == 0) return false;
 			if (rule.has_min) bounds_desc = "min " + rule.min_op + " \"" + rule.min_raw + "\"";
 			if (rule.has_max)
@@ -5343,10 +5351,16 @@ extern "C"
 				return false;
 			}
 			auto acc = make_string_like_accessor(array);
+			// compare_op is used at string_view rather than std::string: this used to build a
+			// std::string from the view PER ROW -- a malloc, a copy and a free -- purely to make
+			// the call. string_view's operator< and operator== are byte-lexicographic, which is
+			// what compare_op<std::string> already was, so the ordering is unchanged. value_view
+			// is hoisted because the bound is loop-invariant.
+			const std::string_view value_view(value_text);
 			for (int64_t i = 0; i < n; ++i)
 			{
 				out[static_cast<size_t>(i)] = acc.is_null(i) ? kUnknown
-					: kleene_of(compare_op<std::string>(std::string(acc.get_view(i)), value_text, cmp));
+					: kleene_of(compare_op<std::string_view>(acc.get_view(i), value_view, cmp));
 			}
 			return true;
 		}

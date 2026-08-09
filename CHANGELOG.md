@@ -459,6 +459,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Filtering and read-side quality control on a string column no longer allocate per row.** Both
+  built a `std::string` out of the string view they already had, purely to make a comparison —
+  a malloc, a copy and a free for every row of the column. The comparison is now made on the view
+  itself; `std::string_view`'s `<` and `==` are byte-lexicographic, which is exactly what the
+  previous comparison was, so no ordering changes. Measured on an 8-core M1 Pro over 4 M rows of
+  `character(len=16)`, best of five warmed rounds at `--profile release`: the filter's row-matching
+  phase 15.80 ns/row to 11.26 ns/row (**1.40x**), and a qc-enforced read of the whole column
+  0.1765 s to 0.1553 s (**1.14x**). Installing a filter as a whole gains 1.08x, the rest being the
+  column decode that this does not touch.
+- **Reading a space-padded string column is 1.2x faster, and neither direction stages the bytes
+  through a temporary buffer any more.** Both directions of the `character(len=*)` string path
+  allocated an `item_len * nrows`-byte staging array and then copied it, one character at a time,
+  through a nested loop with a loop-carried cursor (`values(i)(j:j) = achar(iachar(packed(k)))`).
+  A Fortran `character(len=item_len)` array and that buffer have identical memory layout, so the
+  buffer was never needed: the C++ reader now fills the caller's array directly and the writer
+  hands the caller's array straight to the encoder. The read side also drops a redundant
+  `values(i) = ''` that blanked each element immediately before every one of its bytes was
+  overwritten. Measured on an 8-core M1 Pro, best of five warmed rounds at `--profile release`,
+  1.5 M rows of `character(len=16)`: read 0.0388 s to 0.0317 s (**1.22x**), and the same for a
+  width-4 vector column (**1.21x**); the write is **1.05x** end-to-end and **1.13x** counting only
+  `parquet_write_column` itself, the rest being Arrow encoding and file I/O that this does not
+  touch. Files are byte-identical and reads return identical values, including padding, nulls and
+  `null_value` substitution. The `parquet_string_column` path was already buffer-free and is
+  unaffected.
+- **A qc-enabled string write no longer measures every element to find the longest.** The
+  `array_size` check built a complete per-element length array purely to take its maximum and
+  compare that against the declared limit, so a violating first element still cost a full pass and
+  a full-size temporary. It now stops at the first element that is too long. Same abort, same
+  message.
 - **An ordinary write no longer pays for row masking it is not using.** `parquet_write_column` and
   `parquet_write_column_chunk` fabricated an all-`.true.` row mask whenever no
   `parquet_write_row_mask`/`parquet_write_chunk_row_mask` was in force — which is the common case —

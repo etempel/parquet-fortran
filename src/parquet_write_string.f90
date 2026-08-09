@@ -186,6 +186,29 @@ contains
             ", data range ['" // data_min // "', '" // data_max // "'], " // &
             fmt_int // " of " // fmt_int2 // " valid element(s) out of range")
     end subroutine parquet_check_qc_string_compact
+    !> Reports whether any element of a space-padded string array is longer, once trailing blanks
+    !> are ignored, than the column's declared `array_size` -- stopping at the first one that is.
+    !>
+    !> `values` is assumed-size, so the matrix specifics pass their rank-2 argument straight in by
+    !> sequence association. This replaced `maxval([(len_trim(values(i)), i=1,nitems)])`, which
+    !> built a complete nitems-element integer temporary, and its `maxval(len_trim(values))`
+    !> sibling, which built an elemental one -- in both cases to compute a maximum that was then
+    !> only ever compared against a limit, so every element was measured even when the first
+    !> already answered the question.
+    pure logical function any_item_too_long(values, nitems, limit) result(too_long)
+        character(len=*), intent(in) :: values(*) !! the elements to check, in any rank.
+        integer(int64), intent(in) :: nitems !! how many elements `values` holds.
+        integer, intent(in) :: limit !! the column's declared array_size.
+        integer(int64) :: i
+
+        too_long = .false.
+        do i = 1_int64, nitems
+            if (len_trim(values(i)) > limit) then
+                too_long = .true.
+                return
+            end if
+        end do
+    end function any_item_too_long
     ! ---- Flat write workers ----
     !
     ! The four space-padded string specifics (scalar/matrix x whole-column/chunked) share one
@@ -213,25 +236,15 @@ contains
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! post-mask row count.
         logical, intent(in), optional, target :: valid(*) !! `nitems`-long validity mask, or absent.
-        character(kind=c_char), allocatable :: packed(:)
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
-        integer(int64) :: i, k
-        integer :: j, item_len
+        integer :: item_len
 
         call parquet_check_row_count(writer, name, nrows)
 
         item_len = len(flat)
-        allocate(packed(item_len*nitems))
-        k = 0_int64
-        do i = 1_int64, nitems
-            do j = 1, item_len
-                k = k + 1_int64
-                packed(k) = achar(iachar(flat(i)(j:j)), kind=c_char)
-            end do
-        end do
 
         nullify(vmask)
         if (present(valid)) vmask => valid(1:nitems)
@@ -244,10 +257,10 @@ contains
 
         call parquet_resolve_output_name(writer, name, outname)
         if (asize == 1) then
-            call parquet_append_string_column(writer%handle, trim(outname)//char(0), packed, &
+            call parquet_append_string_column(writer%handle, trim(outname)//char(0), flat, &
                 int(item_len, kind=c_long_long), nrows, valid_ptr)
         else
-            call parquet_append_string_array_column(writer%handle, trim(outname)//char(0), packed, &
+            call parquet_append_string_array_column(writer%handle, trim(outname)//char(0), flat, &
                 int(item_len, kind=c_long_long), nrows, asize, valid_ptr)
         end if
     end subroutine write_string_flat
@@ -262,23 +275,13 @@ contains
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! this chunk's post-mask row count.
         logical, intent(in), optional, target :: valid(*) !! `nitems`-long validity mask, or absent.
-        character(kind=c_char), allocatable :: packed(:)
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
-        integer(int64) :: i, k
-        integer :: j, item_len
+        integer :: item_len
 
         item_len = len(flat)
-        allocate(packed(item_len*nitems))
-        k = 0_int64
-        do i = 1_int64, nitems
-            do j = 1, item_len
-                k = k + 1_int64
-                packed(k) = achar(iachar(flat(i)(j:j)), kind=c_char)
-            end do
-        end do
 
         nullify(vmask)
         if (present(valid)) vmask => valid(1:nitems)
@@ -293,10 +296,10 @@ contains
         if (nrows > 0) then
             call parquet_resolve_output_name(writer, name, outname)
             if (asize == 1) then
-                call parquet_append_string_column_chunk(writer%handle, trim(outname)//char(0), packed, &
+                call parquet_append_string_column_chunk(writer%handle, trim(outname)//char(0), flat, &
                     int(item_len, kind=c_long_long), valid_ptr)
             else
-                call parquet_append_string_array_column_chunk(writer%handle, trim(outname)//char(0), packed, &
+                call parquet_append_string_array_column_chunk(writer%handle, trim(outname)//char(0), flat, &
                     int(item_len, kind=c_long_long), asize, valid_ptr)
             end if
         end if
@@ -362,7 +365,7 @@ contains
     end subroutine write_string_compact_chunk_tail
     module procedure parquet_write_string_column
         integer(int64) :: i, nrows, asize, nitems, nkeep
-        integer :: idx, max_item_len, max_string_len
+        integer :: idx, max_string_len
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         logical, allocatable :: row_mask(:), elem_mask(:)
         logical, allocatable :: is_valid_c(:) !! masked copy of is_valid; unallocated => absent downstream.
@@ -396,8 +399,7 @@ contains
         if (writer%is_schema_enforced) then
             call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            max_item_len = maxval([(len_trim(values(i)), i=1_int64,nitems)])
-            if (max_item_len > max_string_len) then
+            if (any_item_too_long(values, nitems, max_string_len)) then
                 error stop "parquet_write_string_column: string length exceeds declared array_size for column: " // trim(name)
             end if
         end if
@@ -417,7 +419,7 @@ contains
     end procedure parquet_write_string_column
     module procedure parquet_write_string_matrix_column
         integer(int64) :: i, nrows, asize, nitems, nkeep
-        integer :: idx, max_item_len, max_string_len
+        integer :: idx, max_string_len
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         logical, allocatable :: row_mask(:), elem_mask(:)
         logical, allocatable :: is_valid_c(:) !! masked copy of is_valid; unallocated => absent downstream.
@@ -440,8 +442,7 @@ contains
 
             call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1, 1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            max_item_len = maxval(len_trim(values))
-            if (max_item_len > max_string_len) then
+            if (any_item_too_long(values, size(values, kind=int64), max_string_len)) then
                 error stop "parquet_write_string_matrix_column: string length exceeds declared array_size for column: " &
                     // trim(name)
             end if
@@ -518,7 +519,7 @@ contains
     end procedure parquet_write_string_column_compact
     module procedure parquet_write_string_column_chunk
         integer(int64) :: i, nrows, asize, nitems, nkeep
-        integer :: idx, max_item_len, max_string_len
+        integer :: idx, max_string_len
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         logical, allocatable :: row_mask(:), elem_mask(:)
         logical, allocatable :: is_valid_c(:) !! masked copy of is_valid; unallocated => absent downstream.
@@ -552,8 +553,7 @@ contains
         if (writer%is_schema_enforced) then
             call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            max_item_len = maxval([(len_trim(values(i)), i=1_int64,nitems)])
-            if (max_item_len > max_string_len) then
+            if (any_item_too_long(values, nitems, max_string_len)) then
                 error stop "parquet_write_string_column_chunk: string length exceeds declared array_size " // &
                     "for column: " // trim(name)
             end if
@@ -574,7 +574,7 @@ contains
     end procedure parquet_write_string_column_chunk
     module procedure parquet_write_string_matrix_column_chunk
         integer(int64) :: i, nrows, asize, nitems, nkeep
-        integer :: idx, max_item_len, max_string_len
+        integer :: idx, max_string_len
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
         logical, allocatable :: row_mask(:), elem_mask(:)
         logical, allocatable :: is_valid_c(:) !! masked copy of is_valid; unallocated => absent downstream.
@@ -598,8 +598,7 @@ contains
 
             call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1, 1)))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
-            max_item_len = maxval(len_trim(values))
-            if (max_item_len > max_string_len) then
+            if (any_item_too_long(values, size(values, kind=int64), max_string_len)) then
                 error stop "parquet_write_string_matrix_column_chunk: string length exceeds declared " // &
                     "array_size for column: " // trim(name)
             end if

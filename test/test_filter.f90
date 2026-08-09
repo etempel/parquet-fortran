@@ -55,6 +55,8 @@ contains
             new_unittest("three %add calls, each an or-expression", test_three_adds_of_or_expressions), &
             new_unittest("a rule longer than the old 512-character cap", test_long_rule_accepted), &
             new_unittest("quoted string values may contain spaces, parens and keywords", test_quoted_value_contents), &
+            new_unittest("an ordering comparison on a string column selects the right rows", &
+                test_string_ordering_filter), &
             new_unittest("a dotted struct-leaf name inside an expression", test_struct_leaf_in_expression), &
             new_unittest("Kleene: not (x > v) excludes Null rows", test_kleene_not_excludes_nulls), &
             new_unittest("Kleene: or does not resurrect a Null row", test_kleene_or_keeps_nulls_out), &
@@ -402,6 +404,46 @@ contains
     !
     !> A quoted value is lexed as one token, so spaces, parentheses and even the keywords
     !> themselves inside the quotes are part of the value rather than expression syntax.
+    !> An ORDERING comparison on a string column, which nothing else in this suite covers: every
+    !> other string-valued filter test uses `==`, and equality is symmetric, so it cannot tell a
+    !> correct comparison from one whose operands are the wrong way round. Confirmed by mutation:
+    !> swapping compare_op's operands at eval_filter_clause's string arm passes the entire suite
+    !> without this test and fails with it.
+    !>
+    !> The fixture is deliberately asymmetric -- `s > "banana"` keeps two rows while the reversed
+    !> reading keeps one -- so the row COUNT alone separates the two, before any value is compared.
+    subroutine test_string_ordering_filter(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        character(len=8) :: names(4)
+        character(len=8) :: got(2)
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_string_ordering.parquet"
+
+        names(1) = "apple"
+        names(2) = "mango"
+        names(3) = "zebra"
+        names(4) = "banana"
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "name", names)
+        call parquet_close_writer(writer)
+
+        call filt%add('name > "banana"')
+        call parquet_open_reader(reader, file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call check(error, nrows == 2_int64, &
+            "a string ordering filter must keep exactly the lexicographically greater rows")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_read_column(reader, "name", got)
+        call parquet_close_reader(reader)
+        call check(error, trim(got(1)) == "mango" .and. trim(got(2)) == "zebra", &
+            "a string ordering filter kept the wrong rows, or lost their file order")
+    end subroutine test_string_ordering_filter
     subroutine test_quoted_value_contents(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer

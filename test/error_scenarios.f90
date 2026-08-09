@@ -910,6 +910,10 @@ program error_scenarios
         call scenario_string_build_from_unassociated()
     case ("string_build_from_stale_index")
         call scenario_string_build_from_stale_index()
+    case ("string_build_from_character_mask_length")
+        call scenario_string_build_from_character_mask_length()
+    case ("string_append_values_mask_length")
+        call scenario_string_append_values_mask_length()
     case ("string_column_append_buffers_offset_not_zero")
         call scenario_string_column_append_buffers_offset_not_zero()
     case ("string_column_append_buffers_offset_not_zero_int32")
@@ -8246,6 +8250,34 @@ contains
         call dest%build_from(handles)
         print '(a,i0)', "unexpectedly gathered a stale handle, dest size=", dest%size()
     end subroutine scenario_string_build_from_stale_index
+
+    !> parquet_string_column%build_from, character-array form: an is_null mask whose length does
+    !! not match `values` aborts rather than being read past its end. The check is cheap and the
+    !! failure it prevents is not: the mask is walked once per element in the sizing pass and again
+    !! when the null bits are written, so a short mask reads uninitialised memory twice and decides
+    !! nullness from it -- a column that validates, with the wrong rows null and no symptom.
+    subroutine scenario_string_build_from_character_mask_length()
+        type(parquet_string_column) :: col
+        character(len=4) :: vals(3)
+        logical :: mask(2)
+        vals = [character(len=4) :: "aa", "bb", "cc"]
+        mask = [.true., .false.]
+        call col%build_from(vals, is_null=mask)   ! 3 values, 2 mask entries -> aborts
+        print '(a,i0)', "unexpectedly built from a short mask, null_count=", col%null_count()
+    end subroutine scenario_string_build_from_character_mask_length
+
+    !> parquet_string_column%append_values: the same mask-length check as build_from's character
+    !! form, on the appending entry point. Separate scenario because it is a separate guard on a
+    !! separate procedure -- deleting either one leaves the other's test passing.
+    subroutine scenario_string_append_values_mask_length()
+        type(parquet_string_column) :: col
+        character(len=4) :: vals(3)
+        logical :: mask(2)
+        vals = [character(len=4) :: "aa", "bb", "cc"]
+        mask = [.true., .false.]
+        call col%append_values(vals, is_null=mask)   ! 3 values, 2 mask entries -> aborts
+        print '(a,i0)', "unexpectedly appended with a short mask, size=", col%size()
+    end subroutine scenario_string_append_values_mask_length
 
     !> parquet_string_column%append_buffers: a source offsets buffer whose first entry isn't 0
     !! (e.g. straight from a sliced Arrow array, not rebased by the caller) aborts rather than

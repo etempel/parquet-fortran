@@ -256,7 +256,23 @@ are given, `strip` wins.
 Here you hand over one string at a time and its length is exactly what you wrote, so there is
 nothing to guess. Those two take whole `character(len=*)` **arrays**, whose elements share one
 declared length and are blank-padded by Fortran — so they trim, because the padding cannot have
-been meant. See [table.md](table.html#string-columns-in-a-table). To trim a whole column that is already built, use `strip_all()` (both
+been meant. See [table.md](table.html#string-columns-in-a-table).
+
+**The two bulk forms follow the array rule, not the scalar one**, for exactly that reason:
+
+```fortran
+call col%build_from(values)                  ! replaces the column; every element trimmed
+call col%append_values(more)                 ! extends it; same rule
+call col%build_from(values, is_null=mask)    ! mask entries become zero-width nulls
+```
+
+`values` is a `character(len=*)` array, so each element's trailing blanks are dropped — matching
+what `parquet_column%set_all`/`%append_values` on a string column have always done, and what they
+now use internally. Prefer these over a loop of `append_string` whenever the whole array is in
+hand: filling a 1 M-row column measured **65.2 ms → 10.6 ms**, because the per-element form
+re-derives the trim, re-checks capacity, and copies the payload through a temporary each time.
+`build_from` replaces the column's whole contents; `append_values` leaves what is already there
+alone. Both take an optional `is_null` mask of the same length as `values`. To trim a whole column that is already built, use `strip_all()` (both
 ends) or `trim_all()` (trailing only) — both operate in place and skip null elements:
 
 ```fortran

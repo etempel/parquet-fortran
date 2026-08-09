@@ -151,59 +151,70 @@ contains
         character(len=*), intent(in) :: values(*)         !! `n` elements, in flat store order.
         integer(int64), intent(in) :: n                   !! elements to write.
         logical, intent(in) :: modify_nulls               !! .false. leaves null elements untouched.
-        type(parquet_string_column) :: rebuilt
-        integer(int64) :: k, nchars
+        logical, allocatable :: keep(:)
+        integer(int64) :: k
         !
-        ! One pass for the exact trimmed byte count, so the payload is allocated once at its final
-        ! size rather than grown into. len_trim is what process_bounds' trim branch computes.
-        nchars = 0_int64
-        do k = 1_int64, n
-            if (.not. modify_nulls) then
-                if (str%is_null(k)) cycle
-            end if
-            nchars = nchars + int(len_trim(values(k)), int64)
-        end do
-        call rebuilt%reserve(n, nchars)
-        do k = 1_int64, n
-            if (.not. modify_nulls) then
-                if (str%is_null(k)) then
-                    call rebuilt%append_null()
-                    cycle
-                end if
-            end if
-            call rebuilt%append_string(values(k), trim=.true.)
-        end do
-        call str%move_from(rebuilt)
+        ! One call rather than a sizing loop plus `n` x `%append_string`. The bulk build does the
+        ! same two passes this used to -- exact byte count, then fill -- but inside `parquet_strings`,
+        ! where the payload copy is a section-to-section assignment between two `character(len=1)`
+        ! arrays instead of a `transfer` with a temporary per element. Measured on 1M x
+        ! `character(len=24)`: `%set_all` 65.2 ms -> 9.5 ms (feature_optimise_A7.md, S7-5). The
+        ! trimming rule is unchanged and now lives in one place: `%build_from` trims, because an
+        ! array's elements share a declared length (see this procedure's own doc-comment above).
+        if (modify_nulls) then
+            call str%build_from(values(1:n))
+        else
+            ! `modify_nulls = .false.` preserves a null element exactly: nulls carry no payload, so
+            ! the mask is all the bulk build needs to reproduce them. Reading it costs `n` calls,
+            ! but the previous shape paid `2n` of the same call on this path, so it is cheaper here
+            ! too -- and it is the rare path, `.true.` being the default.
+            allocate(keep(n))
+            do k = 1_int64, n
+                keep(k) = str%is_null(k)
+            end do
+            call str%build_from(values(1:n), is_null=keep)
+        end if
     end subroutine refill_string_store
+    !
+    !> Relays a flat run of `n` elements into `parquet_string_column%append_values`. Its only job is
+    !! the assumed-size dummy: a rank-2 `values` sequence-associates with it and is then passed on
+    !! as the contiguous rank-1 section the bulk entry point takes, with no copy. `reshape` would
+    !! do the same flattening by copying the whole array.
+    subroutine append_flat_strings(str, values, n)
+        type(parquet_string_column), intent(inout) :: str !! the store to append to.
+        character(len=*), intent(in) :: values(*)         !! `n` elements, in flat store order.
+        integer(int64), intent(in) :: n                   !! elements to append.
+        call str%append_values(values(1:n))
+    end subroutine append_flat_strings
     !
     !> Appends rows to a PK_STRING column. `values` is an ARRAY, so trailing blanks are trimmed --
     !! the same rule `refill_string_store` states, applied here so that a column filled by
     !! `%append` and one filled by `%set_all` hold the same bytes.
     module procedure append_values_str
-        integer(int64) :: k, n
+        integer(int64) :: n
         call check_kind(self, PK_STRING, "append_values")
         n = size(values, kind=int64)
         if (n == 0_int64) return
-        do k = 1_int64, n
-            call self%str%append_string(values(k), trim=.true.)
-        end do
+        ! One bulk append rather than n x %append_string, for the reason refill_string_store gives.
+        call self%str%append_values(values)
         self%nrows = self%nrows + n
     end procedure append_values_str
     !
     !> Appends rows to a PK_STRING_VEC column, from a (width, n) array. Trailing blanks are
     !! trimmed, as in `append_values_str`.
     module procedure append_values_strv
-        integer(int64) :: k, e, n, w
+        integer(int64) :: n
         call check_kind(self, PK_STRING_VEC, "append_values")
         call check_width(self, size(values, 1, kind=int64), "append_values")
         n = size(values, 2, kind=int64)
         if (n == 0_int64) return
-        w = int(self%width, int64)
-        do k = 1_int64, n
-            do e = 1_int64, w
-                call self%str%append_string(values(e, k), trim=.true.)
-            end do
-        end do
+        ! A rank-2 `values` is contiguous in column-major order, which IS the store's own
+        ! element-major (i-1)*width + e layout (RF6/s1) -- the same identity `set_all_strv` relies
+        ! on -- so the whole (width, n) block appends as one flat run of width*n elements.
+        ! It reaches the rank-1 bulk entry point through an assumed-size relay rather than
+        ! `reshape`, which would copy the entire array to produce a flattening that sequence
+        ! association gives for free.
+        call append_flat_strings(self%str, values, size(values, kind=int64))
         self%nrows = self%nrows + n
     end procedure append_values_strv
     !

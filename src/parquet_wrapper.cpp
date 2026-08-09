@@ -3473,6 +3473,40 @@ extern "C"
 	int64_t parquet_debug_get_filter_eval_nanos(void) { return g_debug_filter_eval_nanos; }
 	int64_t parquet_debug_get_filter_mask_nanos(void) { return g_debug_filter_mask_nanos; }
 
+	// Same idea, for the fixed-width space-padded string read (parquet_read_string_column). Two
+	// phases, because the only question anyone asks about that path is whether its per-element work
+	// is worth optimising, and that cannot be answered without knowing what share of the read it is:
+	//
+	//   decode -- get_single_chunk_array: Arrow reads and materialises the column. Not this
+	//             library's code, and not reachable by any change to the accessor.
+	//   copy   -- the per-row loop: one StringLikeAccessor::get_view (a std::function, so an
+	//             indirect call that cannot inline) plus copy_string_with_padding.
+	//
+	// The `copy` share is the CEILING on replacing those std::function members with a
+	// dispatch-once/templated visitor: even driving the indirect call to zero cannot beat it.
+	// Nothing in the library reads these; plain non-atomic int64, as above.
+	//
+	// THAT CEILING HAS BEEN MEASURED, AND THE ANSWER WAS "NOT WORTH IT" -- do not re-derive it.
+	// On machine A, 2M rows x character(len=24): decode 29.6 ms, copy loop 13.3 ms, whole read
+	// 43.0 ms, so the ceiling is 31%. But an A/B running the SAME loop with a direct
+	// arrow::StringArray::GetView instead of the std::function put it at 11.5 ms against 13.3
+	// (stable to +-0.02 ms over four runs) -- so the indirect call is only 1.8 ms of it, i.e.
+	// **4.2% of the read**, and the other 11.5 ms is copy_string_with_padding's memcpy and blank
+	// fill, which no accessor change touches. That is below this project's ~5% keep-or-drop line,
+	// so A.4's second half was dropped rather than implemented. See feature_optimise_A7.md's S7-7
+	// outcome. Re-measure before reopening it; do not re-open it on the strength of the 31%.
+	static int64_t g_debug_string_read_decode_nanos = 0;
+	static int64_t g_debug_string_read_copy_nanos = 0;
+
+	void parquet_debug_reset_string_read_phase_nanos(void)
+	{
+		g_debug_string_read_decode_nanos = 0;
+		g_debug_string_read_copy_nanos = 0;
+	}
+
+	int64_t parquet_debug_get_string_read_decode_nanos(void) { return g_debug_string_read_decode_nanos; }
+	int64_t parquet_debug_get_string_read_copy_nanos(void) { return g_debug_string_read_copy_nanos; }
+
 	// Test-only: how many threads the last parquet_table SINGLE-COLUMN read was spread across, by
 	// row group (materialize_column_parallel, src/parquet_tables_read.f90); 0 when that read took
 	// the ordinary whole-column path. A separate counter from the prefetch one above on purpose --
@@ -9314,7 +9348,9 @@ extern "C"
 	void parquet_read_string_column(void *handle, const char *name, char *data, int64_t item_len, int64_t nrows, int8_t *valid_out)
 	{
 		auto reader_handle = as_reader_handle(handle);
+		auto t_dec = std::chrono::steady_clock::now();
 		auto array = get_single_chunk_array(reader_handle, name);
+		charge_phase(t_dec, g_debug_string_read_decode_nanos);
 		if (!is_string_like_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_string_column", std::string("type mismatch for column: ") + name +
@@ -9326,11 +9362,13 @@ extern "C"
 			report_fatal_error("parquet_read_string_column", std::string("nrows mismatch for column: ") + name);
 		}
 		check_or_report_nulls(array, name, valid_out, "parquet_read_string_column");
+		auto t_copy = std::chrono::steady_clock::now();
 		for (int64_t i = 0; i < nrows; ++i)
 		{
 			auto view = arr.get_view(i);
 			copy_string_with_padding(data + i * item_len, item_len, view);
 		}
+		charge_phase(t_copy, g_debug_string_read_copy_nanos);
 		fill_null_default_string(data, item_len, valid_out, nrows);
 		mark_read_string(reader_handle, name, item_len, array);
 	}

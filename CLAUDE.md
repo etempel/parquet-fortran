@@ -26,6 +26,7 @@ working rules).
   - [Only apply low-blast-radius renames/refactors](#only-apply-low-blast-radius-renamesrefactors)
   - [`feature_*.md` planning documents](#feature_md-planning-documents)
   - [The `feature_risks.md` standing-risks register](#the-feature_risksmd-standing-risks-register)
+  - [Never splice a file with an unanchored `index()` — use Edit, or assert both ends](#never-splice-a-file-with-an-unanchored-index--use-edit-or-assert-both-ends)
   - [Don't run the GitLab CI pipeline yourself](#dont-run-the-gitlab-ci-pipeline-yourself)
   - [The CI-environment Docker image: ask for it, never build it](#the-ci-environment-docker-image-ask-for-it-never-build-it)
   - [Don't commit or push on the main/default branch yourself](#dont-commit-or-push-on-the-maindefault-branch-yourself)
@@ -193,6 +194,41 @@ after the test exists is worse than no entry, because the next reader will write
 appeared far from its cause — add it as a new `Risk-N` in section 1 rather than only writing a code
 comment. This file (CLAUDE.md) is for rules that apply project-wide; `feature_risks.md` is for a
 specific property of a specific area, with its test status attached.
+
+### Never splice a file with an unanchored `index()` — use Edit, or assert both ends
+
+A script that locates a replacement range by searching for two markers —
+
+```python
+start = s.index("<first marker>")
+end   = s.index("**Proposal.**")        # finds the FIRST one in the file, not this section's
+s = s[:start] + new + s[end:]
+```
+
+— silently **duplicates** everything between the wrong `end` and `start` whenever `end < start`. It
+does not raise, the file still parses, and the damage reads later as an unrelated merge artifact.
+Confirmed instance: a splice in `feature_optimise.md` duplicated **132 lines** — a section's tail, a
+whole section, and the head of a third — and went unnoticed across sessions, after which the stale
+duplicate was read as authoritative. (A second planning document was damaged around the same time by
+a genuine unresolved three-way merge, which is a *different* mechanism with the same outcome: silent
+structural damage to a file nothing validates. Both were found only by cross-checking headings.)
+
+**Rules, in order of preference:**
+
+- **Prefer the `Edit` tool over a hand-rolled splice.** It fails on a non-unique `old_string`, which
+  is exactly the check the shape above omits.
+- When a script really must replace a range, **assert both ends**: that each marker occurs the
+  expected number of times, that `end > start`, and that the text being discarded is what you think
+  it is. Print the discarded byte count.
+- **After any scripted edit to a structured document, re-derive its structure and compare** —
+  `grep "^#" file | sort | uniq -d` catches a duplicated heading instantly, and a ToC-versus-headings
+  cross-check catches a deleted one. Both take one command and both would have caught these.
+
+**A `feature_*.md` file has NO recovery path** — it is git-ignored, so there is no `git checkout` and
+no history. The only copy of a damaged section is whatever a session transcript happens to hold
+(`~/.claude/projects/<project>/*.jsonl`, searchable for the text), which is how both incidents were
+repaired. Take a copy before a scripted rewrite of one, and be aware that a "clean up this document"
+request is a one-way door without it.
 
 ### Don't run the GitLab CI pipeline yourself
 
@@ -1927,6 +1963,26 @@ applied to the harness instead of the source.
 - **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**, not
   blank-padded. To place a short string into a longer fixed-length slot, assign normally (which
   blank-pads); reserve `transfer` for exact-size byte moves.
+- **A PER-ELEMENT `transfer` into a `character(len=1)` array allocates a temporary each time, and
+  SEQUENCE ASSOCIATION is the way out.** `dst(a:b) = transfer(str(lo:hi), dst, n)` is the obvious way
+  to copy a `character(len=*)` scalar's bytes into a packed `character(len=1), allocatable` payload,
+  and it costs an allocation per call: measured at **21.6 ms of a 55.5 ms** 1M-element column fill.
+  The fix is not a better `transfer` but a change of view — a contiguous `character(len=w)` array's
+  bytes are one `w*n` block, and passing it to a `character(len=1), intent(in) :: src(*)` dummy hands
+  that block over verbatim, after which each element's copy is an ordinary **section-to-section
+  assignment between two `character(len=1)` arrays**: no temporary, no intermediate buffer, one pass.
+  `pack_character_bytes` (`src/parquet_strings.f90`) is the worked example, and the same trick is what
+  lets the read/write paths hand a caller's `character(len=*)` array straight to a
+  `character(kind=c_char) :: data(*)` `bind(C)` dummy with no staging buffer at all.
+
+  **Three things to know before reaching for it.** The actual argument must be **contiguous** —
+  declare the public dummy `contiguous`, which costs a copy-in for the rare strided caller and makes
+  the association safe. It flattens rank freely, so a rank-2 `values(:,:)` associates with the same
+  assumed-size dummy in column-major order, which is how a matrix specific reaches a rank-1 bulk
+  entry point **without `reshape`** — `reshape` would copy the whole array to produce the flattening
+  association gives for free. And **do not hand-roll `len_trim` over the byte view** once you have
+  it: replacing the intrinsic with a trailing-blank scan measured **3x slower** (32.5 ms against
+  9.5), so lengths stay on the element view and only the payload copy uses the byte view.
 - **An array-section assignment whose two sides are the SAME array costs a heap temporary per
   iteration.** A scalar byte loop compacting a buffer in place —
   `do k = lo, hi; w = w + 1; a(w) = a(k); end do` — reads like something waiting to be replaced by
@@ -2649,6 +2705,22 @@ runs once per reader open) and they are what makes the next measurement one benc
 than a fresh investigation. The rule that governs where such a hook may sit is the existing one: a
 debug hook may sit on a coarse operation, never on a per-row or per-element path.
 
+**But a phase's SHARE bounds the prize; it does not estimate it — and stopping at the share will
+keep an item that should be dropped.** The phase still contains work the proposed change does not
+remove. Worked example, and it is the reason this paragraph exists: a phase timer put the padded
+string read's per-row copy loop at **31% of the read**, comfortably above this project's ~5%
+keep-or-drop line. An A/B running that same loop with a direct typed call instead of the
+`std::function` under test then put the indirect call at **1.8 ms of 43 ms — 4.2%**; the other
+11.5 ms was a memcpy and blank fill no accessor change touches. The 31% would have bought ten-plus
+C++ call sites, a template inside the file's single `extern "C"` block, and a silently-wrong-string
+failure mode, for 4%.
+
+**So: after a phase timer, A/B the actual change on ONE site before committing to sixteen.** A
+temporary A/B is cheap (run both loops, charge each to its own counter, discard one result), and it
+is reverted afterwards while the phase counters stay. The same trap in a different dress killed
+another item: a *loop* ratio is not an *operation* ratio either, so always carry the loop's share of
+the end-to-end path — one change measured 1.5x on its loop and a **negative** end-to-end ceiling.
+
 ## Testing & coverage
 
 ### Running a single test suite/test
@@ -2870,6 +2942,16 @@ Three things about doing it *here* specifically:
   survived it. Whenever a new constant gates behaviour on input size, give it a
   `parquet_debug_set_*` override and have the tests lower it, exactly as
   `parquet_debug_set_sort_merge_min_segment` now does. See `feature_risks.md` Risk-49.
+- **An OPTIONAL argument that no internal caller passes is completely untested, and the suite stays
+  green.** Adding one for API symmetry — so a new bulk entry point takes the same `is_null=` mask its
+  sibling does — creates public surface the library itself never exercises, so every guard and every
+  branch behind it is dead as far as the suite is concerned. Measured instance: **five of six**
+  mutations to a new bulk-append path survived, and all five were behind either that optional
+  argument or the not-empty-destination case, because the only in-library caller passed neither. The
+  same applies to the *degenerate* shapes of a new entry point (appending onto a non-empty
+  destination, a zero-length input): an internal caller usually hits one shape only. Enumerate the
+  argument's presence/absence and the destination's empty/non-empty states deliberately when adding
+  the test, rather than testing the path the library happens to take.
 - **A surviving mutation is not automatically a coverage gap.** It may be *masked*: by a redundant
   sibling guard (removing either alone changes nothing — see `column_has_nulls_from_footer`'s
   `is_stats_set()`/`HasNullCount()` pair, where removing both segfaults), or by a later check that

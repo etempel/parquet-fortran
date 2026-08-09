@@ -50,6 +50,7 @@ program benchmark_stage7
     if (want("s7-4")) call gate_s7_4()
     if (want("s7-5")) call gate_s7_5()
     if (want("s7-6")) call gate_s7_6()
+    if (want("s7-7")) call gate_s7_7()
     if (want("s7-9")) call gate_s7_9()
     print "(A)", "=================================================================="
     print "(A)", " end of stage 7 measurements"
@@ -954,7 +955,256 @@ contains
         print "(A)", ""
         print "(A)", "S7-5 (A.13) building a 1M-row string column via %set_all (character(len=24))"
         print "(A,F9.2)", "  ms : ", best
+        call gate_s7_5_where(v, N, best)
     end subroutine gate_s7_5
+
+    !> S7-5's PRECONDITION: `%set_all` is 63 ms -- but the item only proposes replacing ONE of its
+    !> two passes, so what matters is how that 63 ms divides and what the replacement's floor is.
+    !>
+    !> `refill_string_store` (`src/parquet_columns_string.f90`) already does the right thing in pass
+    !> 1: one `len_trim` sweep giving the exact byte count, then a single exact-size `%reserve`. A.13
+    !> says to keep that. Pass 2 is `n` calls to `%append_string`, and each of those re-checks two
+    !> capacities that `%reserve` has just guaranteed, calls `process_bounds` to redo the trim, and
+    !> copies the payload with `transfer(str(lo:hi), self%data, slen)` -- a temporary per element,
+    !> since the store's payload is `character(len=1), allocatable :: data(:)`.
+    !>
+    !> So the rows below separate the sizing pass (which no design removes) from the rebuild (which
+    !> is the whole prize), and then bound the rebuild two ways:
+    !>
+    !>   * `substring` -- a prefix-sum plus `payload(a:b) = v(k)(1:L)` into a `character(len=:)`
+    !>     scalar. One memcpy per element, no temporary, no call. This is the FLOOR: no bulk build
+    !>     can beat it, because these are the bytes that have to move.
+    !>   * `transfer` -- the same loop writing into a `character(len=1)` array the way the store
+    !>     actually declares its payload. The gap between the two is what `transfer` costs, and it
+    !>     is the difference between "S7-5 is a bulk-API problem" and "S7-5 is a one-line problem".
+    !>
+    !> **S7-5 IS NOW IMPLEMENTED, so the first row is history rather than a tie-down.** Before the
+    !> change, `reserve` + n x `%append_string` reproduced `%set_all` to within the sizing pass
+    !> (55.5 + 7.5 against 62.8), which is what made the rest of this decomposition trustworthy.
+    !> `%set_all` now routes through `%build_from`, lands at ~10 ms, and should track CANDIDATE 2 --
+    !> the row it was built from. Keep the superseded row: it is the before-figure any future change
+    !> here is measured against, and it costs one loop to produce.
+    subroutine gate_s7_5_where(v, n, set_all_ms)
+        character(len=*), intent(in) :: v(:)   !! the same fixture `%set_all` was timed on.
+        integer(int64), intent(in) :: n        !! element count.
+        real(real64), intent(in) :: set_all_ms !! the shipped figure, for the tie-down.
+        type(parquet_string_column) :: sc
+        character(len=:), allocatable :: payload
+        character(len=1), allocatable :: dat(:)
+        integer(int64), allocatable :: off(:)
+        integer(int64) :: k, acc, nchars
+        integer :: r, ln
+        integer, allocatable :: lens(:)
+        real(real64) :: t0, t1, b_size, b_app, b_sub, b_tr, b_cand, b_cand2
+        b_size = huge(1.0_real64); b_app = b_size; b_sub = b_size; b_tr = b_size; b_cand = b_size; b_cand2 = b_size
+        allocate(off(0:n), lens(n))
+        nchars = 0_int64
+        do k = 1_int64, n
+            nchars = nchars + int(len_trim(v(k)), int64)
+        end do
+        allocate(character(len=nchars) :: payload)
+        allocate(dat(nchars))
+        do r = 1, REP
+            ! --- pass 1: the sizing sweep, which every design keeps ---
+            call tick(t0)
+            acc = 0_int64
+            do k = 1_int64, n
+                acc = acc + int(len_trim(v(k)), int64)
+            end do
+            call tick(t1); b_size = min(b_size, (t1 - t0)*1.0e3_real64)
+            if (acc /= nchars) error stop "s7-5 gate: sizing pass disagrees"
+            ! --- pass 2 as shipped: reserve once, then one %append_string per element ---
+            call sc%clear()
+            call tick(t0)
+            call sc%reserve(n, nchars)
+            do k = 1_int64, n
+                call sc%append_string(v(k), trim=.true.)
+            end do
+            call tick(t1); b_app = min(b_app, (t1 - t0)*1.0e3_real64)
+            ! --- floor: prefix-sum offsets + one memcpy per element, no call, no temporary ---
+            call tick(t0)
+            off(0) = 0_int64
+            do k = 1_int64, n
+                ln = len_trim(v(k))
+                off(k) = off(k-1) + int(ln, int64)
+                if (ln > 0) payload(off(k-1)+1 : off(k)) = v(k)(1:ln)
+            end do
+            call tick(t1); b_sub = min(b_sub, (t1 - t0)*1.0e3_real64)
+            ! --- the same, into the character(len=1) array the store actually declares ---
+            call tick(t0)
+            off(0) = 0_int64
+            do k = 1_int64, n
+                ln = len_trim(v(k))
+                off(k) = off(k-1) + int(ln, int64)
+                if (ln > 0) dat(off(k-1)+1 : off(k)) = transfer(v(k)(1:ln), dat, ln)
+            end do
+            call tick(t1); b_tr = min(b_tr, (t1 - t0)*1.0e3_real64)
+            ! --- the CANDIDATE design, end to end: one len_trim sweep whose lengths are KEPT,
+            !     a prefix sum, memcpy into a character(len=:) scalar, then ONE bulk transfer of
+            !     the whole payload into the char(1) array the store declares. Two passes over the
+            !     payload instead of one, both memcpy, and no per-element transfer or call.
+            call tick(t0)
+            acc = 0_int64
+            do k = 1_int64, n
+                lens(k) = len_trim(v(k))
+                acc = acc + int(lens(k), int64)
+            end do
+            off(0) = 0_int64
+            do k = 1_int64, n
+                off(k) = off(k-1) + int(lens(k), int64)
+                if (lens(k) > 0) payload(off(k-1)+1 : off(k)) = v(k)(1:lens(k))
+            end do
+            dat(1:acc) = transfer(payload, dat, int(acc))
+            call tick(t1); b_cand = min(b_cand, (t1 - t0)*1.0e3_real64)
+            ! --- CANDIDATE 2: no intermediate buffer at all. `values` is a contiguous array of
+            !     character(len=W), so its bytes are one W*n block; sequence association lets a
+            !     `character(len=1) :: flat(*)` dummy see exactly that block, after which element
+            !     k's bytes are an ordinary array section and the copy into a char(1) payload is a
+            !     section-to-section assignment -- no transfer, no temporary, ONE pass over the
+            !     payload instead of the two candidate 1 needs.
+            call tick(t0)
+            call pack_via_bytes(v, v, dat, off, lens, n, len(v), acc)
+            call tick(t1); b_cand2 = min(b_cand2, (t1 - t0)*1.0e3_real64)
+        end do
+        print "(A)", ""
+        print "(A)", "  -- where does it go? ms, best of 7, same 1M x char(24) fixture --"
+        print "(A,F9.2,A,F9.2,A)", "  SUPERSEDED: n x %append_string: ", b_app, &
+            "   (%set_all now: ", set_all_ms, ")"
+        print "(A,F9.2)", "  pass 1: len_trim sizing only : ", b_size
+        print "(A,F9.2)", "  FLOOR: prefix-sum + substring: ", b_sub
+        print "(A,F9.2)", "  same, transfer into char(1)  : ", b_tr
+        print "(A,F9.2)", "  CANDIDATE 1, scalar + 1 xfer : ", b_cand
+        print "(A,F9.2)", "  CANDIDATE 2, byte-view, 1 pass: ", b_cand2
+        print "(A)", ""
+        print "(A,F9.2,A)", "  bytes actually moved         : ", real(nchars, real64)/1.0e6_real64, " MB"
+        print "(A,F9.2,A)", "  per-element cost of len_trim : ", b_size*1.0e6_real64/real(n, real64), " ns"
+        print "(A,F9.2,A)", "  the payload memcpy alone     : ", b_sub - b_size, " ms (floor minus sizing)"
+        print "(A,F9.2,A)", "  what transfer-per-element adds: ", b_tr - b_sub, " ms"
+        print "(A,F6.2,A)", "  CEILING on S7-5's gain       : ", &
+            100.0_real64*(set_all_ms - min(b_cand, b_cand2))/max(set_all_ms, 1.0e-9_real64), " %"
+        print "(A,F6.2,A)", "  i.e. %set_all could reach     : ", min(b_cand, b_cand2), " ms"
+        print "(A)", "    Measured end to end against the candidate, not derived from a formula:"
+        print "(A)", "    an earlier version of this gate subtracted the sizing pass AND the floor,"
+        print "(A)", "    which double-counts len_trim because the floor loop calls it too."
+    end subroutine gate_s7_5_where
+
+    !> Packs `n` trimmed elements of a character(len=w) array into `dst`, computing `off` and
+    !> `lens` as it goes. `src` is declared `character(len=1) :: src(*)`, so Fortran's sequence
+    !> association gives it the caller's whole W*n byte block -- which is what turns each element's
+    !> payload copy into a section-to-section assignment rather than a `transfer`.
+    subroutine pack_via_bytes(vals, src, dst, off, lens, n, w, total)
+        character(len=*), intent(in) :: vals(*)   !! the same array, seen as elements, for len_trim.
+        character(len=1), intent(in) :: src(*)    !! the caller's char(w) array, seen as bytes.
+        character(len=1), intent(inout) :: dst(:) !! packed destination, at least `total` bytes.
+        integer(int64), intent(out) :: off(0:)    !! receives offsets(0:n), off(0) = 0.
+        integer, intent(out) :: lens(:)           !! receives each element's trimmed length.
+        integer(int64), intent(in) :: n           !! element count.
+        integer, intent(in) :: w                  !! declared length of one element.
+        integer(int64), intent(out) :: total      !! packed byte count.
+        integer(int64) :: k, base
+        integer :: j
+        off(0) = 0_int64
+        do k = 1_int64, n
+            base = (k - 1_int64)*int(w, int64)
+            ! len_trim on the ELEMENT view: an intrinsic the compiler implements far better than a
+            ! hand-written trailing-blank scan over the byte view, which measured 3x worse.
+            j = len_trim(vals(k))
+            lens(k) = j
+            off(k) = off(k-1) + int(j, int64)
+            if (j > 0) dst(off(k-1)+1 : off(k)) = src(base+1 : base+int(j, int64))
+        end do
+        total = off(n)
+    end subroutine pack_via_bytes
+
+    ! =============================================================================================
+    ! S7-7 (A.4 second half) -- THE PRECONDITION, and it is allowed to retire the item.
+    !
+    ! A.4's proposal is to replace StringLikeAccessor's two std::function members with a
+    ! dispatch-once/templated visitor across its call sites. Stage 4 already measured the FILTER
+    ! path and found it does not justify the change (evaluate is 11.26 ns/row against a 40.64 ns/row
+    ! decode nothing here can touch). The remaining candidate is the six padded-string READ sites,
+    ! whose share has never been measured -- that path lost its staging buffer in stage 3, so the
+    ! surviving indirect call per row is a larger fraction of what is left than it used to be.
+    !
+    ! Two phase counters in parquet_read_string_column answer it directly:
+    !
+    !   decode -- Arrow materialising the column. Not this library's code; no change to the
+    !             accessor can touch it.
+    !   copy   -- the per-row loop: one std::function get_view plus copy_string_with_padding.
+    !
+    ! The copy share is the CEILING, and a generous one: it credits the change with driving the
+    ! indirect call to ZERO, when in reality copy_string_with_padding's memcpy and blank fill stay.
+    ! If that ceiling is small, S7-7 drops here without a line of C++ being written, which is what
+    ! this gate exists to be able to conclude.
+    ! =============================================================================================
+    subroutine gate_s7_7()
+        integer(int64), parameter :: N = 2000000_int64
+        integer, parameter :: W = 24
+        character(len=*), parameter :: file = "test_run/bench_s7_7.parquet"
+        interface
+            subroutine reset_srp() bind(C, name="parquet_debug_reset_string_read_phase_nanos")
+            end subroutine reset_srp
+            integer(c_int64_t) function srp_decode() bind(C, name="parquet_debug_get_string_read_decode_nanos")
+                import :: c_int64_t
+            end function srp_decode
+            integer(c_int64_t) function srp_copy() bind(C, name="parquet_debug_get_string_read_copy_nanos")
+                import :: c_int64_t
+            end function srp_copy
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_schema) :: schema
+        character(len=W), allocatable :: v(:), got(:)
+        integer(int64) :: i, best_dec, best_cop
+        integer :: r
+        real(real64) :: t0, t1, best_total
+
+        allocate(v(N), got(N))
+        do i = 1_int64, N
+            write(v(i), "(A,I0)") "row_", i
+        end do
+        call schema%init("s7_7")
+        call schema%add_field("s", "string", array_size=W)
+        call parquet_parse_maml(schema)
+        call parquet_open_writer(writer, file, schema=schema)
+        call parquet_write_column(writer, "s", v)
+        call parquet_close_writer(writer)
+
+        got = ""                                   ! warm the destination's pages before timing
+        best_total = huge(1.0_real64)
+        best_dec = huge(1_int64); best_cop = huge(1_int64)
+        do r = 1, REP
+            call reset_srp()
+            call parquet_open_reader(reader, file)
+            call tick(t0)
+            call parquet_read_column(reader, "s", got)
+            call tick(t1)
+            call parquet_close_reader(reader)
+            best_total = min(best_total, (t1 - t0)*1.0e3_real64)
+            best_dec = min(best_dec, srp_decode())
+            best_cop = min(best_cop, srp_copy())
+        end do
+        print "(A)", ""
+        print "(A)", "S7-7 (A.4 ii) padded string read, 2M rows x character(len=24)"
+        print "(A)", "  Where does parquet_read_string_column's time go? ms, best of 7."
+        print "(A,F9.2)", "  whole parquet_read_column     : ", best_total
+        print "(A,F9.2)", "  phase: Arrow decode           : ", real(best_dec, real64)/1.0e6_real64
+        print "(A,F9.2)", "  phase: per-row copy loop      : ", real(best_cop, real64)/1.0e6_real64
+        print "(A,F9.2,A)", "  per-row copy cost             : ", &
+            real(best_cop, real64)/real(N, real64), " ns"
+        print "(A,F6.2,A)", "  CEILING on S7-7's gain        : ", &
+            100.0_real64*real(best_cop, real64)/1.0e6_real64/max(best_total, 1.0e-9_real64), " %"
+        print "(A)", "    = the copy loop's whole share. Generous twice over: it credits the change"
+        print "(A)", "    with removing the indirect call ENTIRELY, and charges it nothing for the"
+        print "(A)", "    memcpy and blank-fill that stay. Compare against the ~5% keep-or-drop line."
+        print "(A)", ""
+        print "(A)", "  ALREADY DECIDED, and the ceiling above is NOT the answer. A temporary A/B ran"
+        print "(A)", "  the same loop with a direct arrow::StringArray::GetView in place of the"
+        print "(A)", "  std::function: 11.5 ms against 13.3 (stable to +-0.02 over four runs). So the"
+        print "(A)", "  indirect call is 1.8 ms, i.e. 4.2% of the read -- BELOW the keep-or-drop line."
+        print "(A)", "  S7-7 was dropped on that. The A/B was reverted; these two counters stayed,"
+        print "(A)", "  so re-deciding costs one build rather than one investigation."
+    end subroutine gate_s7_7
 
     ! =============================================================================================
     ! S7-6 (A.14) -- baseline for pf_permute on an already-int64 permutation.

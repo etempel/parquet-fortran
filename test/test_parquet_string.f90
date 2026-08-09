@@ -45,6 +45,10 @@ contains
             new_unittest("view_slice fills one handle per row of a range", test_view_slice), &
             new_unittest("slice extracts an owning copy of a row range", test_slice), &
             new_unittest("build_from gathers an array of handles into a column", test_build_from), &
+            new_unittest("build_from builds from a character array, trimming each element", &
+                test_build_from_character), &
+            new_unittest("append_values bulk-appends a character array onto a non-empty column", &
+                test_append_values_character), &
             new_unittest("build_from: empty, all-null, zero-length and repeated handles", &
                 test_build_from_edges), &
             new_unittest("to_character materialization + null_value", test_to_character), &
@@ -792,6 +796,228 @@ contains
         if (allocated(error)) return
         call check(error, dest%validate(), "build_from invariants hold")
     end subroutine test_build_from
+    !
+    !> `%build_from` over a character ARRAY: the bulk fill that `parquet_column%set_all` routes
+    !> through, and the reason `%set_all` on a 1M-row column went from 65 ms to 10 ms (S7-5).
+    !>
+    !> It reaches the payload by re-seeing the caller's `character(len=w)` array as one `w*n` byte
+    !> block through a sequence-associated `character(len=1) :: src(*)` dummy, so **every assertion
+    !> here is really about arithmetic on that block**: get `base = (k-1)*w` or the section bounds
+    !> wrong and elements come back shifted, truncated, or holding a neighbour's bytes. Nothing
+    !> aborts when that happens -- the column still validates -- so the values are checked one by
+    !> one rather than through a size or a null count.
+    !>
+    !> **The first element is deliberately the SHORTEST.** CLAUDE.md's "sized/typed from the first
+    !> element" bug class applies directly: a length derived from `values(1)` instead of per element
+    !> would truncate everything after it, and a fixture whose first element is longest passes such
+    !> a bug happily.
+    !>
+    !> An `is_null` mask is checked with elements that still need trimming, because the mask path is
+    !> a separate branch of the sizing pass -- a mutation dropping `len_trim` there survived a suite
+    !> that only ever combined the mask with already-trimmed values.
+    subroutine test_build_from_character(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col, ref
+        character(len=6) :: vals(5)
+        logical :: mask(5)
+        character(len=:), allocatable :: s
+        integer :: k
+
+        ! shortest first, one empty, trailing blanks everywhere by construction (len=6)
+        vals = [character(len=6) :: "a", "bb", "", "dddd", "eeeee"]
+        call col%append_string("stale")          ! must be cleared, as the handles form is
+        call col%build_from(vals)
+        call check(error, col%size() == 5_int64, "build_from(character) must replace, not append")
+        if (allocated(error)) return
+        do k = 1, 5
+            call col%get(int(k, int64), s)
+            call check(error, s == trim(vals(k)), &
+                "build_from(character) element "//char(48+k)//" must be its trimmed source value")
+            if (allocated(error)) return
+        end do
+        call check(error, col%character_size() == 12_int64, &
+            "build_from(character) must store 1+2+0+4+5 = 12 bytes, not the padded 30")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 0_int64, &
+            "build_from(character) without a mask must produce no nulls")
+        if (allocated(error)) return
+
+        ! Equivalence with the per-element form it replaced: same bytes, same offsets, same values.
+        do k = 1, 5
+            call ref%append_string(vals(k), trim=.true.)
+        end do
+        call check(error, col%character_size() == ref%character_size() .and. &
+            col%size() == ref%size(), &
+            "build_from(character) must agree with a column built by %append_string(trim=.true.)")
+        if (allocated(error)) return
+        do k = 1, 5
+            call ref%get(int(k, int64), s)
+            call check(error, col%equals(int(k, int64), s), &
+                "build_from(character) element "//char(48+k)//" must equal the appended column's")
+            if (allocated(error)) return
+        end do
+
+        ! is_null: masked elements become zero-width nulls, and the UNMASKED ones still trim.
+        mask = [.false., .true., .false., .true., .false.]
+        call col%build_from(vals, is_null=mask)
+        call check(error, col%null_count() == 2_int64, &
+            "build_from(character) with a mask must record the null count")
+        if (allocated(error)) return
+        call check(error, col%is_null(2_int64) .and. col%is_null(4_int64), &
+            "build_from(character) must mark exactly the masked elements null")
+        if (allocated(error)) return
+        call check(error, .not. col%is_null(1_int64) .and. .not. col%is_null(5_int64), &
+            "build_from(character) must leave the unmasked elements non-null")
+        if (allocated(error)) return
+        call col%get(5_int64, s)
+        call check(error, s == "eeeee", &
+            "build_from(character) must still trim an unmasked element when a mask is present")
+        if (allocated(error)) return
+        call check(error, col%character_size() == 6_int64, &
+            "build_from(character) with a mask must store only the unmasked bytes (1+0+5)")
+        if (allocated(error)) return
+        call check(error, col%validate(), "build_from(character) with a mask: invariants hold")
+        if (allocated(error)) return
+
+        ! degenerate shapes: an all-null mask, an all-empty array, and a zero-length array
+        mask = .true.
+        call col%build_from(vals, is_null=mask)
+        call check(error, col%size() == 5_int64 .and. col%null_count() == 5_int64 .and. &
+            col%character_size() == 0_int64, "build_from(character): an all-null mask")
+        if (allocated(error)) return
+        vals = ""
+        call col%build_from(vals)
+        call check(error, col%size() == 5_int64 .and. col%character_size() == 0_int64 .and. &
+            col%null_count() == 0_int64, "build_from(character): an all-empty array is 5 empty rows")
+        if (allocated(error)) return
+        block
+            character(len=6) :: none(0)
+            call col%build_from(none)
+            call check(error, col%size() == 0_int64 .and. col%empty(), &
+                "build_from(character): a zero-length array leaves an empty column")
+        end block
+    end subroutine test_build_from_character
+    !
+    !> `%append_values`: the appending counterpart of `build_from`'s character form, and the entry
+    !> point `parquet_column%append_values` now routes through.
+    !>
+    !> **Everything here is about appending to a column that is not empty**, because that is the
+    !> only thing separating it from `build_from`: it continues the offset scan from `self%nchars`
+    !> and writes validity bits at `nrows + k` rather than `k`. Both of those look right when the
+    !> destination starts empty — every base is 0 — so a test that only appends to a fresh column
+    !> passes against an implementation that ignores the base entirely.
+    !>
+    !> The `is_null` cases are here rather than left to the `parquet_column` layer because that
+    !> layer never passes a mask: `%append_values` on a `parquet_column` has no null argument, so
+    !> this optional is reachable only through `parquet_string_column` directly, and is untested
+    !> anywhere else.
+    subroutine test_append_values_character(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        character(len=5) :: first(3), more(2)
+        logical :: mask(2)
+        character(len=:), allocatable :: s
+
+        first = [character(len=5) :: "a", "bb", "ccc"]
+        more  = [character(len=5) :: "dddd", "e"]
+
+        ! --- append onto a NON-EMPTY column: offsets must continue, not restart ---
+        call col%build_from(first)
+        call col%append_values(more)
+        call check(error, col%size() == 5_int64, "append_values must extend, not replace")
+        if (allocated(error)) return
+        call check(error, col%character_size() == 1+2+3+4+1, &
+            "append_values must add its bytes to the existing payload, not replace the count")
+        if (allocated(error)) return
+        call col%get(1_int64, s)
+        call check(error, s == "a", "append_values must leave the pre-existing element 1 intact")
+        if (allocated(error)) return
+        call col%get(3_int64, s)
+        call check(error, s == "ccc", "append_values must leave the pre-existing element 3 intact")
+        if (allocated(error)) return
+        call col%get(4_int64, s)
+        call check(error, s == "dddd", "append_values element 4 must be the first appended value")
+        if (allocated(error)) return
+        call col%get(5_int64, s)
+        call check(error, s == "e", "append_values element 5 must be trimmed")
+        if (allocated(error)) return
+        call check(error, col%validate(), "append_values onto a non-empty column: invariants hold")
+        if (allocated(error)) return
+
+        ! --- append onto a column that ALREADY has nulls: the new rows must come back valid ---
+        call col%clear()
+        call col%build_from(first, is_null=[.false., .true., .false.])
+        call col%append_values(more)
+        call check(error, col%null_count() == 1_int64, &
+            "appending non-null values must not change the existing null count")
+        if (allocated(error)) return
+        call check(error, col%is_null(2_int64), "the pre-existing null must stay null")
+        if (allocated(error)) return
+        call check(error, .not. col%is_null(4_int64) .and. .not. col%is_null(5_int64), &
+            "rows appended onto a null-carrying column must be valid, not whatever the bitmap held")
+        if (allocated(error)) return
+
+        ! --- append WITH a mask onto a non-empty column: bits go at nrows + k ---
+        call col%clear()
+        call col%build_from(first)
+        mask = [.true., .false.]
+        call col%append_values(more, is_null=mask)
+        call check(error, col%size() == 5_int64 .and. col%null_count() == 1_int64, &
+            "append_values with a mask must record exactly one new null")
+        if (allocated(error)) return
+        call check(error, col%is_null(4_int64), &
+            "append_values must mark the masked element at nrows+k, not at k")
+        if (allocated(error)) return
+        call check(error, .not. col%is_null(1_int64) .and. .not. col%is_null(5_int64), &
+            "append_values must leave every other element non-null")
+        if (allocated(error)) return
+        call col%get(5_int64, s)
+        call check(error, s == "e", "append_values must still trim an unmasked element under a mask")
+        if (allocated(error)) return
+        call check(error, col%character_size() == 1+2+3+1, &
+            "a masked appended element must contribute no bytes")
+        if (allocated(error)) return
+
+        ! --- accumulate across several appends, each carrying its own null ---
+        call col%clear()
+        call col%append_values(more, is_null=[.true., .false.])
+        call col%append_values(more, is_null=[.false., .true.])
+        call check(error, col%size() == 4_int64 .and. col%null_count() == 2_int64, &
+            "append_values must ACCUMULATE the null count across calls, not overwrite it")
+        if (allocated(error)) return
+        call check(error, col%is_null(1_int64) .and. col%is_null(4_int64), &
+            "each append's own null must land in its own range")
+        if (allocated(error)) return
+        call check(error, col%validate(), "repeated masked appends: invariants hold")
+        if (allocated(error)) return
+
+        ! --- stale validity bits ABOVE nrows, which is the only case the "already has nulls"
+        !     branch exists for. ensure_validity_cap fills NEW bytes all-ones, so appending into
+        !     fresh capacity is valid whether or not the branch runs; what it protects is a bit
+        !     that was cleared while the column was longer and never re-set when it shrank. Without
+        !     it the appended row inherits that bit and comes back null with no other symptom.
+        call col%clear()
+        call col%build_from(first)                              ! 3 rows
+        call col%append_values(more, is_null=[.true., .true.])  ! rows 4,5 null -> bits cleared
+        call col%erase(5_int64)
+        call col%erase(4_int64)                                 ! back to 3 rows; bits 4,5 stale
+        call col%append_values(more)                            ! rows 4,5 again, no mask
+        call check(error, .not. col%is_null(4_int64) .and. .not. col%is_null(5_int64), &
+            "an append must write its own rows valid, not inherit a stale cleared bit")
+        if (allocated(error)) return
+        call check(error, col%null_count() == 0_int64, &
+            "the null count must not carry over bits belonging to erased rows")
+        if (allocated(error)) return
+
+        ! --- a zero-length append is a no-op ---
+        block
+            character(len=5) :: none(0)
+            integer(int64) :: before
+            before = col%size()
+            call col%append_values(none)
+            call check(error, col%size() == before, "a zero-length append_values must change nothing")
+        end block
+    end subroutine test_append_values_character
     !
     !> `build_from` sizes the destination from a validation pass and then copies each element's
     !! bytes straight out of ITS OWN source column, so these are the cases that separate a correct

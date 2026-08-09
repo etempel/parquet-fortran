@@ -632,6 +632,8 @@ scenarios=(
     "string_build_from_self_alias:1"
     "string_build_from_unassociated:1"
     "string_build_from_stale_index:1"
+    "string_build_from_character_mask_length:1"
+    "string_append_values_mask_length:1"
     "string_column_append_buffers_offset_not_zero:1"
     "string_column_append_buffers_offset_not_zero_int32:1"
     "compact_string_write_requires_scalar_column:1"

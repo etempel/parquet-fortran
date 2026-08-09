@@ -182,10 +182,15 @@ module parquet_strings
         procedure :: append_string                     !! Append a string to the end.
         procedure :: append_null                       !! Append a null element to the end.
         procedure :: append_column                     !! Append all elements from another column.
+        procedure :: append_values                     !! Bulk-append a character array, trimming each element.
         procedure, private :: append_from_i32          !! int32 specific of append_from.
         procedure, private :: append_from_i64          !! int64 specific of append_from.
         generic :: append_from => append_from_i32, append_from_i64 !! Append one element of another column.
-        procedure :: build_from                        !! Clears self, then gathers an array of handles into it.
+        procedure, private :: build_from_handles       !! handles specific of build_from.
+        procedure, private :: build_from_character     !! character-array specific of build_from.
+        generic :: build_from => build_from_handles, build_from_character
+        !! Clears self, then fills it -- from an array of handles, or from a character array
+        !! (trailing blanks trimmed, one optional null mask). Both replace the whole column.
         procedure, private :: set_i32                  !! int32 specific of set.
         procedure, private :: set_i64                  !! int64 specific of set.
         generic :: set => set_i32, set_i64             !! Replace the content of element i.
@@ -1414,7 +1419,7 @@ contains
     !! is unassociated, or refers to a stale/out-of-range index. The first handle (in array order)
     !! that trips any of these three checks (in that priority order) determines the abort message
     !! -- other handles are not scanned once one is found.
-    subroutine build_from(self, handles)
+    subroutine build_from_handles(self, handles)
         class(parquet_string_column), intent(inout), target :: self !! cleared, then filled from handles.
         type(parquet_string), intent(in) :: handles(:)               !! source handles, in order.
         integer(int64) :: k, m, want, a, elen, idx, nnull
@@ -1532,7 +1537,7 @@ contains
         !$omp end parallel do
         self%nrows = m
         self%nchars = self%offsets(m+1_int64)
-    end subroutine build_from
+    end subroutine build_from_handles
     !
     !> `build_from`'s original single-pass fill, kept for the below-the-floor and in-a-parallel-
     !! region cases. See `build_from` for why both shapes exist and what binds them together.
@@ -1576,6 +1581,175 @@ contains
         self%nrows = m
         self%nchars = pos
     end subroutine build_from_fill_serial
+    !
+    !> Character-array specific of `build_from`: clears the column and rebuilds it from `values`,
+    !! trimming each element's trailing blanks.
+    !!
+    !! **Why this exists rather than a loop of `%append_string`.** Every element of a
+    !! `character(len=*)` array shares one declared length, so filling a column this way is the
+    !! single commonest thing anyone does with one -- and doing it per element costs a call that
+    !! re-derives the trim, re-checks two capacities that are already known to be sufficient, and
+    !! copies the payload with `transfer(str(lo:hi), self%data, slen)`, which builds a temporary per
+    !! element because the payload is `character(len=1), allocatable`. Measured on 1M x
+    !! `character(len=24)`: **55.5 ms of per-element calls against 9.5 ms here**, taking
+    !! `parquet_column%set_all` from 65.2 ms to 9.5 ms overall (feature_optimise_A7.md, S7-5).
+    !!
+    !! **The trick that removes the per-element `transfer`, and the reason for the `contiguous`
+    !! attribute.** `values` is a contiguous array of `character(len=w)`, so its bytes are one
+    !! `w*n` block; `pack_character_bytes` below re-sees exactly that block through a
+    !! `character(len=1) :: src(*)` dummy by sequence association, after which each element's
+    !! payload copy is an ordinary section-to-section assignment between two `character(len=1)`
+    !! arrays -- the same shape `build_from_handles`' phase 3 uses, and no temporary. Sequence
+    !! association needs the actual argument to be contiguous, which is what `contiguous` here
+    !! guarantees (at the cost of a copy-in for the rare strided caller).
+    !!
+    !! **`len_trim` stays on the ELEMENT view and must not be hand-rolled.** Replacing it with a
+    !! trailing-blank scan over the byte view -- which looks like the natural thing to do once the
+    !! byte view exists -- measured **3x slower** (32.5 ms against 9.5): the intrinsic is far better
+    !! than a per-byte loop. `len_trim` is then the floor here, at ~7.5 ns/element.
+    !!
+    !! `is_null`, when present, marks those elements null: they occupy a zero-width slot, exactly
+    !! as `%append_null` would leave them, and their `values` entry is ignored.
+    subroutine build_from_character(self, values, is_null)
+        class(parquet_string_column), intent(inout) :: self       !! cleared, then filled from `values`.
+        character(len=*), intent(in), contiguous :: values(:)     !! source elements; trailing blanks trimmed.
+        logical, intent(in), optional :: is_null(:)               !! .true. => store that element as null.
+        integer(int64) :: n, k, nchars, nnull
+        integer, allocatable :: lens(:)
+        n = size(values, kind=int64)
+        if (present(is_null)) then
+            if (size(is_null, kind=int64) /= n) then
+                error stop EP//"build_from: is_null must have the same length as values"
+            end if
+        end if
+        call self%clear()
+        if (n <= 0_int64) return
+        allocate(lens(n))
+        ! Pass 1: each element's trimmed length, and the null count. Separate from the pack below
+        ! because the payload has to be allocated at its exact final size before a byte moves --
+        ! the same reason build_from_handles sizes in its validation pass.
+        nchars = 0_int64
+        nnull = 0_int64
+        if (present(is_null)) then
+            do k = 1_int64, n
+                if (is_null(k)) then
+                    lens(k) = 0
+                    nnull = nnull + 1_int64
+                else
+                    lens(k) = len_trim(values(k))
+                    nchars = nchars + int(lens(k), int64)
+                end if
+            end do
+        else
+            do k = 1_int64, n
+                lens(k) = len_trim(values(k))
+                nchars = nchars + int(lens(k), int64)
+            end do
+        end if
+        call self%reserve(n, nchars)
+        ! Pass 2: the prefix sum and the payload, in one walk, continuing from offsets(1) = 0.
+        self%offsets(1) = 0_int64
+        call pack_character_bytes(values, self%data, self%offsets, lens, n, len(values), 0_int64)
+        self%nrows = n
+        self%nchars = nchars
+        if (nnull > 0_int64) then
+            self%has_nulls = .true.
+            ! Freshly allocated validity bytes are all-ones (every row valid), so only the null
+            ! rows need writing -- build_from_handles relies on the same property.
+            call ensure_validity_cap(self, n)
+            do k = 1_int64, n
+                if (is_null(k)) call set_bit_null(self, k)
+            end do
+            self%n_null = nnull
+        end if
+    end subroutine build_from_character
+    !
+    !> `build_from_character`'s packing walk. `src` is declared `character(len=1) :: src(*)` so that
+    !! sequence association hands it the caller's whole `w*n` byte block; that is what makes each
+    !! element's copy a section-to-section assignment rather than a `transfer` with a temporary.
+    !! See `build_from_character` for the measurement that justifies the shape.
+    subroutine pack_character_bytes(src, dst, offsets, lens, n, w, row_base)
+        character(len=1), intent(in) :: src(*)      !! the caller's char(w) array, re-seen as bytes.
+        character(len=1), intent(inout) :: dst(:)   !! the payload buffer, already sized.
+        integer(int64), intent(inout) :: offsets(:) !! writes offsets(row_base+2 : row_base+n+1).
+        integer, intent(in) :: lens(:)              !! each element's trimmed length, from pass 1.
+        integer(int64), intent(in) :: n             !! element count.
+        integer, intent(in) :: w                    !! declared length of one source element.
+        integer(int64), intent(in) :: row_base      !! rows already in the column; 0 for a rebuild.
+        integer(int64) :: k, base, at
+        ! `offsets(row_base+1)` is already the running byte total -- 0 for a rebuild, `self%nchars`
+        ! for an append -- so the scan simply continues from it and both callers share this loop.
+        do k = 1_int64, n
+            base = (k - 1_int64)*int(w, int64)
+            at = offsets(row_base + k)
+            offsets(row_base + k + 1_int64) = at + int(lens(k), int64)
+            if (lens(k) > 0) then
+                dst(at+1_int64 : at + int(lens(k), int64)) = src(base+1_int64 : base + int(lens(k), int64))
+            end if
+        end do
+    end subroutine pack_character_bytes
+    !
+    !> Bulk-appends a character array, trimming each element's trailing blanks -- the appending
+    !! counterpart of `build_from`'s character form, sharing its packing walk and existing for the
+    !! same reason: `parquet_column%append_values` on a string column used one `%append_string` call
+    !! per element. See `build_from_character` for why the byte-view copy is what makes this fast
+    !! and why `len_trim` must stay on the element view.
+    !!
+    !! `is_null`, when present, appends those elements as zero-width nulls and ignores their
+    !! `values` entry.
+    subroutine append_values(self, values, is_null)
+        class(parquet_string_column), intent(inout) :: self   !! the column, appended to.
+        character(len=*), intent(in), contiguous :: values(:) !! elements to append; blanks trimmed.
+        logical, intent(in), optional :: is_null(:)           !! .true. => append that element as null.
+        integer(int64) :: n, k, nchars, nnull, base_rows
+        integer, allocatable :: lens(:)
+        n = size(values, kind=int64)
+        if (present(is_null)) then
+            if (size(is_null, kind=int64) /= n) then
+                error stop EP//"append_values: is_null must have the same length as values"
+            end if
+        end if
+        if (n <= 0_int64) return
+        allocate(lens(n))
+        nchars = 0_int64
+        nnull = 0_int64
+        if (present(is_null)) then
+            do k = 1_int64, n
+                if (is_null(k)) then
+                    lens(k) = 0
+                    nnull = nnull + 1_int64
+                else
+                    lens(k) = len_trim(values(k))
+                    nchars = nchars + int(lens(k), int64)
+                end if
+            end do
+        else
+            do k = 1_int64, n
+                lens(k) = len_trim(values(k))
+                nchars = nchars + int(lens(k), int64)
+            end do
+        end if
+        base_rows = self%nrows
+        call ensure_offsets_cap(self, base_rows + n)
+        if (nchars > 0_int64) call ensure_data_cap(self, self%nchars + nchars)
+        call pack_character_bytes(values, self%data, self%offsets, lens, n, len(values), base_rows)
+        if (nnull > 0_int64) then
+            self%has_nulls = .true.
+            call ensure_validity_cap(self, base_rows + n)
+            do k = 1_int64, n
+                if (is_null(k)) call set_bit_null(self, base_rows + k)
+            end do
+            self%n_null = self%n_null + nnull
+        else if (self%has_nulls) then
+            ! The column already tracks validity, so the appended rows need their bits written
+            ! valid rather than left at whatever the grown buffer holds -- the same step
+            ! `append_buffers` takes for exactly this case.
+            call ensure_validity_cap(self, base_rows + n)
+            call fill_validity_valid(self, base_rows + 1_int64, n)
+        end if
+        self%nrows = base_rows + n
+        self%nchars = self%nchars + nchars
+    end subroutine append_values
     !
     !> int32 specific of set; see the set generic.
     subroutine set_i32(self, i, str, strip, trim)

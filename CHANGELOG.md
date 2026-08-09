@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Filling a string `parquet_column` from a character array is 6.2x faster**, and
+  `parquet_string_column%build_from` gains a **character-array form** to make it so:
+  `call col%build_from(values [, is_null])` clears the column and rebuilds it from a
+  `character(len=*)` array, trimming each element's trailing blanks (the same rule `%set_all`
+  already documented) and marking the optional mask's elements null. `%set_all` and
+  `%append_values` on a `PK_STRING`/`PK_STRING_VEC` column rebuilt the store with one
+  `%append_string` call per element, each of which re-derived the trim, re-checked two capacities
+  that had just been reserved, and copied the payload through a `transfer` that allocates a
+  temporary per element. The bulk forms do the same two passes — exact byte count, then fill — but
+  copy each element's bytes as a plain array section, which needs no temporary. Measured on 1 M rows
+  of `character(len=24)`: `%set_all` **65.2 ms → 10.6 ms**, of which the remaining 7.5 ms is
+  `len_trim` itself. `%build_from` is now a generic over both forms, so the existing
+  handle-gathering call is unchanged; **`%append_values(values [, is_null])`** is the new appending
+  counterpart, and is what `parquet_column%append_values` on a string column now uses. No stored
+  bytes change, and the trimming rule is unchanged in both directions.
+
 - **Building a table row by row is no longer quadratic**, and `parquet_column` gains the capacity
   controls that make it so: **`%capacity()`**, **`%reserve(n)`** and **`%shrink_to_fit()`**, with
   **`parquet_table%reserve(n)`** and **`parquet_table%compact()`** as the whole-table forms. A

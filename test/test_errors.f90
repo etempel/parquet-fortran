@@ -955,6 +955,10 @@ contains
                 test_string_build_from_unassociated_aborts), &
             new_unittest("parquet_string_column build_from with a stale handle aborts", &
                 test_string_build_from_stale_index_aborts), &
+            new_unittest("parquet_string_column build_from(character) with a short mask aborts", &
+                test_string_build_from_character_mask_length_aborts), &
+            new_unittest("parquet_string_column append_values with a short mask aborts", &
+                test_string_append_values_mask_length_aborts), &
             new_unittest("parquet_string_column append_buffers with un-rebased offsets aborts", &
                 test_string_column_append_buffers_offset_not_zero_aborts), &
             new_unittest("parquet_string_column append_buffers with un-rebased int32 offsets aborts", &
@@ -1948,6 +1952,22 @@ contains
             failure_message="build_from with a stale handle in the input array was expected to abort", &
             required_stderr="parquet_strings: build_from: stale or out-of-range handle in input array")
     end subroutine test_string_build_from_stale_index_aborts
+
+    subroutine test_string_build_from_character_mask_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_build_from_character_mask_length", &
+            expect_abort=.true., &
+            failure_message="build_from(character) with a mask shorter than values was expected to abort", &
+            required_stderr="parquet_strings: build_from: is_null must have the same length as values")
+    end subroutine test_string_build_from_character_mask_length_aborts
+
+    subroutine test_string_append_values_mask_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "string_append_values_mask_length", &
+            expect_abort=.true., &
+            failure_message="append_values with a mask shorter than values was expected to abort", &
+            required_stderr="parquet_strings: append_values: is_null must have the same length as values")
+    end subroutine test_string_append_values_mask_length_aborts
 
     subroutine test_string_column_append_buffers_offset_not_zero_aborts(error)
         type(error_type), allocatable, intent(out) :: error

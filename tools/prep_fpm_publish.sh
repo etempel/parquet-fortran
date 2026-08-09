@@ -82,6 +82,7 @@ fi
 # shell script out from under its own interpreter is a fragile pattern, so it's left in place --
 # one small maintainer-only script left in the tarball is an accepted trade-off.
 REMOVE_PATHS=(
+    BENCHMARKING.md
     CLAUDE.md
     CONTRIBUTING.md
     feature_risks.md
@@ -89,6 +90,7 @@ REMOVE_PATHS=(
     .github
     docs.md
     test/fixtures
+    tools/benchmark_stage7.sh
     tools/benchmark_strings.sh
     tools/benchmark_table.sh
     tools/benchmark_threads.sh

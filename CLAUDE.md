@@ -65,6 +65,7 @@ working rules).
   - [The `parquet_strings` module](#the-parquet_strings-module)
   - [The `parquet_temporal` module (date/time/timestamp)](#the-parquet_temporal-module-datetimetimestamp)
 - [Build & compiler notes](#build--compiler-notes)
+  - [The three machines available for testing](#the-three-machines-available-for-testing)
   - [Compiler & language gotchas](#compiler--language-gotchas)
   - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
   - [gcovr <7.1 cannot parse gcov output for a 10,000+ line file](#gcovr-71-cannot-parse-gcov-output-for-a-10000-line-file)
@@ -86,6 +87,7 @@ working rules).
   - [A test that asserts a REFUSAL must say what to assert when the refusal lifts](#a-test-that-asserts-a-refusal-must-say-what-to-assert-when-the-refusal-lifts)
   - [A static check that enumerates names goes stale silently](#a-static-check-that-enumerates-names-goes-stale-silently)
   - [Measuring test coverage](#measuring-test-coverage)
+  - [Coverage tooling never drives design](#coverage-tooling-never-drives-design)
   - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
   - [`src/parquet_wrapper.cpp`: GCC vs Clang gcov attribution](#srcparquet_wrappercpp-gcc-vs-clang-gcov-attribution)
   - [Regression tests for "sized/typed from the first element" bugs](#regression-tests-for-sizedtyped-from-the-first-element-bugs)
@@ -1515,6 +1517,75 @@ counterpart. User guide: `doc/pages/date-time.md`.
 
 ## Build & compiler notes
 
+### The three machines available for testing
+
+Three physical machines are available for building, testing and benchmarking this library, and they
+differ in ways that matter — architecture, SIMD width, Fortran compiler, core count and Arrow
+version. **Recorded here because a performance claim is only meaningful with the machine attached**,
+and because this project already has one case (CLAUDE.md's materialize note) where the same change
+measured 1.84x under one toolchain and parity under another. There is **no Docker** on machine A, so
+the CI-environment image is not a route to a second toolchain; anything needing one runs on B or C.
+
+| | **A — laptop** | **B — `bunyip.to.ee`** | **C — desktop** |
+|---|---|---|---|
+| CPU | Apple M1 Pro, 8 cores | 2 x AMD EPYC 9654, **192 physical / 384 logical**, 2 sockets, 2 NUMA nodes | Intel i7-10700K, 8 physical / 16 logical |
+| arch / SIMD | **arm64, NEON (128-bit)** | **x86-64 Zen 4, AVX-512** (f/bw/dq/vl/vnni/bf16/…) | **x86-64 Comet Lake, AVX2 (256-bit)** |
+| RAM | 32 GB | **1132 GB** | 128 GB |
+| OS | macOS (arm64) | RHEL 9.7, kernel 5.14 | macOS (x86_64) |
+| Fortran | gfortran 15.2 (MacPorts), **flang 22.1.8** | **ifx 2026.1.1**; gfortran 14.2.1 (gcc-toolset-14); system gfortran 11.5 — *see the warning below* | gfortran 15.2 (MacPorts), **flang-mp-22** |
+| C++ | Apple clang 21, **`g++-mp-15`** (GCC 15.2) | **icpx 2026.1.1**; g++ 14.2.1 (toolset) or 11.5 (system) | Apple clang, MacPorts GCC |
+| Arrow / Parquet | 25.0.0 | **24.0.0** | 25.0.0 |
+| fpm | 0.13.0 alpha | 0.13.0 alpha | 0.13.0 alpha |
+
+**Activating an environment on machine B.** B carries two complete toolchains and neither is
+implicit — a shell there starts in the ifx environment:
+
+- **ifx** (the default): `source /storage/projektid/qmost/activate_qmost_env.sh`. Sets `FPM_FC=ifx`
+  and exports `FPM_CXXFLAGS`/`FPM_LDFLAGS` carrying Arrow's paths.
+- **gfortran**: `source /opt/fortran/activate_gcc.sh`. Switches to gcc-toolset-14 (gfortran/g++
+  14.2.1) and sets `FPM_FC=gfortran`.
+
+**DANGER on machine B: the system `gfortran` is 11.5.0, which is BELOW this project's minimum of 13
+and will silently miscompile it.** In the ifx environment `/usr/bin/gfortran` (11.5.0) is what
+`gfortran` resolves to, so anyone overriding `FPM_FC=gfortran` there without first sourcing
+`activate_gcc.sh` gets a compiler that miscompiles the optional allocatable-`character` argument in
+`schema%add_col_qc` — surfacing as a spurious "column not found" abort at runtime, far from the
+cause (see "Compiler & language gotchas" for the underlying bug). **Always source
+`activate_gcc.sh` before building with gfortran on B**, and check `gfortran --version` reports 14.x
+before trusting a result from there.
+
+**Machine B's gfortran environment exports `-ffree-line-length-none` in `FPM_FFLAGS`.** That is
+directly contrary to this project's enforced 132-column limit, so **a build on B cannot be used to
+verify line length** — a too-long line compiles cleanly there and fails elsewhere. Check line length
+on A or C, or with `tools/run_lint_check.sh`.
+
+**What each machine is good for:**
+
+- **A** — everyday development, and the only machine with a local `flang`. Quiet, so it gives the
+  most stable small deltas.
+- **B** — anything about **ifx**, about **threading at scale** (384 threads), or about **AVX-512**.
+  It is also the only machine that can compare **gfortran against ifx with everything else held
+  constant**, which is the cleanest compiler experiment available. Its size cuts both ways: a large
+  NUMA machine is *bad* for small measurements (a cold destination is dominated by page faults —
+  this project has recorded 5.6x run-to-run variation there at one size), so use it for scaling
+  questions and take small deltas on A.
+- **C** — x86-64 with the **same gfortran and Arrow as A**, so an A-vs-C comparison isolates
+  **architecture alone** (NEON-128 against AVX2-256). That is the only clean single-variable
+  vector-width experiment available and it is worth remembering it exists.
+
+**Arrow differs**: B is on 24.0.0, A and C on 25.0.0. Irrelevant to anything measured purely in
+Fortran, a confound for anything going through `src/parquet_wrapper.cpp` or an end-to-end read/write
+timing. Do not compare those figures across B and C.
+
+**Never override `FPM_FFLAGS`/`FPM_CXXFLAGS`/`FPM_LDFLAGS` on any of the three** — on all of them
+those variables carry Arrow's (and other libraries') include and link paths, and setting them on a
+command line *replaces* rather than appends, producing `fatal error: 'arrow/api.h' file not found`,
+which reads like a missing dependency rather than a flag mistake. Append when a flag must be added:
+`FPM_FFLAGS="${FPM_FFLAGS:-} -flto"`.
+
+**Link-time optimisation links cleanly on all three** (verified with a minimal mixed Fortran/C++
+`bind(C)` program): `-flto` for gfortran + g++, and **`-ipo`** — not `-flto` — for ifx + icpx.
+
 ### Compiler & language gotchas
 
 - **132-column line limit is enforced — do not reintroduce `-ffree-line-length-none`.**
@@ -2588,6 +2659,33 @@ these are expected to be genuinely covered under Clang) and everything else that
 hits (the stale-exclusion candidates). `tools/coverage.sh` only needs the latter, single section,
 since Fortran coverage uses the same `gfortran`/`gcov` toolchain locally and in CI — there's no
 GCC-vs-Clang split to make for `src/*.f90`.
+
+### Coverage tooling never drives design
+
+**gcov and gcovr are instruments, not requirements. A coverage tool's limitation is never a reason
+to write the code differently.** If a change is right for the library — faster, clearer, simpler —
+it is made, and any resulting coverage artifact is documented and excluded, not designed around.
+
+This has to be stated because the pressure runs the other way in practice: this file records several
+places where a tool cannot see what the code does (six `impure elemental` headers in
+`src/parquet_temporal.f90` that never register as hit while their bodies do; the `module procedure`
+form having no extractable source; whole classes of GCC-versus-Clang line attribution differing on
+`src/parquet_wrapper.cpp`), and each one is a standing temptation to avoid the construct rather than
+annotate it. Don't. Concretely, none of the following is ever a reason to reject a change:
+
+- a procedure would become `elemental` and so join the header-attribution quirk above;
+- a rewrite would move lines into a shape gcov attributes to a different line;
+- a `GCOVR_EXCL` marker would have to be added, moved, or explained;
+- a coverage percentage would move because a hot loop became one vectorised statement.
+
+What *is* required is that the artifact be recorded: tag the site with the conventions in the two
+sections below, so the next reader knows the exclusion is a tool limitation rather than untested
+code, and so `tools/coverage.sh`'s stale-exclusion report does not flag it forever.
+
+The one thing this does not license is using "it is a coverage artifact" to wave away a genuine gap.
+The distinction is evidence: an artifact is confirmed by showing the surrounding body *is* covered
+(see the next section for how each documented instance was verified), never asserted because a line
+is inconvenient to reach.
 
 ### Fortran gcov attribution artifacts
 

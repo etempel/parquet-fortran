@@ -67,13 +67,14 @@ To generate the executables:
 
     fpm install --prefix my_path
 
-`fpm.toml` sets `auto-executables = true`, so **seven** executables are built from `app/*.f90` and placed in `my_path/bin`:
+`fpm.toml` sets `auto-executables = true`, so **eight** executables are built from `app/*.f90` and placed in `my_path/bin`:
 
 | Executable | Source | Purpose |
 |---|---|---|
-| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the seven that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other six are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
+| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the eight that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other seven are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
 | `benchmark_threads` | `app/benchmark_threads.f90` | Driven by `tools/benchmark_threads.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_table` | `app/benchmark_table.f90` | Driven by `tools/benchmark_table.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `benchmark_stage7` | `app/benchmark_stage7.f90` | Driven by `tools/benchmark_stage7.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `test_large_scale` | `app/test_large_scale.f90` | Driven by `tools/test_large_scale.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `check_arrow_release` | `app/check_arrow_release.f90` | Driven by `tools/check_arrow_release.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `playground` | `app/playground.f90` | Maintainer scratch file for trying out Fortran code; no fixed purpose. |
@@ -211,6 +212,45 @@ NMULT=20 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 # Keep the synthetic file at a path of your own choosing instead of a temp dir that gets deleted:
 TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 ```
+
+`tools/benchmark_stage7.sh` runs a set of targeted micro-measurements over paths this library's
+optimisation work needs numbers for, and — this is why it exists rather than being a throwaway
+script — prints the **toolchain provenance** ahead of them: compiler and version, Arrow version,
+core count, git commit, and whether the working tree was dirty. A performance number from this
+project is only meaningful with that attached, because the same change has measured 1.84x under one
+toolchain and parity under another (see CLAUDE.md's "The three machines available for testing").
+
+It drives `app/benchmark_stage7.f90`, which covers several independent items selectable with
+`--only=`; run with no selection it measures all of them. The one worth knowing about on its own is
+**`s7-2`**, which times the write-side numeric range-check-and-convert loops in three shapes — the
+fused loop the library has today, and two split forms that separate the check from the conversion so
+both halves can vectorise — across six sizes spanning the cache hierarchy. It answers whether
+splitting that loop would pay on a given target, which is a property of the compiler and the vector
+width rather than of this project, and therefore has to be measured per machine rather than reasoned
+about.
+
+```bash
+# everything, on the current build
+tools/benchmark_stage7.sh
+# one item only
+tools/benchmark_stage7.sh --only=s7-2
+# with and without link-time optimisation, one after the other (-ipo for ifx, -flto otherwise)
+tools/benchmark_stage7.sh --both
+# ...and additionally run the whole test suite under each build configuration
+tools/benchmark_stage7.sh --both --test
+```
+
+`--test` is slow but is not optional when measuring LTO: a faster build that fails the suite is not
+a result, and this project has four documented ifx codegen bugs that appear only at `-O1` and above,
+which an interprocedural build makes more rather than less likely to surface.
+
+`FPM_FC`/`FPM_CXX`/`FPM_*FLAGS` are read from the environment and **appended to, never replaced** —
+on every machine this project is built on they already carry Arrow's include and link paths.
+
+**To run this (or any other measurement) on the reference machines, see
+[BENCHMARKING.md](BENCHMARKING.md)** — it lists the three machines and what each one isolates, how to
+activate either toolchain on machine B, the two hazards there that silently invalidate a result, and
+the ready-to-paste run sheets.
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
 writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`

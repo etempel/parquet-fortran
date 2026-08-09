@@ -37,40 +37,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_i32_i32
     !
     module procedure permute_i32_i64
-        integer(int64), allocatable :: p64(:)
         integer(int32), allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_i32_i64
     !
     module procedure permute_i64_i32
@@ -85,40 +78,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_i64_i32
     !
     module procedure permute_i64_i64
-        integer(int64), allocatable :: p64(:)
         integer(int64), allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_i64_i64
     !
     module procedure permute_f32_i32
@@ -133,40 +119,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_f32_i32
     !
     module procedure permute_f32_i64
-        integer(int64), allocatable :: p64(:)
         real(real32), allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_f32_i64
     !
     module procedure permute_f64_i32
@@ -181,40 +160,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_f64_i32
     !
     module procedure permute_f64_i64
-        integer(int64), allocatable :: p64(:)
         real(real64), allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_f64_i64
     !
     module procedure permute_bool_i32
@@ -229,40 +201,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_bool_i32
     !
     module procedure permute_bool_i64
-        integer(int64), allocatable :: p64(:)
         logical, allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_bool_i64
     !
     module procedure permute_chr_i32
@@ -277,40 +242,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(character(len=len(values)) :: tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_chr_i32
     !
     module procedure permute_chr_i64
-        integer(int64), allocatable :: p64(:)
         character(len=len(values)), allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(character(len=len(values)) :: tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_chr_i64
     !
     module procedure permute_date_i32
@@ -325,40 +283,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_date_i32
     !
     module procedure permute_date_i64
-        integer(int64), allocatable :: p64(:)
         type(parquet_date), allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_date_i64
     !
     module procedure permute_time_i32
@@ -373,40 +324,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_time_i32
     !
     module procedure permute_time_i64
-        integer(int64), allocatable :: p64(:)
         type(parquet_time), allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_time_i64
     !
     module procedure permute_ts_i32
@@ -421,40 +365,33 @@ contains
         p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
+        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
         call check_permutation(p64, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
             tmp(k) = values(p64(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_ts_i32
     !
     module procedure permute_ts_i64
-        integer(int64), allocatable :: p64(:)
         type(parquet_timestamp), allocatable :: tmp(:)
         integer(int64) :: k, n
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         n = size(values, kind=int64)
         ! The LENGTH is checked even under assume_valid=.true.: the gather below
-        ! indexes values(p64(k)) for k = 1..size(values), so a short perm would read
-        ! past its end. Only the O(n) contents walk is what the caller may skip.
-        call check_permutation(p64, n, "pf_permute", scan=.not. skip)
+        ! indexes values(perm(k)) for k = 1..size(values), so a short perm would
+        ! read past its end. Only the O(n) contents walk is what the caller may skip.
+        call check_permutation(perm, n, "pf_permute", scan=.not. skip)
         allocate(tmp(n))
         do k = 1_int64, n
-            tmp(k) = values(p64(k))
+            tmp(k) = values(perm(k))
         end do
-        do k = 1_int64, n
-            values(k) = tmp(k)
-        end do
+        values(1:n) = tmp(1:n)
     end procedure permute_ts_i64
     !
     module procedure permute_strcol_i32
@@ -476,20 +413,17 @@ contains
     end procedure permute_strcol_i32
     !
     module procedure permute_strcol_i64
-        integer(int64), allocatable :: p64(:)
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         ! `assume_valid` means the same thing here as for the nine array types:
         ! %reindex_trusted skips the O(n) contents walk and keeps the O(1) length
         ! check. Both column types validate unconditionally without it.
         if (skip) then
-            call values%reindex_trusted(p64)
+            call values%reindex_trusted(perm)
         else
-            call values%reindex(p64)
+            call values%reindex(perm)
         end if
     end procedure permute_strcol_i64
     !
@@ -512,20 +446,17 @@ contains
     end procedure permute_col_i32
     !
     module procedure permute_col_i64
-        integer(int64), allocatable :: p64(:)
         logical :: skip
         !
         skip = .false.
         if (present(assume_valid)) skip = assume_valid
-        allocate(p64(size(perm, kind=int64)))
-        p64 = int(perm, int64)
         ! `assume_valid` means the same thing here as for the nine array types:
         ! %reindex_trusted skips the O(n) contents walk and keeps the O(1) length
         ! check. Both column types validate unconditionally without it.
         if (skip) then
-            call values%reindex_trusted(p64)
+            call values%reindex_trusted(perm)
         else
-            call values%reindex(p64)
+            call values%reindex(perm)
         end if
     end procedure permute_col_i64
     !

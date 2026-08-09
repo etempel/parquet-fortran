@@ -53,6 +53,7 @@ contains
             new_unittest("pf_sort copies without touching the input", test_sort_out_of_place), &
             new_unittest("pf_permute applies a permutation in place", test_permute_round_trip), &
             new_unittest("pf_permute accepts assume_valid", test_permute_assume_valid), &
+            new_unittest("pf_permute: every type x both index kinds x five shapes", test_permute_all_specifics), &
             new_unittest("pf_is_sorted agrees with pf_sort", test_is_sorted_agrees), &
             new_unittest("is_sorted is direction- and null-aware", test_is_sorted_options), &
             new_unittest("an int32 permutation equals the int64 one", test_perm_kinds_agree), &
@@ -283,6 +284,234 @@ contains
         if (allocated(error)) return
         call check(error, all(a == [1, 2, 3, 4, 5]), "reversing a reversed array must sort it")
     end subroutine test_permute_assume_valid
+    !
+    !> `pf_permute` has 22 specifics -- eleven value types times two index kinds -- all emitted from
+    !> ONE template in `tools/generate_parquet_sorting.py`. That is the risk this test exists for: a
+    !> template slip is invisible in the generator's own `--check` (which compares the committed
+    !> output against a fresh generation, so a wrong template matches perfectly) and a wrong
+    !> permutation is a silently wrong answer, not a crash. So the sweep is exhaustive by
+    !> construction rather than representative.
+    !>
+    !> **The `_i64` half is the half that was thin.** The specifics differ only in the index kind,
+    !> and until this test existed eight of ten `pf_permute` call sites in this file passed an
+    !> `integer(int32)` permutation -- which is what `pf_argsort` hands back into an `int32`
+    !> variable, so it is the shape a test reaches for by default. Every case below runs both kinds
+    !> over the same data and requires the same answer, so a specific that diverges from its twin
+    !> fails here even if both are individually self-consistent.
+    !>
+    !> Five permutation shapes, chosen so that a plausible slip cannot hide behind all of them:
+    !> identity (catches a body that permutes when it should not), reversal (catches an inverted
+    !> permutation -- it is its own inverse, so it is the one shape that would NOT catch that, and
+    !> is included for the boundary rather than for that property), scattered (catches an inverted
+    !> or transposed index -- `perm` and its inverse differ here), a two-element swap (catches an
+    !> off-by-one that leaves most elements in place) and a single element (the degenerate bound).
+    !>
+    !> Values are distinct per row wherever the type allows it, so any misplacement shows. `logical`
+    !> is the one type that cannot manage six distinct values; its pattern is asymmetric and swept
+    !> across all shapes instead, which is weaker and is why it is called out here rather than left
+    !> to look equivalent.
+    subroutine test_permute_all_specifics(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: N = 6, NSH = 4
+        !> Column `s` is one permutation shape: identity, reversal, scattered, two-element swap.
+        integer(int32), parameter :: SH(N, NSH) = reshape([ &
+            1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32, &
+            6_int32, 5_int32, 4_int32, 3_int32, 2_int32, 1_int32, &
+            4_int32, 1_int32, 6_int32, 2_int32, 5_int32, 3_int32, &
+            2_int32, 1_int32, 3_int32, 4_int32, 5_int32, 6_int32], [N, NSH])
+        character(len=*), parameter :: SHNAME(NSH) = &
+            [character(len=8) :: "identity", "reversal", "scatter", "swap"]
+        integer :: s, ik
+        integer(int32) :: p32(N)
+        integer(int64) :: p64(N)
+        character(len=32) :: ctx
+
+        do s = 1, NSH
+            do ik = 1, 2
+                p32 = SH(:, s)
+                p64 = int(SH(:, s), int64)
+                write(ctx, "(A,A,A,I0)") "[", trim(SHNAME(s)), "/i", 32*ik
+                ! ---- the six plain intrinsic types ----
+                block
+                    integer(int32) :: v(N), src(N) = [11_int32, 22_int32, 33_int32, 44_int32, 55_int32, 66_int32]
+                    v = src
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    call check(error, all(v == src(SH(:, s))), trim(ctx)//"] int32 permute")
+                end block
+                if (allocated(error)) return
+                block
+                    integer(int64) :: v(N), src(N) = [11_int64, 22_int64, 33_int64, 44_int64, 55_int64, 66_int64]
+                    v = src
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    call check(error, all(v == src(SH(:, s))), trim(ctx)//"] int64 permute")
+                end block
+                if (allocated(error)) return
+                block
+                    real(real32) :: v(N), src(N) = [1.5_real32, 2.5_real32, 3.5_real32, 4.5_real32, &
+                        5.5_real32, 6.5_real32]
+                    v = src
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    call check(error, all(v == src(SH(:, s))), trim(ctx)//"] real32 permute")
+                end block
+                if (allocated(error)) return
+                block
+                    real(real64) :: v(N), src(N) = [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64, &
+                        5.5_real64, 6.5_real64]
+                    v = src
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    call check(error, all(v == src(SH(:, s))), trim(ctx)//"] real64 permute")
+                end block
+                if (allocated(error)) return
+                block
+                    logical :: v(N), src(N) = [.true., .false., .true., .true., .false., .false.]
+                    v = src
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    call check(error, all(v .eqv. src(SH(:, s))), trim(ctx)//"] logical permute")
+                end block
+                if (allocated(error)) return
+                block
+                    character(len=4) :: v(N), src(N) = [character(len=4) :: "aa1", "bb2", "cc3", "dd4", "ee5", "ff6"]
+                    v = src
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    call check(error, all(v == src(SH(:, s))), trim(ctx)//"] character permute")
+                end block
+                if (allocated(error)) return
+                ! ---- the three temporal element types, compared through their raw accessors ----
+                block
+                    type(parquet_date) :: v(N)
+                    integer(int32) :: raws(N) = [101_int32, 202_int32, 303_int32, 404_int32, 505_int32, 606_int32]
+                    integer :: k
+                    call v%set_raw(raws)
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    call check(error, all([(v(k)%raw(), k = 1, N)] == raws(SH(:, s))), &
+                        trim(ctx)//"] parquet_date permute")
+                end block
+                if (allocated(error)) return
+                block
+                    type(parquet_time) :: v(N)
+                    integer(int64) :: raws(N) = [101_int64, 202_int64, 303_int64, 404_int64, 505_int64, 606_int64]
+                    integer :: k
+                    call v%set_raw(raws)
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    call check(error, all([(v(k)%raw(), k = 1, N)] == raws(SH(:, s))), &
+                        trim(ctx)//"] parquet_time permute")
+                end block
+                if (allocated(error)) return
+                block
+                    type(parquet_timestamp) :: v(N)
+                    integer(int64) :: secs(N) = [101_int64, 202_int64, 303_int64, 404_int64, 505_int64, 606_int64]
+                    integer(int64) :: gs(N)
+                    integer(int32) :: gn(N)
+                    integer :: k
+                    call v%set_raw(secs, 7_int32)
+                    if (ik == 1) then
+                        call pf_permute(v, p32)
+                    else
+                        call pf_permute(v, p64)
+                    end if
+                    do k = 1, N
+                        call v(k)%get_raw(gs(k), gn(k))
+                    end do
+                    call check(error, all(gs == secs(SH(:, s))) .and. all(gn == 7_int32), &
+                        trim(ctx)//"] parquet_timestamp permute")
+                end block
+                if (allocated(error)) return
+                ! ---- the two container types, which delegate to their own %reindex ----
+                block
+                    type(parquet_string_column) :: sc
+                    character(len=:), allocatable :: got
+                    character(len=*), parameter :: SRC(N) = [character(len=4) :: "aa1", "bb2", "cc3", &
+                        "dd4", "ee5", "ff6"]
+                    integer :: k
+                    logical :: ok
+                    do k = 1, N
+                        call sc%append_string(trim(SRC(k)))
+                    end do
+                    if (ik == 1) then
+                        call pf_permute(sc, p32)
+                    else
+                        call pf_permute(sc, p64)
+                    end if
+                    ok = .true.
+                    do k = 1, N
+                        call sc%get(int(k, int64), got)
+                        if (got /= trim(SRC(SH(k, s)))) ok = .false.
+                    end do
+                    call check(error, ok, trim(ctx)//"] parquet_string_column permute")
+                end block
+                if (allocated(error)) return
+                block
+                    type(parquet_column) :: c
+                    integer(int32) :: src(N) = [11_int32, 22_int32, 33_int32, 44_int32, 55_int32, 66_int32]
+                    integer(int32) :: got
+                    integer :: k
+                    logical :: ok
+                    call c%init(PK_INT32, int(N, int64))
+                    call c%set_all(src)
+                    call c%set_null(2_int64)      ! a null must travel with its row, not stay put
+                    if (ik == 1) then
+                        call pf_permute(c, p32)
+                    else
+                        call pf_permute(c, p64)
+                    end if
+                    ok = .true.
+                    do k = 1, N
+                        if (SH(k, s) == 2) then
+                            if (.not. c%is_null(int(k, int64))) ok = .false.
+                        else
+                            if (c%is_null(int(k, int64))) ok = .false.
+                            call c%get_at(int(k, int64), got)
+                            if (got /= src(SH(k, s))) ok = .false.
+                        end if
+                    end do
+                    call check(error, ok, trim(ctx)//"] parquet_column permute (value and null)")
+                end block
+                if (allocated(error)) return
+            end do
+        end do
+
+        ! ---- the degenerate bound: a single element, every type reached through the same path ----
+        block
+            integer(int32) :: a(1) = [7_int32], q32(1) = [1_int32]
+            integer(int64) :: b(1) = [7_int64], q64(1) = [1_int64]
+            call pf_permute(a, q32)
+            call pf_permute(b, q64)
+            call check(error, a(1) == 7_int32 .and. b(1) == 7_int64, &
+                "a single-element permutation must be a no-op in both index kinds")
+        end block
+    end subroutine test_permute_all_specifics
     !
     !> `pf_is_sorted` must answer .false. before and .true. after sorting the same array -- the
     !> two share a comparator, so they cannot be allowed to disagree.

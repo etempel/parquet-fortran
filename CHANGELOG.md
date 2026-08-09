@@ -459,6 +459,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`pf_permute` no longer copies a permutation that is already the right kind.** Every specific
+  widened `perm` into a fresh `integer(int64)` array before using it — including the eleven
+  `integer(int64)`-index specifics, where that was an allocation and a full copy to produce a value
+  identical to an argument already in hand. Those eleven now use `perm` directly; the
+  `integer(int32)`-index specifics still widen, because there the conversion is real. Measured on a
+  4 M-element `real64` permutation with an `int64` index: 11.9 → 11.1 ms (**1.07x**), and one
+  fewer `n`-element allocation per call. No answer changes, and the `int32` path is untouched.
+
 - **Reading a `parquet_date` column is 1.6x faster**, and every temporal read is cheaper, from a
   one-word change repeated across the setters. `parquet_date`/`parquet_time`/`parquet_timestamp`
   declared their setters' passed-object dummy `class(...), intent(out)`, which makes the compiler

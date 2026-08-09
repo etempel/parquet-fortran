@@ -459,6 +459,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Sorting an integer column that contains nulls is 3.1x faster.** The integer counting fast path
+  declined any column carrying a validity mask, so **a single null anywhere took the whole sort onto
+  the general comparator path** — a step function of whether a null existed, not of how many. Nulls
+  are a *tier* in this engine rather than a value, so they never interleave with values; the fast
+  path now places them as one contiguous block and counting-sorts the rest. Measured on a 4 M-row
+  `int32` column: 168.8 → 54.3 ms at 0.1% nulls, 172.0 → 56.3 ms at 10%, 136.7 → 43.9 ms at 50%.
+  A null-bearing integer column is the common case in real files, and this reaches `pf_sort`,
+  `pf_argsort`, `parquet_table%sort_by` and the reader's `sort=` alike. Null placement, the
+  direction rule (`descending` never moves the null block) and stability are unchanged — the fast
+  path is asserted against the comparator path across both directions and both placements. A
+  related latent bug is fixed with it: the fast path's value-range scan counted null rows, whose key
+  bytes Arrow does not define, so a null carrying a large value could silently disable the fast path
+  for a column well within its limits.
+
 - **Building a validity mask for a date/time/timestamp column is 2.6x faster.** These kinds keep
   their null state in the element rather than in the column's bitmap, so `%row_validity`,
   `%element_validity` and `%set_validity` took a separate branch for them — one that asked the

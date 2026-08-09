@@ -3739,21 +3739,49 @@ extern "C"
 	}
 
 	// True when the single-key integer case can be counting-sorted, filling lo/hi with the key's
-	// value range. Declines a null-bearing key: nulls would need their own tier handling and the
-	// comparator path already does it correctly, so the fast path stays deliberately narrow.
+	// value range over its VALID rows.
+	//
+	// A null-bearing key is accepted. It used to be declined, and that one clause cost the entire
+	// fast path to a single null anywhere in the column -- measured as a 4.6-5.6x cliff at 0.1%
+	// null density on a 4M-row int32 column, i.e. a step function of WHETHER a null exists rather
+	// than of how many. What makes nulls tractable is that they are a TIER in this engine, never a
+	// value (see sort_tier_of): they never interleave with values, so they form one contiguous
+	// block that the permutation can place directly.
+	//
+	// THE RANGE SCAN MUST SKIP NULLS, and that is not an optimisation. A null row's key slot holds
+	// whatever the buffer happened to contain -- Arrow promises nothing there -- so including it
+	// can widen the range past g_sort_counting_bucket_limit and decline the fast path for no
+	// reason, or admit a bucket domain sized from garbage.
 	static bool sort_counting_candidate(const std::vector<SortKeyData> &keys, int64_t n, int64_t &lo, int64_t &hi)
 	{
 		if (keys.size() != 1 || n < 2) return false;
 		const SortKeyData &key = keys[0];
-		if (key.kind != SortValueKind::Integer || !key.valid.empty()) return false;
-		lo = key.ints_ptr[0];
-		hi = key.ints_ptr[0];
-		for (int64_t i = 1; i < n; ++i)
+		if (key.kind != SortValueKind::Integer) return false;
+		const bool has_nulls = !key.valid.empty();
+		bool seen = false;
+		lo = 0;
+		hi = 0;
+		for (int64_t i = 0; i < n; ++i)
 		{
+			if (has_nulls && key.valid[static_cast<size_t>(i)] == 0) continue;
 			int64_t v = key.ints_ptr[static_cast<size_t>(i)];
-			if (v < lo) lo = v;
-			if (v > hi) hi = v;
+			if (!seen)
+			{
+				lo = v;
+				hi = v;
+				seen = true;
+			}
+			else
+			{
+				if (v < lo) lo = v;
+				if (v > hi) hi = v;
+			}
 		}
+		// Every row null: there is no range to bound, and the answer is file order because all
+		// nulls tie. lo == hi == 0 leaves one empty bucket, and the permutation below then emits
+		// the identity -- which is correct, and cheaper than letting the comparator path discover
+		// the same thing through n log n comparisons that all return 0.
+		if (!seen) return true;
 		// Unsigned subtraction, so a range spanning both signs cannot overflow the check itself.
 		uint64_t range = static_cast<uint64_t>(hi) - static_cast<uint64_t>(lo);
 		return range < static_cast<uint64_t>(g_sort_counting_bucket_limit);
@@ -3764,18 +3792,44 @@ extern "C"
 	// both O(n); stable by construction, because the placement pass walks the input in index order
 	// and so emits equal values in their original order -- the same result the comparator path's
 	// index tiebreaker produces.
+	//
+	// NULLS ARE A BLOCK, NOT A BUCKET. They are a tier in this engine (sort_tier_of), so they never
+	// interleave with values; the permutation places them as one contiguous run and counting-sorts
+	// the values into what is left. Four properties have to survive, each of them already true of
+	// the comparator path and each independently breakable here:
+	//
+	//   1. The null block sits at ONE END -- last by default, first under `nulls_first`.
+	//   2. `descending` NEVER MOVES IT. sort_compare_key applies the tier test before the
+	//      descending negation, so a descending sort still puts nulls last. This is Arrow's own
+	//      rule and is the single most likely thing to get wrong here, because it is invisible to
+	//      any ascending test. Note below that value_base/null_base do not mention `descending`.
+	//   3. Nulls hold FILE ORDER among themselves -- they tie, so they are emitted in increasing
+	//      row index, which the single forward pass gives for free.
+	//   4. The value block keeps its existing behaviour exactly, including descending and
+	//      stability. With no nulls, nn is 0, value_base is 0 and this is the original code.
 	static std::vector<int64_t> sort_counting_permutation(const SortKeyData &key, int64_t n, int64_t lo, int64_t hi)
 	{
 		size_t nbuckets = static_cast<size_t>(static_cast<uint64_t>(hi) - static_cast<uint64_t>(lo)) + 1;
 		std::vector<int64_t> counts(nbuckets, 0);
+		const bool has_nulls = !key.valid.empty();
+		int64_t nn = 0;
 		for (int64_t i = 0; i < n; ++i)
 		{
+			if (has_nulls && key.valid[static_cast<size_t>(i)] == 0)
+			{
+				++nn;
+				continue;
+			}
 			++counts[static_cast<size_t>(static_cast<uint64_t>(key.ints_ptr[static_cast<size_t>(i)]) - static_cast<uint64_t>(lo))];
 		}
+		// Where each block starts. Deliberately free of `descending` -- see property 2 above.
+		const int64_t value_base = (has_nulls && key.nulls_first) ? nn : 0;
+		int64_t null_pos = (has_nulls && key.nulls_first) ? 0 : (n - nn);
 		// Turn counts into each bucket's first output offset: bottom-up ascending, top-down
-		// descending (so the largest value lands at offset 0 while keeping ties in file order).
+		// descending (so the largest value lands at the front of the VALUE BLOCK while keeping
+		// ties in file order).
 		std::vector<int64_t> offsets(nbuckets, 0);
-		int64_t running = 0;
+		int64_t running = value_base;
 		if (key.descending)
 		{
 			for (size_t b = nbuckets; b-- > 0;)
@@ -3795,6 +3849,11 @@ extern "C"
 		std::vector<int64_t> perm(static_cast<size_t>(n));
 		for (int64_t i = 0; i < n; ++i)
 		{
+			if (has_nulls && key.valid[static_cast<size_t>(i)] == 0)
+			{
+				perm[static_cast<size_t>(null_pos++)] = i;
+				continue;
+			}
 			size_t b = static_cast<size_t>(static_cast<uint64_t>(key.ints_ptr[static_cast<size_t>(i)]) - static_cast<uint64_t>(lo));
 			perm[static_cast<size_t>(offsets[b]++)] = i;
 		}

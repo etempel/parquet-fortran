@@ -70,6 +70,8 @@ contains
             new_unittest("empty and single-element arrays are handled", test_degenerate_sizes), &
             new_unittest("pf_argsort matches a read-time sort_by=", test_oracle_matches_read_time_sort), &
             new_unittest("the counting path matches the comparator", test_counting_path_agrees), &
+            new_unittest("the counting path matches the comparator on a NULL-BEARING key", &
+                test_counting_path_nulls_agree), &
             new_unittest("partial_sort equals a truncated full sort", test_partial_matches_full), &
             new_unittest("n is clamped, not refused", test_partial_clamps), &
             new_unittest("partial_argsort agrees with argsort", test_partial_argsort), &
@@ -676,6 +678,107 @@ contains
         call check(error, all([(v(fast(k)), k = 1, 40)] == [(v(slow(k)), k = 1, 40)]), &
             "both paths must gather the same values in the same order")
     end subroutine test_counting_path_agrees
+    !
+    !> The counting fast path with NULLS, which it used to decline outright.
+    !!
+    !! Declining cost the whole fast path to a single null anywhere in the column -- a step
+    !! function of WHETHER a null exists, not how many, measured as a 3.1x end-to-end loss on a
+    !! 4M-row column at 0.1% null density. Nulls are a TIER in this engine, never a value, so they
+    !! form one contiguous block the permutation places directly.
+    !!
+    !! **Every case sweeps `descending` x `nulls_first`, and that is the point rather than
+    !! thoroughness for its own sake.** The null block's position must depend on `nulls_first` and
+    !! must NOT depend on `descending` -- Arrow's rule, and the one property a partition-then-count
+    !! implementation gets wrong by default. An ascending nulls-last test cannot see either.
+    !!
+    !! Each case asserts BOTH halves: that the two engines really diverged (zero comparisons on the
+    !! fast half, nonzero on the slow one) and that they agree. Without the first, a fast path that
+    !! silently declined would pass the equality against itself -- feature_risks.md Risk-35/Risk-52.
+    subroutine test_counting_path_nulls_agree(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(40)
+        logical :: ok(40), none_null(40), all_null(40)
+        integer :: k
+
+        do k = 1, 40
+            v(k) = int(mod(k * 7, 5), int32)     ! five distinct values: the counting path's case
+            ok(k) = mod(k, 7) /= 0               ! a scattered handful of nulls
+        end do
+        none_null = .true.
+        all_null = .false.
+        !
+        call one_null_case(error, v, ok, .false., .false., "asc/nulls-last")
+        if (allocated(error)) return
+        call one_null_case(error, v, ok, .true., .false., "desc/nulls-last")
+        if (allocated(error)) return
+        call one_null_case(error, v, ok, .false., .true., "asc/nulls-first")
+        if (allocated(error)) return
+        call one_null_case(error, v, ok, .true., .true., "desc/nulls-first")
+        if (allocated(error)) return
+        ! The two ends. All-null has no value range at all, so the candidate has nothing to bound
+        ! and must still answer file order; no-null must reach the same result as before the mask
+        ! argument existed.
+        call one_null_case(error, v, all_null, .false., .false., "all-null asc")
+        if (allocated(error)) return
+        call one_null_case(error, v, all_null, .true., .true., "all-null desc/nulls-first")
+        if (allocated(error)) return
+        call one_null_case(error, v, none_null, .false., .false., "no-null asc")
+        if (allocated(error)) return
+        call one_null_case(error, v, none_null, .true., .false., "no-null desc")
+        if (allocated(error)) return
+        !
+        ! A NULL ROW'S KEY SLOT IS NOT A VALUE, and this is the case that proves the candidate
+        ! knows it. Arrow promises nothing about the bytes behind a null, so a null row can carry
+        ! anything -- here a value four orders of magnitude outside the valid rows' 0..4 range, and
+        ! far past the bucket limit. Counting the null rows into the range scan would size the
+        ! bucket domain from that value, blow the limit, and silently decline the fast path; the
+        ! `cmp_fast == 0` assertion in one_null_case is what catches it. Every other fixture in
+        ! this test holds an in-range value behind its nulls, so none of them can see this.
+        do k = 1, 40
+            if (mod(k, 7) == 0) v(k) = 2000000000_int32
+        end do
+        call one_null_case(error, v, ok, .false., .false., "null slot holds a huge value")
+        if (allocated(error)) return
+        call one_null_case(error, v, ok, .true., .true., "huge null slot, desc/nulls-first")
+    end subroutine test_counting_path_nulls_agree
+    !
+    !> One (descending, nulls_first) case of the test above: both engines, both halves asserted.
+    subroutine one_null_case(error, v, ok, desc, nfirst, label)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), intent(in) :: v(:)      !! key values.
+        logical, intent(in) :: ok(:)            !! validity mask; .false. marks a null.
+        logical, intent(in) :: desc             !! sort direction.
+        logical, intent(in) :: nfirst           !! null placement.
+        character(len=*), intent(in) :: label   !! names the case in a failure message.
+        integer(int32), allocatable :: fast(:), slow(:)
+        integer(int64) :: cmp_fast, cmp_slow
+        integer :: k, n
+
+        n = size(v)
+        call arm_sort_comparisons()
+        call pf_argsort(v, fast, is_valid=ok, descending=desc, nulls_first=nfirst)
+        cmp_fast = sort_comparisons()
+        call parquet_set_sort_counting_path(.false.)
+        call arm_sort_comparisons()
+        call pf_argsort(v, slow, is_valid=ok, descending=desc, nulls_first=nfirst)
+        cmp_slow = sort_comparisons()
+        call parquet_set_sort_counting_path(.true.)
+        !
+        call check(error, cmp_fast == 0_int64, &
+            label // ": the fast half must reach the COUNTING path (zero comparisons); a nonzero " // &
+            "count means the candidate declined and the agreement below is vacuous")
+        if (allocated(error)) return
+        call check(error, cmp_slow > 0_int64, &
+            label // ": the slow half must reach the COMPARATOR path")
+        if (allocated(error)) return
+        call check(error, all(fast == slow), &
+            label // ": the counting path must produce exactly the comparator path's permutation")
+        if (allocated(error)) return
+        ! Not implied by the permutation check: it pins WHERE the nulls landed, which is the
+        ! property `descending` must not disturb.
+        call check(error, all([(ok(fast(k)), k = 1, n)] .eqv. [(ok(slow(k)), k = 1, n)]), &
+            label // ": the null block must land in the same place under both engines")
+    end subroutine one_null_case
     !
     !> **The partial-sort oracle.** Its first `n` must equal `pf_sort`'s first `n`, for every
     !> boundary value of `n` -- which is nearly free, because `pf_sort` is already trusted by every

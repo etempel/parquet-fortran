@@ -154,6 +154,7 @@ contains
             call bench_whole(src, d32, d64, old32, new32, old64, new64)
             print "(I9,6F8.2)", n, old32, new32, old32/new32, old64, new64, old64/new64
         end do
+        call whole_end_to_end()
         print "(A)", ""
         print "(A)", "  HOW TO READ THIS. aarch64 has FRINTA, one instruction with anint's exact"
         print "(A)", "  semantics, and measures ratio ~0.4 -- i.e. the candidate LOSES there, badly."
@@ -219,6 +220,67 @@ contains
             new64 = min(new64, (t1 - t0)*1.0e9_real64/real(n, real64))
         end do
     end subroutine bench_whole
+
+    !> What share of a REAL write the integrality test is, which is what decides S7-9.
+    !!
+    !! The table above times the conversion loop alone. That loop is not reachable on its own: it
+    !! runs inside `parquet_write_column` when the schema declares an integer column and the caller
+    !! passes floats, and the rest of that call -- Arrow append, encoding, compression, file I/O --
+    !! is charged to the same user. The keep-or-drop rule in feature_optimise_A7.md is explicit that
+    !! a gain only reachable through a path that swamps it is dropped, so the ratio above is not on
+    !! its own an argument for changing anything.
+    !!
+    !! Reports the whole write, and the share the integrality test accounts for at this machine's
+    !! own measured cost. The CEILING on any end-to-end gain is share*(1 - 1/ratio) -- print it
+    !! rather than leaving it to be estimated, because that is the number the decision needs.
+    subroutine whole_end_to_end()
+        integer(int64), parameter :: NROW = 4000000_int64
+        character(len=*), parameter :: OUT = "test_run/s7-9-endtoend.parquet"
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64), allocatable :: src(:)
+        integer(int32), allocatable :: d32(:)
+        integer(int64), allocatable :: d64(:)
+        real(real64) :: t0, t1, total_ms, anint32, cand32, anint64, cand64
+        real(real64) :: conv_ms, share, ratio, ceiling
+        integer(int64) :: i
+        allocate(src(NROW), d32(NROW), d64(NROW))
+        do i = 1_int64, NROW
+            src(i) = real(mod(i, 1000_int64), real64)
+        end do
+        d32 = 0_int32 ; d64 = 0_int64
+        ! This machine's own per-element costs, measured exactly as the table above, so both the
+        ! share and the ratio below come from this run rather than from another machine's figures.
+        call bench_whole(src, d32, d64, anint32, cand32, anint64, cand64)
+        call schema%init(table="s7_9_endtoend")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+        call tick(t0)
+        call parquet_open_writer(writer, OUT, schema)
+        call parquet_write_column(writer, "v", src)
+        call parquet_close_writer(writer)
+        call tick(t1)
+        total_ms = (t1 - t0)*1000.0_real64
+        conv_ms = anint32*real(NROW, real64)*1.0e-6_real64
+        share = conv_ms/total_ms
+        ratio = anint32/cand32
+        ! share * (1 - 1/ratio): the fraction of the write the loop occupies, times the fraction of
+        ! the loop the candidate removes. An upper bound, since it credits the change with the whole
+        ! difference and charges it nothing.
+        ceiling = share*(1.0_real64 - 1.0_real64/ratio)
+        print "(A)", ""
+        print "(A)", "  End-to-end: 4M float64 rows written through an int32 schema column."
+        print "(A,F10.2)", "    whole open + parquet_write_column + close, ms : ", total_ms
+        print "(A,F10.2)", "    integrality+range+convert loop alone,      ms : ", conv_ms
+        print "(A,F9.1,A)", "    that loop's share of the write                : ", share*100.0_real64, " %"
+        print "(A,F9.2)",   "    this machine's candidate/anint ratio (int32)  : ", ratio
+        print "(A,F9.1,A)", "    CEILING on the end-to-end gain                : ", ceiling*100.0_real64, " %"
+        print "(A)", "    The ceiling is share*(1 - 1/ratio) and is generous: it credits the"
+        print "(A)", "    change with the whole difference and charges it nothing. Compare it"
+        print "(A)", "    against the ~5% line the keep-or-drop rule uses. The conversion is"
+        print "(A)", "    NOT callable on its own -- it is reached only through this write -- so"
+        print "(A)", "    this number, not the loop ratio, is what the rule asks for."
+    end subroutine whole_end_to_end
 
     !> The CANDIDATE integrality test S7-9 proposes: no `anint`, so no libm call on x86-64.
     !!

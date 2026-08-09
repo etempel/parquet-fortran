@@ -358,36 +358,41 @@ contains
             elem_mask = reshape(spread(mask, 1, int(block_width)), [size(mask, kind=int64)*block_width])
         end if
     end function parquet_mask_expand_block
-    !> Returns the row-keep mask applicable to a whole-column write of `nrows` (pre-mask) rows:
-    !> the writer's file_mask (set by parquet_write_row_mask), or an all-.true. identity mask if
-    !> masking is not in use. `error stop`s if a file_mask is set but its size doesn't match
-    !> `nrows` exactly. Also marks the writer as started (blocking a later parquet_write_row_mask
-    !> call) and as having had a whole-column write (blocking parquet_write_chunk_row_mask).
-    subroutine parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
+    !> Reports whether a whole-file row mask (parquet_write_row_mask) is in force for a
+    !> whole-column write of `nrows` (pre-mask) rows and, when one is, returns it in `row_mask`.
+    !> `error stop`s if a file_mask is set but its size doesn't match `nrows` exactly. Also marks
+    !> the writer as started (blocking a later parquet_write_row_mask call) and as having had a
+    !> whole-column write (blocking parquet_write_chunk_row_mask).
+    !>
+    !> `masked` is .false. for the overwhelmingly common unmasked write, and `row_mask` is then
+    !> left UNALLOCATED rather than filled with an all-.true. identity mask. Callers take their
+    !> own fast path on it -- see the "unmasked fast path" note in parquet_write_numeric.f90.
+    !> Fabricating the identity mask here is what used to make every ordinary write allocate and
+    !> then `pack` through a full-length logical array that could not remove a single row.
+    subroutine parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column being written; named only in the error-stop message.
         integer(int64), intent(in) :: nrows !! this call's own (pre-mask) row count.
-        logical, allocatable, intent(out) :: row_mask(:) !! this call's applicable row-keep mask, `nrows` long.
+        logical, allocatable, intent(out) :: row_mask(:) !! the `nrows`-long row-keep mask; unallocated if .not. masked.
+        logical, intent(out) :: masked !! .true. if a whole-file row mask applies to this write.
         character(len=32) :: expected_str, got_str
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
 
         writer%write_started = .true.
         writer%any_whole_column_write = .true.
 
-        if (allocated(writer%file_mask)) then
-            if (size(writer%file_mask, kind=int64) /= nrows) then
-                write(expected_str, '(i0)') size(writer%file_mask, kind=int64)
-                write(got_str, '(i0)') nrows
-                call writer_context_suffix(writer, ctx)
-                error stop "parquet_write_column: values row count (" // trim(got_str) // &
-                    ") does not match the mask set via parquet_write_row_mask (" // trim(expected_str) // &
-                    " rows) for column " // trim(name) // ctx
-            end if
-            row_mask = writer%file_mask
-        else
-            allocate(row_mask(nrows))
-            row_mask = .true.
+        masked = allocated(writer%file_mask)
+        if (.not. masked) return
+
+        if (size(writer%file_mask, kind=int64) /= nrows) then
+            write(expected_str, '(i0)') size(writer%file_mask, kind=int64)
+            write(got_str, '(i0)') nrows
+            call writer_context_suffix(writer, ctx)
+            error stop "parquet_write_column: values row count (" // trim(got_str) // &
+                ") does not match the mask set via parquet_write_row_mask (" // trim(expected_str) // &
+                " rows) for column " // trim(name) // ctx
         end if
+        row_mask = writer%file_mask
     end subroutine parquet_writer_whole_column_mask
     module procedure parquet_write_row_mask_impl
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
@@ -952,16 +957,25 @@ contains
     !> (writer%current_row_group_nrows, set by parquet_new_row_group) -- the streaming
     !> counterpart to parquet_check_row_count, which instead fixes/checks a row count against
     !> the whole file.
-    !> Also returns this chunk's applicable row-keep mask (row_mask, always allocated and
-    !> `nrows` long: an identity mask if no masking scheme is active) and enforces
-    !> parquet_write_chunk_row_mask's all-or-nothing-per-writer rule: writer%chunk_mask_scheme is
-    !> fixed (0 -> 1 or 2) at the first parquet_write_column_chunk call of the writer's first row
-    !> group, and any later row group must then agree with that decision.
-    subroutine parquet_check_row_group_row_count(writer, name, nrows, row_mask)
+    !> Also reports whether a row mask applies to this chunk (`masked`) and, when one does,
+    !> returns it in `row_mask`; `row_mask` is left UNALLOCATED otherwise, so an unmasked chunked
+    !> write allocates and packs nothing. Both masking routes count: a whole-file mask
+    !> (parquet_write_row_mask, whose per-row-group window parquet_new_row_group_impl has already
+    !> sliced into writer%chunk_mask) and a per-row-group one (parquet_write_chunk_row_mask).
+    !> They are mutually exclusive by parquet_write_chunk_row_mask's own guard.
+    !>
+    !> Enforces parquet_write_chunk_row_mask's all-or-nothing-per-writer rule too:
+    !> writer%chunk_mask_scheme is fixed (0 -> 1 or 2) at the first parquet_write_column_chunk
+    !> call of the writer's first row group, and any later row group must then agree with that
+    !> decision. This subroutine therefore must still be CALLED on every chunk write, unmasked or
+    !> not -- it also validates the chunk's row count and opens the underlying C++ row group. Only
+    !> the mask itself is skippable.
+    subroutine parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
         type(parquet_writer), intent(inout) :: writer !! open writer, expected to have a row group open.
         character(len=*), intent(in) :: name !! column being written; named only in the error-stop message.
         integer(c_long_long), intent(in) :: nrows !! row count of this chunk's own values.
-        logical, allocatable, intent(out) :: row_mask(:) !! this chunk's applicable row-keep mask, `nrows` long.
+        logical, allocatable, intent(out) :: row_mask(:) !! the `nrows`-long row-keep mask; unallocated if .not. masked.
+        logical, intent(out) :: masked !! .true. if a row mask applies to this chunk (either scheme).
         character(len=32) :: expected_str, got_str
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
 
@@ -995,7 +1009,8 @@ contains
             writer%cpp_row_group_open = .true.
         end if
         writer%row_group_first_write_done = .true.
-        row_mask = writer%chunk_mask
+        masked = allocated(writer%file_mask) .or. writer%chunk_mask_set_this_group
+        if (masked) row_mask = writer%chunk_mask
     end subroutine parquet_check_row_group_row_count
     !> Like parquet_assert_column_type, but requires an EXACT data_type match rather than
     !> parquet_is_type_compatible's lenient cross-numeric-type compatibility: unlike
@@ -1106,12 +1121,23 @@ contains
         else
             ! Per-row-group masking (parquet_write_chunk_row_mask) may or may not be used for this
             ! row group -- not knowable yet, since that call (if it comes at all) happens after
-            ! this one. Default to an identity mask (kept count = nrows, exactly today's non-masked
-            ! behavior) and defer the actual C++ open to whichever comes first of
-            ! parquet_write_chunk_row_mask_impl or parquet_check_row_group_row_count (this row
-            ! group's first parquet_write_column_chunk call) -- both commit using the by-then-known
-            ! kept count.
-            writer%chunk_mask = spread(.true., 1, nrows)
+            ! this one. Leave chunk_mask UNALLOCATED, meaning "no mask for this row group unless
+            ! parquet_write_chunk_row_mask says otherwise", and defer the actual C++ open to
+            ! whichever comes first of parquet_write_chunk_row_mask_impl or
+            ! parquet_check_row_group_row_count (this row group's first parquet_write_column_chunk
+            ! call) -- both commit using the by-then-known kept count.
+            !
+            ! This used to store an all-.true. identity mask of `nrows` instead, which every
+            ! chunk write of the row group then packed through to remove nothing.
+            !
+            ! The deallocate is DEFENSIVE, not load-bearing: parquet_check_row_group_row_count
+            ! decides whether a mask applies from file_mask/chunk_mask_set_this_group, never from
+            ! allocated(chunk_mask), so a previous row group's mask left lying here could not be
+            ! read anyway (confirmed by mutation: removing this line changes no test result).
+            ! It is kept so that the state matches what it claims -- a predicate keyed on
+            ! allocated(chunk_mask) is the obvious thing for a later change to reach for, and it
+            ! would be silently wrong if a stale mask survived here.
+            if (allocated(writer%chunk_mask)) deallocate(writer%chunk_mask)
         end if
     end subroutine parquet_new_row_group_impl
     module procedure parquet_new_row_group_int32

@@ -74,6 +74,8 @@ contains
                 test_qc_warning_printed_for_numeric_violation), &
             new_unittest("qc=.true. WARNING for a fractional bound uses fractional formatting", &
                 test_qc_warning_printed_for_fractional_bound), &
+            new_unittest("qc: an int64 bound is judged in int64, not after widening to real64", &
+                test_qc_int64_bound_judged_in_int64), &
             new_unittest("qc=.true. prints a WARNING for an out-of-range string value", &
                 test_qc_warning_printed_for_string_violation), &
             new_unittest("qc: on a boolean field is accepted but never enforced", &
@@ -976,6 +978,38 @@ contains
         call check(error, found_bound_text, &
             "expected the qc violation WARNING to include the fractionally-formatted bound '0.5'")
     end subroutine test_qc_warning_printed_for_fractional_bound
+
+    !> An int64 qc bound is judged in int64, not after widening every value to real64: a value of
+    !> 2**53 + 1 against `max: 2**53` violates, and must be reported as such even though the two
+    !> are indistinguishable once widened. The same scenario carries the negative control -- a
+    !> second column holding 2**53 exactly, which satisfies the bound and must stay silent -- so a
+    !> checker that warned about every int64 column could not pass this.
+    !>
+    !> Before this was fixed the `over` column produced no warning at all, which is the failure
+    !> mode worth remembering: qc reported compliance for data that violated its declaration.
+    subroutine test_qc_int64_bound_judged_in_int64(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_over, warned_at
+
+        call run_error_scenario("qc_int64_beyond_float64_precision", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a qc violation must warn, never error stop")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'over'", warned_over)
+        call check(error, warned_over, &
+            "2**53 + 1 violates max: 2**53, but no qc warning named the 'over' column -- the bound " // &
+            "was compared after widening the value to real64, which rounds it onto the bound")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'at'", warned_at)
+        call check(error, .not. warned_at, &
+            "2**53 satisfies max: 2**53, so the 'at' column must not produce a qc warning")
+    end subroutine test_qc_int64_bound_judged_in_int64
 
     subroutine test_qc_warning_printed_for_string_violation(error)
         type(error_type), allocatable, intent(out) :: error

@@ -562,6 +562,7 @@ scenarios=(
     "set_max_threads_below_one:1"
     "qc_warning_numeric:0"
     "qc_warning_fractional_bound:0"
+    "qc_int64_beyond_float64_precision:0"
     "qc_warning_string:0"
     "qc_silently_ignored_for_boolean:0"
     "qc_miss_default_active_numeric_warns:0"

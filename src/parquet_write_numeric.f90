@@ -9,6 +9,27 @@
 !> formatting) they depend on.
 submodule (parquet_core:parquet_write) parquet_write_numeric
     implicit none
+
+    !> Checks every valid element of a numeric column against its schema-declared qc: min:/max:
+    !> bounds and prints a single WARNING naming the column, its declared bound(s), the observed
+    !> data range among valid elements, and how many of them violate at least one bound. Never
+    !> errors -- writing proceeds regardless. A no-op for a schema-less writer, a writer with qc
+    !> off, a column without a qc: block, or when there are no valid elements to check at all.
+    !> An absent is_valid_flat means every element counts, matching the write-side is_valid
+    !> convention elsewhere.
+    !>
+    !> One specific per value kind, rather than one procedure taking real64: the widening this
+    !> used to require built a full float64 copy of the whole column purely to make the call, on
+    !> every qc-enabled write. Each specific now converts the BOUND (once, before the loop) and
+    !> leaves the values alone -- see qc_bound_as_int64 for the one case where that also changes
+    !> the answer, for the better.
+    interface parquet_check_qc_numeric
+        procedure :: qc_numeric_i32
+        procedure :: qc_numeric_i64
+        procedure :: qc_numeric_r32
+        procedure :: qc_numeric_r64
+    end interface parquet_check_qc_numeric
+
 contains
 
     !> Narrows int64 `src` to int32, error stopping if any value is outside
@@ -283,25 +304,30 @@ contains
             end if
         end if
     end subroutine parquet_qc_format_real
-    !> If writer%qc is set and the column has a schema-declared qc: min:
-    !> and/or max:, checks every element of `values64` where `is_valid_flat`
-    !> is .true. against those bounds (absent is_valid means every element
-    !> counts, matching the write-side is_valid convention elsewhere) and
-    !> prints a single WARNING to stdout naming the column, its declared
-    !> bound(s), the observed data range among valid elements, and how many
-    !> of them violate at least one bound. Never errors -- writing proceeds
-    !> regardless. No-op for a schema-less writer, a column without qc:, or
-    !> when there are no valid elements to check at all.
-    subroutine parquet_check_qc_numeric(writer, name, values64, is_valid_flat)
-        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+    !> Resolves the qc: min:/max: bounds declared for column `name`, so the four per-kind
+    !> parquet_check_qc_numeric specifics below share one copy of the lookup rather than each
+    !> carrying their own. Returns .false. when there is nothing to check at all: a writer with
+    !> qc off, a schema-less writer, a column that is not in the schema, a column with no qc:
+    !> block, or bounds whose text does not parse for the column's declared data_type.
+    logical function qc_numeric_bounds(writer, name, have_min, min_bound, min_op, &
+        have_max, max_bound, max_op) result(any_bound)
+        type(parquet_writer), intent(in) :: writer !! open writer.
         character(len=*), intent(in) :: name !! numeric column name.
-        real(real64), intent(in) :: values64(:) !! flattened column values, widened to real64.
-        logical, intent(in) :: is_valid_flat(:) !! flattened validity mask (.true. => checked).
+        logical, intent(out) :: have_min !! .true. if a usable qc: min: bound was declared.
+        real(real64), intent(out) :: min_bound !! the declared min bound (meaningful only if have_min).
+        character(len=:), allocatable, intent(out) :: min_op !! its comparison operator, ">=" or ">".
+        logical, intent(out) :: have_max !! .true. if a usable qc: max: bound was declared.
+        real(real64), intent(out) :: max_bound !! the declared max bound (meaningful only if have_max).
+        character(len=:), allocatable, intent(out) :: max_op !! its comparison operator, "<=" or "<".
         integer :: idx
-        integer(int64) :: i, n_valid, n_violate
-        real(real64) :: min_bound, max_bound, data_min, data_max
-        logical :: any_valid, have_min_bound, have_max_bound, ok
-        character(len=:), allocatable :: bounds_desc, fmt_num, fmt_num2, fmt_int, fmt_int2
+
+        any_bound = .false.
+        have_min = .false.
+        have_max = .false.
+        min_bound = 0.0_real64
+        max_bound = 0.0_real64
+        min_op = ""
+        max_op = ""
 
         if (.not. writer%qc) return
         if (.not. writer%is_schema_enforced) return
@@ -309,51 +335,49 @@ contains
         if (idx == 0) return
         if (.not. (writer%all_columns(idx)%has_qc_min .or. writer%all_columns(idx)%has_qc_max)) return
 
-        have_min_bound = .false.
-        have_max_bound = .false.
         if (writer%all_columns(idx)%has_qc_min) then
-            have_min_bound = parquet_qc_numeric_bound( &
+            have_min = parquet_qc_numeric_bound( &
                 writer%all_columns(idx)%qc_min_raw, writer%all_columns(idx)%data_type, min_bound)
+            if (have_min) min_op = trim(writer%all_columns(idx)%qc_min_op)
         end if
         if (writer%all_columns(idx)%has_qc_max) then
-            have_max_bound = parquet_qc_numeric_bound( &
+            have_max = parquet_qc_numeric_bound( &
                 writer%all_columns(idx)%qc_max_raw, writer%all_columns(idx)%data_type, max_bound)
+            if (have_max) max_op = trim(writer%all_columns(idx)%qc_max_op)
         end if
-        if (.not. (have_min_bound .or. have_max_bound)) return
-
-        any_valid = .false.
-        n_valid = 0_int64
-        n_violate = 0_int64
-        do i = 1_int64, size(values64, kind=int64)
-            if (.not. is_valid_flat(i)) cycle
-            n_valid = n_valid + 1
-            if (.not. any_valid) then
-                data_min = values64(i)
-                data_max = values64(i)
-                any_valid = .true.
-            else
-                data_min = min(data_min, values64(i))
-                data_max = max(data_max, values64(i))
-            end if
-
-            ok = .true.
-            if (have_min_bound) ok = ok .and. &
-                parquet_qc_numeric_satisfies(values64(i), min_bound, writer%all_columns(idx)%qc_min_op)
-            if (have_max_bound) ok = ok .and. &
-                parquet_qc_numeric_satisfies(values64(i), max_bound, writer%all_columns(idx)%qc_max_op)
-            if (.not. ok) n_violate = n_violate + 1
-        end do
-        if (.not. any_valid .or. n_violate == 0) return
+        any_bound = have_min .or. have_max
+    end function qc_numeric_bounds
+    !> Emits the single WARNING a qc: min:/max: violation produces, naming the column, its
+    !> declared bound(s), the observed data range among valid elements, and how many of them
+    !> violate at least one bound. Shared by the four per-kind specifics so the message text
+    !> stays identical across value kinds -- the observed range is reported in real64 for every
+    !> kind, which is what keeps an int64 column's warning byte-for-byte what it has always been
+    !> even though qc_numeric_i64 now compares in int64.
+    subroutine qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+        data_min, data_max, n_violate, n_valid)
+        type(parquet_writer), intent(in) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! numeric column name.
+        logical, intent(in) :: have_min !! whether a min bound was declared.
+        real(real64), intent(in) :: min_bound !! the declared min bound.
+        character(len=*), intent(in) :: min_op !! its comparison operator.
+        logical, intent(in) :: have_max !! whether a max bound was declared.
+        real(real64), intent(in) :: max_bound !! the declared max bound.
+        character(len=*), intent(in) :: max_op !! its comparison operator.
+        real(real64), intent(in) :: data_min !! smallest valid element seen.
+        real(real64), intent(in) :: data_max !! largest valid element seen.
+        integer(int64), intent(in) :: n_violate !! how many valid elements violate a bound.
+        integer(int64), intent(in) :: n_valid !! how many elements were checked at all.
+        character(len=:), allocatable :: bounds_desc, fmt_num, fmt_num2, fmt_int, fmt_int2
 
         bounds_desc = ""
-        if (have_min_bound) then
+        if (have_min) then
             call parquet_qc_format_real(min_bound, fmt_num)
-            bounds_desc = "min " // trim(writer%all_columns(idx)%qc_min_op) // " " // fmt_num
+            bounds_desc = "min " // trim(min_op) // " " // fmt_num
         end if
-        if (have_max_bound) then
+        if (have_max) then
             if (len_trim(bounds_desc) > 0) bounds_desc = bounds_desc // ", "
             call parquet_qc_format_real(max_bound, fmt_num)
-            bounds_desc = bounds_desc // "max " // trim(writer%all_columns(idx)%qc_max_op) // " " // fmt_num
+            bounds_desc = bounds_desc // "max " // trim(max_op) // " " // fmt_num
         end if
 
         call parquet_qc_format_real(data_min, fmt_num)
@@ -363,15 +387,770 @@ contains
         call parquet_emit_warning("qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
             ", data range [" // fmt_num // ", " // fmt_num2 // "], " // &
             fmt_int // " of " // fmt_int2 // " valid element(s) out of range")
-    end subroutine parquet_check_qc_numeric
+    end subroutine qc_numeric_report
+    !> Converts a real64 qc bound to an exactly-equivalent int64 one, reporting .false. when it
+    !> has no exact int64 equivalent (a fractional bound, or one beyond int64's range).
+    !>
+    !> Only qc_numeric_i64 needs this, and only because a real64 bound cannot represent every
+    !> int64 value: past 2^53 the widening `real(value, real64)` this checker used to apply to
+    !> every element rounds, so a value could be judged against the bound wrongly. int32,
+    !> float32 and float64 values all convert to real64 exactly, so their specifics keep
+    !> comparing in real64 with no change in results.
+    !>
+    !> A fractional bound reaches an int64 column's values only when the SCHEMA type is a float
+    !> one and the caller passed int64 values (parquet_qc_numeric_bound rejects a fractional
+    !> bound outright for an int32/int64 schema type), in which case comparing in real64 -- what
+    !> the caller gets when this returns .false. -- is the correct reading of the declaration.
+    logical function qc_bound_as_int64(bound, ibound) result(exact)
+        real(real64), intent(in) :: bound !! the declared bound, as parsed into real64.
+        integer(int64), intent(out) :: ibound !! its int64 equivalent (0 when not exact).
+        real(real64) :: rounded
+
+        exact = .false.
+        ibound = 0_int64
+        rounded = anint(bound)
+        if (bound /= rounded) return
+        if (rounded < -real(huge(0_int64), real64) .or. rounded >= real(huge(0_int64), real64)) return
+        ibound = int(rounded, kind=int64)
+        exact = .true.
+    end function qc_bound_as_int64
+    !> parquet_qc_numeric_satisfies' int64 counterpart: applies one declared qc bound's
+    !> comparison operator to a value and bound that are both exact int64s.
+    logical function qc_int64_satisfies(value, bound, op) result(ok)
+        integer(int64), intent(in) :: value !! value being checked.
+        integer(int64), intent(in) :: bound !! declared qc: min:/max: bound, as an exact int64.
+        character(len=*), intent(in) :: op !! comparison operator (">=", "<=", ">", "<").
+
+        select case (trim(op))
+        case (">=")
+            ok = value >= bound
+        case ("<=")
+            ok = value <= bound
+        case (">")
+            ok = value > bound
+        case ("<")
+            ok = value < bound
+        case default
+            ok = .true.
+        end select
+    end function qc_int64_satisfies
+    !> parquet_check_qc_numeric's int32 specific -- see the generic's own doc-comment above.
+    subroutine qc_numeric_i32(writer, name, values, is_valid_flat)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! numeric column name.
+        integer(int32), intent(in) :: values(:) !! flattened column values, in their own kind.
+        logical, intent(in), optional :: is_valid_flat(:) !! flattened validity mask; absent = every element counts.
+        logical :: have_min, have_max, any_valid, ok, use_mask
+        real(real64) :: min_bound, max_bound, data_min, data_max, v
+        character(len=:), allocatable :: min_op, max_op
+        integer(int64) :: i, n_valid, n_violate
+
+        if (.not. qc_numeric_bounds(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op)) return
+
+        use_mask = present(is_valid_flat)
+        any_valid = .false.
+        n_valid = 0_int64
+        n_violate = 0_int64
+        data_min = 0.0_real64
+        data_max = 0.0_real64
+        do i = 1_int64, size(values, kind=int64)
+            if (use_mask) then
+                if (.not. is_valid_flat(i)) cycle
+            end if
+            v = real(values(i), kind=real64)
+            n_valid = n_valid + 1
+            if (.not. any_valid) then
+                data_min = v
+                data_max = v
+                any_valid = .true.
+            else
+                data_min = min(data_min, v)
+                data_max = max(data_max, v)
+            end if
+
+            ok = .true.
+            if (have_min) ok = ok .and. parquet_qc_numeric_satisfies(v, min_bound, min_op)
+            if (have_max) ok = ok .and. parquet_qc_numeric_satisfies(v, max_bound, max_op)
+            if (.not. ok) n_violate = n_violate + 1
+        end do
+        if (.not. any_valid .or. n_violate == 0) return
+        call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+            data_min, data_max, n_violate, n_valid)
+    end subroutine qc_numeric_i32
+    !> parquet_check_qc_numeric's int64 specific -- see the generic's own doc-comment above.
+    !> The only specific that compares in something other than real64: see qc_bound_as_int64 for
+    !> why, and for when it falls back to the real64 comparison the other three always use.
+    subroutine qc_numeric_i64(writer, name, values, is_valid_flat)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! numeric column name.
+        integer(int64), intent(in) :: values(:) !! flattened column values, in their own kind.
+        logical, intent(in), optional :: is_valid_flat(:) !! flattened validity mask; absent = every element counts.
+        logical :: have_min, have_max, any_valid, ok, use_mask, exact_min, exact_max
+        real(real64) :: min_bound, max_bound, data_min, data_max, v
+        character(len=:), allocatable :: min_op, max_op
+        integer(int64) :: i, n_valid, n_violate, imin, imax, iv
+
+        if (.not. qc_numeric_bounds(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op)) return
+
+        exact_min = .false.
+        exact_max = .false.
+        imin = 0_int64
+        imax = 0_int64
+        if (have_min) exact_min = qc_bound_as_int64(min_bound, imin)
+        if (have_max) exact_max = qc_bound_as_int64(max_bound, imax)
+
+        use_mask = present(is_valid_flat)
+        any_valid = .false.
+        n_valid = 0_int64
+        n_violate = 0_int64
+        data_min = 0.0_real64
+        data_max = 0.0_real64
+        do i = 1_int64, size(values, kind=int64)
+            if (use_mask) then
+                if (.not. is_valid_flat(i)) cycle
+            end if
+            iv = values(i)
+            v = real(iv, kind=real64)
+            n_valid = n_valid + 1
+            if (.not. any_valid) then
+                data_min = v
+                data_max = v
+                any_valid = .true.
+            else
+                data_min = min(data_min, v)
+                data_max = max(data_max, v)
+            end if
+
+            ok = .true.
+            if (have_min) then
+                if (exact_min) then
+                    ok = ok .and. qc_int64_satisfies(iv, imin, min_op)
+                else
+                    ok = ok .and. parquet_qc_numeric_satisfies(v, min_bound, min_op)
+                end if
+            end if
+            if (have_max) then
+                if (exact_max) then
+                    ok = ok .and. qc_int64_satisfies(iv, imax, max_op)
+                else
+                    ok = ok .and. parquet_qc_numeric_satisfies(v, max_bound, max_op)
+                end if
+            end if
+            if (.not. ok) n_violate = n_violate + 1
+        end do
+        if (.not. any_valid .or. n_violate == 0) return
+        call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+            data_min, data_max, n_violate, n_valid)
+    end subroutine qc_numeric_i64
+    !> parquet_check_qc_numeric's float32 specific -- see the generic's own doc-comment above.
+    subroutine qc_numeric_r32(writer, name, values, is_valid_flat)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! numeric column name.
+        real(real32), intent(in) :: values(:) !! flattened column values, in their own kind.
+        logical, intent(in), optional :: is_valid_flat(:) !! flattened validity mask; absent = every element counts.
+        logical :: have_min, have_max, any_valid, ok, use_mask
+        real(real64) :: min_bound, max_bound, data_min, data_max, v
+        character(len=:), allocatable :: min_op, max_op
+        integer(int64) :: i, n_valid, n_violate
+
+        if (.not. qc_numeric_bounds(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op)) return
+
+        use_mask = present(is_valid_flat)
+        any_valid = .false.
+        n_valid = 0_int64
+        n_violate = 0_int64
+        data_min = 0.0_real64
+        data_max = 0.0_real64
+        do i = 1_int64, size(values, kind=int64)
+            if (use_mask) then
+                if (.not. is_valid_flat(i)) cycle
+            end if
+            v = real(values(i), kind=real64)
+            n_valid = n_valid + 1
+            if (.not. any_valid) then
+                data_min = v
+                data_max = v
+                any_valid = .true.
+            else
+                data_min = min(data_min, v)
+                data_max = max(data_max, v)
+            end if
+
+            ok = .true.
+            if (have_min) ok = ok .and. parquet_qc_numeric_satisfies(v, min_bound, min_op)
+            if (have_max) ok = ok .and. parquet_qc_numeric_satisfies(v, max_bound, max_op)
+            if (.not. ok) n_violate = n_violate + 1
+        end do
+        if (.not. any_valid .or. n_violate == 0) return
+        call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+            data_min, data_max, n_violate, n_valid)
+    end subroutine qc_numeric_r32
+    !> parquet_check_qc_numeric's float64 specific -- see the generic's own doc-comment above.
+    subroutine qc_numeric_r64(writer, name, values, is_valid_flat)
+        type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
+        character(len=*), intent(in) :: name !! numeric column name.
+        real(real64), intent(in) :: values(:) !! flattened column values, in their own kind.
+        logical, intent(in), optional :: is_valid_flat(:) !! flattened validity mask; absent = every element counts.
+        logical :: have_min, have_max, any_valid, ok, use_mask
+        real(real64) :: min_bound, max_bound, data_min, data_max, v
+        character(len=:), allocatable :: min_op, max_op
+        integer(int64) :: i, n_valid, n_violate
+
+        if (.not. qc_numeric_bounds(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op)) return
+
+        use_mask = present(is_valid_flat)
+        any_valid = .false.
+        n_valid = 0_int64
+        n_violate = 0_int64
+        data_min = 0.0_real64
+        data_max = 0.0_real64
+        do i = 1_int64, size(values, kind=int64)
+            if (use_mask) then
+                if (.not. is_valid_flat(i)) cycle
+            end if
+            v = values(i)
+            n_valid = n_valid + 1
+            if (.not. any_valid) then
+                data_min = v
+                data_max = v
+                any_valid = .true.
+            else
+                data_min = min(data_min, v)
+                data_max = max(data_max, v)
+            end if
+
+            ok = .true.
+            if (have_min) ok = ok .and. parquet_qc_numeric_satisfies(v, min_bound, min_op)
+            if (have_max) ok = ok .and. parquet_qc_numeric_satisfies(v, max_bound, max_op)
+            if (.not. ok) n_violate = n_violate + 1
+        end do
+        if (.not. any_valid .or. n_violate == 0) return
+        call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+            data_min, data_max, n_violate, n_valid)
+    end subroutine qc_numeric_r64
+    ! ---- Flat write workers (one per type x whole-column/chunked) ----
+    !
+    ! Each of the twenty public numeric write specifics does its own schema/type/col_size
+    ! prologue and then hands the values to one of these workers, which own everything from the
+    ! row-mask decision onward. A scalar specific and its matrix sibling share a worker: `flat`
+    ! is an assumed-size dummy, so a rank-2 actual argument sequence-associates with it directly
+    ! and the matrix forms no longer build a `reshape(values, [n])` copy to pass down.
+    !
+    ! THE UNMASKED FAST PATH. parquet_writer_whole_column_mask / parquet_check_row_group_row_count
+    ! report whether a row mask is actually in force. When one is not -- the overwhelmingly common
+    ! case -- there is nothing to remove, so `vals` simply points at the caller's own array and no
+    ! mask, no expanded element mask and no `pack` copy are built at all. When one is, the packed
+    ! copy is built exactly as before and `vals` points at that instead. Pointing rather than
+    ! copying is what keeps the two paths sharing one tail; `flat` and `valid` therefore carry the
+    ! TARGET attribute, and the pointers are used only within the worker, never returned.
+    !
+    ! A caller that supplied no `is_valid` leaves `vmask` disassociated, which makes it ABSENT at
+    ! every `optional` dummy it is passed on to (F2018 15.5.2.12) -- so the qc checker and
+    ! parquet_make_valid_buf_write take their own no-mask paths without this code branching again.
+
+    !> Whole-column write worker for parquet_write_int32_column/_matrix_column.
+    subroutine write_int32_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int32), intent(in), target :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        integer(int32), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        integer(int32), pointer :: vals(:) !! the values actually written.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        integer(int64) :: nkeep
+        logical :: masked
+
+        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            values_c = pack(flat(1:nelem), elem_mask)
+            vals => values_c
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            vals => flat(1:nelem)
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, nkeep)
+        call parquet_append_as_schema_int32(writer, name, vals, nkeep, asize, valid_ptr)
+    end subroutine write_int32_flat
+    !> Whole-column write worker for parquet_write_int64_column/_matrix_column; see write_int32_flat.
+    subroutine write_int64_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int64), intent(in), target :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        integer(int64), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        integer(int64), pointer :: vals(:) !! the values actually written.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        integer(int64) :: nkeep
+        logical :: masked
+
+        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            values_c = pack(flat(1:nelem), elem_mask)
+            vals => values_c
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            vals => flat(1:nelem)
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, nkeep)
+        call parquet_append_as_schema_int64(writer, name, vals, nkeep, asize, valid_ptr)
+    end subroutine write_int64_flat
+    !> Whole-column write worker for parquet_write_float32_column/_matrix_column; see write_int32_flat.
+    subroutine write_float32_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        real(real32), intent(in), target :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        real(real32), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        real(real32), pointer :: vals(:) !! the values actually written.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        integer(int64) :: nkeep
+        logical :: masked
+
+        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            values_c = pack(flat(1:nelem), elem_mask)
+            vals => values_c
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            vals => flat(1:nelem)
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, nkeep)
+        call parquet_append_as_schema_float32(writer, name, vals, nkeep, asize, valid_ptr)
+    end subroutine write_float32_flat
+    !> Whole-column write worker for parquet_write_float64_column/_matrix_column; see write_int32_flat.
+    subroutine write_float64_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        real(real64), intent(in), target :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        real(real64), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        real(real64), pointer :: vals(:) !! the values actually written.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        integer(int64) :: nkeep
+        logical :: masked
+
+        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            values_c = pack(flat(1:nelem), elem_mask)
+            vals => values_c
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            vals => flat(1:nelem)
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, nkeep)
+        call parquet_append_as_schema_float64(writer, name, vals, nkeep, asize, valid_ptr)
+    end subroutine write_float64_flat
+    !> Whole-column write worker for parquet_write_logical_column/_matrix_column.
+    !>
+    !> Unlike the four numeric workers there is no fast path that avoids a copy entirely: the C
+    !> binding takes one int8 per element, so a Fortran LOGICAL array always has to be converted.
+    !> The saving is that the conversion now writes only the elements that survive the mask,
+    !> instead of converting every element into a full-length buffer and then packing that buffer
+    !> down -- two passes and two full-size allocations become one of each.
+    subroutine write_logical_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer.
+        character(len=*), intent(in) :: name !! column name.
+        logical, intent(in) :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        integer(c_int8_t), allocatable :: bool_data(:)
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+        integer(int64) :: i, k, nkeep
+        logical :: masked
+
+        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            allocate(bool_data(count(elem_mask, kind=int64)))
+            k = 0_int64
+            do i = 1_int64, nelem
+                if (.not. elem_mask(i)) cycle
+                k = k + 1_int64
+                bool_data(k) = merge(1_c_int8_t, 0_c_int8_t, flat(i))
+            end do
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            allocate(bool_data(nelem))
+            do i = 1_int64, nelem
+                bool_data(i) = merge(1_c_int8_t, 0_c_int8_t, flat(i))
+            end do
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_check_row_count(writer, name, nkeep)
+
+        call parquet_resolve_output_name(writer, name, outname)
+        call parquet_append_bool8_column(writer%handle, trim(outname)//char(0), bool_data, nkeep, asize, valid_ptr)
+    end subroutine write_logical_flat
+    !> Row-group-chunked write worker for parquet_write_int32_column_chunk/_matrix_column_chunk;
+    !> see write_int32_flat for the fast path, which is the same. The differences from the
+    !> whole-column worker are the row-count check (a chunk is checked against the open row
+    !> group, not the file), the mark-written bookkeeping, and appending to the open row group
+    !> rather than to the file as a whole.
+    subroutine write_int32_chunk_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int32), intent(in), target :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        integer(int32), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        integer(int32), pointer :: vals(:) !! the values actually written.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+        integer(int64) :: nkeep
+        logical :: masked
+
+        call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            values_c = pack(flat(1:nelem), elem_mask)
+            vals => values_c
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            vals => flat(1:nelem)
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_resolve_output_name(writer, name, outname)
+        if (nkeep > 0) call parquet_append_int32_column_chunk(writer%handle, &
+            trim(outname)//char(0), vals, asize, valid_ptr)
+    end subroutine write_int32_chunk_flat
+    !> Chunked write worker for parquet_write_int64_column_chunk/_matrix_column_chunk; see
+    !> write_int32_chunk_flat.
+    subroutine write_int64_chunk_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int64), intent(in), target :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        integer(int64), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        integer(int64), pointer :: vals(:) !! the values actually written.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+        integer(int64) :: nkeep
+        logical :: masked
+
+        call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            values_c = pack(flat(1:nelem), elem_mask)
+            vals => values_c
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            vals => flat(1:nelem)
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_resolve_output_name(writer, name, outname)
+        if (nkeep > 0) call parquet_append_int64_column_chunk(writer%handle, &
+            trim(outname)//char(0), vals, asize, valid_ptr)
+    end subroutine write_int64_chunk_flat
+    !> Chunked write worker for parquet_write_float32_column_chunk/_matrix_column_chunk; see
+    !> write_int32_chunk_flat.
+    subroutine write_float32_chunk_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        real(real32), intent(in), target :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        real(real32), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        real(real32), pointer :: vals(:) !! the values actually written.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+        integer(int64) :: nkeep
+        logical :: masked
+
+        call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            values_c = pack(flat(1:nelem), elem_mask)
+            vals => values_c
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            vals => flat(1:nelem)
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_resolve_output_name(writer, name, outname)
+        if (nkeep > 0) call parquet_append_float32_column_chunk(writer%handle, &
+            trim(outname)//char(0), vals, asize, valid_ptr)
+    end subroutine write_float32_chunk_flat
+    !> Chunked write worker for parquet_write_float64_column_chunk/_matrix_column_chunk; see
+    !> write_int32_chunk_flat.
+    subroutine write_float64_chunk_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        real(real64), intent(in), target :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        real(real64), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        real(real64), pointer :: vals(:) !! the values actually written.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+        integer(int64) :: nkeep
+        logical :: masked
+
+        call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            values_c = pack(flat(1:nelem), elem_mask)
+            vals => values_c
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            vals => flat(1:nelem)
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_resolve_output_name(writer, name, outname)
+        if (nkeep > 0) call parquet_append_float64_column_chunk(writer%handle, &
+            trim(outname)//char(0), vals, asize, valid_ptr)
+    end subroutine write_float64_chunk_flat
+    !> Chunked write worker for parquet_write_logical_column_chunk/_matrix_column_chunk; see
+    !> write_logical_flat for why this one always converts rather than passing values through.
+    subroutine write_logical_chunk_flat(writer, name, flat, nelem, asize, nrows, valid)
+        type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        logical, intent(in) :: flat(*) !! asize*nrows values in (element, row)-major order.
+        integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
+        integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
+        integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
+        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        integer(c_int8_t), allocatable :: bool_data(:)
+        logical, allocatable :: row_mask(:), elem_mask(:)
+        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        integer(c_int8_t), allocatable, target :: valid_buf(:)
+        type(c_ptr) :: valid_ptr
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+        integer(int64) :: i, k, nkeep
+        logical :: masked
+
+        call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        nullify(vmask)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            allocate(bool_data(count(elem_mask, kind=int64)))
+            k = 0_int64
+            do i = 1_int64, nelem
+                if (.not. elem_mask(i)) cycle
+                k = k + 1_int64
+                bool_data(k) = merge(1_c_int8_t, 0_c_int8_t, flat(i))
+            end do
+            nkeep = count(row_mask, kind=int64)
+            if (present(valid)) then
+                valid_c = pack(valid(1:nelem), elem_mask)
+                vmask => valid_c
+            end if
+        else
+            allocate(bool_data(nelem))
+            do i = 1_int64, nelem
+                bool_data(i) = merge(1_c_int8_t, 0_c_int8_t, flat(i))
+            end do
+            nkeep = nrows
+            if (present(valid)) vmask => valid(1:nelem)
+        end if
+
+        if (associated(vmask)) then
+            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_qc_miss(writer, name, vmask)
+        end if
+        call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
+        call parquet_chunk_mark_written_if_first(writer, name)
+
+        call parquet_resolve_output_name(writer, name, outname)
+        if (nkeep > 0) call parquet_append_bool8_column_chunk(writer%handle, &
+            trim(outname)//char(0), bool_data, asize, valid_ptr)
+    end subroutine write_logical_chunk_flat
     module procedure parquet_write_int32_column
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
-        integer(int32), allocatable :: values_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -396,38 +1175,12 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        values_c = pack(values, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
-            end if
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), &
-                    spread(.true., 1, size(values_c, kind=int64)))
-            end if
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_append_as_schema_int32(writer, name, values_c, nrows, asize, valid_ptr)
+        call write_int32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_int32_column
     module procedure parquet_write_int32_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(int32), allocatable :: packed(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -449,41 +1202,12 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(packed(size(values, kind=int64)))
-        packed = reshape(values, [size(values, kind=int64)])
-
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        packed = pack(packed, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
-            end if
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
-                    spread(.true., 1, size(packed, kind=int64)))
-            end if
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_append_as_schema_int32(writer, name, packed, nrows, asize, valid_ptr)
+        call write_int32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_int32_matrix_column
     module procedure parquet_write_int64_column
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
-        integer(int64), allocatable :: values_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -508,38 +1232,12 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        values_c = pack(values, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
-            end if
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), &
-                    spread(.true., 1, size(values_c, kind=int64)))
-            end if
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_append_as_schema_int64(writer, name, values_c, nrows, asize, valid_ptr)
+        call write_int64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_int64_column
     module procedure parquet_write_int64_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(int64), allocatable :: packed(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -561,41 +1259,12 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(packed(size(values, kind=int64)))
-        packed = reshape(values, [size(values, kind=int64)])
-
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        packed = pack(packed, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
-            end if
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
-                    spread(.true., 1, size(packed, kind=int64)))
-            end if
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_append_as_schema_int64(writer, name, packed, nrows, asize, valid_ptr)
+        call write_int64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_int64_matrix_column
     module procedure parquet_write_float32_column
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
-        real(real32), allocatable :: values_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -620,38 +1289,12 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        values_c = pack(values, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
-            end if
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), &
-                    spread(.true., 1, size(values_c, kind=int64)))
-            end if
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_append_as_schema_float32(writer, name, values_c, nrows, asize, valid_ptr)
+        call write_float32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_float32_column
     module procedure parquet_write_float32_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
-        real(real32), allocatable :: packed(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -673,41 +1316,12 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(packed(size(values, kind=int64)))
-        packed = reshape(values, [size(values, kind=int64)])
-
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        packed = pack(packed, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
-            end if
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
-                    spread(.true., 1, size(packed, kind=int64)))
-            end if
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_append_as_schema_float32(writer, name, packed, nrows, asize, valid_ptr)
+        call write_float32_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_float32_matrix_column
     module procedure parquet_write_float64_column
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
-        real(real64), allocatable :: values_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -732,38 +1346,12 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        values_c = pack(values, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
-            end if
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), &
-                    spread(.true., 1, size(values_c, kind=int64)))
-            end if
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_append_as_schema_float64(writer, name, values_c, nrows, asize, valid_ptr)
+        call write_float64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_float64_column
     module procedure parquet_write_float64_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
-        real(real64), allocatable :: packed(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -785,42 +1373,12 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(packed(size(values, kind=int64)))
-        packed = reshape(values, [size(values, kind=int64)])
-
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        packed = pack(packed, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
-            end if
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
-                    spread(.true., 1, size(packed, kind=int64)))
-            end if
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_append_as_schema_float64(writer, name, packed, nrows, asize, valid_ptr)
+        call write_float64_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_float64_matrix_column
     module procedure parquet_write_logical_column
         integer :: idx
-        integer(int64) :: asize, nrows, i
-        integer(c_int8_t), allocatable :: bool_data(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
+        integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -845,47 +1403,12 @@ contains
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
 
-        allocate(bool_data(size(values, kind=int64)))
-        do i = 1_int64, size(values, kind=int64)
-            if (values(i)) then
-                bool_data(i) = 1_c_int8_t
-            else
-                bool_data(i) = 0_c_int8_t
-            end if
-        end do
-
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        bool_data = pack(bool_data, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        call parquet_append_bool8_column(&
-            writer%handle, &
-            trim(outname)//char(0), &
-            bool_data, &
-            nrows, &
-            asize, &
-            valid_ptr )
+        call write_logical_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_logical_column
     module procedure parquet_write_logical_matrix_column
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable :: bool_data(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -907,42 +1430,12 @@ contains
         if (.not. parquet_is_column_enabled(writer, name)) return
         call parquet_mark_column_written(writer, name)
 
-        allocate(bool_data(size(values, kind=int64)))
-        bool_data = merge(1_c_int8_t, 0_c_int8_t, reshape(values, [size(values, kind=int64)]))
-
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        bool_data = pack(bool_data, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_check_row_count(writer, name, nrows)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        call parquet_append_bool8_column(&
-            writer%handle, &
-            trim(outname)//char(0), &
-            bool_data, &
-            nrows, &
-            asize, &
-            valid_ptr )
+        call write_logical_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_logical_matrix_column
     module procedure parquet_write_int32_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
-        integer(int32), allocatable :: values_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -966,41 +1459,13 @@ contains
             "parquet_write_int32_column_chunk: values size is not divisible by col_size for column " // &
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        values_c = pack(values, elem_mask)
-        nrows = count(row_mask, kind=int64)
 
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
-            end if
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), &
-                    spread(.true., 1, size(values_c, kind=int64)))
-            end if
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_int32_column_chunk(writer%handle, &
-            trim(outname)//char(0), values_c, asize, valid_ptr)
+        call write_int32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_int32_column_chunk
     module procedure parquet_write_int32_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(int32), allocatable :: packed(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1021,44 +1486,13 @@ contains
         call parquet_assert_column_type_exact(writer, name, "int32")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
 
-        allocate(packed(size(values, kind=int64)))
-        packed = reshape(values, [size(values, kind=int64)])
-        packed = pack(packed, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
-            end if
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
-                    spread(.true., 1, size(packed, kind=int64)))
-            end if
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_int32_column_chunk(writer%handle, &
-            trim(outname)//char(0), packed, asize, valid_ptr)
+        call write_int32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_int32_matrix_column_chunk
     module procedure parquet_write_int64_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
-        integer(int64), allocatable :: values_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1082,41 +1516,13 @@ contains
             "parquet_write_int64_column_chunk: values size is not divisible by col_size for column " // &
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        values_c = pack(values, elem_mask)
-        nrows = count(row_mask, kind=int64)
 
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
-            end if
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), &
-                    spread(.true., 1, size(values_c, kind=int64)))
-            end if
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_int64_column_chunk(writer%handle, &
-            trim(outname)//char(0), values_c, asize, valid_ptr)
+        call write_int64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_int64_column_chunk
     module procedure parquet_write_int64_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(int64), allocatable :: packed(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1137,44 +1543,13 @@ contains
         call parquet_assert_column_type_exact(writer, name, "int64")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
 
-        allocate(packed(size(values, kind=int64)))
-        packed = reshape(values, [size(values, kind=int64)])
-        packed = pack(packed, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
-            end if
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
-                    spread(.true., 1, size(packed, kind=int64)))
-            end if
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_int64_column_chunk(writer%handle, &
-            trim(outname)//char(0), packed, asize, valid_ptr)
+        call write_int64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_int64_matrix_column_chunk
     module procedure parquet_write_float32_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
-        real(real32), allocatable :: values_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1198,41 +1573,13 @@ contains
             "parquet_write_float32_column_chunk: values size is not divisible by col_size for column " // &
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        values_c = pack(values, elem_mask)
-        nrows = count(row_mask, kind=int64)
 
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
-            end if
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), &
-                    spread(.true., 1, size(values_c, kind=int64)))
-            end if
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_float32_column_chunk(writer%handle, &
-            trim(outname)//char(0), values_c, asize, valid_ptr)
+        call write_float32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_float32_column_chunk
     module procedure parquet_write_float32_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        real(real32), allocatable :: packed(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1253,44 +1600,13 @@ contains
         call parquet_assert_column_type_exact(writer, name, "float32")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
 
-        allocate(packed(size(values, kind=int64)))
-        packed = reshape(values, [size(values, kind=int64)])
-        packed = pack(packed, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
-            end if
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
-                    spread(.true., 1, size(packed, kind=int64)))
-            end if
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_float32_column_chunk(writer%handle, &
-            trim(outname)//char(0), packed, asize, valid_ptr)
+        call write_float32_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_float32_matrix_column_chunk
     module procedure parquet_write_float64_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
-        real(real64), allocatable :: values_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1314,41 +1630,13 @@ contains
             "parquet_write_float64_column_chunk: values size is not divisible by col_size for column " // &
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        values_c = pack(values, elem_mask)
-        nrows = count(row_mask, kind=int64)
 
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), is_valid_c)
-            end if
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(values_c, kind=real64), &
-                    spread(.true., 1, size(values_c, kind=int64)))
-            end if
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_float64_column_chunk(writer%handle, &
-            trim(outname)//char(0), values_c, asize, valid_ptr)
+        call write_float64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_float64_column_chunk
     module procedure parquet_write_float64_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        real(real64), allocatable :: packed(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1369,44 +1657,13 @@ contains
         call parquet_assert_column_type_exact(writer, name, "float64")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
 
-        allocate(packed(size(values, kind=int64)))
-        packed = reshape(values, [size(values, kind=int64)])
-        packed = pack(packed, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), valid_flat)
-            end if
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            if (writer%qc .and. writer%is_schema_enforced) then
-                call parquet_check_qc_numeric(writer, name, real(packed, kind=real64), &
-                    spread(.true., 1, size(packed, kind=int64)))
-            end if
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_float64_column_chunk(writer%handle, &
-            trim(outname)//char(0), packed, asize, valid_ptr)
+        call write_float64_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_float64_matrix_column_chunk
     module procedure parquet_write_logical_column_chunk
         integer :: idx
-        integer(int64) :: asize, nrows, i
-        integer(c_int8_t), allocatable :: bool_data(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
+        integer(int64) :: asize, nrows
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: row_mask(:), elem_mask(:), is_valid_c(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1430,46 +1687,13 @@ contains
             "parquet_write_logical_column_chunk: values size is not divisible by col_size for column " // &
             trim(name) // ctx
         nrows = size(values, kind=int64) / asize
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
 
-        allocate(bool_data(size(values, kind=int64)))
-        do i = 1_int64, size(values, kind=int64)
-            if (values(i)) then
-                bool_data(i) = 1_c_int8_t
-            else
-                bool_data(i) = 0_c_int8_t
-            end if
-        end do
-        bool_data = pack(bool_data, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            is_valid_c = pack(is_valid, elem_mask)
-            call parquet_check_protected(writer, name, is_valid_c)
-            call parquet_check_qc_miss(writer, name, is_valid_c)
-        end if
-        call parquet_make_valid_buf_write(is_valid_c, valid_buf, valid_ptr)
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_bool8_column_chunk(&
-            writer%handle, &
-            trim(outname)//char(0), &
-            bool_data, &
-            asize, &
-            valid_ptr )
+        call write_logical_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_logical_column_chunk
     module procedure parquet_write_logical_matrix_column_chunk
         integer :: idx
         integer(int64) :: asize, nrows
-        integer(c_int8_t), allocatable :: bool_data(:)
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
-        logical, allocatable :: valid_flat(:)
-        integer(c_int8_t), allocatable, target :: valid_buf(:)
-        type(c_ptr) :: valid_ptr
-        logical, allocatable :: row_mask(:), elem_mask(:)
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
         call check_writer_open(writer)
         call lk%claim(writer)
@@ -1490,31 +1714,8 @@ contains
         call parquet_assert_column_type_exact(writer, name, "boolean")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
 
-        allocate(bool_data(size(values, kind=int64)))
-        bool_data = merge(1_c_int8_t, 0_c_int8_t, reshape(values, [size(values, kind=int64)]))
-        bool_data = pack(bool_data, elem_mask)
-        nrows = count(row_mask, kind=int64)
-
-        if (present(is_valid)) then
-            valid_flat = pack(reshape(is_valid, [size(is_valid, kind=int64)]), elem_mask)
-            call parquet_check_protected(writer, name, valid_flat)
-            call parquet_check_qc_miss(writer, name, valid_flat)
-            call parquet_make_valid_buf_write(valid_flat, valid_buf, valid_ptr)
-        else
-            call parquet_make_valid_buf_write(valid_buf=valid_buf, valid_ptr=valid_ptr)
-        end if
-        call parquet_chunk_mark_written_if_first(writer, name)
-
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nrows > 0) call parquet_append_bool8_column_chunk(&
-            writer%handle, &
-            trim(outname)//char(0), &
-            bool_data, &
-            asize, &
-            valid_ptr )
+        call write_logical_chunk_flat(writer, name, values, size(values, kind=int64), asize, nrows, is_valid)
     end procedure parquet_write_logical_matrix_column_chunk
 
 end submodule parquet_write_numeric

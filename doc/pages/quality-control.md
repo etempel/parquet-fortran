@@ -122,6 +122,12 @@ WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: 
 ```
 This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`); the range check only fires for columns that actually declare `qc: min:`/`max:`, and the miss check only fires for a column actually written with a null-carrying mask. `qc=.false.` skips both checks entirely.
 
+### One precision limit worth knowing, on `int64` columns
+
+A declared bound is parsed from the MAML text into a 64-bit float, so **a bound larger than 2^53 (9007199254740992) is rounded to the nearest representable value**. Declaring `max: 9007199254740993` gives you `max: 9007199254740992`, silently — there is no warning, because nothing about the text says it was meant exactly.
+
+The *values* are not affected: an `int64` column's elements are compared against the bound in `int64`, so a value past 2^53 is judged exactly. Only the bound itself has this limit, and only when it is written larger than 2^53 — which for a range check on real data is an unusual thing to want. If you need one, express it as a `min:`/`max:` a little wider than the true intent rather than relying on an exact bound at that magnitude.
+
 ## Read-side enforcement
 
 `parquet_open_reader(reader, filename, schema=..., qc=..., qc_soft=...)` checks column values against `qc: min:`/`max:`/`miss:` bounds declared in a MAML file — mirroring the write-side `qc:` check above, but on the read side. By default a violation is a **hard error** (`qc_soft=.false.`): the process aborts with a diagnostic on stderr, the same class of clean, deliberate abort as the read-side Null/type-mismatch checks (see [Limitations](../index.html#limitations)). Pass `qc_soft=.true.` to instead **warn and continue**: a `WARNING` is printed to stdout and reading proceeds. Either way, the existing strict-by-default Null behavior (`error stop` on a genuine Null unless `null_value=`/`is_valid=` is passed — see [Null values](supported-data-types.html#null-values)) is completely unchanged.

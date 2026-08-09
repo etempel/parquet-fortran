@@ -459,6 +459,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **An ordinary write no longer pays for row masking it is not using.** `parquet_write_column` and
+  `parquet_write_column_chunk` fabricated an all-`.true.` row mask whenever no
+  `parquet_write_row_mask`/`parquet_write_chunk_row_mask` was in force — which is the common case —
+  expanded it to one logical per *element*, and then `pack`ed the whole column through it to remove
+  nothing. For a 100 M-row `int32` column that was ~800 MB of transient logical arrays plus a full
+  copy of data that was already contiguous. The mask is now built only when one actually applies;
+  otherwise the caller's own array is written as it stands. The matrix forms additionally no longer
+  `reshape` into a flattened copy first, the `boolean` forms convert only the elements they keep
+  instead of converting all of them and then packing, a `parquet_string_column` write no longer
+  rebuilds the entire column row by row, and a per-row-group identity mask is no longer allocated
+  for every row group of an unmasked chunked write. Measured on an 8-core M1 Pro, best of five
+  warmed rounds at `--profile release`: `float64` and `boolean` scalar columns **1.6x**, `int32`
+  scalar **1.2x**, a width-4 `int32` matrix **1.14x**, `character(len=16)` **1.16x**. Files are
+  byte-identical to what the previous version wrote, masked and unmasked alike, across every type
+  and both the whole-column and chunked forms.
+- **A qc-enabled numeric write no longer builds a `float64` copy of the whole column.** The
+  quality-control check took its values as `float64`, so every `int32`/`int64`/`float32` write with
+  `qc=.true.` widened the entire column into a temporary purely to make the call, and passed a
+  full-length all-`.true.` mask alongside it whenever the caller supplied no `is_valid`. The check
+  now converts the *bound* once instead, and the mask argument is optional. See **Fixed** below for
+  the one case where this also changes the answer.
 - **`parquet_string_column%to_character` is 4.3x faster and `%build_from` 9.3x**, for the same
   reason in both: each element was being materialized through `%get`/`%to_string`, which allocates a
   deferred-length string, fills it, copies it into the destination and frees it — one heap round-trip
@@ -621,6 +642,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   argument, and every other column type is unaffected.
 
 ### Fixed
+
+- **A `qc: min:`/`max:` bound on an `int64` column is now judged in `int64`, not after widening
+  every value to `float64`.** Each value was converted to `float64` before being compared, and past
+  2^53 that conversion rounds — so a value could be reported as compliant when it violated its
+  declared bound, silently and with nothing to indicate the check had been weakened. A bound that
+  is a whole number within `int64`'s range is now converted once and compared natively; a
+  fractional bound (only reachable when the schema's own type is a float one) still compares in
+  `float64`, which is the correct reading of that declaration. **The bound's own precision is
+  unchanged** — it is still parsed from the MAML text into `float64`, so a *bound* past 2^53 is
+  still rounded. `int32`, `float32` and `float64` columns are unaffected: those all convert to
+  `float64` exactly, and their warnings are byte-for-byte what they were.
 
 - **Sharing one `parquet_writer` across threads now reliably aborts with the documented diagnostic
   instead of segfaulting.** The concurrency guard was claimed only once a call reached C++, which on

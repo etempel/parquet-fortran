@@ -85,7 +85,7 @@ contains
     subroutine write_date_flat(writer, name, flat, asize, nrows)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column name.
-        type(parquet_date), intent(in) :: flat(:) !! flattened dates.
+        type(parquet_date), intent(in), target :: flat(:) !! flattened dates.
         integer(int64), intent(in) :: asize !! per-row element count.
         integer(int64), intent(in) :: nrows !! row count.
         logical :: do_write
@@ -95,7 +95,9 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         logical, allocatable :: row_mask(:), elem_mask(:)
-        type(parquet_date), allocatable :: flat_c(:)
+        type(parquet_date), allocatable, target :: flat_c(:) !! masked copy; unused on the unmasked fast path.
+        type(parquet_date), pointer :: fv(:) !! the elements actually written: `flat` itself, or flat_c.
+        logical :: masked !! whether a row mask applies to this write.
         integer(int64) :: nrows_c
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
@@ -103,13 +105,19 @@ contains
         call lk%claim(writer)
         call temporal_write_preamble(writer, name, "date", asize, do_write, outname, idx)
         if (.not. do_write) return
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        flat_c = pack(flat, elem_mask)
-        nrows_c = count(row_mask, kind=int64)
-        allocate(days(size(flat_c, kind=int64)))
-        days = flat_c%raw()
-        call temporal_valid_ptr(writer, name, flat_c%is_null(), valid_buf, valid_ptr)
+        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            flat_c = pack(flat, elem_mask)
+            fv => flat_c
+            nrows_c = count(row_mask, kind=int64)
+        else
+            fv => flat
+            nrows_c = nrows
+        end if
+        allocate(days(size(fv, kind=int64)))
+        days = fv%raw()
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
         call parquet_check_row_count(writer, name, nrows_c)
         call parquet_append_date_column(writer%handle, trim(outname)//char(0), days, nrows_c, asize, valid_ptr)
     end subroutine write_date_flat
@@ -117,7 +125,7 @@ contains
     subroutine write_time_flat(writer, name, flat, asize, nrows)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column name.
-        type(parquet_time), intent(in) :: flat(:) !! flattened times.
+        type(parquet_time), intent(in), target :: flat(:) !! flattened times.
         integer(int64), intent(in) :: asize !! per-row element count.
         integer(int64), intent(in) :: nrows !! row count.
         logical :: do_write
@@ -128,7 +136,9 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         logical, allocatable :: row_mask(:), elem_mask(:)
-        type(parquet_time), allocatable :: flat_c(:)
+        type(parquet_time), allocatable, target :: flat_c(:) !! masked copy; unused on the unmasked fast path.
+        type(parquet_time), pointer :: fv(:) !! the elements actually written: `flat` itself, or flat_c.
+        logical :: masked !! whether a row mask applies to this write.
         integer(int64) :: nrows_c
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
@@ -137,13 +147,19 @@ contains
         call temporal_write_preamble(writer, name, "time", asize, do_write, outname, idx)
         if (.not. do_write) return
         call resolve_temporal_write_unit(writer, idx, unit, is_utc)
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        flat_c = pack(flat, elem_mask)
-        nrows_c = count(row_mask, kind=int64)
-        allocate(ns(size(flat_c, kind=int64)))
-        ns = flat_c%raw()
-        call temporal_valid_ptr(writer, name, flat_c%is_null(), valid_buf, valid_ptr)
+        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            flat_c = pack(flat, elem_mask)
+            fv => flat_c
+            nrows_c = count(row_mask, kind=int64)
+        else
+            fv => flat
+            nrows_c = nrows
+        end if
+        allocate(ns(size(fv, kind=int64)))
+        ns = fv%raw()
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
         call parquet_check_row_count(writer, name, nrows_c)
         call parquet_append_time_column(writer%handle, trim(outname)//char(0), ns, nrows_c, asize, &
             int(unit, c_int32_t), valid_ptr)
@@ -153,7 +169,7 @@ contains
     subroutine write_timestamp_flat(writer, name, flat, asize, nrows)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column name.
-        type(parquet_timestamp), intent(in) :: flat(:) !! flattened instants.
+        type(parquet_timestamp), intent(in), target :: flat(:) !! flattened instants.
         integer(int64), intent(in) :: asize !! per-row element count.
         integer(int64), intent(in) :: nrows !! row count.
         logical :: do_write
@@ -165,7 +181,9 @@ contains
         type(c_ptr) :: valid_ptr
         integer(int64) :: i, n
         logical, allocatable :: row_mask(:), elem_mask(:)
-        type(parquet_timestamp), allocatable :: flat_c(:)
+        type(parquet_timestamp), allocatable, target :: flat_c(:) !! masked copy; unused on the unmasked fast path.
+        type(parquet_timestamp), pointer :: fv(:) !! the elements actually written: `flat` itself, or flat_c.
+        logical :: masked !! whether a row mask applies to this write.
         integer(int64) :: nrows_c
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
@@ -174,20 +192,26 @@ contains
         call temporal_write_preamble(writer, name, "timestamp", asize, do_write, outname, idx)
         if (.not. do_write) return
         call resolve_temporal_write_unit(writer, idx, unit, is_utc)
-        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        flat_c = pack(flat, elem_mask)
-        nrows_c = count(row_mask, kind=int64)
-        n = size(flat_c, kind=int64)
+        call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            flat_c = pack(flat, elem_mask)
+            fv => flat_c
+            nrows_c = count(row_mask, kind=int64)
+        else
+            fv => flat
+            nrows_c = nrows
+        end if
+        n = size(fv, kind=int64)
         allocate(vals(n))
         do i = 1_int64, n
-            if (flat_c(i)%is_null()) then
+            if (fv(i)%is_null()) then
                 vals(i) = 0_c_int64_t
             else
-                vals(i) = flat_c(i)%to_unix(unit)
+                vals(i) = fv(i)%to_unix(unit)
             end if
         end do
-        call temporal_valid_ptr(writer, name, flat_c%is_null(), valid_buf, valid_ptr)
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
         call parquet_check_row_count(writer, name, nrows_c)
         call parquet_append_timestamp_column(writer%handle, trim(outname)//char(0), vals, nrows_c, asize, &
             int(unit, c_int32_t), is_utc, valid_ptr)
@@ -216,7 +240,8 @@ contains
     ! ---- Temporal streaming (row-group-chunked) writes -------------------------------
     !> Chunk counterpart of temporal_write_preamble: schema checks + exact type match, the
     !> streaming row-group row-count check, and first-chunk mark-written. Returns do_write.
-    subroutine temporal_chunk_preamble(writer, name, expected_type, asize, nrows, do_write, outname, idx, row_mask)
+    subroutine temporal_chunk_preamble(writer, name, expected_type, asize, nrows, do_write, outname, idx, &
+        row_mask, masked)
         type(parquet_writer), intent(inout) :: writer !! open writer with a row group open.
         character(len=*), intent(in) :: name !! column name.
         character(len=*), intent(in) :: expected_type !! "date"/"time"/"timestamp".
@@ -225,11 +250,13 @@ contains
         logical, intent(out) :: do_write !! whether to write this chunk.
         character(len=:), allocatable, intent(out) :: outname !! resolved output name.
         integer, intent(out) :: idx !! schema column index, or 0 schema-less.
-        logical, allocatable, intent(out) :: row_mask(:) !! this chunk's applicable row-keep mask, `nrows` long.
+        logical, allocatable, intent(out) :: row_mask(:) !! this chunk's row-keep mask; unallocated if .not. masked.
+        logical, intent(out) :: masked !! .true. if a row mask applies to this chunk.
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
 
         do_write = .false.
         idx = 0
+        masked = .false.
         if (writer%is_schema_enforced) then
             idx = parquet_get_defined_column_index(writer, name)
             call writer_context_suffix(writer, ctx)
@@ -243,7 +270,7 @@ contains
             end if
         end if
         if (.not. parquet_is_column_enabled(writer, name)) return
-        call parquet_check_row_group_row_count(writer, name, nrows, row_mask)
+        call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
         call parquet_chunk_mark_written_if_first(writer, name)
         call parquet_resolve_output_name(writer, name, outname)
         do_write = .true.
@@ -252,7 +279,7 @@ contains
     subroutine write_date_chunk_flat(writer, name, flat, asize, nrows)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column name.
-        type(parquet_date), intent(in) :: flat(:) !! this chunk's flattened dates.
+        type(parquet_date), intent(in), target :: flat(:) !! this chunk's flattened dates.
         integer(int64), intent(in) :: asize !! per-row element count.
         integer(int64), intent(in) :: nrows !! this chunk's row count.
         logical :: do_write
@@ -262,26 +289,33 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         logical, allocatable :: row_mask(:), elem_mask(:)
-        type(parquet_date), allocatable :: flat_c(:)
+        type(parquet_date), allocatable, target :: flat_c(:) !! masked copy; unused on the unmasked fast path.
+        type(parquet_date), pointer :: fv(:) !! the elements actually written: `flat` itself, or flat_c.
+        logical :: masked !! whether a row mask applies to this write.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
         call lk%claim(writer)
-        call temporal_chunk_preamble(writer, name, "date", asize, nrows, do_write, outname, idx, row_mask)
+        call temporal_chunk_preamble(writer, name, "date", asize, nrows, do_write, outname, idx, row_mask, masked)
         if (.not. do_write) return
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        flat_c = pack(flat, elem_mask)
-        allocate(days(size(flat_c, kind=int64)))
-        days = flat_c%raw()
-        call temporal_valid_ptr(writer, name, flat_c%is_null(), valid_buf, valid_ptr)
-        if (size(flat_c, kind=int64) > 0_int64) &
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            flat_c = pack(flat, elem_mask)
+            fv => flat_c
+        else
+            fv => flat
+        end if
+        allocate(days(size(fv, kind=int64)))
+        days = fv%raw()
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
+        if (size(fv, kind=int64) > 0_int64) &
             call parquet_append_date_column_chunk(writer%handle, trim(outname)//char(0), days, asize, valid_ptr)
     end subroutine write_date_chunk_flat
     !> Flat worker for the scalar and matrix time chunk writes.
     subroutine write_time_chunk_flat(writer, name, flat, asize, nrows)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column name.
-        type(parquet_time), intent(in) :: flat(:) !! this chunk's flattened times.
+        type(parquet_time), intent(in), target :: flat(:) !! this chunk's flattened times.
         integer(int64), intent(in) :: asize !! per-row element count.
         integer(int64), intent(in) :: nrows !! this chunk's row count.
         logical :: do_write
@@ -292,20 +326,27 @@ contains
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         logical, allocatable :: row_mask(:), elem_mask(:)
-        type(parquet_time), allocatable :: flat_c(:)
+        type(parquet_time), allocatable, target :: flat_c(:) !! masked copy; unused on the unmasked fast path.
+        type(parquet_time), pointer :: fv(:) !! the elements actually written: `flat` itself, or flat_c.
+        logical :: masked !! whether a row mask applies to this write.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
         call lk%claim(writer)
-        call temporal_chunk_preamble(writer, name, "time", asize, nrows, do_write, outname, idx, row_mask)
+        call temporal_chunk_preamble(writer, name, "time", asize, nrows, do_write, outname, idx, row_mask, masked)
         if (.not. do_write) return
         call resolve_temporal_write_unit(writer, idx, unit, is_utc)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        flat_c = pack(flat, elem_mask)
-        allocate(ns(size(flat_c, kind=int64)))
-        ns = flat_c%raw()
-        call temporal_valid_ptr(writer, name, flat_c%is_null(), valid_buf, valid_ptr)
-        if (size(flat_c, kind=int64) > 0_int64) &
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            flat_c = pack(flat, elem_mask)
+            fv => flat_c
+        else
+            fv => flat
+        end if
+        allocate(ns(size(fv, kind=int64)))
+        ns = fv%raw()
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
+        if (size(fv, kind=int64) > 0_int64) &
             call parquet_append_time_column_chunk(writer%handle, trim(outname)//char(0), ns, asize, &
                 int(unit, c_int32_t), valid_ptr)
     end subroutine write_time_chunk_flat
@@ -313,7 +354,7 @@ contains
     subroutine write_timestamp_chunk_flat(writer, name, flat, asize, nrows)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         character(len=*), intent(in) :: name !! column name.
-        type(parquet_timestamp), intent(in) :: flat(:) !! this chunk's flattened instants.
+        type(parquet_timestamp), intent(in), target :: flat(:) !! this chunk's flattened instants.
         integer(int64), intent(in) :: asize !! per-row element count.
         integer(int64), intent(in) :: nrows !! this chunk's row count.
         logical :: do_write
@@ -325,26 +366,33 @@ contains
         type(c_ptr) :: valid_ptr
         integer(int64) :: i, m
         logical, allocatable :: row_mask(:), elem_mask(:)
-        type(parquet_timestamp), allocatable :: flat_c(:)
+        type(parquet_timestamp), allocatable, target :: flat_c(:) !! masked copy; unused on the unmasked fast path.
+        type(parquet_timestamp), pointer :: fv(:) !! the elements actually written: `flat` itself, or flat_c.
+        logical :: masked !! whether a row mask applies to this write.
         type(writer_lock) :: lk !! Releases writer's concurrency guard on every exit path (FINAL).
 
         call check_writer_open(writer)
         call lk%claim(writer)
-        call temporal_chunk_preamble(writer, name, "timestamp", asize, nrows, do_write, outname, idx, row_mask)
+        call temporal_chunk_preamble(writer, name, "timestamp", asize, nrows, do_write, outname, idx, row_mask, masked)
         if (.not. do_write) return
         call resolve_temporal_write_unit(writer, idx, unit, is_utc)
-        elem_mask = parquet_mask_expand_block(row_mask, asize)
-        flat_c = pack(flat, elem_mask)
-        m = size(flat_c, kind=int64)
+        if (masked) then
+            elem_mask = parquet_mask_expand_block(row_mask, asize)
+            flat_c = pack(flat, elem_mask)
+            fv => flat_c
+        else
+            fv => flat
+        end if
+        m = size(fv, kind=int64)
         allocate(vals(m))
         do i = 1_int64, m
-            if (flat_c(i)%is_null()) then
+            if (fv(i)%is_null()) then
                 vals(i) = 0_c_int64_t
             else
-                vals(i) = flat_c(i)%to_unix(unit)
+                vals(i) = fv(i)%to_unix(unit)
             end if
         end do
-        call temporal_valid_ptr(writer, name, flat_c%is_null(), valid_buf, valid_ptr)
+        call temporal_valid_ptr(writer, name, fv%is_null(), valid_buf, valid_ptr)
         if (m > 0_int64) call parquet_append_timestamp_column_chunk(writer%handle, trim(outname)//char(0), vals, asize, &
             int(unit, c_int32_t), is_utc, valid_ptr)
     end subroutine write_timestamp_chunk_flat

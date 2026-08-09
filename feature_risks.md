@@ -131,6 +131,7 @@ something a reader is expected to have.
 | [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null) | Two threads pasting adjacent row groups share a validity bitmap block and lose a null | 4 — covered |
 | [Risk-65](#risk-65--a-guard-claimed-after-the-state-it-protects-is-a-guard-that-loses-the-race) | A guard claimed after the state it protects is a guard that loses the race | 4 — covered |
 | [Risk-67](#risk-67--an-unbounded-read-of-a-parquet_column-storage-array-returns-uninitialised-slack) | An unbounded read of a `parquet_column` storage array returns uninitialised slack | 4 — covered |
+| [Risk-68](#risk-68--a-qc-bound-is-parsed-into-float64-so-a-bound-past-253-is-silently-rounded) | A qc bound is parsed into `float64`, so a bound past 2^53 is silently rounded | 4 — covered |
 
 ---
 
@@ -138,7 +139,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-68**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-69**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2701,3 +2702,42 @@ whole suite, as it did on the first attempt.
 obviously "the whole array" is meant. Do not use `size(self%<comp>)` as a row count — `self%nrows` is
 the row count and `%capacity()` is the allocation. And do not "simplify" `ensure_bitmap` back to
 `bits_needed(self)`: it looks like the tighter, more careful expression, and it is the bug.
+
+### Risk-68 — A qc bound is parsed into `float64`, so a bound past 2^53 is silently rounded
+
+**What breaks.** `parquet_qc_numeric_bound` (`src/parquet_metadata_maml.f90`) reads a `qc: min:`/
+`max:` bound out of the MAML text with `read(raw, *, iostat=ios) value` into a `real(real64)`. Every
+consumer of a numeric bound therefore sees a `float64`, whatever the column's declared type. Past
+2^53 that is lossy: `max: 9007199254740993` becomes `9007199254740992` with no diagnostic, because
+nothing in the text distinguishes "I meant exactly this" from "I meant roughly this".
+
+**Why it is quiet.** A qc violation is a WARNING, so the failure mode is not an abort but a *missing*
+warning — the check reports compliance for data that violates its declaration. Nothing downstream can
+notice: the file is written correctly, the values are correct, and the only evidence is a line that
+was never printed.
+
+**The values are no longer affected — only the bound.** `parquet_check_qc_numeric` used to widen
+every element to `float64` before comparing, which rounded the *data* the same way; an `int64` column
+holding 2^53 + 1 compared as though it held 2^53 and passed a `max: 2^53` bound it violates. That is
+fixed: `qc_numeric_i64` converts the bound to `int64` once (`qc_bound_as_int64`) and compares
+natively whenever the bound has an exact `int64` equivalent, falling back to the `float64` comparison
+only for a fractional bound — which can reach an `int64` column only when the *schema's* type is a
+float one, where comparing in `float64` is the correct reading.
+
+**Test.** `qc: an int64 bound is judged in int64, not after widening to real64`
+(`test/test_writing.f90`, over the `qc_int64_beyond_float64_precision` error scenario). The scenario
+carries both halves in one file: an `over` column holding 2^53 + 1 against `max: 2^53`, which must
+warn, and an `at` column holding 2^53 exactly against the same bound, which must not. The negative
+control is what stops a checker that simply warns about every `int64` column from passing. Confirmed
+by mutation: making `qc_bound_as_int64` always answer `.false.` — i.e. restoring the old widening —
+fails the test.
+
+**What this forbids.** Do not "fix" the remaining half by rounding, clamping or ceiling the bound
+into the value's kind: the operator makes that a different question for each of `>=`, `>`, `<=`, `<`,
+and getting it wrong turns a silently-loose check into a silently-tight one, which is worse. The
+honest options are to leave it (and document it, which
+[quality-control.md](doc/pages/quality-control.md) now does) or to carry the bound's original text
+down to the comparison so an exact integer bound can be parsed as one — which would touch
+`parquet_qc_numeric_bound`'s two schema-validation callers as well, and is a change to make
+deliberately rather than in passing.
+

@@ -658,6 +658,8 @@ program error_scenarios
         call scenario_qc_warning_numeric()
     case ("qc_warning_fractional_bound")
         call scenario_qc_warning_fractional_bound()
+    case ("qc_int64_beyond_float64_precision")
+        call scenario_qc_int64_beyond_float64_precision()
     case ("qc_warning_string")
         call scenario_qc_warning_string()
     case ("qc_silently_ignored_for_boolean")
@@ -6937,6 +6939,44 @@ contains
         call parquet_write_column(writer, "f", values)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_warning_fractional_bound
+
+    !> An int64 qc bound must be judged in int64, not after widening every value to real64.
+    !> Two columns, one assertion each way:
+    !>
+    !>   `over` holds 2**53 + 1 against `max: 2**53`. real64 cannot represent 2**53 + 1, so
+    !>   widening it rounds it DOWN onto the bound and the value looks compliant -- which is
+    !>   exactly what this library used to do, silently passing a value that violates. It must
+    !>   now warn.
+    !>
+    !>   `at` holds 2**53 itself against the same bound, which genuinely satisfies `<=`. It must
+    !>   NOT warn -- the negative control, without which a checker that simply warns about every
+    !>   int64 column would pass this scenario.
+    subroutine scenario_qc_int64_beyond_float64_precision()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: over(1) = [9007199254740993_int64]  !! 2**53 + 1: not representable in real64.
+        integer(int64) :: at(1) = [9007199254740992_int64]    !! 2**53 exactly: representable, and compliant.
+
+        schema%maml%name = "qc_int64_precision.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: over", &
+            "  data_type: int64", &
+            "  qc:", &
+            "    max: 9007199254740992", &
+            "- name: at", &
+            "  data_type: int64", &
+            "  qc:", &
+            "    max: 9007199254740992" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_int64_precision.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "over", over)
+        call parquet_write_column(writer, "at", at)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_int64_beyond_float64_precision
 
     subroutine scenario_qc_warning_string()
         type(parquet_schema) :: schema

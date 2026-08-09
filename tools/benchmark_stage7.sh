@@ -147,6 +147,27 @@ if "$fc" --version 2>&1 | head -1 | grep -qi "ifx\|intel"; then
     fi
 else
     LTO_FLAG="-flto"
+    # GCC HAS THE SAME ARCHIVER PROBLEM AS INTEL, and it is easy to miss because the build succeeds.
+    # Under -flto a GCC object carries GIMPLE IR; an archiver with no LTO plugin indexes only what it
+    # can see, so the linker takes the machine-code half of a fat object and does NO cross-module
+    # optimisation -- the LTO arm then measures a normal build with bigger objects. It does not fail
+    # and it does not warn. GCC ships gcc-ar (a thin wrapper passing -plugin liblto_plugin) exactly
+    # for this. On Linux, binutils ar usually loads the plugin itself; on macOS the default `ar` is
+    # Apple cctools ar, which cannot, which is where this was found: machine C's -flto arm produced a
+    # 14.2 MB archive against 5.2 MB plain, still full of ordinary text symbols, and measured no gain
+    # anywhere. Prefer a versioned gcc-ar matching the compiler (MacPorts ships gcc-ar-mp-15 beside
+    # gfortran-mp-15), then a plain gcc-ar, and warn rather than silently measuring nothing.
+    gcc_major="$("$fc" -dumpversion 2>/dev/null | cut -d. -f1)"
+    for cand in "gcc-ar-mp-${gcc_major}" "gcc-ar-${gcc_major}" gcc-ar; do
+        if command -v "$cand" >/dev/null 2>&1; then LTO_AR="$cand"; break; fi
+    done
+    if [ -z "$LTO_AR" ]; then
+        echo "WARNING: no gcc-ar found; the LTO build will archive with '$(command -v ar)'." >&2
+        echo "  If that archiver has no LTO plugin (Apple's cctools ar has none), the static" >&2
+        echo "  library keeps IR the linker will not use, so the build quietly does NO" >&2
+        echo "  interprocedural optimisation and its numbers are a measurement of nothing." >&2
+        echo "  Install/expose gcc-ar (MacPorts: gcc-ar-mp-<N>) and rerun before trusting -flto." >&2
+    fi
 fi
 
 run_one() {  # $1 = "plain" | "lto"

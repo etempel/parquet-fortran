@@ -1587,6 +1587,32 @@ which reads like a missing dependency rather than a flag mistake. Append when a 
 **Link-time optimisation links cleanly on all three** (verified with a minimal mixed Fortran/C++
 `bind(C)` program): `-flto` for gfortran + g++, and **`-ipo`** — not `-flto` — for ifx + icpx.
 
+**But linking is not optimising: an LTO build across this library's STATIC LIBRARY also needs a
+plugin-capable ARCHIVER, and without one it silently does nothing.** Under `-flto`/`-ipo` an object
+holds intermediate representation rather than finished code. An archiver that cannot read that IR
+indexes only what it can see, so the linker takes the machine-code half of a fat object and performs
+no cross-module optimisation — **the build succeeds, the tests pass, and the measurement is of an
+ordinary build with bigger objects.** There is no error and no warning. Intel ships `xiar`, GCC
+ships `gcc-ar` (a wrapper adding `-plugin liblto_plugin`); `fpm` archives with plain `ar` unless
+`FPM_AR` says otherwise. **On Linux, binutils `ar` usually loads the plugin itself; on macOS the
+default `ar` is Apple's cctools `ar`, which cannot** — so both macOS machines need
+`FPM_AR=gcc-ar-mp-<N>` for a GCC LTO build to mean anything. The tell is the archive size: machine
+C's `libparquet-fortran.a` came out **14.2 MB under `-flto` against 5.2 MB plain** while still full
+of ordinary text symbols under `nm`, and measured no gain anywhere.
+`tools/benchmark_stage7.sh` selects the archiver for both compiler families and warns when it cannot
+find one; `tools/machine_report.sh` reports which archivers exist. **Check the archiver before
+reporting any LTO result, in either direction** — "LTO changes nothing here" is exactly what a
+disabled LTO build looks like.
+
+**On the two macOS machines the C++ half is Apple clang unless something says otherwise, so the
+normal build is MIXED-FAMILY.** fpm derives its C/C++ compiler from the *Fortran* compiler's family
+when `FPM_CC`/`FPM_CXX` are unset — gfortran gives `gcc`/`g++`, and on macOS a bare `gcc`/`g++` is
+Apple clang, not MacPorts GCC. Machine C builds MacPorts gfortran 15.2 against Apple clang 21 that
+way, which is deliberate (`FPM_CXXFLAGS` carries `-stdlib=libc++`, which MacPorts `g++` would
+reject). Read `tools/machine_report.sh`'s `fc`/`cc` lines rather than assuming a matched pair, and
+say which pair a figure came from — the same-family (`gfortran-mp-15` + `g++-mp-15`) and
+mixed-family builds are different experiments.
+
 ### Writing benchmarking instructions for another machine
 
 Measurements regularly have to be taken somewhere other than the machine the work is being done on —
@@ -2364,6 +2390,18 @@ before being noticed:**
 - **Take the best of several rounds, not one measurement.** Single rounds of the `access` mode swung
   0.96x–1.22x on the same build — wider than the effect being measured. The minimum is the run least
   disturbed by everything else on the machine, which is what these modes are actually asking about.
+- **Never measure a configuration immediately after a heavy phase, and never trust an A/B where one
+  arm ran second.** A wrapper that builds config 1, tests it, then builds config 2 and tests it hands
+  the second arm a machine that has not settled — the test suite and the error scenarios are hundreds
+  of subprocesses — so the second arm is systematically penalised by whatever is still draining. This
+  is not the same hazard as "the machine is busy": it is *ordered*, so it biases one arm rather than
+  adding symmetric noise, and best-of-N rounds does **not** remove it. Measured with
+  `tools/benchmark_stage7.sh --both --test`, which reported LTO **22–30% slower**
+  than plain (S7-5 85.59 → 111.00 ms); re-measuring the two arms alone, with no suite in between, put
+  them within **0.5%** (85.10 vs 85.43). The first result would have been written up as a real
+  regression. **Re-run any delta that would change a decision, with the arms measured back to back
+  and nothing heavy before either**, and quote the noise floor: the same binary moved 12% run to run
+  on that machine (S7-1 118.84 → 133.02 ms), so anything under that is indistinguishable from zero.
 - **An accessor that copies is not a read — make two modes being compared do the SAME job.** `%get`
   allocates a fresh array the size of the column and copies into it, so a `%get` loop measures the
   read *plus* a full allocation and copy per column, and `sum(...)` on top adds another whole pass.
@@ -2675,6 +2713,26 @@ visible, makes the list self-correcting instead of stale, and turns the remainin
 a reader can see the size of. `check_no_per_element_string_alloc`'s `KNOWN_REMAINING` is the worked
 example; verify a new ratchet fires in both directions before trusting it, because the
 count-left-too-high half is the one that never fires on its own.
+
+**The same blindness applies to a tool that inventories the ENVIRONMENT rather than the source, and
+there it is worse, because absence gets quoted as a finding.** `tools/machine_report.sh` listed
+compilers from a fixed set of unsuffixed names (`gfortran flang g++ …`), while MacPorts, Homebrew and
+most distributions ship them suffixed — `flang-mp-22`, `g++-mp-15`, `gcc-13`, `clang++-18`. On
+machine C it therefore reported flang as absent when flang 22.1.8 was on `PATH`, its `--lto-probe`
+skipped the flang arm **silently**, and a benchmarking report went on to record both that the machine
+had no flang and that this file's own machine table was stale. Both conclusions were wrong, and
+nothing in the tool's output looked incomplete. Two rules follow, and they generalise to any future
+environment probe:
+
+- **Match by shape, not by a remembered list** — `BASE`, `BASE-mp-*`, `BASE-[0-9]*` across every
+  `PATH` entry (`compiler_variants` in that script), so a compiler installed under any conventional
+  name is found without editing anything.
+- **A skipped probe must not look like a passing one.** Print `SKIPPED -- '<x>' not found` rather
+  than returning quietly; an arm that never ran is otherwise indistinguishable from one that was
+  never written, and the reader counts passes rather than arms.
+
+**A tool's silence is evidence about the tool, never about the machine.** Before reporting that
+something is not installed, run it by name.
 
 ### Measuring test coverage
 

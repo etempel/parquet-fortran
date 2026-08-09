@@ -189,6 +189,8 @@ contains
                 test_set_max_threads_valid_value_does_not_break_round_trip), &
             new_unittest("writing a numeric kind that differs from the schema's declared data_type " // &
                 "converts to match it", test_write_cross_type_schema_coercion), &
+            new_unittest("the float-to-int integrality test accepts every whole value across its boundaries", &
+                test_write_float_to_int_boundary_values), &
             new_unittest("float32 scalar (with is_valid) and float32/boolean vector columns round-trip", &
                 test_write_float32_boolean_vector_columns), &
             new_unittest("vector columns written through a qc-enabled schema round-trip (with/without is_valid)", &
@@ -2443,6 +2445,58 @@ contains
     !> that has a dedicated conversion branch in parquet_write.f90's
     !> parquet_append_as_schema_* family; the reversed-direction failure modes
     !> (overflow, non-integral) are covered separately as error_scenarios.
+    !> The ACCEPT side of the float-to-int integrality check, swept across the boundaries where a
+    !> rewrite of it would most plausibly go wrong. The reject side (non-integral, out of range,
+    !> and the ordering between them) is covered by error scenarios, since each of those aborts.
+    !>
+    !> Why this exists as its own test: `parquet_is_whole_number` (parquet_core.f90) replaced an
+    !> `x /= anint(x)` form to avoid a per-element libm call on x86-64, and it is built from an
+    !> `abs`, a 2**52 magnitude arm and an integer round trip -- three places a boundary can be
+    !> got wrong by one. Every value below is a whole number that MUST be accepted; a mistake in
+    !> any of the three shows up here as a spurious "non-integral" abort rather than as a wrong
+    !> value, which no round-trip assertion would catch.
+    subroutine test_write_float_to_int_boundary_values(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        ! 0 and -0 (the sign bit must not survive abs), +/-1, the exact int32 limits, and a value
+        ! just inside them. All whole, all inside int32 range.
+        real(real64), parameter :: src32(7) = [ 0.0_real64, -0.0_real64, 1.0_real64, -1.0_real64, &
+            2147483647.0_real64, -2147483648.0_real64, 2147483646.0_real64 ]
+        ! The 2**52 arm of the predicate: below it the integer round trip decides, at and above it
+        ! every real64 is whole by construction. 2**52-1 and 2**52 sit on either side of that
+        ! branch, and 2**53 is past the point where consecutive integers stop being representable.
+        real(real64), parameter :: src64(5) = [ 4503599627370495.0_real64, 4503599627370496.0_real64, &
+            4503599627370497.0_real64, 9007199254740992.0_real64, -4503599627370496.0_real64 ]
+        ! Fixed-size, not allocatable: parquet_read_column takes the row count from the array it
+        ! is given, so an unallocated one reads as zero rows and aborts on the mismatch.
+        integer(int32) :: back32(7)
+        integer(int64) :: back64(7)
+        character(len=*), parameter :: out_file = "test_run/test_write_float_to_int_boundary.parquet"
+
+        call schema%init(table="float_to_int_boundary")
+        call schema%add_field("i32", "int32")
+        call schema%add_field("i64", "int64")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "i32", src32)
+        call parquet_write_column(writer, "i64", [src64, 0.0_real64, 0.0_real64])
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "i32", back32)
+        call parquet_read_column(reader, "i64", back64)
+        call parquet_close_reader(reader)
+
+        call check(error, all(back32 == int(src32, int32)), &
+            "every whole float64 inside int32 range must convert exactly")
+        if (allocated(error)) return
+        call check(error, all(back64(1:5) == int(src64, int64)), &
+            "every whole float64 across the 2**52 boundary must convert exactly")
+    end subroutine test_write_float_to_int_boundary_values
+
     subroutine test_write_cross_type_schema_coercion(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema

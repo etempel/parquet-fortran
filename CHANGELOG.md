@@ -459,6 +459,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Writing float values into an integer column no longer costs a libm call per element on
+  x86-64.** The check that every value is a whole number was `x /= anint(x)`, and `anint` means
+  round-half-away-from-zero — for which x86-64 has no SSE/AVX instruction, so the compiler emitted a
+  call to libm's `round()` for **every element**, on every float-to-integer write and on every
+  `parquet_table%cast` feasibility test. Measured across three machines, the float conversions cost
+  roughly ten times their integer counterparts on x86-64 while matching them on aarch64, which has a
+  single instruction for that rounding and never paid it. The test now uses an exact integer round
+  trip guarded by a 2^52 magnitude arm, which has a baseline SSE2 encoding throughout. **No answer
+  changes**: the new test agrees with the old on every input — including NaN, ±Infinity, denormals
+  and both sides of the 2^52 boundary — and the two error messages, and the order in which they are
+  reported when a value is both non-integral and out of range, are unchanged and now pinned by their
+  own tests.
+
 - **Null tracking is written a 64-bit word at a time instead of a bit at a time**, which is what
   most of the bulk validity operations were doing — one un-inlinable call per element, each redoing
   a division and a modulo to find the bit it wanted, and in two cases a full type-bound dispatch per

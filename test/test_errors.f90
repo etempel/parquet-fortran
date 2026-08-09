@@ -631,6 +631,12 @@ contains
                 test_write_float_to_int32_non_integral_aborts), &
             new_unittest("writing an out-of-int32-range float64 value to an int32 schema column aborts", &
                 test_write_float_to_int32_out_of_range_aborts), &
+            new_unittest("a float value both non-integral and out of int32 range reports the non-integral error", &
+                test_write_float_to_int32_non_integral_and_out_of_range_aborts), &
+            new_unittest("a large negative out-of-int64-range float reports the range error", &
+                test_write_float_to_int64_negative_out_of_range_aborts), &
+            new_unittest("writing a NaN to an int32 schema column aborts", &
+                test_write_float_nan_to_int32_aborts), &
             new_unittest("writing a non-integral float64 value to an int64 schema column aborts", &
                 test_write_float_to_int64_non_integral_aborts), &
             new_unittest("writing an out-of-int64-range float64 value to an int64 schema column aborts", &
@@ -4633,6 +4639,39 @@ contains
             failure_message="writing a non-integral float64 value to an int32 schema column was expected to error stop", &
             required_stderr="parquet_write_column: non-integral float value written to int column v")
     end subroutine test_write_float_to_int32_non_integral_aborts
+
+    subroutine test_write_float_to_int32_non_integral_and_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        ! Pins the ORDER of the two checks, which neither single-condition scenario can see:
+        ! the value violates both, and integrality is tested first, so this exact message is
+        ! what a caller gets. Asserting the range message here instead would pass against a
+        ! swapped implementation, which is the whole point of the test.
+        call check_scenario_exit_status_and_stderr(error, "write_float_to_int32_non_integral_and_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a float64 value that is both non-integral and out of int32 range was expected " // &
+                "to error stop naming the non-integral check, which is the one performed first", &
+            required_stderr="parquet_write_column: non-integral float value written to int column v")
+    end subroutine test_write_float_to_int32_non_integral_and_out_of_range_aborts
+
+    subroutine test_write_float_nan_to_int32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_float_nan_to_int32", expect_abort=.true., &
+            failure_message="writing a NaN to an int32 schema column was expected to error stop", &
+            required_stderr="parquet_write_column: non-integral float value written to int column v")
+    end subroutine test_write_float_nan_to_int32_aborts
+
+    subroutine test_write_float_to_int64_negative_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_float_to_int64_negative_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a large NEGATIVE out-of-int64-range float64 value was expected to error stop " // &
+                "naming the range check; reporting the integrality check instead means the integrality " // &
+                "test lost its abs() and ran an out-of-range int conversion", &
+            required_stderr="parquet_write_column: float value out of int64 range for column v")
+    end subroutine test_write_float_to_int64_negative_out_of_range_aborts
 
     subroutine test_write_float_to_int32_out_of_range_aborts(error)
         type(error_type), allocatable, intent(out) :: error

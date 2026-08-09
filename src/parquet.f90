@@ -67,6 +67,10 @@ module parquet
     ! emits has to reach them, so parquet_settings makes them public, and the facade hides them.
     private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
     private :: parquet_output_is_suppressed
+    ! Same case again: the float-to-integer integrality test is needed by the write path (a
+    ! submodule of parquet_core) AND by parquet_tables' %cast, two different modules, so
+    ! parquet_core has to make it public. It is an internal numeric predicate, not API.
+    private :: parquet_is_whole_number
     !
     character(len=*),parameter:: cversion = "v1.5.0 (2026-08-08)" !! version info
 #ifndef RELEASE_VERSION

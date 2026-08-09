@@ -825,13 +825,15 @@ contains
     end function int64_survives_real
     !
     !> Whether real64 `d` is a whole number that fits the integer kind `to_kind`. NaN fails the
-    !! whole-number test (`anint` of a NaN is a NaN, which equals nothing), which is the answer
-    !! wanted: there is no integer a NaN could become.
+    !! whole-number test, which is the answer wanted: there is no integer a NaN could become.
+    !! The test itself is `parquet_is_whole_number` (`parquet_core.f90`) rather than an inline
+    !! `d /= anint(d)`, because `anint` costs a libm call per element on x86-64 -- see that
+    !! function's own doc-comment.
     pure logical function real_fits_integer(d, to_kind) result(ok)
         real(real64), intent(in) :: d  !! the value to test.
         integer, intent(in) :: to_kind !! PK_INT32/PK_INT64 or their _VEC forms.
         ok = .false.
-        if (d /= anint(d)) return
+        if (.not. parquet_is_whole_number(d)) return
         if (to_kind == PK_INT32 .or. to_kind == PK_INT32_VEC) then
             ok = d >= -2147483648.0_real64 .and. d <= 2147483647.0_real64
         else

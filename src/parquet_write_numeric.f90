@@ -61,7 +61,7 @@ contains
 
         allocate(dst(size(src, kind=int64)))
         do i = 1_int64, size(src, kind=int64)
-            if (src(i) /= anint(src(i))) then
+            if (.not. parquet_is_whole_number(src(i))) then
                 error stop "parquet_write_column: non-integral float value written to int column " // trim(name)
             end if
             if (src(i) < -real(huge(0_int32), real64) - 1.0_real64 .or. src(i) > real(huge(0_int32), real64)) then
@@ -82,7 +82,7 @@ contains
 
         allocate(dst(size(src, kind=int64)))
         do i = 1_int64, size(src, kind=int64)
-            if (src(i) /= anint(src(i))) then
+            if (.not. parquet_is_whole_number(src(i))) then
                 error stop "parquet_write_column: non-integral float value written to int column " // trim(name)
             end if
             if (src(i) < -real(huge(0_int64), real64) .or. src(i) >= real(huge(0_int64), real64)) then

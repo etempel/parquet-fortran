@@ -684,6 +684,12 @@ program error_scenarios
         call scenario_write_int64_to_int32_overflow()
     case ("write_float_to_int32_non_integral")
         call scenario_write_float_to_int32_non_integral()
+    case ("write_float_nan_to_int32")
+        call scenario_write_float_nan_to_int32()
+    case ("write_float_to_int64_negative_out_of_range")
+        call scenario_write_float_to_int64_negative_out_of_range()
+    case ("write_float_to_int32_non_integral_and_out_of_range")
+        call scenario_write_float_to_int32_non_integral_and_out_of_range()
     case ("write_float_to_int32_out_of_range")
         call scenario_write_float_to_int32_out_of_range()
     case ("write_float_to_int64_non_integral")
@@ -7241,6 +7247,73 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote an out-of-int32-range float64 value to an int32 schema column without error"
     end subroutine scenario_write_float_to_int32_out_of_range
+
+    !> A value that is BOTH non-integral and out of int32 range must report the
+    !> **integrality** error, not the range one. The two checks are separate `if`s in
+    !> parquet_float64_to_int32 and integrality comes first, so which message appears is
+    !> purely a property of that ordering -- and nothing else in the suite pins it, because
+    !> the two existing scenarios each trigger only one of the checks. Guards the ordering
+    !> against a rewrite of the integrality test (see parquet_is_whole_number): swapping the
+    !> two `if`s, or folding them into one, changes this message while leaving both
+    !> single-condition scenarios green.
+    subroutine scenario_write_float_to_int32_non_integral_and_out_of_range()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        ! Both wrong at once: 3.0e9 exceeds huge(int32), and .5 is below 2**52 so the value
+        ! genuinely carries fractional bits rather than being a large-magnitude whole number.
+        real(real64) :: values(1) = [3000000000.5_real64]
+
+        call schema%init(table="float_both_wrong_table")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_float_to_int32_both_wrong.parquet", schema)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a non-integral out-of-range float64 value without error"
+    end subroutine scenario_write_float_to_int32_non_integral_and_out_of_range
+
+    !> Writing a NaN to an integer schema column: there is no integer a NaN could become, so it
+    !> takes the non-integral path. Covers `parquet_is_whole_number`'s NaN branch, which nothing
+    !> else reaches -- note the branch is defensive rather than load-bearing (see that function's
+    !> doc-comment), so this scenario pins the MESSAGE a user gets, not the branch's necessity.
+    subroutine scenario_write_float_nan_to_int32()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: values(1)
+
+        values(1) = ieee_value(0.0_real64, ieee_quiet_nan)
+        call schema%init(table="float_nan_table")
+        call schema%add_field("v", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_float_nan_to_int32.parquet", schema)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a NaN to an int32 schema column without error"
+    end subroutine scenario_write_float_nan_to_int32
+
+    !> A LARGE NEGATIVE out-of-int64-range float must report the range error, not the
+    !> integrality one. Its positive twin above cannot see this: `parquet_is_whole_number`
+    !> takes `abs` before its 2**52 magnitude arm, and without that `abs` a large negative
+    !> value misses the arm and reaches an `int(x, int64)` conversion that is out of range --
+    !> which answers "not whole" and produces the wrong message. Removing the `abs` leaves
+    !> every other scenario in this file green, which is why this one exists.
+    subroutine scenario_write_float_to_int64_negative_out_of_range()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: values(1) = [-real(huge(0_int64), real64) * 2.0_real64]
+
+        call schema%init(table="float_neg_out_of_range_table")
+        call schema%add_field("v", "int64")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_float_to_int64_neg_out_of_range.parquet", schema)
+        call parquet_write_column(writer, "v", values)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a large negative out-of-int64-range float64 value without error"
+    end subroutine scenario_write_float_to_int64_negative_out_of_range
 
     !> Same non-integral check as scenario_write_float_to_int32_non_integral,
     !> but for the int64 schema-column conversion path

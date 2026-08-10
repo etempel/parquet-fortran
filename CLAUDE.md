@@ -61,6 +61,7 @@ working rules).
   - [A `parquet_table` pointer does not survive a ROW-structural mutation](#a-parquet_table-pointer-does-not-survive-a-row-structural-mutation)
   - [New `parquet_table` state goes on the CACHE](#new-parquet_table-state-goes-on-the-cache--never-as-an-allocatable-component-of-the-type)
   - [Assembling a `parquet_column` from pieces: preallocate and `%paste`](#assembling-a-parquet_column-from-pieces-preallocate-and-paste)
+  - [`parquet_column`'s TYPED accessor tier: never reach storage through a binding](#parquet_columns-typed-accessor-tier-never-reach-storage-through-a-binding)
   - [A `parquet_schema` built in code must be parsed before anything reads its fields](#a-parquet_schema-built-in-code-must-be-parsed-before-anything-reads-its-fields)
 - [Element-domain modules (`parquet_strings`, `parquet_temporal`)](#element-domain-modules-parquet_strings-parquet_temporal)
   - [The `parquet_strings` module](#the-parquet_strings-module)
@@ -1434,6 +1435,71 @@ trimming a piece needs no `keep` mask and no `%delete_by_mask` either. `material
 If a future kind gains its own storage, decide which of these two shapes it has before adding it to
 the paste path.
 
+### `parquet_column`'s TYPED accessor tier: never reach storage through a binding
+
+**`parquet_tables` must never call a type-bound procedure on a `parquet_column`.** Every per-cell
+path reaches storage through the `parquet_column_*` generics that `parquet_columns` exports —
+`parquet_column_get_at`, `_set_at`, `_get_elem`, `_set_elem`, `_data_ptr`, `_string_column`,
+`_is_null`, `_set_null`, `_clear_null` — never through `%values%get_at(...)` or any sibling. The
+generics are public and the specifics beneath them are private; `src/parquet.f90` privatises all
+nine again, so none of it reaches a `use parquet` program and the public API is unchanged.
+
+**Why, in one paragraph, because the reason is not visible in the source.** When ifx passes a
+`type(parquet_column)` actual to a `class(parquet_column)` dummy whose callee is in another
+compilation unit, it constructs the runtime class descriptor: one full type-descriptor record per
+allocatable component — 21 records, **178 stores** — emitted as straight-line code in the **caller's
+prologue**, unconditionally, ahead of any branch. A `select case` arm that never executes still pays
+it. Measured at **~35 ns per call**, which was **78%** of what a resolved-handle `%get(i, value)`
+cost; removing it took that read from **48.24 ns to 14.38 (3.36x)** and the whole table layer's
+overhead above a raw storage read from 43.10 ns to 9.34. gfortran never emitted the block and still
+gained **1.23-1.32x**, because the re-homing takes a polymorphic dummy off the hot path on any
+compiler. Three conditions are jointly necessary: a non-polymorphic actual, a callee in a separate
+compilation unit, and a type carrying deep deallocation/finalisation information.
+
+**The shape, and the one arrow that must not be flipped.** The implementation lives at the `type`
+end and the binding is a one-line forwarder onto it:
+
+```fortran
+module procedure parquet_column_get_at_f64          ! the IMPLEMENTATION, type(parquet_column)
+    call parquet_column_check_kind(col, PK_FLOAT64, "get_at")
+    value = col%f64(i)
+end procedure parquet_column_get_at_f64
+!
+module procedure get_at_f64                          ! the binding, now a forwarder
+    call parquet_column_get_at_f64(self, i, value)   ! class -> type: legal, free
+end procedure get_at_f64
+```
+
+A `class` actual passed to a `type` dummy costs nothing; a `type` actual passed to a `class` dummy
+builds the descriptor. **Writing it the other way round — a typed wrapper that calls the binding —
+relocates the conversion into the wrapper and buys exactly zero**, and the symptom is a measurement
+that refuses to move rather than anything failing.
+
+Four rules for anyone working here:
+
+- **Adding a per-cell accessor means adding BOTH halves** — a typed specific under the right generic
+  (in `tools/generate_parquet_columns.py`, which emits the interfaces, the bodies and the
+  forwarders) and a `private ::` line in `src/parquet.f90` if it introduces a new generic name.
+- **A typed body must call the TYPED guards** (`parquet_column_check_kind`/`_check_index`/
+  `_check_element`/`_check_width`) and no `class(parquet_column)`-dummy helper at all. The guards
+  are not the only such helper: `ensure_bitmap` had to be converted to a `type` dummy for exactly
+  this reason, because the typed `set_null` forms call it. Check what a new body reaches for.
+- **`check_no_type_bound_column_access` (`tools/check_source_conventions.py`) is the enforcement**,
+  and it covers all three shapes above. **This is deliberately NOT a `feature_risks.md` entry**:
+  that register is for properties whose breach is a wrong answer, and a reintroduced binding call
+  answers correctly and merely costs 35 ns — so a static check, not a risk entry, is its home.
+- **Keep the tier even if a future ifx stops emitting the block.** It costs gfortran nothing (it
+  gains, in fact), and re-flattening it would re-expose the library to the next compiler that makes
+  the same codegen choice. The one-command check is `objdump -dr --no-show-raw-insn <obj> | awk
+  '/<parquet_tables_mp_col_fetch_f64_>:/,/^$/' | grep -c 'R_X86_64.*\.bss'`, which must read **0**.
+
+**Scope deliberately stops at per-cell.** `mat_*`/`matchunk_*`, `add_column_*`, `set_arr_*` and the
+once-per-table procedures still convert, and that is fine — the cost is per call, not proportional
+to the work, so it amortises away on a per-column path. A library-wide sweep went 262 -> 138
+procedures carrying the block, and everything left is per-column or cold. `parquet_sorting` is
+excluded on the same grounds (it binds a sort key once per column). Widening scope needs a
+measurement, not an assumption.
+
 ### A `parquet_schema` built in code must be parsed before anything reads its fields
 
 `schema%init` + `schema%add_field` build the schema's MAML **text** only; `schema%cinfo` stays
@@ -2162,6 +2228,20 @@ applied to the harness instead of the source.
   `feature_risks.md` Risk-70. **Do not reach for the whole-array elemental call as an alternative
   fix** — measured after the change, `call arr%set_unix(vals, unit)` was **3.2x slower** than the
   indexed loop it would replace, so the win is in the dummy's intent, not in the call shape.
+- **The CONVERSE also costs, and on ifx it costs far more: passing a non-polymorphic `type(T)`
+  actual to a `class(T)` dummy in another compilation unit makes ifx BUILD the class descriptor,
+  in the caller's prologue, on every call.** One type-descriptor record per allocatable component
+  of `T`, emitted unconditionally ahead of any branch — for `parquet_column` that is 21 records and
+  178 stores, **~35 ns per call**, and it was 78% of what a per-cell table read cost. The bullet
+  above is about a polymorphic dummy being *initialised*; this is about a non-polymorphic actual
+  being *converted*, and the two are independent. The fix is to put the implementation behind a
+  `type(T)` dummy and leave the type-bound binding as a one-line forwarder — a `class` actual
+  passed to a `type` dummy is free, so only that direction works. Fully written up, with the
+  maintenance rules and the one-command `objdump` check, under
+  [`parquet_column`'s TYPED accessor tier](#parquet_columns-typed-accessor-tier-never-reach-storage-through-a-binding)
+  — read that before adding an accessor or a helper to `parquet_column`. **gfortran does not emit
+  the block but still gained 1.23-1.32x from the same change**, so this is not an ifx-only
+  workaround.
 - **The previous bullet's "resets every component for free" is the documented standard behavior,
   but this project has one confirmed, empirically-reproduced counterexample — don't treat it as an
   absolute guarantee for a correctness-critical `logical` component.** `parquet_table` (finalizable,

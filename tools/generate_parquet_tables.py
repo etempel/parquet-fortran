@@ -883,6 +883,19 @@ def gen_row_type():
     !! Still treat it as short-lived: a handle is cheap to make and the refusal is deliberately
     !! conservative, so re-fetching inside the loop is the shape to reach for rather than working
     !! out which mutations a particular handle could have survived.
+    !!
+    !! **No finalizer, deliberately** -- and this once had one, `row_finalize`, which nullified the
+    !! pointer, removed on the argument rather than on a measurement. It protected nothing: it ran
+    !! at scope exit (the object is already dead), and on `r = t%row(i)` it nullified a pointer the
+    !! copy overwrote a moment later. It could not catch the case that matters either -- a cache
+    !! freed with its table leaves `associated()` answering `.true.`, not `.false.`. Meanwhile it
+    !! cost two finalizer calls per assignment, on the shape this API makes idiomatic, and put the
+    !! type in the class CLAUDE.md says never to give to OpenMP's `private()`.
+    !!
+    !! `parquet_string` still carries the equivalent nullify-only finalizer, so the library is not
+    !! uniform here. That is accepted rather than overlooked: it is a released type, its finalizer
+    !! has no measured cost, and the consistency that matters is between this handle and
+    !! `parquet_table_col`, which the guide presents as its mirror image.
     type :: parquet_table_row
         private
         type(parquet_table_cache), pointer :: cache => null() !! the table's column store.
@@ -932,7 +945,7 @@ def gen_row_type():
         generic :: is_null => row_is_null, row_is_null_elem
         procedure :: index => row_index       !! This row's 1-based index within the table.
         procedure :: is_valid => row_is_valid !! Whether the handle is attached AND still current.
-        final :: row_finalize                 !! Drops the pointer; owns nothing, frees nothing.
+        ! NO `final` -- see the type's own doc-comment. This is a decision, not an omission.
     end type parquet_table_row
     !
     !> A resolved handle on ONE column of a `parquet_table`: the slot, its kind and the table's row
@@ -946,11 +959,11 @@ def gen_row_type():
     !! column: it stamps the table's `%generation()` when it is made and refuses once they differ.
     !! `%is_valid()` is the non-aborting way to ask. Re-fetching costs one lookup.
     !!
-    !! **No finalizer, deliberately** -- unlike `parquet_table_row`. The handle owns nothing and
-    !! frees nothing, and a finalizer could not catch the case that matters (a cache freed with its
-    !! table leaves `associated()` answering `.true.`, not `.false.`). It is not free either:
-    !! intrinsic assignment to or from a finalizable type runs the finalizer twice, which
-    !! `c = t%column(name)` would pay on every handle it makes.
+    !! **No finalizer, deliberately** -- the same decision `parquet_table_row` now carries, and for
+    !! the same reasons. The handle owns nothing and frees nothing, and a finalizer could not catch
+    !! the case that matters (a cache freed with its table leaves `associated()` answering `.true.`,
+    !! not `.false.`). It is not free either: intrinsic assignment to or from a finalizable type
+    !! runs the finalizer twice, which `c = t%column(name)` would pay on every handle it makes.
     !!
     !! **No allocatable components, mandatory.** A per-thread handle declared in a `block` inside a
     !! parallel region is an obvious thing to write, and this project has recorded both an ifx
@@ -3285,10 +3298,6 @@ def gen_spec_interfaces():
             class(parquet_table_row), intent(in) :: self !! the row handle.
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
         end subroutine row_check_current
-        !> Drops the store pointer. The handle owns nothing, so nothing is freed.
-        module subroutine row_finalize(self)
-            type(parquet_table_row), intent(inout) :: self !! the handle being destroyed.
-        end subroutine row_finalize
         !> Resolves `name` for a row-handle access, triggering the same lazy first touch the
         !! table's own accessors do. Aborts on a missing, unsupported or unreadable column.
         module subroutine row_resolve(self, name, proc, idx)

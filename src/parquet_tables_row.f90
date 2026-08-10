@@ -65,13 +65,6 @@ contains
             "); re-fetch it with %row(...)" // sfx
     end procedure row_check_current
     !
-    module procedure row_finalize
-        ! The handle owns nothing -- the cache belongs to the table -- so this drops the pointer
-        ! and frees nothing, exactly like parquet_string's own handle finalizer.
-        nullify(self%cache)
-        self%irow = 0
-    end procedure row_finalize
-    !
     module procedure row_is_null
         integer :: idx
         !

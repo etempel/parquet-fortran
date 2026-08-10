@@ -1933,9 +1933,12 @@ applied to the harness instead of the source.
   ```
 
   This applies to every finalizable type this library exposes (`parquet_table`, `parquet_reader`,
-  `parquet_writer`, `parquet_table_row`), and to any future one — so a per-thread instance of any
-  of them belongs in a `block`, and any example or guide page showing `private(<that type>)` is
-  wrong and should be corrected on sight.
+  `parquet_writer`), and to any future one — so a per-thread instance of any of them belongs in a
+  `block`, and any example or guide page showing `private(<that type>)` is wrong and should be
+  corrected on sight. **The two table HANDLES are deliberately not in that list**: neither
+  `parquet_table_row` nor `parquet_table_col` has a finalizer, which is what keeps them usable in a
+  `private()` clause — so removing a finalizer is one way to take a type *out* of this rule, and
+  adding one to either handle would put it back in.
 - **ifx forbids the `block` form the previous bullet prescribes, for any type that has
   ALLOCATABLE COMPONENTS — and is perfectly happy with `private()`. The two compilers forbid
   opposite shapes, so a type in that class can use neither, and needs a shared per-thread array
@@ -2066,8 +2069,9 @@ applied to the harness instead of the source.
   pays two finalizer calls per element for them. `parquet_string_column%view_all` did exactly that
   (`data_string(i) = self%view(i)`, setting a pointer and an integer) and got **3.9x** faster by
   writing the two components directly, which also dropped a redundant bounds check. This library
-  exposes six finalizable types (`parquet_writer`, `parquet_reader`, `parquet_string_column`,
-  `parquet_string`, `parquet_table`, `parquet_table_row` — grep `final ::` to re-derive the list), so
+  exposes five finalizable types (`parquet_writer`, `parquet_reader`, `parquet_string_column`,
+  `parquet_string`, `parquet_table` — grep `final ::` to re-derive the list rather than trusting
+  this one, which has already gone stale once), so
   check for this shape before threading any loop that assigns one of them. Every other finalizer note
   in this file is about *correctness*; this one is purely about cost.
 - **Passing an UNALLOCATED allocatable to an `optional` dummy makes that dummy ABSENT** (F2018

@@ -334,7 +334,9 @@ contains
             new_unittest("a row handle refuses to be used after a structural change", &
                 test_row_handle_staleness), &
             new_unittest("%append invalidates a row handle on the destination itself", &
-                test_row_handle_append_self_invalidates) &
+                test_row_handle_append_self_invalidates), &
+            new_unittest("a column handle on a file-backed table touches, and survives a sibling touch", &
+                test_col_handle_file_backed) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -8751,5 +8753,85 @@ contains
         call t%append(r)
         call check(error, .not. r%is_valid(), "appending through it invalidates it")
     end subroutine test_row_handle_append_self_invalidates
+    !
+    !> Handles against a FILE-BACKED table, which every other handle test avoids by building the
+    !! table in memory. Three behaviours only exist here, and all three are decisions the guide now
+    !! states as fact:
+    !!
+    !! * **`%column` touches at creation** (Q11, decided) — so making a handle on a never-read
+    !!   column READS it. That is right for the loop a handle exists for and wrong for a metadata
+    !!   sweep, which is why the guide sends `do j = 1, t%ncols()` to the by-position queries
+    !!   instead. Nothing tested it.
+    !! * **A lazy first touch does NOT invalidate a sibling handle.** `table_touch` deliberately
+    !!   leaves `generation` alone, and if it did not, the conservative staleness rule would
+    !!   swallow the ordinary case of reading a second column.
+    !! * **The first read of `parquet_row_index` DOES invalidate every handle**, because it
+    !!   materialises a slot through `table_new_slot`, which bumps `generation`. This is the case a
+    !!   caller cannot predict from their own code, and it is the reason `%is_valid()` exists as a
+    !!   public predicate rather than the rule just being documented.
+    subroutine test_col_handle_file_backed(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        character(len=*), parameter :: f = "test_run/table_colhandle_file.parquet"
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c, other, ri
+        real(real64) :: v
+        integer(int64) :: idx
+        logical :: found
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        ! Nothing has been read yet, so every column is empty.
+        call check(error, t%residency("f64") == RES_EMPTY, "a freshly opened column is not resident")
+        if (allocated(error)) return
+        ! --- %column touches at creation: this call is what reads the column ---
+        call t%column("f64", c)
+        call check(error, t%residency("f64") == RES_FULL, "%column reads the column it resolves")
+        if (allocated(error)) return
+        call check(error, c%residency() == RES_FULL, "and the handle reports that residency itself")
+        if (allocated(error)) return
+        call c%get(2_int64, v)
+        call check(error, abs(v - 2.0_real64 * 2.25_real64) < 1.0e-12_real64, &
+            "a handle on a file-backed column reads the file's values")
+        if (allocated(error)) return
+        ! --- reading ANOTHER column must not invalidate this handle ---
+        call check(error, t%residency("i32") == RES_EMPTY, "the sibling column is still unread")
+        if (allocated(error)) return
+        call t%column("i32", other)
+        call check(error, t%residency("i32") == RES_FULL, "resolving the sibling read it")
+        if (allocated(error)) return
+        call check(error, c%is_valid(), "a lazy first touch of another column leaves this handle valid")
+        if (allocated(error)) return
+        call c%get(3_int64, v)
+        call check(error, abs(v - 3.0_real64 * 2.25_real64) < 1.0e-12_real64, &
+            "and the handle still reads correctly afterwards")
+        if (allocated(error)) return
+        ! --- but parquet_row_index materialises a NEW SLOT, which does invalidate ---
+        call t%column(PARQUET_ROW_INDEX, ri)
+        call check(error, ri%is_valid(), "the row-index handle itself is valid")
+        if (allocated(error)) return
+        call check(error, .not. c%is_valid(), &
+            "the first read of parquet_row_index adds a column, so it invalidates outstanding handles")
+        if (allocated(error)) return
+        call check(error, .not. other%is_valid(), "including the sibling handle")
+        if (allocated(error)) return
+        call ri%get(1_int64, idx)
+        call check(error, idx == 1_int64, "the row-index handle reads the file row number")
+        if (allocated(error)) return
+        ! Re-fetching is what the abort message tells the caller to do, and it works.
+        call t%column("f64", c)
+        call check(error, c%is_valid(), "re-fetching after that revalidates")
+        if (allocated(error)) return
+        ! --- found= on the handle producer: a miss reports rather than aborting, and leaves a
+        !     handle that answers .false. rather than one that looks usable.
+        call t%column("nope", other, found=found)
+        call check(error, .not. found, "%column reports a missing name through found=")
+        if (allocated(error)) return
+        call check(error, .not. other%is_valid(), "and the handle it leaves behind is not valid")
+        if (allocated(error)) return
+        call t%column(99, other, found=found)
+        call check(error, .not. found, "%column reports an out-of-range position through found=")
+        if (allocated(error)) return
+        call check(error, .not. other%is_valid(), "and that handle is not valid either")
+    end subroutine test_col_handle_file_backed
     !
 end module test_table

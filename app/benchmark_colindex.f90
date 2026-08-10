@@ -897,16 +897,16 @@ contains
     end subroutine run_loop
 
     ! ---------------------------------------------------------------------------------------
-    ! Mode: rowfinal -- what making a handle costs today, finalizers included.
+    ! Mode: rowfinal -- what CONSTRUCTING a row handle costs (the type has no finalizer now).
     ! ---------------------------------------------------------------------------------------
 
     !> `r = t%row(i)` per row, against reaching the same cell with no handle at all.
     !!
-    !! `parquet_table_row` is finalizable and `%row` is a function, so `r = t%row(i)` is intrinsic
-    !! assignment from a function result of a finalizable type — which CLAUDE.md records as running
-    !! the finalizer **twice** per call. `row_finalize` nullifies a pointer on a handle that owns
-    !! nothing, so if that cost is real it is being paid by every row-major loop written to date,
-    !! for nothing. That is a free win for existing code, independent of F1.
+    !! This mode was built to price `row_finalize`, which has since been **deleted** — on the
+    !! argument that a finalizer nullifying a pointer on a non-owning handle protects nothing,
+    !! not on a figure from here (this mode cannot separate construction from finalization, which
+    !! is why it could not settle it). What it still measures is what CONSTRUCTING a row handle
+    !! costs, which is the number behind the guide's advice not to make one per cell.
     subroutine run_rowfinal(nrows, ncols, rounds, naccess)
         integer(int64), intent(in) :: nrows   !! rows per column.
         integer, intent(in) :: ncols          !! table width.
@@ -990,9 +990,10 @@ contains
         write(output_unit, '(a)') "  derived:"
         call emit_diff("handle construction per row", ns_row, ns_elem)
         write(output_unit, '(a)') ""
-        write(output_unit, '(a)') "  That difference is the row handle's construction plus its two finalizer calls,"
-        write(output_unit, '(a)') "  minus the one name lookup %get_element does and r%get also does. A large"
-        write(output_unit, '(a)') "  figure here argues for deleting row_finalize, which frees nothing anyway."
+        write(output_unit, '(a)') "  That difference is the row handle's construction, minus the one name lookup"
+        write(output_unit, '(a)') "  %get_element does and r%get also does. The type carries no finalizer any more,"
+        write(output_unit, '(a)') "  so what is left here is construction alone -- see --mode=handle for the column"
+        write(output_unit, '(a)') "  handle, which is what a per-cell loop should be using instead."
     end subroutine run_rowfinal
 
 end program benchmark_colindex

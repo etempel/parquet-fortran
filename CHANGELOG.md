@@ -41,7 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `%compact` or `%drop_column` used to read whatever now sat at its index. Relatedly,
   `t%append(r)` now validates the row handle it is given, with its own distinct message when the
   handle names the table being appended to (which the append itself invalidates, so re-fetching
-  cannot help).
+  cannot help). `parquet_table_row` also **loses its finalizer**, which nullified a pointer on a
+  handle that owns nothing: neither handle type is finalizable now, so both may be declared in an
+  OpenMP `private()` clause as well as in a `block`.
 
 - **Filling a string `parquet_column` from a character array is 6.2x faster**, and
   `parquet_string_column%build_from` gains a **character-array form** to make it so:

@@ -185,4 +185,140 @@ contains
         call col_fetch_ts(self%cache, self%slot, self%colkind, i, value, "get")
     end procedure col_get_ts_i64
     !
+    module procedure col_store_i32
+        call cache_require_kind(cache, slot, PK_INT32, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_i32
+    !
+    module procedure col_store_i64
+        call cache_require_kind(cache, slot, PK_INT64, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_i64
+    !
+    module procedure col_store_f32
+        call cache_require_kind(cache, slot, PK_FLOAT32, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_f32
+    !
+    module procedure col_store_f64
+        call cache_require_kind(cache, slot, PK_FLOAT64, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_f64
+    !
+    module procedure col_store_bool
+        call cache_require_kind(cache, slot, PK_LOGICAL, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_bool
+    !
+    module procedure col_store_date
+        call cache_require_kind(cache, slot, PK_DATE, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_date
+    !
+    module procedure col_store_time
+        call cache_require_kind(cache, slot, PK_TIME, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_time
+    !
+    module procedure col_store_ts
+        call cache_require_kind(cache, slot, PK_TIMESTAMP, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_ts
+    !
+    module procedure col_set_i32_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_i32_i32
+    !
+    module procedure col_set_i32_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_i32(self%cache, self%slot, i, value, "set")
+    end procedure col_set_i32_i64
+    !
+    module procedure col_set_i64_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_i64_i32
+    !
+    module procedure col_set_i64_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_i64(self%cache, self%slot, i, value, "set")
+    end procedure col_set_i64_i64
+    !
+    module procedure col_set_f32_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_f32_i32
+    !
+    module procedure col_set_f32_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_f32(self%cache, self%slot, i, value, "set")
+    end procedure col_set_f32_i64
+    !
+    module procedure col_set_f64_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_f64_i32
+    !
+    module procedure col_set_f64_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_f64(self%cache, self%slot, i, value, "set")
+    end procedure col_set_f64_i64
+    !
+    module procedure col_set_bool_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_bool_i32
+    !
+    module procedure col_set_bool_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_bool(self%cache, self%slot, i, value, "set")
+    end procedure col_set_bool_i64
+    !
+    module procedure col_set_date_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_date_i32
+    !
+    module procedure col_set_date_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_date(self%cache, self%slot, i, value, "set")
+    end procedure col_set_date_i64
+    !
+    module procedure col_set_time_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_time_i32
+    !
+    module procedure col_set_time_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_time(self%cache, self%slot, i, value, "set")
+    end procedure col_set_time_i64
+    !
+    module procedure col_set_ts_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_ts_i32
+    !
+    module procedure col_set_ts_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_ts(self%cache, self%slot, i, value, "set")
+    end procedure col_set_ts_i64
+    !
 end submodule parquet_tables_colaccess ! GCOVR_EXCL_LINE

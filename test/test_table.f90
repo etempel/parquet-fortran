@@ -318,7 +318,11 @@ contains
             new_unittest("a column handle's %get agrees with %get_element on every scalar shape", &
                 test_col_handle_get_matches_name_form), &
             new_unittest("a column handle refuses to be used after a structural change", &
-                test_col_handle_staleness) &
+                test_col_handle_staleness), &
+            new_unittest("a column handle's %set writes the table, and never widens", &
+                test_col_handle_set_writes_table), &
+            new_unittest("the handle's null trio works on kinds it has no %get for", &
+                test_col_handle_null_trio) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -8180,5 +8184,104 @@ contains
             call check(error, .not. fresh%is_valid(), "a handle that was never made is not valid")
         end block
     end subroutine test_col_handle_staleness
+    !> A handle is a VIEW: `%set` through it must change the table, be visible through the name
+    !! form, and clear that row's null. It must also refuse a kind that is not the column's --
+    !! `%get` widens float32 into a real64, `%set` never does the reverse.
+    subroutine test_col_handle_set_writes_table(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        real(real64) :: d(3), v
+        integer(int32) :: iv(3), iw
+        !
+        d = [1.0_real64, 2.0_real64, 3.0_real64]
+        iv = [4_int32, 5_int32, 6_int32]
+        call parquet_new_table(t)
+        call t%add_column("x", d)
+        call t%add_column("n", iv)
+        call t%column("x", c)
+        call c%set(2_int64, 99.5_real64)
+        ! Visible through the NAME form, because the handle is a view of the table and not a copy.
+        call t%get_element("x", 2_int64, v)
+        call check(error, abs(v - 99.5_real64) < 1.0e-12_real64, "a handle %set is visible through %get_element")
+        if (allocated(error)) return
+        call c%get(2_int64, v)
+        call check(error, abs(v - 99.5_real64) < 1.0e-12_real64, "a handle %set is visible through its own %get")
+        if (allocated(error)) return
+        call c%get(1_int64, v)
+        call check(error, abs(v - 1.0_real64) < 1.0e-12_real64, "a handle %set left its neighbours alone")
+        if (allocated(error)) return
+        ! Writing a value clears that row's null -- the table's own rule, inherited by the handle.
+        call c%set_null(3_int64)
+        call check(error, c%is_null(3_int64), "%set_null through a handle marks the row")
+        if (allocated(error)) return
+        call c%set(3_int64, 7.25_real64)
+        call check(error, .not. c%is_null(3_int64), "writing a value clears that row's null")
+        if (allocated(error)) return
+        ! A second column of a different kind, so a handle wired to the wrong slot cannot pass.
+        call t%column("n", c)
+        call c%set(1_int64, 42_int32)
+        call t%get_element("n", 1_int64, iw)
+        call check(error, iw == 42_int32, "a handle %set on an int32 column writes int32")
+        if (allocated(error)) return
+        call t%get_element("x", 1_int64, v)
+        call check(error, abs(v - 1.0_real64) < 1.0e-12_real64, "writing one column left the other alone")
+    end subroutine test_col_handle_set_writes_table
+    !
+    !> The null trio takes no value argument, so one body serves every kind -- including the ten
+    !! that stage 3a gave no `%get`/`%set`. This asserts exactly that: it drives the trio on a
+    !! STRING column and a vector column, neither of which the handle can read yet.
+    subroutine test_col_handle_null_trio(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        character(len=4) :: s(3)
+        real(real64) :: vec(2, 3)
+        !
+        s = [character(len=4) :: "aa", "bb", "cc"]
+        vec = reshape([1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64], [2, 3])
+        call parquet_new_table(t)
+        call t%add_column("txt", s)
+        call t%add_column("pair", vec)
+        ! --- a string column: no %get on the handle, but the trio must work ---
+        call t%column("txt", c)
+        call check(error, .not. c%is_null(1_int64), "a fresh string row is not null")
+        if (allocated(error)) return
+        call c%set_null(2_int64)
+        call check(error, c%is_null(2_int64), "%set_null marks a string row")
+        if (allocated(error)) return
+        call check(error, t%is_null("txt", 2_int64), "the table agrees the string row is null")
+        if (allocated(error)) return
+        call c%clear_null(2_int64)
+        call check(error, .not. c%is_null(2_int64), "%clear_null unmarks a string row")
+        if (allocated(error)) return
+        ! --- a vector column: the element forms, and the row form's "any element" rule ---
+        call t%column("pair", c)
+        call check(error, .not. c%is_null(1_int64), "a fresh vector row is not null")
+        if (allocated(error)) return
+        call c%set_null(1_int64, 2_int64)
+        call check(error, c%is_null(1_int64, 2_int64), "%set_null marks one element")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(1_int64, 1_int64), "the row's other element is untouched")
+        if (allocated(error)) return
+        call check(error, c%is_null(1_int64), "the row form answers .true. when ANY element is null")
+        if (allocated(error)) return
+        call c%clear_null(1_int64, 2_int64)
+        call check(error, .not. c%is_null(1_int64), "clearing the only null element clears the row")
+        if (allocated(error)) return
+        ! --- and the table's own by-POSITION %is_null, stage 1's remaining gap ---
+        call c%set_null(3_int64, 1_int64)
+        call check(error, t%is_null(t%column_index("pair"), 3_int64), &
+            "the table's by-position %is_null sees it (row form)")
+        if (allocated(error)) return
+        call check(error, t%is_null(t%column_index("pair"), 3_int64, 1_int64), &
+            "the table's by-position %is_null sees it (element form)")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null(t%column_index("pair"), 3_int64, 2_int64), &
+            "the by-position element form is precise about which element")
+        if (allocated(error)) return
+        call check(error, t%is_null(t%column_index("pair"), 3_int64) .eqv. t%is_null("pair", 3_int64), &
+            "by-position and by-name %is_null agree")
+    end subroutine test_col_handle_null_trio
     !
 end module test_table

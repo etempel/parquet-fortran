@@ -621,12 +621,17 @@ def gen_table_type():
         procedure, private :: is_null_i64 => table_is_null_i64 !! %is_null specific, int64 row index.
         procedure, private :: is_null_e32 => table_is_null_e32 !! %is_null specific, int32 row + element.
         procedure, private :: is_null_e64 => table_is_null_e64 !! %is_null specific, int64 row + element.
+        procedure, private :: is_null_at_i32 => table_is_null_at_i32 !! %is_null by position, int32 row.
+        procedure, private :: is_null_at_i64 => table_is_null_at_i64 !! %is_null by position, int64 row.
+        procedure, private :: is_null_at_e32 => table_is_null_at_e32 !! %is_null by position, int32 row + element.
+        procedure, private :: is_null_at_e64 => table_is_null_at_e64 !! %is_null by position, int64 row + element.
         !> Whether row `i` of a column is null, or -- given `e` as well -- element `e` of it.
         !!
         !! On a *_VEC column the row form answers "ANY element of the row is null"; the element
         !! form answers about that one element. Defined on a scalar column too, where `e` can only
         !! be 1 and the two agree.
-        generic :: is_null => is_null_i32, is_null_i64, is_null_e32, is_null_e64
+        generic :: is_null => is_null_i32, is_null_i64, is_null_e32, is_null_e64, &
+            is_null_at_i32, is_null_at_i64, is_null_at_e32, is_null_at_e64
         procedure :: is_detached => table_is_detached !! Whether the table has left its file behind.
         procedure, private :: is_supported_name => table_is_supported !! %is_supported specific, by name.
         procedure, private :: is_supported_at => table_is_supported_at !! %is_supported specific, by position.
@@ -951,6 +956,37 @@ def gen_row_type():
     w("        generic :: get => " + wrap_list(
         [f"col_get_{k[0]}_{ik}" for k in SCALAR_FREE_KINDS for ik in ("i32", "i64")], 12,
         first_prefix=len("        generic :: get => ")))
+    for k in SCALAR_FREE_KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: col_set_{tag}_i32 !! %set specific, {tag} value, int32 row index.")
+        w(f"        procedure, private :: col_set_{tag}_i64 !! %set specific, {tag} value, int64 row index.")
+    w("        !> Writes one row's value. The kind must match the column's exactly (a write never")
+    w("        !! widens), and writing a value CLEARS that row's null. The TABLE is updated -- a")
+    w("        !! handle is a view of it, not a copy.")
+    w("        generic :: set => " + wrap_list(
+        [f"col_set_{k[0]}_{ik}" for k in SCALAR_FREE_KINDS for ik in ("i32", "i64")], 12,
+        first_prefix=len("        generic :: set => ")))
+    w("""        procedure, private :: col_is_null_i32  !! %is_null specific, whole row, int32 index.
+        procedure, private :: col_is_null_i64  !! %is_null specific, whole row, int64 index.
+        procedure, private :: col_is_null_e32  !! %is_null specific, one element, int32 indices.
+        procedure, private :: col_is_null_e64  !! %is_null specific, one element, int64 indices.
+        !> Whether row `i` of this column is null, or -- given `e` as well -- element `e` of it.
+        !! On a *_VEC column the row form answers "ANY element of the row is null".
+        generic :: is_null => col_is_null_i32, col_is_null_i64, col_is_null_e32, col_is_null_e64
+        procedure, private :: col_set_null_i32  !! %set_null specific, whole row, int32 index.
+        procedure, private :: col_set_null_i64  !! %set_null specific, whole row, int64 index.
+        procedure, private :: col_set_null_e32  !! %set_null specific, one element, int32 indices.
+        procedure, private :: col_set_null_e64  !! %set_null specific, one element, int64 indices.
+        !> Marks row `i` null, or -- given `e` -- element `e` of it. Naming only a row marks
+        !! every element of it, exactly as the table's own %set_null does.
+        generic :: set_null => col_set_null_i32, col_set_null_i64, col_set_null_e32, col_set_null_e64
+        procedure, private :: col_clear_null_i32  !! %clear_null specific, whole row, int32 index.
+        procedure, private :: col_clear_null_i64  !! %clear_null specific, whole row, int64 index.
+        procedure, private :: col_clear_null_e32  !! %clear_null specific, one element, int32 indices.
+        procedure, private :: col_clear_null_e64  !! %clear_null specific, one element, int64 indices.
+        !> Clears row `i`'s null, or -- given `e` -- element `e` of it. The stored VALUE is
+        !! whatever was there; clearing a null does not write one.
+        generic :: clear_null => col_clear_null_i32, col_clear_null_i64, col_clear_null_e32, col_clear_null_e64""")
     w("""
         procedure :: is_valid => col_is_valid !! Whether the handle is attached AND still current.
         procedure :: index => col_index       !! This column's 1-based position in the table.
@@ -1455,6 +1491,40 @@ def gen_spec_interfaces():
             logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
             logical :: isnull                        !! .true. if that row is null (.false. on a miss).
         end function table_is_null_i64
+        !> Whether row `i` of the column at 1-based position `j` is null.
+        module function table_is_null_at_i32(self, j, i, found) result(isnull)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer, intent(in) :: j                 !! 1-based column position.
+            integer(int32), intent(in) :: i          !! 1-based row index.
+            logical, intent(out), optional :: found  !! present: report an out-of-range j instead of aborting.
+            logical :: isnull                        !! .true. if null (.false. on a miss).
+        end function table_is_null_at_i32
+        !> Whether row `i` of the column at 1-based position `j` is null.
+        module function table_is_null_at_i64(self, j, i, found) result(isnull)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer, intent(in) :: j                 !! 1-based column position.
+            integer(int64), intent(in) :: i          !! 1-based row index.
+            logical, intent(out), optional :: found  !! present: report an out-of-range j instead of aborting.
+            logical :: isnull                        !! .true. if null (.false. on a miss).
+        end function table_is_null_at_i64
+        !> Whether element `e` of row `i` of the column at 1-based position `j` is null.
+        module function table_is_null_at_e32(self, j, i, e, found) result(isnull)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer, intent(in) :: j                 !! 1-based column position.
+            integer(int32), intent(in) :: i          !! 1-based row index.
+            integer(int32), intent(in) :: e          !! 1-based element index within the row.
+            logical, intent(out), optional :: found  !! present: report an out-of-range j instead of aborting.
+            logical :: isnull                        !! .true. if null (.false. on a miss).
+        end function table_is_null_at_e32
+        !> Whether element `e` of row `i` of the column at 1-based position `j` is null.
+        module function table_is_null_at_e64(self, j, i, e, found) result(isnull)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer, intent(in) :: j                 !! 1-based column position.
+            integer(int64), intent(in) :: i          !! 1-based row index.
+            integer(int64), intent(in) :: e          !! 1-based element index within the row.
+            logical, intent(out), optional :: found  !! present: report an out-of-range j instead of aborting.
+            logical :: isnull                        !! .true. if null (.false. on a miss).
+        end function table_is_null_at_e64
         !> error stops unless `i` is a valid 1-based row index for this table. Shared by every
         !! per-row entry point so they all report the same way.
         module subroutine table_require_row(self, i, proc)
@@ -1514,6 +1584,76 @@ def gen_spec_interfaces():
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer :: k                                 !! the PK_* constant.
         end function col_kind
+        !> Whether that row is null (handle form, i32 indices).
+        module function col_is_null_i32(self, i) result(isnull)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            logical :: isnull                        !! .true. if null.
+        end function col_is_null_i32
+        !> Whether that row is null (handle form, i64 indices).
+        module function col_is_null_i64(self, i) result(isnull)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            logical :: isnull                        !! .true. if null.
+        end function col_is_null_i64
+        !> Whether that element is null (handle form, e32 indices).
+        module function col_is_null_e32(self, i, e) result(isnull)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            logical :: isnull                        !! .true. if null.
+        end function col_is_null_e32
+        !> Whether that element is null (handle form, e64 indices).
+        module function col_is_null_e64(self, i, e) result(isnull)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            logical :: isnull                        !! .true. if null.
+        end function col_is_null_e64
+        !> Marks that row's null (handle form, i32 indices).
+        module subroutine col_set_null_i32(self, i)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+        end subroutine col_set_null_i32
+        !> Marks that row's null (handle form, i64 indices).
+        module subroutine col_set_null_i64(self, i)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+        end subroutine col_set_null_i64
+        !> Marks that element's null (handle form, e32 indices).
+        module subroutine col_set_null_e32(self, i, e)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+        end subroutine col_set_null_e32
+        !> Marks that element's null (handle form, e64 indices).
+        module subroutine col_set_null_e64(self, i, e)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+        end subroutine col_set_null_e64
+        !> Clears that row's null (handle form, i32 indices).
+        module subroutine col_clear_null_i32(self, i)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+        end subroutine col_clear_null_i32
+        !> Clears that row's null (handle form, i64 indices).
+        module subroutine col_clear_null_i64(self, i)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+        end subroutine col_clear_null_i64
+        !> Clears that element's null (handle form, e32 indices).
+        module subroutine col_clear_null_e32(self, i, e)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+        end subroutine col_clear_null_e32
+        !> Clears that element's null (handle form, e64 indices).
+        module subroutine col_clear_null_e64(self, i, e)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+        end subroutine col_clear_null_e64
         !> Aborts unless the handle is attached and current, naming the remedy -- the cause of a
         !! stale handle is usually several statements away from where it is noticed.
         module subroutine col_resolve(self, proc)
@@ -1548,6 +1688,25 @@ def gen_spec_interfaces():
         w(f"            {decl}, intent(out) :: value             !! receives the value.")
         w("            character(len=*), intent(in) :: proc           !! calling procedure, for the message.")
         w(f"        end subroutine col_fetch_{tag}")
+        w(f"        !> The shared {tag} body behind both `%set_element(name, i, v)` and a column")
+        w("        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently")
+        w("        !! converted would lose information the caller did not agree to lose.")
+        w(f"        module subroutine col_store_{tag}(cache, slot, i, value, proc)")
+        w("            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.")
+        w("            integer, intent(in) :: slot                    !! validated slot index.")
+        w("            integer(int64), intent(in) :: i                !! validated 1-based row index.")
+        w(f"            {decl}, intent(in) :: value              !! the value to write.")
+        w("            character(len=*), intent(in) :: proc           !! calling procedure, for the message.")
+        w(f"        end subroutine col_store_{tag}")
+    for k in SCALAR_FREE_KINDS:
+        tag, _pk, decl, _comp, _rank, _cat = k
+        for ik, ikdecl in (("i32", "integer(int32)"), ("i64", "integer(int64)")):
+            w(f"        !> Writes one row's {tag} value through a handle ({ik} row index).")
+            w(f"        module subroutine col_set_{tag}_{ik}(self, i, value)")
+            w("            class(parquet_table_col), intent(in) :: self !! the handle.")
+            w(f"            {ikdecl}, intent(in) :: i               !! 1-based row index.")
+            w(f"            {decl}, intent(in) :: value             !! the value to write.")
+            w(f"        end subroutine col_set_{tag}_{ik}")
     w("""
 """)
     for k in SCALAR_FREE_KINDS:
@@ -1744,6 +1903,16 @@ def gen_spec_interfaces():
             integer, intent(in) :: kind              !! required PK_* discriminator.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_require_kind
+        !> The CACHE-and-slot twin of `table_check_shared_write`, for callers holding a resolved
+        !! slot rather than a table. `table_check_shared_write` delegates to it, so a handle and a
+        !! name enforce the same two concurrency rules -- the string-store rule and the
+        !! first-null-allocates-validity rule -- from one body.
+        module subroutine cache_check_shared_write(cache, idx, proc, nulling)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: idx               !! slot index.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+            logical, intent(in) :: nulling           !! .true. when the write would create a null.
+        end subroutine cache_check_shared_write
         !> The CACHE-and-slot twin of `table_require_kind`, for callers that hold a resolved slot
         !! rather than a table -- a column handle, and every shared `col_fetch_*`/`col_store_*`
         !! body. `table_require_kind` delegates to it, so there is exactly one wording of this
@@ -4387,6 +4556,27 @@ def set_impl(k):
 
 
 def _setelem_pair(tag, pk):
+    """(see below) -- delegating form for the kinds stage 3a converted."""
+    if tag in DELEGATING_KINDS:
+        return f"""    module procedure set_element_{tag}_i32
+        call self%set_element(name, int(i, int64), value, found)
+    end procedure set_element_{tag}_i32
+    !
+    module procedure set_element_{tag}_i64
+        integer :: idx
+        !
+        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
+        ! "nothing was changed" rather than "something was changed and then a problem arose".
+        call table_resolve(self, name, "set_element", idx, found, writing=.true.)
+        if (idx == 0) return
+        call table_require_row(self, i, "set_element")
+        call col_store_{tag}(self%cache, idx, i, value, "set_element")
+    end procedure set_element_{tag}_i64
+    !"""
+    return _setelem_pair_own(tag, pk)
+
+
+def _setelem_pair_own(tag, pk):
     """One kind's two %set_element specifics: the int64 worker and its int32 delegation.
 
     The int32 form exists so a caller with a plain default-kind INTEGER loop variable can write
@@ -4431,7 +4621,7 @@ def getelem_impl(k):
     end procedure get_element_{tag}_i32
     !"""]
     if tag in DELEGATING_KINDS:
-        # STAGE 2 PROTOTYPE -- one kind only, to measure what sharing the body costs the NAME
+        # STAGE 3a -- one kind only, to measure what sharing the body costs the NAME
         # form before the other 17 are converted. This is feature_colindex.md 6.3's FIVE-ARGUMENT
         # variant, not its handle-delegating sketch: building a `parquet_table_col` here just to
         # delegate through it measured +16.3% on this accessor, three times criterion (3)'s bar.
@@ -4654,6 +4844,39 @@ def col_get_impl(k):
     !"""
 
 
+def col_store_impl(k):
+    """The SHARED body behind both `%set_element(name, i, v)` and a handle's `%set(i, v)`.
+
+    Exact kind, never widening -- a write that silently converted would lose information the
+    caller did not agree to lose. Mirrors `col_fetch_*`'s five-argument shape for the same
+    measured reason.
+    """
+    tag, pk = k[0], k[1]
+    return f"""    module procedure col_store_{tag}
+        call cache_require_kind(cache, slot, {pk}, proc)
+        call cache%cols(slot)%values%set_at(i, value)
+        cache%cols(slot)%user_populated = .true.
+    end procedure col_store_{tag}
+    !"""
+
+
+def col_set_impl(k):
+    """The handle's own `%set`: validate the handle, the row and the shared-write rule, then the
+    shared body. `nulling=.false.` -- writing a VALUE cannot be the first null."""
+    tag = k[0]
+    return f"""    module procedure col_set_{tag}_i32
+        call self%set(int(i, int64), value)
+    end procedure col_set_{tag}_i32
+    !
+    module procedure col_set_{tag}_i64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call col_store_{tag}(self%cache, self%slot, i, value, "set")
+    end procedure col_set_{tag}_i64
+    !"""
+
+
 def gen_colaccess():
     o = []
     w = o.append
@@ -4673,6 +4896,10 @@ contains
         w(col_fetch_impl(k))
     for k in SCALAR_FREE_KINDS:
         w(col_get_impl(k))
+    for k in SCALAR_FREE_KINDS:
+        w(col_store_impl(k))
+    for k in SCALAR_FREE_KINDS:
+        w(col_set_impl(k))
     w("end submodule parquet_tables_colaccess ! GCOVR_EXCL_LINE")
     return "\n".join(o)
 

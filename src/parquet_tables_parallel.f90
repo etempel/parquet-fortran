@@ -152,28 +152,32 @@ contains
     end procedure table_read_exit
     !
     module procedure table_check_shared_write
+        call cache_check_shared_write(self%cache, idx, proc, nulling)
+    end procedure table_check_shared_write
+    !
+    module procedure cache_check_shared_write
         character(len=:), allocatable :: sfx
         !
         ! The overwhelmingly common case, and the only one on the serial path: nothing shared,
         ! nothing to check. omp_in_parallel() plus two integer comparisons.
-        if (.not. unsafe_shared_mutation(self%cache)) return
-        associate (col => self%cache%cols(idx))
+        if (.not. unsafe_shared_mutation(cache)) return
+        associate (col => cache%cols(idx))
             if (col%values%kindof() == PK_STRING .or. col%values%kindof() == PK_STRING_VEC) then
-                call table_context_suffix(self%cache, col%name, sfx)
+                call table_context_suffix(cache, col%name, sfx)
                 error stop EP // trim(proc) // ": this is a string column, whose rows share one " // &
                     "packed store -- writing any element can move the whole payload, so its rows " // &
                     "cannot be divided between threads the way a fixed-width column's can. Write " // &
                     "it before the parallel region or after it" // sfx
             end if
             if (nulling .and. .not. col%values%has_validity_storage()) then
-                call table_context_suffix(self%cache, col%name, sfx)
+                call table_context_suffix(cache, col%name, sfx)
                 error stop EP // trim(proc) // ": this column has no validity storage yet, so " // &
                     "the first null would allocate it and two threads doing that race with no " // &
                     "diagnostic. Call %ensure_validity('" // trim(col%name) // "') before the " // &
                     "parallel region" // sfx
             end if
         end associate
-    end procedure table_check_shared_write
+    end procedure cache_check_shared_write
     !
     module procedure table_ensure_validity
         integer :: idx, i

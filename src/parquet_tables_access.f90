@@ -2139,10 +2139,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_INT32, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_i32(self%cache, idx, i, value, "set_element")
     end procedure set_element_i32_i64
     !
     module procedure set_element_i64_i32
@@ -2156,10 +2154,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_INT64, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_i64(self%cache, idx, i, value, "set_element")
     end procedure set_element_i64_i64
     !
     module procedure set_element_f32_i32
@@ -2173,10 +2169,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_FLOAT32, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_f32(self%cache, idx, i, value, "set_element")
     end procedure set_element_f32_i64
     !
     module procedure set_element_f64_i32
@@ -2190,10 +2184,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_FLOAT64, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_f64(self%cache, idx, i, value, "set_element")
     end procedure set_element_f64_i64
     !
     module procedure set_element_bool_i32
@@ -2207,10 +2199,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_LOGICAL, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_bool(self%cache, idx, i, value, "set_element")
     end procedure set_element_bool_i64
     !
     module procedure set_element_date_i32
@@ -2224,10 +2214,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_DATE, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_date(self%cache, idx, i, value, "set_element")
     end procedure set_element_date_i64
     !
     module procedure set_element_time_i32
@@ -2241,10 +2229,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_TIME, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_time(self%cache, idx, i, value, "set_element")
     end procedure set_element_time_i64
     !
     module procedure set_element_ts_i32
@@ -2258,10 +2244,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_TIMESTAMP, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_ts(self%cache, idx, i, value, "set_element")
     end procedure set_element_ts_i64
     !
     module procedure set_element_i32v_i32

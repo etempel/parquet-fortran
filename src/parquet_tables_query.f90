@@ -672,6 +672,40 @@ contains
         isnull = self%cache%cols(idx)%values%is_null(i, e)
     end procedure table_is_null_e64
     !
+    module procedure table_is_null_at_i32
+        isnull = self%is_null(j, int(i, int64), found)
+    end procedure table_is_null_at_i32
+    !
+    module procedure table_is_null_at_i64
+        integer :: idx
+        !
+        ! .false. on a reported miss, not .true.: "there is no such column" is not "that row is
+        ! null", exactly as the name form reasons.
+        isnull = .false.
+        call table_slot_or_fail(self, j, "is_null", idx, found)
+        if (idx == 0) return
+        call table_resolve_slot(self, idx, "is_null", found)
+        if (idx == 0) return
+        call table_require_row(self, i, "is_null")
+        isnull = self%cache%cols(idx)%values%is_null(i)
+    end procedure table_is_null_at_i64
+    !
+    module procedure table_is_null_at_e32
+        isnull = self%is_null(j, int(i, int64), int(e, int64), found)
+    end procedure table_is_null_at_e32
+    !
+    module procedure table_is_null_at_e64
+        integer :: idx
+        !
+        isnull = .false.
+        call table_slot_or_fail(self, j, "is_null", idx, found)
+        if (idx == 0) return
+        call table_resolve_slot(self, idx, "is_null", found)
+        if (idx == 0) return
+        call table_require_row(self, i, "is_null")
+        isnull = self%cache%cols(idx)%values%is_null(i, e)
+    end procedure table_is_null_at_e64
+    !
     module procedure table_require_row
         character(len=32) :: got, want
         !

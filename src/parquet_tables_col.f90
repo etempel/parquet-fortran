@@ -127,4 +127,82 @@ contains
             trim(got) // ", which cannot be read as " // trim(wanted) // sfx
     end procedure col_kind_error
     !
+    ! ---- the null trio ------------------------------------------------------------------------
+    !
+    ! These are the one part of the handle's surface that is NOT per-kind: they take no value
+    ! argument, so one body serves every column type, including the ten kinds stage 3a has not
+    ! given %get/%set yet. That is deliberate -- a handle whose %is_null answered only for scalars
+    ! would be a runtime surprise decided by the file's schema, which is exactly what the
+    ! compile-time-only gap in %get/%set is not. See feature_colindex.md's stage 3.
+    !
+    module procedure col_is_null_i32
+        isnull = self%is_null(int(i, int64))
+    end procedure col_is_null_i32
+    !
+    module procedure col_is_null_i64
+        call col_resolve(self, "is_null")
+        call col_require_row(self, i, "is_null")
+        isnull = self%cache%cols(self%slot)%values%is_null(i)
+    end procedure col_is_null_i64
+    !
+    module procedure col_is_null_e32
+        isnull = self%is_null(int(i, int64), int(e, int64))
+    end procedure col_is_null_e32
+    !
+    module procedure col_is_null_e64
+        call col_resolve(self, "is_null")
+        call col_require_row(self, i, "is_null")
+        ! The element index is bounds-checked by parquet_column itself, which names the element
+        ! axis in its message -- the mistake this guards is passing a FLAT element position.
+        isnull = self%cache%cols(self%slot)%values%is_null(i, e)
+    end procedure col_is_null_e64
+    !
+    module procedure col_set_null_i32
+        call self%set_null(int(i, int64))
+    end procedure col_set_null_i32
+    !
+    module procedure col_set_null_i64
+        call col_resolve(self, "set_null")
+        call col_require_row(self, i, "set_null")
+        ! nulling=.true.: the FIRST null on a column allocates its validity storage, and two
+        ! threads doing that race with no diagnostic. Same rule the table's own %set_null obeys.
+        call cache_check_shared_write(self%cache, self%slot, "set_null", nulling=.true.)
+        call self%cache%cols(self%slot)%values%set_null(i)
+    end procedure col_set_null_i64
+    !
+    module procedure col_set_null_e32
+        call self%set_null(int(i, int64), int(e, int64))
+    end procedure col_set_null_e32
+    !
+    module procedure col_set_null_e64
+        call col_resolve(self, "set_null")
+        call col_require_row(self, i, "set_null")
+        call cache_check_shared_write(self%cache, self%slot, "set_null", nulling=.true.)
+        call self%cache%cols(self%slot)%values%set_null(i, e)
+    end procedure col_set_null_e64
+    !
+    module procedure col_clear_null_i32
+        call self%clear_null(int(i, int64))
+    end procedure col_clear_null_i32
+    !
+    module procedure col_clear_null_i64
+        call col_resolve(self, "clear_null")
+        call col_require_row(self, i, "clear_null")
+        ! nulling=.false.: clearing a null cannot be the write that first allocates validity
+        ! storage, because there is nothing to clear until something allocated it.
+        call cache_check_shared_write(self%cache, self%slot, "clear_null", nulling=.false.)
+        call self%cache%cols(self%slot)%values%clear_null(i)
+    end procedure col_clear_null_i64
+    !
+    module procedure col_clear_null_e32
+        call self%clear_null(int(i, int64), int(e, int64))
+    end procedure col_clear_null_e32
+    !
+    module procedure col_clear_null_e64
+        call col_resolve(self, "clear_null")
+        call col_require_row(self, i, "clear_null")
+        call cache_check_shared_write(self%cache, self%slot, "clear_null", nulling=.false.)
+        call self%cache%cols(self%slot)%values%clear_null(i, e)
+    end procedure col_clear_null_e64
+    !
 end submodule parquet_tables_col ! GCOVR_EXCL_LINE

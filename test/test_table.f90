@@ -330,7 +330,11 @@ contains
             new_unittest("a column handle's %ref aliases the same storage as %col", &
                 test_col_handle_ref), &
             new_unittest("a row handle reads and writes through a column handle", &
-                test_row_handle_takes_column_handle) &
+                test_row_handle_takes_column_handle), &
+            new_unittest("a row handle refuses to be used after a structural change", &
+                test_row_handle_staleness), &
+            new_unittest("%append invalidates a row handle on the destination itself", &
+                test_row_handle_append_self_invalidates) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -8663,5 +8667,89 @@ contains
         call check(error, abs(v_row - 77.0_real64) < 1.0e-12_real64, &
             "the row handle's name form still reads the same cell")
     end subroutine test_row_handle_takes_column_handle
+    !
+    !> The row handle now carries the same generation stamp the column handle does, so this is the
+    !! column-handle staleness test asked of the other handle — and it is a **behaviour change**:
+    !! before this, a row handle held across a `%sort_by` silently read whatever now sat at that
+    !! index, and the guide said so because nothing could detect it.
+    !!
+    !! `%is_valid()` must answer all four states, and the third is the one that matters: a
+    !! predicate that only reported "attached" would answer `.true.` after the mutation and send
+    !! the caller into an abort.
+    subroutine test_row_handle_staleness(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r, fresh
+        real(real64) :: d(3), v
+        !
+        d = [1.0_real64, 2.0_real64, 3.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("x", d)
+        call t%add_column("y", d)
+        ! (1) never attached
+        call check(error, .not. fresh%is_valid(), "a default-initialised row handle is not valid")
+        if (allocated(error)) return
+        ! (2) freshly made
+        r = t%row(2_int64)
+        call check(error, r%is_valid(), "a freshly made row handle is valid")
+        if (allocated(error)) return
+        call r%get("x", v)
+        call check(error, abs(v - 2.0_real64) < 1.0e-12_real64, "and it reads the row it names")
+        if (allocated(error)) return
+        ! (3) after a structural change -- the state a predicate that only asked "attached" would
+        !     have got wrong
+        call t%drop_column("y")
+        call check(error, .not. r%is_valid(), "a row handle is not valid after a structural change")
+        if (allocated(error)) return
+        ! (4) and valid again once re-fetched, which is what the message tells the caller to do
+        r = t%row(2_int64)
+        call check(error, r%is_valid(), "re-fetching the row handle makes it valid again")
+        if (allocated(error)) return
+        call r%get("x", v)
+        call check(error, abs(v - 2.0_real64) < 1.0e-12_real64, "and the re-fetched handle reads correctly")
+        if (allocated(error)) return
+        ! A row-set change invalidates too, not only a column-set one -- that is the case the old
+        ! by-value scope went stale on with nothing to report it.
+        call t%sort_by(["x"], descending=[.true.])
+        call check(error, .not. r%is_valid(), "a row handle is not valid after a row reordering")
+        if (allocated(error)) return
+        ! %index() is deliberately exempt: it answers about the HANDLE, not about the table, and
+        ! it is `pure`, so it could not abort even if that were wanted.
+        call check(error, r%index() == 2_int64, "%index() still answers on a stale handle")
+    end subroutine test_row_handle_staleness
+    !
+    !> `%append(row)` given a handle on the destination ITSELF gets its own message, because the
+    !! generic staleness advice — re-fetch the handle — cannot work there: the append is what
+    !! invalidated it, so the next iteration would invalidate it again. This asserts the
+    !! non-aborting half; `scenario_table_append_row_self` asserts the message.
+    subroutine test_row_handle_append_self_invalidates(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t, src
+        type(parquet_table_row) :: r
+        real(real64) :: d(2)
+        !
+        d = [1.0_real64, 2.0_real64]
+        call parquet_new_table(src)
+        call src%add_column("x", d)
+        call parquet_new_table(t)
+        call t%add_column("x", d)
+        ! A handle on ANOTHER table survives appending from it -- the append bumps the
+        ! DESTINATION's generation, not the source's, so a loop over `src` rows keeps working.
+        r = src%row(1_int64)
+        call t%append(r)
+        call check(error, r%is_valid(), "appending from another table leaves that table's handle valid")
+        if (allocated(error)) return
+        call check(error, t%nrows() == 3_int64, "the row was appended")
+        if (allocated(error)) return
+        call t%append(r)
+        call check(error, t%nrows() == 4_int64, "the same source handle can be appended twice")
+        if (allocated(error)) return
+        ! A handle on the DESTINATION does not survive its own append.
+        r = t%row(1_int64)
+        call check(error, r%is_valid(), "a handle on the destination starts valid")
+        if (allocated(error)) return
+        call t%append(r)
+        call check(error, .not. r%is_valid(), "appending through it invalidates it")
+    end subroutine test_row_handle_append_self_invalidates
     !
 end module test_table

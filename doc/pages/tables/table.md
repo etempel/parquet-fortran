@@ -413,12 +413,25 @@ has no fixed slot to point at. A `%ref` pointer carries the same lifetime rule a
 [Two ways to reach a column](#two-ways-to-reach-a-column).
 
 `%get` on a handle widens exactly as the table's own does, and triggers the same lazy first
-touch, so a handle can reach a column nothing has read yet. The handle resolves the column by
-name and the row by index on every access, so it survives anything that merely reallocates a
-column; it is invalidated by a change to the row set, by dropping a column it reads, and by the
-table going out of scope. None of those is detectable from the handle, so treat it as
-short-lived: make it, use it, let it go. The index must be a row the table has, and the table it
-came from does **not** need the `target` attribute.
+touch, so a handle can reach a column nothing has read yet. The index must be a row the table has,
+and the table it came from does **not** need the `target` attribute.
+
+**A row handle does not survive a structural change, and says so.** It stamps the table's
+`%generation()` when it is made and refuses once the two differ, so a handle left over from before
+a `%sort_by`, a `%filter_rows`, an `%append`, a dropped column or a `%compact` aborts with a
+message naming the remedy rather than quietly reading whatever now sits at that index. `%is_valid()`
+is the non-aborting way to ask:
+
+```fortran
+r = t%row(42)
+call t%sort_by("mass")
+if (.not. r%is_valid()) r = t%row(42)   ! re-fetching costs one call
+```
+
+The rule is deliberately conservative — some mutations a particular handle could have survived are
+refused anyway — because one total rule is easier to rely on than a list of exceptions. Handles are
+cheap, so the shape to reach for is re-fetching inside the loop rather than working out which
+changes are safe.
 
 **The handle has to be a variable — `call t%row(42)%get("mass", m)` does not compile.** That is a
 constraint of Fortran itself, not a gap in this library: the leftmost part of a data reference

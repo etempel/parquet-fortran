@@ -735,6 +735,12 @@ contains
                 test_col_handle_ref_kind_mismatch_aborts), &
             new_unittest("a row handle given another table's column handle aborts", &
                 test_row_handle_foreign_column_aborts), &
+            new_unittest("using a row handle after a structural change aborts", &
+                test_row_handle_stale_aborts), &
+            new_unittest("%append from a row handle on the destination itself aborts", &
+                test_table_append_row_self_aborts), &
+            new_unittest("%append from a stale source row handle aborts", &
+                test_table_append_row_stale_source_aborts), &
             new_unittest("a never-attached column handle aborts when used", &
                 test_col_handle_never_attached_aborts), &
             new_unittest("parquet_table %col with a mismatched pointer kind aborts", &
@@ -1290,6 +1296,36 @@ contains
             failure_message="a row handle given another table's column handle was expected to abort", &
             required_stderr="belongs to a different table than this row handle")
     end subroutine test_row_handle_foreign_column_aborts
+
+    subroutine test_row_handle_stale_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The behaviour that did not exist before the row handle gained a stamp: it used to read
+        ! whatever now sat at its index, which is a wrong answer rather than an error.
+        call check_scenario_exit_status_and_stderr(error, "row_handle_stale_after_sort", &
+            expect_abort=.true., &
+            failure_message="using a stale row handle was expected to abort", &
+            required_stderr="re-fetch it with %row(...)")
+    end subroutine test_row_handle_stale_aborts
+
+    subroutine test_table_append_row_self_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! Its OWN message, not the generic staleness one -- "re-fetch it" cannot work when the
+        ! append is what invalidates the handle.
+        call check_scenario_exit_status_and_stderr(error, "table_append_row_self", &
+            expect_abort=.true., &
+            failure_message="%append from a handle on the destination itself was expected to abort", &
+            required_stderr="a table cannot be grown from a handle on itself")
+    end subroutine test_table_append_row_self_aborts
+
+    subroutine test_table_append_row_stale_source_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The other half of the split: here "re-fetch it" IS the right advice, so the generic
+        ! message is what must appear.
+        call check_scenario_exit_status_and_stderr(error, "table_append_row_stale_source", &
+            expect_abort=.true., &
+            failure_message="%append from a stale source row handle was expected to abort", &
+            required_stderr="re-fetch it with %row(...)")
+    end subroutine test_table_append_row_stale_source_aborts
 
     subroutine test_col_handle_never_attached_aborts(error)
         type(error_type), allocatable, intent(out) :: error

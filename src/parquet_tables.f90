@@ -843,13 +843,19 @@ module parquet_tables
     !! return a usable handle without the caller declaring the table `target` (a pointer to a
     !! dummy's target would be undefined the moment the function returned).
     !!
-    !! Invalidated by anything that changes the row set, by dropping a column it reads, and by
-    !! the table going out of scope. None of those is detectable from the handle, so treat it as
-    !! short-lived: make it, use it, let it go.
+    !! **A handle does not survive a structural change**, and says so rather than reading the wrong
+    !! row: it stamps the table's `%generation()` when it is made and refuses once they differ.
+    !! `%is_valid()` is the non-aborting way to ask. The rule, the stamp and the message are the
+    !! same ones `parquet_table_col` uses -- two handles with one rule between them.
+    !!
+    !! Still treat it as short-lived: a handle is cheap to make and the refusal is deliberately
+    !! conservative, so re-fetching inside the loop is the shape to reach for rather than working
+    !! out which mutations a particular handle could have survived.
     type :: parquet_table_row
         private
         type(parquet_table_cache), pointer :: cache => null() !! the table's column store.
         integer(int64) :: irow = 0                            !! this row's 1-based index.
+        integer(int64) :: gen = -1_int64                      !! cache%generation when this handle was made.
         type(table_scope) :: scope                            !! the table's row scope, by value.
     contains
         procedure, private :: row_get_i32 !! %get specific for the i32 kind.
@@ -972,8 +978,9 @@ module parquet_tables
         procedure, private :: row_is_null_elem !! %is_null specific asking about one element.
         !> Whether this row is null in a column, or -- given `e` -- element `e` of it.
         generic :: is_null => row_is_null, row_is_null_elem
-        procedure :: index => row_index     !! This row's 1-based index within the table.
-        final :: row_finalize               !! Drops the pointer; owns nothing, frees nothing.
+        procedure :: index => row_index       !! This row's 1-based index within the table.
+        procedure :: is_valid => row_is_valid !! Whether the handle is attached AND still current.
+        final :: row_finalize                 !! Drops the pointer; owns nothing, frees nothing.
     end type parquet_table_row
     !
     !> A resolved handle on ONE column of a `parquet_table`: the slot, its kind and the table's row
@@ -5878,10 +5885,28 @@ module parquet_tables
             logical :: isnull                            !! .true. if that element is null.
         end function row_is_null_elem
         !> This row's 1-based index within its table.
+        !!
+        !! Deliberately `pure`, and so the one query that does NOT check the stamp: it answers
+        !! about the HANDLE ("which row was I made for"), not about the table, and that answer is
+        !! still true after a mutation even though reading through the handle is refused. Its
+        !! column-handle counterpart `%index()` does check, because a slot number is about the
+        !! table and slots renumber.
         pure module function row_index(self) result(i)
             class(parquet_table_row), intent(in) :: self !! the row handle.
             integer(int64) :: i                          !! the row index.
         end function row_index
+        !> Whether the handle is attached to a table AND still current -- one predicate, for the
+        !! reason its `parquet_table_col` twin gives: a caller can do nothing useful with a handle
+        !! that is one and not the other.
+        module function row_is_valid(self) result(ok)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            logical :: ok                                !! .true. when it can still be used.
+        end function row_is_valid
+        !> Aborts unless the row handle is attached and current, naming the remedy.
+        module subroutine row_check_current(self, proc)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            character(len=*), intent(in) :: proc         !! calling procedure, for the message.
+        end subroutine row_check_current
         !> Drops the store pointer. The handle owns nothing, so nothing is freed.
         module subroutine row_finalize(self)
             type(parquet_table_row), intent(inout) :: self !! the handle being destroyed.

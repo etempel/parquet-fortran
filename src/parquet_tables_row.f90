@@ -33,12 +33,37 @@ contains
         call table_require_row(self, i, "row")
         r%cache => self%cache
         r%irow = i
+        r%gen = self%cache%generation
         r%scope = table_scope_of(self)
     end procedure row_at_i64
     !
     module procedure row_index
         i = self%irow
     end procedure row_index
+    !
+    module procedure row_is_valid
+        ok = .false.
+        if (.not. associated(self%cache)) return
+        ok = self%cache%generation == self%gen
+    end procedure row_is_valid
+    !
+    module procedure row_check_current
+        character(len=:), allocatable :: sfx
+        character(len=32) :: g_now, g_then
+        !
+        if (.not. associated(self%cache)) then
+            error stop EP // "row " // trim(proc) // ": this row handle is not attached to a table"
+        end if
+        if (self%cache%generation == self%gen) return
+        ! The remedy is named because the cause is usually several statements away: a %sort_by, a
+        ! %filter_rows, an %append somewhere between making the handle and using it.
+        write(g_now, "(I0)") self%cache%generation
+        write(g_then, "(I0)") self%gen
+        call table_context_suffix(self%cache, "", sfx)
+        error stop EP // "row " // trim(proc) // ": this table has changed structurally since the " // &
+            "handle was made (generation " // trim(g_now) // ", handle " // trim(g_then) // &
+            "); re-fetch it with %row(...)" // sfx
+    end procedure row_check_current
     !
     module procedure row_finalize
         ! The handle owns nothing -- the cache belongs to the table -- so this drops the pointer
@@ -62,12 +87,9 @@ contains
     end procedure row_is_null_elem
     !
     module procedure row_require_col
-        if (.not. associated(self%cache)) then
-            error stop EP // "row " // trim(proc) // ": this row handle is not attached to a table"
-        end if
-        ! `c` first, because a stale column handle is the likelier mistake and its message names
-        ! the remedy. It also makes the two checks below meaningful: only a CURRENT handle's cache
-        ! pointer and scope say anything about the table as it is now.
+        call row_check_current(self, proc)
+        ! Then `c`, whose message names its own remedy. Only a CURRENT handle's cache pointer and
+        ! scope say anything about the table as it is now, which is what the two checks below need.
         call col_resolve(c, proc)
         if (.not. associated(self%cache, c%cache)) then
             error stop EP // "row " // trim(proc) // ": this column handle belongs to a different " // &
@@ -83,10 +105,9 @@ contains
     module procedure row_resolve
         character(len=:), allocatable :: sfx
         !
-        if (.not. associated(self%cache)) then
-            error stop EP // "row " // trim(proc) // ": this row handle is not attached to a " // &
-                "table"
-        end if
+        ! Attached AND current, from the same body %is_valid answers from -- one rule, and the
+        ! same one parquet_table_col obeys.
+        call row_check_current(self, proc)
         idx = cache_find(self%cache, name)
         if (idx == 0) then
             call table_context_suffix(self%cache, name, sfx)

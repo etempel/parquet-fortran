@@ -1182,6 +1182,12 @@ program error_scenarios
         call scenario_col_handle_ref_kind_mismatch()
     case ("row_handle_foreign_column")
         call scenario_row_handle_foreign_column()
+    case ("row_handle_stale_after_sort")
+        call scenario_row_handle_stale_after_sort()
+    case ("table_append_row_self")
+        call scenario_table_append_row_self()
+    case ("table_append_row_stale_source")
+        call scenario_table_append_row_stale_source()
     case ("col_handle_never_attached")
         call scenario_col_handle_never_attached()
     case ("table_pointer_kind_mismatch")
@@ -10278,6 +10284,61 @@ contains
         call c%ref(p64)                 ! int64 pointer into an int32 column -> aborts
         print '(a,i0)', "unexpectedly aliased an int32 column through an int64 pointer, size=", size(p64)
     end subroutine scenario_col_handle_ref_kind_mismatch
+    !
+    !> USING a stale row handle must abort. This is the behaviour that did not exist before the
+    !! handle gained a generation stamp: the handle used to keep a by-value row scope and read
+    !! whatever now sat at its index, which is a wrong answer rather than an error.
+    subroutine scenario_row_handle_stale_after_sort()
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        real(real64) :: d(3), v
+        d = [3.0_real64, 1.0_real64, 2.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("x", d)
+        r = t%row(1_int64)
+        call r%get("x", v)              ! negative control: the handle works before the change
+        print '(a,f8.3)', "fresh row handle read, v=", v
+        call t%sort_by(["x"])           ! reorders the rows -> the handle is stale
+        call r%get("x", v)              ! aborts
+        print '(a,f8.3)', "unexpectedly read through a stale row handle, v=", v
+    end subroutine scenario_row_handle_stale_after_sort
+    !
+    !> `%append` given a row handle on the DESTINATION gets its own message, not the generic
+    !! staleness one: the append is what invalidated the handle, so "re-fetch it" would send the
+    !! caller round the same loop. The advice has to be to snapshot the table instead.
+    subroutine scenario_table_append_row_self()
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        real(real64) :: d(2)
+        d = [1.0_real64, 2.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("x", d)
+        r = t%row(1_int64)
+        call t%append(r)                ! negative control: the first append is legitimate
+        print '(a,i0)', "first self-append ok, nrows=", t%nrows()
+        call t%append(r)                ! the handle is now stale, and on THIS table -> aborts
+        print '(a,i0)', "unexpectedly appended twice from a self handle, nrows=", t%nrows()
+    end subroutine scenario_table_append_row_self
+    !
+    !> The other half of the Q10 split: a handle on ANOTHER table that has since changed gets the
+    !! ordinary staleness message, whose "re-fetch it" advice does work there.
+    subroutine scenario_table_append_row_stale_source()
+        type(parquet_table) :: t, src
+        type(parquet_table_row) :: r
+        real(real64) :: d(2)
+        ! Deliberately out of order, so the sort below really does reorder the rows.
+        d = [2.0_real64, 1.0_real64]
+        call parquet_new_table(src)
+        call src%add_column("x", d)
+        call parquet_new_table(t)
+        call t%add_column("x", d)
+        r = src%row(1_int64)
+        call t%append(r)                ! negative control: a current source handle appends fine
+        print '(a,i0)', "append from a current source handle ok, nrows=", t%nrows()
+        call src%sort_by(["x"])         ! the SOURCE moved -> the handle is stale
+        call t%append(r)                ! aborts
+        print '(a,i0)', "unexpectedly appended from a stale source handle, nrows=", t%nrows()
+    end subroutine scenario_table_append_row_stale_source
     !
     !> A column handle from ANOTHER table is not stale and not detached — it is a perfectly valid
     !! handle on a different object, so nothing else in the library would object to it. Without

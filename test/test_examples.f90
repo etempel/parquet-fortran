@@ -49,7 +49,9 @@ contains
     !> missing re-export is a build-time break for every downstream user.
     !>
     !> Layers touched, one name each: parquet_core (parquet_reader/parquet_schema),
-    !> parquet_tables (parquet_table), parquet_columns (PK_FLOAT64/parquet_kind_name),
+    !> parquet_tables (parquet_table, plus both handle types parquet_table_col/parquet_table_row,
+    !> which are separate `public ::` entries and so separately droppable),
+    !> parquet_columns (PK_FLOAT64/parquet_kind_name),
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
     !> parquet_sorting (pf_argsort), parquet_settings (parquet_get_arrow_threads /
     !> parquet_max_filter_depth), parquet_maml_base (parquet_maml_file), and the facade's own
@@ -92,6 +94,25 @@ contains
             "parquet_column must be reachable from use parquet alone")
         if (allocated(error)) return
         call col%clear()
+
+        ! parquet_tables: the two handle types. Declared in a block so that a dropped re-export
+        ! breaks the BUILD here rather than only a later assertion, which is this test's whole
+        ! mechanism -- its only library import is a bare `use parquet`.
+        block
+            type(parquet_table_col) :: c
+            type(parquet_table_row) :: r
+            real(real64) :: v
+            call t%column("mass", c)
+            call c%get(2_int64, v)
+            call check(error, abs(v - mass(2)) < 1.0e-12_real64, &
+                "parquet_table_col must be reachable from use parquet alone and read a cell")
+            if (allocated(error)) return
+            r = t%row(2_int64)
+            call r%get(c, v)
+            call check(error, abs(v - mass(2)) < 1.0e-12_real64, &
+                "parquet_table_row must be reachable from use parquet alone and read through a handle")
+            if (allocated(error)) return
+        end block
 
         ! parquet_strings: the compact string store.
         call sc%append_string("facade")

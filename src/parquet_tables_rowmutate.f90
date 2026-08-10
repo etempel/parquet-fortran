@@ -493,6 +493,24 @@ contains
     !
     module procedure table_append_row
         call table_check_open(self, "append")
+        ! Validated BEFORE the lock and before anything is written, so a rejected append leaves
+        ! the destination exactly as it was.
+        !
+        ! Two cases, two messages, and the split is the point. A handle on ANOTHER table that has
+        ! since changed is the ordinary staleness case, and "re-fetch it" is good advice -- it is
+        ! also the one staleness case that corrupts a DIFFERENT table's data, since the row index
+        ! would be read against a source whose rows have moved. A handle on the DESTINATION is a
+        ! different mistake: appending bumps this table's own generation, so such a handle is
+        ! self-invalidating and re-fetching it inside the loop would fail again on the next
+        ! iteration. Telling that caller to re-fetch would send them round the same loop.
+        if (.not. r%is_valid()) then
+            if (associated(self%cache, r%cache)) then
+                error stop EP // "append: this row handle names the table being appended to, and " // &
+                    "the append invalidated it; a table cannot be grown from a handle on itself " // &
+                    "-- take a %clone first and append that, or use %append_null_rows and fill"
+            end if
+            call row_check_current(r, "append")
+        end if
         ! This is a public entry point, not an internal caller, so it takes the lock itself and
         ! goes to the worker -- never to table_append_table, which would acquire a second time and
         ! deadlock (an OpenMP simple lock is not recursive). Everything the worker does happens

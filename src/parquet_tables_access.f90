@@ -15,7 +15,6 @@ contains
     !
     module procedure col_ptr_i32
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -27,18 +26,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_INT32) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_INT32, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_i32
     !
     module procedure col_ptr_i64
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -50,18 +43,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_INT64) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_INT64, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_i64
     !
     module procedure col_ptr_f32
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -73,18 +60,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT32) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_FLOAT32, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_f32
     !
     module procedure col_ptr_f64
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -96,18 +77,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT64) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_FLOAT64, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_f64
     !
     module procedure col_ptr_bool
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -119,18 +94,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_LOGICAL) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_LOGICAL, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_bool
     !
     module procedure col_ptr_date
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -142,18 +111,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_DATE) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_DATE, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_date
     !
     module procedure col_ptr_time
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -165,18 +128,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_TIME) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_TIME, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_time
     !
     module procedure col_ptr_ts
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -188,18 +145,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_TIMESTAMP) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_TIMESTAMP, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_ts
     !
     module procedure col_ptr_i32v
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -211,18 +162,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_INT32_VEC) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_INT32_VEC, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_i32v
     !
     module procedure col_ptr_i64v
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -234,18 +179,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_INT64_VEC) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_INT64_VEC, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_i64v
     !
     module procedure col_ptr_f32v
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -257,18 +196,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT32_VEC) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_FLOAT32_VEC, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_f32v
     !
     module procedure col_ptr_f64v
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -280,18 +213,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_FLOAT64_VEC) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_FLOAT64_VEC, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_f64v
     !
     module procedure col_ptr_boolv
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -303,18 +230,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_LOGICAL_VEC) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_LOGICAL_VEC, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_boolv
     !
     module procedure col_ptr_datev
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -326,18 +247,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_DATE_VEC) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_DATE_VEC, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_datev
     !
     module procedure col_ptr_timev
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -349,18 +264,12 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_TIME_VEC) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_TIME_VEC, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_timev
     !
     module procedure col_ptr_tsv
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -372,12 +281,7 @@ contains
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= PK_TIMESTAMP_VEC) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, PK_TIMESTAMP_VEC, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_tsv
     !
@@ -1897,49 +1801,25 @@ contains
     module procedure get_element_i32v_i64
         integer :: idx
         !
+        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            ! `value` stays unallocated, which is how %get reports a miss too.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_INT32_VEC)
-            allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_INT32_VEC, "get_element")
-        end select
+        call col_fetch_i32v(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_i32v_i64
-    !
     module procedure get_element_i64v_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_i64v_i32
     !
     module procedure get_element_i64v_i64
         integer :: idx
-        integer(int32), allocatable :: v_i32v(:)
         !
+        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            ! `value` stays unallocated, which is how %get reports a miss too.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_INT64_VEC)
-            allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case (PK_INT32_VEC)
-            allocate(v_i32v(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, v_i32v)
-            allocate(value(self%cache%cols(idx)%width))
-            value = v_i32v
-        case default
-            call table_require_kind(self, idx, PK_INT64_VEC, "get_element")
-        end select
+        call col_fetch_i64v(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_i64v_i64
-    !
     module procedure get_element_f32v_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_f32v_i32
@@ -1947,49 +1827,25 @@ contains
     module procedure get_element_f32v_i64
         integer :: idx
         !
+        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            ! `value` stays unallocated, which is how %get reports a miss too.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_FLOAT32_VEC)
-            allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_FLOAT32_VEC, "get_element")
-        end select
+        call col_fetch_f32v(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_f32v_i64
-    !
     module procedure get_element_f64v_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_f64v_i32
     !
     module procedure get_element_f64v_i64
         integer :: idx
-        real(real32), allocatable :: v_f32v(:)
         !
+        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            ! `value` stays unallocated, which is how %get reports a miss too.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_FLOAT64_VEC)
-            allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case (PK_FLOAT32_VEC)
-            allocate(v_f32v(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, v_f32v)
-            allocate(value(self%cache%cols(idx)%width))
-            value = v_f32v
-        case default
-            call table_require_kind(self, idx, PK_FLOAT64_VEC, "get_element")
-        end select
+        call col_fetch_f64v(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_f64v_i64
-    !
     module procedure get_element_boolv_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_boolv_i32
@@ -1997,21 +1853,12 @@ contains
     module procedure get_element_boolv_i64
         integer :: idx
         !
+        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            ! `value` stays unallocated, which is how %get reports a miss too.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_LOGICAL_VEC)
-            allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_LOGICAL_VEC, "get_element")
-        end select
+        call col_fetch_boolv(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_boolv_i64
-    !
     module procedure get_element_datev_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_datev_i32
@@ -2019,21 +1866,12 @@ contains
     module procedure get_element_datev_i64
         integer :: idx
         !
+        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            ! `value` stays unallocated, which is how %get reports a miss too.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_DATE_VEC)
-            allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_DATE_VEC, "get_element")
-        end select
+        call col_fetch_datev(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_datev_i64
-    !
     module procedure get_element_timev_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_timev_i32
@@ -2041,21 +1879,12 @@ contains
     module procedure get_element_timev_i64
         integer :: idx
         !
+        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            ! `value` stays unallocated, which is how %get reports a miss too.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_TIME_VEC)
-            allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_TIME_VEC, "get_element")
-        end select
+        call col_fetch_timev(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_timev_i64
-    !
     module procedure get_element_tsv_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_tsv_i32
@@ -2063,38 +1892,24 @@ contains
     module procedure get_element_tsv_i64
         integer :: idx
         !
+        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            ! `value` stays unallocated, which is how %get reports a miss too.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_TIMESTAMP_VEC)
-            allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_TIMESTAMP_VEC, "get_element")
-        end select
+        call col_fetch_tsv(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_tsv_i64
-    !
     module procedure get_element_chr_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_chr_i32
     !
     module procedure get_element_chr_i64
         integer :: idx
-        type(parquet_string_column), pointer :: store
         !
         value = ""
         call table_resolve(self, name, "get_element", idx, found)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_STRING, "get_element")
         call table_require_row(self, i, "get_element")
-        call self%cache%cols(idx)%values%string_column(store)
-        ! allow_null keeps a null row from aborting: it reads back as "", and %is_null is how a
-        ! caller tells the two apart -- the same rule the row handle's %get follows.
-        call store%get(i, value, allow_null=.true.)
+        call col_fetch_str(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_chr_i64
     !
     module procedure get_element_chrv_i32
@@ -2102,30 +1917,12 @@ contains
     end procedure get_element_chrv_i32
     !
     module procedure get_element_chrv_i64
-        integer :: idx, e, wdt, maxlen
-        integer(int64) :: flat
-        character(len=:), allocatable :: str1
-        type(parquet_string_column), pointer :: store
+        integer :: idx
         !
         call table_resolve(self, name, "get_element", idx, found)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_STRING_VEC, "get_element")
         call table_require_row(self, i, "get_element")
-        wdt = self%cache%cols(idx)%width
-        ! A vector string column is ONE flat store of width*nrows elements, element (e, row) at
-        ! (row-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
-        call self%cache%cols(idx)%values%string_column(store)
-        ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
-        maxlen = 1
-        do e = 1, wdt
-            flat = (i - 1_int64) * int(wdt, int64) + int(e, int64)
-            if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
-        end do
-        allocate(character(len=maxlen) :: value(wdt))
-        do e = 1, wdt
-            flat = (i - 1_int64) * int(wdt, int64) + int(e, int64)
-            call store%copy_to(flat, value(e), allow_null=.true.)
-        end do
+        call col_fetch_strv(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_chrv_i64
     !
     module procedure set_element_i32_i32
@@ -2259,10 +2056,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_INT32_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_i32v(self%cache, idx, i, value, "set_element")
     end procedure set_element_i32v_i64
     !
     module procedure set_element_i64v_i32
@@ -2276,10 +2071,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_INT64_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_i64v(self%cache, idx, i, value, "set_element")
     end procedure set_element_i64v_i64
     !
     module procedure set_element_f32v_i32
@@ -2293,10 +2086,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_FLOAT32_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_f32v(self%cache, idx, i, value, "set_element")
     end procedure set_element_f32v_i64
     !
     module procedure set_element_f64v_i32
@@ -2310,10 +2101,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_FLOAT64_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_f64v(self%cache, idx, i, value, "set_element")
     end procedure set_element_f64v_i64
     !
     module procedure set_element_boolv_i32
@@ -2327,10 +2116,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_LOGICAL_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_boolv(self%cache, idx, i, value, "set_element")
     end procedure set_element_boolv_i64
     !
     module procedure set_element_datev_i32
@@ -2344,10 +2131,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_DATE_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_datev(self%cache, idx, i, value, "set_element")
     end procedure set_element_datev_i64
     !
     module procedure set_element_timev_i32
@@ -2361,10 +2146,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_TIME_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_timev(self%cache, idx, i, value, "set_element")
     end procedure set_element_timev_i64
     !
     module procedure set_element_tsv_i32
@@ -2378,10 +2161,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_TIMESTAMP_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_tsv(self%cache, idx, i, value, "set_element")
     end procedure set_element_tsv_i64
     !
     module procedure set_element_chr_i32
@@ -2395,10 +2176,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_STRING, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_str(self%cache, idx, i, value, "set_element")
     end procedure set_element_chr_i64
     !
     module procedure set_element_chrv_i32
@@ -2412,10 +2191,8 @@ contains
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_STRING_VEC, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_strv(self%cache, idx, i, value, "set_element")
     end procedure set_element_chrv_i64
     !
     module procedure row_get_i32
@@ -2836,6 +2613,204 @@ contains
         call self%cache%cols(idx)%values%set_at(self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_tsv
+    !
+    module procedure row_get_col_i32
+        call row_require_col(self, c, "get")
+        call col_fetch_i32(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_i32
+    !
+    module procedure row_get_col_i64
+        call row_require_col(self, c, "get")
+        call col_fetch_i64(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_i64
+    !
+    module procedure row_get_col_f32
+        call row_require_col(self, c, "get")
+        call col_fetch_f32(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_f32
+    !
+    module procedure row_get_col_f64
+        call row_require_col(self, c, "get")
+        call col_fetch_f64(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_f64
+    !
+    module procedure row_get_col_bool
+        call row_require_col(self, c, "get")
+        call col_fetch_bool(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_bool
+    !
+    module procedure row_get_col_str
+        call row_require_col(self, c, "get")
+        call col_fetch_str(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_str
+    !
+    module procedure row_get_col_date
+        call row_require_col(self, c, "get")
+        call col_fetch_date(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_date
+    !
+    module procedure row_get_col_time
+        call row_require_col(self, c, "get")
+        call col_fetch_time(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_time
+    !
+    module procedure row_get_col_ts
+        call row_require_col(self, c, "get")
+        call col_fetch_ts(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_ts
+    !
+    module procedure row_get_col_i32v
+        call row_require_col(self, c, "get")
+        call col_fetch_i32v(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_i32v
+    !
+    module procedure row_get_col_i64v
+        call row_require_col(self, c, "get")
+        call col_fetch_i64v(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_i64v
+    !
+    module procedure row_get_col_f32v
+        call row_require_col(self, c, "get")
+        call col_fetch_f32v(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_f32v
+    !
+    module procedure row_get_col_f64v
+        call row_require_col(self, c, "get")
+        call col_fetch_f64v(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_f64v
+    !
+    module procedure row_get_col_boolv
+        call row_require_col(self, c, "get")
+        call col_fetch_boolv(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_boolv
+    !
+    module procedure row_get_col_strv
+        call row_require_col(self, c, "get")
+        call col_fetch_strv(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_strv
+    !
+    module procedure row_get_col_datev
+        call row_require_col(self, c, "get")
+        call col_fetch_datev(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_datev
+    !
+    module procedure row_get_col_timev
+        call row_require_col(self, c, "get")
+        call col_fetch_timev(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_timev
+    !
+    module procedure row_get_col_tsv
+        call row_require_col(self, c, "get")
+        call col_fetch_tsv(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_tsv
+    !
+    module procedure row_set_col_i32
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_i32(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_i32
+    !
+    module procedure row_set_col_i64
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_i64(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_i64
+    !
+    module procedure row_set_col_f32
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_f32(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_f32
+    !
+    module procedure row_set_col_f64
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_f64(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_f64
+    !
+    module procedure row_set_col_bool
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_bool(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_bool
+    !
+    module procedure row_set_col_str
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_str(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_str
+    !
+    module procedure row_set_col_date
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_date(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_date
+    !
+    module procedure row_set_col_time
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_time(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_time
+    !
+    module procedure row_set_col_ts
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_ts(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_ts
+    !
+    module procedure row_set_col_i32v
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_i32v(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_i32v
+    !
+    module procedure row_set_col_i64v
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_i64v(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_i64v
+    !
+    module procedure row_set_col_f32v
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_f32v(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_f32v
+    !
+    module procedure row_set_col_f64v
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_f64v(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_f64v
+    !
+    module procedure row_set_col_boolv
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_boolv(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_boolv
+    !
+    module procedure row_set_col_strv
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_strv(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_strv
+    !
+    module procedure row_set_col_datev
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_datev(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_datev
+    !
+    module procedure row_set_col_timev
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_timev(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_timev
+    !
+    module procedure row_set_col_tsv
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_tsv(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_tsv
     !
     module procedure row_ref_i32
         integer :: idx

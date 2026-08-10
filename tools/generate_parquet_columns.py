@@ -74,6 +74,11 @@ KINDS = [
 # they delegate to parquet_string_column rather than owning a Fortran array (DD1).
 ARRAY_KINDS = [k for k in KINDS if k[5] != "str"]
 
+# The vector kinds -- the only ones with more than one value per row, and so the only ones for
+# which "one element of one row" is a different operation from "row i". `get_elem`/`set_elem`
+# exist for these and nothing else.
+VEC_KINDS = [k for k in KINDS if k[4] == 2]
+
 # Set by --bench-guards. MEASUREMENT BRANCHES ONLY -- see cell_guards() below.
 BENCH_GUARDS = False
 
@@ -319,11 +324,17 @@ module parquet_columns
     # generic groups
     for gname, doc in (("get_at", "Read element i (or row i's vector) out."),
                        ("set_at", "Write element i (or row i's vector)."),
+                       ("get_elem", "Read ONE element of row i's vector, without materialising the row."),
+                       ("set_elem", "Write ONE element of row i's vector, without materialising the row."),
                        ("set_all", "Replace every value in the column."),
                        ("adopt", "Take ownership of an array outright, without copying it."),
                        ("data_ptr", "Zero-copy typed pointer to the active storage."),
                        ("append_values", "Append values, growing the column.")):
-        tags = [k[0] for k in (KINDS if gname in ("get_at", "set_at", "set_all", "append_values") else ARRAY_KINDS)]
+        if gname in ("get_elem", "set_elem"):
+            tags = [k[0] for k in VEC_KINDS]
+        else:
+            tags = [k[0] for k in (KINDS if gname in ("get_at", "set_at", "set_all", "append_values")
+                                   else ARRAY_KINDS)]
         w(f"        ! --- {gname} ---")
         for t in tags:
             w(f"        procedure, private :: {gname}_{t}   !! {gname} specific for the {t} kind.")
@@ -692,6 +703,25 @@ module parquet_columns
             integer(int64), intent(in) :: i            !! 1-based row index.
             character(len=*), intent(out) :: value(:)  !! receives width values, blank-padded.
         end subroutine get_at_strv
+        !> Reads ONE element of row `i`'s string vector (PK_STRING_VEC) into an allocatable string.
+        !!
+        !! Unlike `get_at_strv`, nothing here is blank-padded to a caller-declared width and no
+        !! width-long array is built: the result is exactly as long as the stored value.
+        module subroutine get_elem_strv(self, i, e, value)
+            class(parquet_column), intent(in) :: self           !! the column.
+            integer(int64), intent(in) :: i                     !! 1-based row index.
+            integer(int64), intent(in) :: e                     !! 1-based element index within the row.
+            character(len=:), allocatable, intent(out) :: value !! the element's value.
+        end subroutine get_elem_strv
+        !> Writes ONE element of row `i`'s string vector (PK_STRING_VEC), clearing THAT element's
+        !! null. `value` is a SCALAR, so it is stored verbatim -- the array forms' trimming rule is
+        !! about one declared length shared by every element, and one element has no such length.
+        module subroutine set_elem_strv(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            character(len=*), intent(in) :: value        !! the new value.
+        end subroutine set_elem_strv
         !> Writes string element `i` (PK_STRING). `value` is a SCALAR, so it is stored verbatim,
         !! trailing blanks included -- a scalar is exactly as long as the caller wrote it. Every
         !! character ARRAY entry point below trims instead; see `set_all_str`.
@@ -764,8 +794,31 @@ module parquet_columns
             integer(int64), intent(in) :: i              !! 1-based row index.
             {decl}, intent(in) :: value{dim1}       !! the new value{'s' if rank == 2 else ''}.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
-        end subroutine set_at_{tag}
-        !> Replaces every value in a {pk} column.
+        end subroutine set_at_{tag}""")
+        if rank == 2:
+            w(f"""        !> Reads ONE element of row `i`'s vector from a {pk} column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_{tag}(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            {decl}, intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_{tag}
+        !> Writes ONE element of row `i`'s vector in a {pk} column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_{tag}(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            {decl}, intent(in) :: value             !! the new value.
+        end subroutine set_elem_{tag}""")
+        w(f"""        !> Replaces every value in a {pk} column.
         module subroutine set_all_{tag}(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
             {decl}, intent(in) :: values{dim2}      !! exactly the column's own shape.
@@ -1230,6 +1283,27 @@ contains""")
             end do
         end if""")
             w(f"""    end procedure set_at_{tag}
+    !
+    module procedure get_elem_{tag}
+{cell_guards(pk, "get_elem")}
+        call check_element(self, e, "get_elem")
+        value = self%{comp}(e, i)
+    end procedure get_elem_{tag}
+    !
+    module procedure set_elem_{tag}
+        call check_kind(self, {pk}, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%{comp}(e, i) = value""")
+            if temporal:
+                # A temporal element IS its own null state, so assigning it is what makes it valid
+                # -- or null, if the caller assigned a default-initialised one. Either way the
+                # cached answer no longer describes the data, hence the flag rather than a guess.
+                w("        self%nulls_dirty = .true.")
+            else:
+                w("        if (self%has_nulls) call bit_clear(self%validity, "
+                  "(i - 1_int64)*int(self%width, int64) + e)")
+            w(f"""    end procedure set_elem_{tag}
     !
     module procedure set_all_{tag}
         logical :: mod_nulls

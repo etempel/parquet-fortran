@@ -729,6 +729,12 @@ contains
                 test_col_handle_stale_aborts), &
             new_unittest("a column handle's own row bounds check aborts", &
                 test_col_handle_row_out_of_range_aborts), &
+            new_unittest("a column handle's %ref after a structural change aborts", &
+                test_col_handle_ref_stale_aborts), &
+            new_unittest("a column handle's %ref with a mismatched pointer kind aborts", &
+                test_col_handle_ref_kind_mismatch_aborts), &
+            new_unittest("a row handle given another table's column handle aborts", &
+                test_row_handle_foreign_column_aborts), &
             new_unittest("a never-attached column handle aborts when used", &
                 test_col_handle_never_attached_aborts), &
             new_unittest("parquet_table %col with a mismatched pointer kind aborts", &
@@ -1255,6 +1261,35 @@ contains
             failure_message="a column handle read past the last row was expected to abort", &
             required_stderr="column handle: get: row index 3 is outside this table's 1..2 rows")
     end subroutine test_col_handle_row_out_of_range_aborts
+
+    subroutine test_col_handle_ref_stale_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! %ref hands back a raw pointer, so a stale one would alias reallocated storage and no
+        ! later check could notice. This is the only test of col_ref_*'s own col_resolve call.
+        call check_scenario_exit_status_and_stderr(error, "col_handle_ref_after_mutation", &
+            expect_abort=.true., &
+            failure_message="%ref through a stale column handle was expected to abort", &
+            required_stderr="column handle: ref: this table has changed structurally")
+    end subroutine test_col_handle_ref_stale_aborts
+
+    subroutine test_col_handle_ref_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The same wording %col produces, from the same helper -- two spellings of one operation.
+        call check_scenario_exit_status_and_stderr(error, "col_handle_ref_kind_mismatch", &
+            expect_abort=.true., &
+            failure_message="%ref with a mismatched pointer kind was expected to abort", &
+            required_stderr="ref: pointer kind does not match the stored kind")
+    end subroutine test_col_handle_ref_kind_mismatch_aborts
+
+    subroutine test_row_handle_foreign_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The only guard in the handle design whose absence gives a WRONG ANSWER rather than an
+        ! error: the foreign handle is valid, just not this table's.
+        call check_scenario_exit_status_and_stderr(error, "row_handle_foreign_column", &
+            expect_abort=.true., &
+            failure_message="a row handle given another table's column handle was expected to abort", &
+            required_stderr="belongs to a different table than this row handle")
+    end subroutine test_row_handle_foreign_column_aborts
 
     subroutine test_col_handle_never_attached_aborts(error)
         type(error_type), allocatable, intent(out) :: error

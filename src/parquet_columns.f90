@@ -262,6 +262,32 @@ module parquet_columns
         generic :: set_at => set_at_i32, set_at_i64, set_at_f32, set_at_f64, set_at_bool, set_at_str, &
             set_at_date, set_at_time, set_at_ts, set_at_i32v, set_at_i64v, set_at_f32v, set_at_f64v, &
             set_at_boolv, set_at_strv, set_at_datev, set_at_timev, set_at_tsv
+        ! --- get_elem ---
+        procedure, private :: get_elem_i32v   !! get_elem specific for the i32v kind.
+        procedure, private :: get_elem_i64v   !! get_elem specific for the i64v kind.
+        procedure, private :: get_elem_f32v   !! get_elem specific for the f32v kind.
+        procedure, private :: get_elem_f64v   !! get_elem specific for the f64v kind.
+        procedure, private :: get_elem_boolv   !! get_elem specific for the boolv kind.
+        procedure, private :: get_elem_strv   !! get_elem specific for the strv kind.
+        procedure, private :: get_elem_datev   !! get_elem specific for the datev kind.
+        procedure, private :: get_elem_timev   !! get_elem specific for the timev kind.
+        procedure, private :: get_elem_tsv   !! get_elem specific for the tsv kind.
+        !> Read ONE element of row i's vector, without materialising the row.
+        generic :: get_elem => get_elem_i32v, get_elem_i64v, get_elem_f32v, get_elem_f64v, get_elem_boolv, &
+            get_elem_strv, get_elem_datev, get_elem_timev, get_elem_tsv
+        ! --- set_elem ---
+        procedure, private :: set_elem_i32v   !! set_elem specific for the i32v kind.
+        procedure, private :: set_elem_i64v   !! set_elem specific for the i64v kind.
+        procedure, private :: set_elem_f32v   !! set_elem specific for the f32v kind.
+        procedure, private :: set_elem_f64v   !! set_elem specific for the f64v kind.
+        procedure, private :: set_elem_boolv   !! set_elem specific for the boolv kind.
+        procedure, private :: set_elem_strv   !! set_elem specific for the strv kind.
+        procedure, private :: set_elem_datev   !! set_elem specific for the datev kind.
+        procedure, private :: set_elem_timev   !! set_elem specific for the timev kind.
+        procedure, private :: set_elem_tsv   !! set_elem specific for the tsv kind.
+        !> Write ONE element of row i's vector, without materialising the row.
+        generic :: set_elem => set_elem_i32v, set_elem_i64v, set_elem_f32v, set_elem_f64v, set_elem_boolv, &
+            set_elem_strv, set_elem_datev, set_elem_timev, set_elem_tsv
         ! --- set_all ---
         procedure, private :: set_all_i32   !! set_all specific for the i32 kind.
         procedure, private :: set_all_i64   !! set_all specific for the i64 kind.
@@ -698,6 +724,25 @@ module parquet_columns
             integer(int64), intent(in) :: i            !! 1-based row index.
             character(len=*), intent(out) :: value(:)  !! receives width values, blank-padded.
         end subroutine get_at_strv
+        !> Reads ONE element of row `i`'s string vector (PK_STRING_VEC) into an allocatable string.
+        !!
+        !! Unlike `get_at_strv`, nothing here is blank-padded to a caller-declared width and no
+        !! width-long array is built: the result is exactly as long as the stored value.
+        module subroutine get_elem_strv(self, i, e, value)
+            class(parquet_column), intent(in) :: self           !! the column.
+            integer(int64), intent(in) :: i                     !! 1-based row index.
+            integer(int64), intent(in) :: e                     !! 1-based element index within the row.
+            character(len=:), allocatable, intent(out) :: value !! the element's value.
+        end subroutine get_elem_strv
+        !> Writes ONE element of row `i`'s string vector (PK_STRING_VEC), clearing THAT element's
+        !! null. `value` is a SCALAR, so it is stored verbatim -- the array forms' trimming rule is
+        !! about one declared length shared by every element, and one element has no such length.
+        module subroutine set_elem_strv(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            character(len=*), intent(in) :: value        !! the new value.
+        end subroutine set_elem_strv
         !> Writes string element `i` (PK_STRING). `value` is a SCALAR, so it is stored verbatim,
         !! trailing blanks included -- a scalar is exactly as long as the caller wrote it. Every
         !! character ARRAY entry point below trims instead; see `set_all_str`.
@@ -1100,6 +1145,28 @@ module parquet_columns
             integer(int32), intent(in) :: value(:)       !! the new values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_i32v
+        !> Reads ONE element of row `i`'s vector from a PK_INT32_VEC column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_i32v(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            integer(int32), intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_i32v
+        !> Writes ONE element of row `i`'s vector in a PK_INT32_VEC column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_i32v(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            integer(int32), intent(in) :: value             !! the new value.
+        end subroutine set_elem_i32v
         !> Replaces every value in a PK_INT32_VEC column.
         module subroutine set_all_i32v(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1142,6 +1209,28 @@ module parquet_columns
             integer(int64), intent(in) :: value(:)       !! the new values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_i64v
+        !> Reads ONE element of row `i`'s vector from a PK_INT64_VEC column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_i64v(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            integer(int64), intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_i64v
+        !> Writes ONE element of row `i`'s vector in a PK_INT64_VEC column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_i64v(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            integer(int64), intent(in) :: value             !! the new value.
+        end subroutine set_elem_i64v
         !> Replaces every value in a PK_INT64_VEC column.
         module subroutine set_all_i64v(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1184,6 +1273,28 @@ module parquet_columns
             real(real32), intent(in) :: value(:)       !! the new values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_f32v
+        !> Reads ONE element of row `i`'s vector from a PK_FLOAT32_VEC column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_f32v(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            real(real32), intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_f32v
+        !> Writes ONE element of row `i`'s vector in a PK_FLOAT32_VEC column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_f32v(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            real(real32), intent(in) :: value             !! the new value.
+        end subroutine set_elem_f32v
         !> Replaces every value in a PK_FLOAT32_VEC column.
         module subroutine set_all_f32v(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1226,6 +1337,28 @@ module parquet_columns
             real(real64), intent(in) :: value(:)       !! the new values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_f64v
+        !> Reads ONE element of row `i`'s vector from a PK_FLOAT64_VEC column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_f64v(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            real(real64), intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_f64v
+        !> Writes ONE element of row `i`'s vector in a PK_FLOAT64_VEC column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_f64v(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            real(real64), intent(in) :: value             !! the new value.
+        end subroutine set_elem_f64v
         !> Replaces every value in a PK_FLOAT64_VEC column.
         module subroutine set_all_f64v(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1268,6 +1401,28 @@ module parquet_columns
             logical, intent(in) :: value(:)       !! the new values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_boolv
+        !> Reads ONE element of row `i`'s vector from a PK_LOGICAL_VEC column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_boolv(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            logical, intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_boolv
+        !> Writes ONE element of row `i`'s vector in a PK_LOGICAL_VEC column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_boolv(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            logical, intent(in) :: value             !! the new value.
+        end subroutine set_elem_boolv
         !> Replaces every value in a PK_LOGICAL_VEC column.
         module subroutine set_all_boolv(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1310,6 +1465,28 @@ module parquet_columns
             type(parquet_date), intent(in) :: value(:)       !! the new values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_datev
+        !> Reads ONE element of row `i`'s vector from a PK_DATE_VEC column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_datev(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            type(parquet_date), intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_datev
+        !> Writes ONE element of row `i`'s vector in a PK_DATE_VEC column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_datev(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_date), intent(in) :: value             !! the new value.
+        end subroutine set_elem_datev
         !> Replaces every value in a PK_DATE_VEC column.
         module subroutine set_all_datev(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1352,6 +1529,28 @@ module parquet_columns
             type(parquet_time), intent(in) :: value(:)       !! the new values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_timev
+        !> Reads ONE element of row `i`'s vector from a PK_TIME_VEC column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_timev(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            type(parquet_time), intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_timev
+        !> Writes ONE element of row `i`'s vector in a PK_TIME_VEC column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_timev(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_time), intent(in) :: value             !! the new value.
+        end subroutine set_elem_timev
         !> Replaces every value in a PK_TIME_VEC column.
         module subroutine set_all_timev(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.
@@ -1394,6 +1593,28 @@ module parquet_columns
             type(parquet_timestamp), intent(in) :: value(:)       !! the new values.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
         end subroutine set_at_tsv
+        !> Reads ONE element of row `i`'s vector from a PK_TIMESTAMP_VEC column.
+        !!
+        !! The point is what it does NOT do: `get_at` fills a width-long array, so reading one
+        !! element through it costs the caller an allocation per access.
+        module subroutine get_elem_tsv(self, i, e, value)
+            class(parquet_column), intent(in) :: self !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            integer(int64), intent(in) :: e           !! 1-based element index within the row.
+            type(parquet_timestamp), intent(out) :: value         !! receives the element's value.
+        end subroutine get_elem_tsv
+        !> Writes ONE element of row `i`'s vector in a PK_TIMESTAMP_VEC column, clearing THAT element's null.
+        !!
+        !! Writing through `%data_ptr` instead would leave the column's own null bookkeeping
+        !! behind -- for a temporal kind that is a cached answer this type recomputes lazily, so
+        !! a bypassed write shows up later as a wrong `%any_null()` and nowhere near its cause.
+        !! That bookkeeping is private to this type, which is why the operation belongs here.
+        module subroutine set_elem_tsv(self, i, e, value)
+            class(parquet_column), intent(inout) :: self !! the column.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_timestamp), intent(in) :: value             !! the new value.
+        end subroutine set_elem_tsv
         !> Replaces every value in a PK_TIMESTAMP_VEC column.
         module subroutine set_all_tsv(self, values, modify_nulls)
             class(parquet_column), intent(inout) :: self !! the column.

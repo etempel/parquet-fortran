@@ -870,11 +870,34 @@ module parquet_tables
         procedure, private :: row_get_datev !! %get specific for the datev kind.
         procedure, private :: row_get_timev !! %get specific for the timev kind.
         procedure, private :: row_get_tsv !! %get specific for the tsv kind.
+        procedure, private :: row_get_col_i32 !! %get specific, i32 kind, column by handle.
+        procedure, private :: row_get_col_i64 !! %get specific, i64 kind, column by handle.
+        procedure, private :: row_get_col_f32 !! %get specific, f32 kind, column by handle.
+        procedure, private :: row_get_col_f64 !! %get specific, f64 kind, column by handle.
+        procedure, private :: row_get_col_bool !! %get specific, bool kind, column by handle.
+        procedure, private :: row_get_col_str !! %get specific, str kind, column by handle.
+        procedure, private :: row_get_col_date !! %get specific, date kind, column by handle.
+        procedure, private :: row_get_col_time !! %get specific, time kind, column by handle.
+        procedure, private :: row_get_col_ts !! %get specific, ts kind, column by handle.
+        procedure, private :: row_get_col_i32v !! %get specific, i32v kind, column by handle.
+        procedure, private :: row_get_col_i64v !! %get specific, i64v kind, column by handle.
+        procedure, private :: row_get_col_f32v !! %get specific, f32v kind, column by handle.
+        procedure, private :: row_get_col_f64v !! %get specific, f64v kind, column by handle.
+        procedure, private :: row_get_col_boolv !! %get specific, boolv kind, column by handle.
+        procedure, private :: row_get_col_strv !! %get specific, strv kind, column by handle.
+        procedure, private :: row_get_col_datev !! %get specific, datev kind, column by handle.
+        procedure, private :: row_get_col_timev !! %get specific, timev kind, column by handle.
+        procedure, private :: row_get_col_tsv !! %get specific, tsv kind, column by handle.
         !> Copies this row's value for a column into the caller's own variable, widening
-        !! int32 -> int64 and float32 -> float64 exactly as the table's own %get does.
+        !! int32 -> int64 and float32 -> float64 exactly as the table's own %get does. The
+        !! column may be named by a string or by a `parquet_table_col` handle; the handle
+        !! form does no name lookup, which is what a loop over rows would otherwise repeat.
         generic :: get => row_get_i32, row_get_i64, row_get_f32, row_get_f64, row_get_bool, row_get_str, row_get_date, &
             row_get_time, row_get_ts, row_get_i32v, row_get_i64v, row_get_f32v, row_get_f64v, row_get_boolv, row_get_strv, &
-            row_get_datev, row_get_timev, row_get_tsv
+            row_get_datev, row_get_timev, row_get_tsv, row_get_col_i32, row_get_col_i64, row_get_col_f32, row_get_col_f64, &
+            row_get_col_bool, row_get_col_str, row_get_col_date, row_get_col_time, row_get_col_ts, row_get_col_i32v, &
+            row_get_col_i64v, row_get_col_f32v, row_get_col_f64v, row_get_col_boolv, row_get_col_strv, row_get_col_datev, &
+            row_get_col_timev, row_get_col_tsv
         procedure, private :: row_set_i32 !! %set specific for the i32 kind.
         procedure, private :: row_set_i64 !! %set specific for the i64 kind.
         procedure, private :: row_set_f32 !! %set specific for the f32 kind.
@@ -893,12 +916,34 @@ module parquet_tables
         procedure, private :: row_set_datev !! %set specific for the datev kind.
         procedure, private :: row_set_timev !! %set specific for the timev kind.
         procedure, private :: row_set_tsv !! %set specific for the tsv kind.
+        procedure, private :: row_set_col_i32 !! %set specific, i32 kind, column by handle.
+        procedure, private :: row_set_col_i64 !! %set specific, i64 kind, column by handle.
+        procedure, private :: row_set_col_f32 !! %set specific, f32 kind, column by handle.
+        procedure, private :: row_set_col_f64 !! %set specific, f64 kind, column by handle.
+        procedure, private :: row_set_col_bool !! %set specific, bool kind, column by handle.
+        procedure, private :: row_set_col_str !! %set specific, str kind, column by handle.
+        procedure, private :: row_set_col_date !! %set specific, date kind, column by handle.
+        procedure, private :: row_set_col_time !! %set specific, time kind, column by handle.
+        procedure, private :: row_set_col_ts !! %set specific, ts kind, column by handle.
+        procedure, private :: row_set_col_i32v !! %set specific, i32v kind, column by handle.
+        procedure, private :: row_set_col_i64v !! %set specific, i64v kind, column by handle.
+        procedure, private :: row_set_col_f32v !! %set specific, f32v kind, column by handle.
+        procedure, private :: row_set_col_f64v !! %set specific, f64v kind, column by handle.
+        procedure, private :: row_set_col_boolv !! %set specific, boolv kind, column by handle.
+        procedure, private :: row_set_col_strv !! %set specific, strv kind, column by handle.
+        procedure, private :: row_set_col_datev !! %set specific, datev kind, column by handle.
+        procedure, private :: row_set_col_timev !! %set specific, timev kind, column by handle.
+        procedure, private :: row_set_col_tsv !! %set specific, tsv kind, column by handle.
         !> Writes this row's value for a column. The kind must match the column's exactly
         !! (a write never widens), and writing a value CLEARS that row's null. The TABLE is
-        !! updated -- a handle is a view of it, not a copy.
+        !! updated -- a handle is a view of it, not a copy. The column may be named by a
+        !! string or by a `parquet_table_col` handle.
         generic :: set => row_set_i32, row_set_i64, row_set_f32, row_set_f64, row_set_bool, row_set_str, row_set_date, &
             row_set_time, row_set_ts, row_set_i32v, row_set_i64v, row_set_f32v, row_set_f64v, row_set_boolv, row_set_strv, &
-            row_set_datev, row_set_timev, row_set_tsv
+            row_set_datev, row_set_timev, row_set_tsv, row_set_col_i32, row_set_col_i64, row_set_col_f32, row_set_col_f64, &
+            row_set_col_bool, row_set_col_str, row_set_col_date, row_set_col_time, row_set_col_ts, row_set_col_i32v, &
+            row_set_col_i64v, row_set_col_f32v, row_set_col_f64v, row_set_col_boolv, row_set_col_strv, row_set_col_datev, &
+            row_set_col_timev, row_set_col_tsv
         procedure, private :: row_ref_i32 !! %ref specific for the i32 kind.
         procedure, private :: row_ref_i64 !! %ref specific for the i64 kind.
         procedure, private :: row_ref_f32 !! %ref specific for the f32 kind.
@@ -971,17 +1016,63 @@ module parquet_tables
         procedure, private :: col_get_f64_i64 !! %get specific, f64 value, int64 row index.
         procedure, private :: col_get_bool_i32 !! %get specific, bool value, int32 row index.
         procedure, private :: col_get_bool_i64 !! %get specific, bool value, int64 row index.
+        procedure, private :: col_get_str_i32 !! %get specific, str value, int32 row index.
+        procedure, private :: col_get_str_i64 !! %get specific, str value, int64 row index.
         procedure, private :: col_get_date_i32 !! %get specific, date value, int32 row index.
         procedure, private :: col_get_date_i64 !! %get specific, date value, int64 row index.
         procedure, private :: col_get_time_i32 !! %get specific, time value, int32 row index.
         procedure, private :: col_get_time_i64 !! %get specific, time value, int64 row index.
         procedure, private :: col_get_ts_i32 !! %get specific, ts value, int32 row index.
         procedure, private :: col_get_ts_i64 !! %get specific, ts value, int64 row index.
+        procedure, private :: col_get_i32v_i32 !! %get specific, i32v value, int32 row index.
+        procedure, private :: col_get_i32v_i64 !! %get specific, i32v value, int64 row index.
+        procedure, private :: col_get_i64v_i32 !! %get specific, i64v value, int32 row index.
+        procedure, private :: col_get_i64v_i64 !! %get specific, i64v value, int64 row index.
+        procedure, private :: col_get_f32v_i32 !! %get specific, f32v value, int32 row index.
+        procedure, private :: col_get_f32v_i64 !! %get specific, f32v value, int64 row index.
+        procedure, private :: col_get_f64v_i32 !! %get specific, f64v value, int32 row index.
+        procedure, private :: col_get_f64v_i64 !! %get specific, f64v value, int64 row index.
+        procedure, private :: col_get_boolv_i32 !! %get specific, boolv value, int32 row index.
+        procedure, private :: col_get_boolv_i64 !! %get specific, boolv value, int64 row index.
+        procedure, private :: col_get_strv_i32 !! %get specific, strv value, int32 row index.
+        procedure, private :: col_get_strv_i64 !! %get specific, strv value, int64 row index.
+        procedure, private :: col_get_datev_i32 !! %get specific, datev value, int32 row index.
+        procedure, private :: col_get_datev_i64 !! %get specific, datev value, int64 row index.
+        procedure, private :: col_get_timev_i32 !! %get specific, timev value, int32 row index.
+        procedure, private :: col_get_timev_i64 !! %get specific, timev value, int64 row index.
+        procedure, private :: col_get_tsv_i32 !! %get specific, tsv value, int32 row index.
+        procedure, private :: col_get_tsv_i64 !! %get specific, tsv value, int64 row index.
+        procedure, private :: col_get_i32v_e32 !! %get specific, one i32v element, int32 indices.
+        procedure, private :: col_get_i32v_e64 !! %get specific, one i32v element, int64 indices.
+        procedure, private :: col_get_i64v_e32 !! %get specific, one i64v element, int32 indices.
+        procedure, private :: col_get_i64v_e64 !! %get specific, one i64v element, int64 indices.
+        procedure, private :: col_get_f32v_e32 !! %get specific, one f32v element, int32 indices.
+        procedure, private :: col_get_f32v_e64 !! %get specific, one f32v element, int64 indices.
+        procedure, private :: col_get_f64v_e32 !! %get specific, one f64v element, int32 indices.
+        procedure, private :: col_get_f64v_e64 !! %get specific, one f64v element, int64 indices.
+        procedure, private :: col_get_boolv_e32 !! %get specific, one boolv element, int32 indices.
+        procedure, private :: col_get_boolv_e64 !! %get specific, one boolv element, int64 indices.
+        procedure, private :: col_get_strv_e32 !! %get specific, one strv element, int32 indices.
+        procedure, private :: col_get_strv_e64 !! %get specific, one strv element, int64 indices.
+        procedure, private :: col_get_datev_e32 !! %get specific, one datev element, int32 indices.
+        procedure, private :: col_get_datev_e64 !! %get specific, one datev element, int64 indices.
+        procedure, private :: col_get_timev_e32 !! %get specific, one timev element, int32 indices.
+        procedure, private :: col_get_timev_e64 !! %get specific, one timev element, int64 indices.
+        procedure, private :: col_get_tsv_e32 !! %get specific, one tsv element, int32 indices.
+        procedure, private :: col_get_tsv_e64 !! %get specific, one tsv element, int64 indices.
         !> Copies one row's value into the caller's variable, widening exactly as the table's
         !! own `%get_element` does. No name, no lookup -- the handle already knows the slot.
+        !! Given `e` as well, copies ONE ELEMENT of that row without materialising the rest,
+        !! which the name form cannot do at all.
         generic :: get => col_get_i32_i32, col_get_i32_i64, col_get_i64_i32, col_get_i64_i64, col_get_f32_i32, col_get_f32_i64, &
-            col_get_f64_i32, col_get_f64_i64, col_get_bool_i32, col_get_bool_i64, col_get_date_i32, col_get_date_i64, &
-            col_get_time_i32, col_get_time_i64, col_get_ts_i32, col_get_ts_i64
+            col_get_f64_i32, col_get_f64_i64, col_get_bool_i32, col_get_bool_i64, col_get_str_i32, col_get_str_i64, &
+            col_get_date_i32, col_get_date_i64, col_get_time_i32, col_get_time_i64, col_get_ts_i32, col_get_ts_i64, &
+            col_get_i32v_i32, col_get_i32v_i64, col_get_i64v_i32, col_get_i64v_i64, col_get_f32v_i32, col_get_f32v_i64, &
+            col_get_f64v_i32, col_get_f64v_i64, col_get_boolv_i32, col_get_boolv_i64, col_get_strv_i32, col_get_strv_i64, &
+            col_get_datev_i32, col_get_datev_i64, col_get_timev_i32, col_get_timev_i64, col_get_tsv_i32, col_get_tsv_i64, &
+            col_get_i32v_e32, col_get_i32v_e64, col_get_i64v_e32, col_get_i64v_e64, col_get_f32v_e32, col_get_f32v_e64, &
+            col_get_f64v_e32, col_get_f64v_e64, col_get_boolv_e32, col_get_boolv_e64, col_get_strv_e32, col_get_strv_e64, &
+            col_get_datev_e32, col_get_datev_e64, col_get_timev_e32, col_get_timev_e64, col_get_tsv_e32, col_get_tsv_e64
         procedure, private :: col_set_i32_i32 !! %set specific, i32 value, int32 row index.
         procedure, private :: col_set_i32_i64 !! %set specific, i32 value, int64 row index.
         procedure, private :: col_set_i64_i32 !! %set specific, i64 value, int32 row index.
@@ -992,18 +1083,63 @@ module parquet_tables
         procedure, private :: col_set_f64_i64 !! %set specific, f64 value, int64 row index.
         procedure, private :: col_set_bool_i32 !! %set specific, bool value, int32 row index.
         procedure, private :: col_set_bool_i64 !! %set specific, bool value, int64 row index.
+        procedure, private :: col_set_str_i32 !! %set specific, str value, int32 row index.
+        procedure, private :: col_set_str_i64 !! %set specific, str value, int64 row index.
         procedure, private :: col_set_date_i32 !! %set specific, date value, int32 row index.
         procedure, private :: col_set_date_i64 !! %set specific, date value, int64 row index.
         procedure, private :: col_set_time_i32 !! %set specific, time value, int32 row index.
         procedure, private :: col_set_time_i64 !! %set specific, time value, int64 row index.
         procedure, private :: col_set_ts_i32 !! %set specific, ts value, int32 row index.
         procedure, private :: col_set_ts_i64 !! %set specific, ts value, int64 row index.
+        procedure, private :: col_set_i32v_i32 !! %set specific, i32v value, int32 row index.
+        procedure, private :: col_set_i32v_i64 !! %set specific, i32v value, int64 row index.
+        procedure, private :: col_set_i64v_i32 !! %set specific, i64v value, int32 row index.
+        procedure, private :: col_set_i64v_i64 !! %set specific, i64v value, int64 row index.
+        procedure, private :: col_set_f32v_i32 !! %set specific, f32v value, int32 row index.
+        procedure, private :: col_set_f32v_i64 !! %set specific, f32v value, int64 row index.
+        procedure, private :: col_set_f64v_i32 !! %set specific, f64v value, int32 row index.
+        procedure, private :: col_set_f64v_i64 !! %set specific, f64v value, int64 row index.
+        procedure, private :: col_set_boolv_i32 !! %set specific, boolv value, int32 row index.
+        procedure, private :: col_set_boolv_i64 !! %set specific, boolv value, int64 row index.
+        procedure, private :: col_set_strv_i32 !! %set specific, strv value, int32 row index.
+        procedure, private :: col_set_strv_i64 !! %set specific, strv value, int64 row index.
+        procedure, private :: col_set_datev_i32 !! %set specific, datev value, int32 row index.
+        procedure, private :: col_set_datev_i64 !! %set specific, datev value, int64 row index.
+        procedure, private :: col_set_timev_i32 !! %set specific, timev value, int32 row index.
+        procedure, private :: col_set_timev_i64 !! %set specific, timev value, int64 row index.
+        procedure, private :: col_set_tsv_i32 !! %set specific, tsv value, int32 row index.
+        procedure, private :: col_set_tsv_i64 !! %set specific, tsv value, int64 row index.
+        procedure, private :: col_set_i32v_e32 !! %set specific, one i32v element, int32 indices.
+        procedure, private :: col_set_i32v_e64 !! %set specific, one i32v element, int64 indices.
+        procedure, private :: col_set_i64v_e32 !! %set specific, one i64v element, int32 indices.
+        procedure, private :: col_set_i64v_e64 !! %set specific, one i64v element, int64 indices.
+        procedure, private :: col_set_f32v_e32 !! %set specific, one f32v element, int32 indices.
+        procedure, private :: col_set_f32v_e64 !! %set specific, one f32v element, int64 indices.
+        procedure, private :: col_set_f64v_e32 !! %set specific, one f64v element, int32 indices.
+        procedure, private :: col_set_f64v_e64 !! %set specific, one f64v element, int64 indices.
+        procedure, private :: col_set_boolv_e32 !! %set specific, one boolv element, int32 indices.
+        procedure, private :: col_set_boolv_e64 !! %set specific, one boolv element, int64 indices.
+        procedure, private :: col_set_strv_e32 !! %set specific, one strv element, int32 indices.
+        procedure, private :: col_set_strv_e64 !! %set specific, one strv element, int64 indices.
+        procedure, private :: col_set_datev_e32 !! %set specific, one datev element, int32 indices.
+        procedure, private :: col_set_datev_e64 !! %set specific, one datev element, int64 indices.
+        procedure, private :: col_set_timev_e32 !! %set specific, one timev element, int32 indices.
+        procedure, private :: col_set_timev_e64 !! %set specific, one timev element, int64 indices.
+        procedure, private :: col_set_tsv_e32 !! %set specific, one tsv element, int32 indices.
+        procedure, private :: col_set_tsv_e64 !! %set specific, one tsv element, int64 indices.
         !> Writes one row's value. The kind must match the column's exactly (a write never
         !! widens), and writing a value CLEARS that row's null. The TABLE is updated -- a
-        !! handle is a view of it, not a copy.
+        !! handle is a view of it, not a copy. Given `e` as well, writes ONE ELEMENT and
+        !! clears that element's null rather than the whole row's.
         generic :: set => col_set_i32_i32, col_set_i32_i64, col_set_i64_i32, col_set_i64_i64, col_set_f32_i32, col_set_f32_i64, &
-            col_set_f64_i32, col_set_f64_i64, col_set_bool_i32, col_set_bool_i64, col_set_date_i32, col_set_date_i64, &
-            col_set_time_i32, col_set_time_i64, col_set_ts_i32, col_set_ts_i64
+            col_set_f64_i32, col_set_f64_i64, col_set_bool_i32, col_set_bool_i64, col_set_str_i32, col_set_str_i64, &
+            col_set_date_i32, col_set_date_i64, col_set_time_i32, col_set_time_i64, col_set_ts_i32, col_set_ts_i64, &
+            col_set_i32v_i32, col_set_i32v_i64, col_set_i64v_i32, col_set_i64v_i64, col_set_f32v_i32, col_set_f32v_i64, &
+            col_set_f64v_i32, col_set_f64v_i64, col_set_boolv_i32, col_set_boolv_i64, col_set_strv_i32, col_set_strv_i64, &
+            col_set_datev_i32, col_set_datev_i64, col_set_timev_i32, col_set_timev_i64, col_set_tsv_i32, col_set_tsv_i64, &
+            col_set_i32v_e32, col_set_i32v_e64, col_set_i64v_e32, col_set_i64v_e64, col_set_f32v_e32, col_set_f32v_e64, &
+            col_set_f64v_e32, col_set_f64v_e64, col_set_boolv_e32, col_set_boolv_e64, col_set_strv_e32, col_set_strv_e64, &
+            col_set_datev_e32, col_set_datev_e64, col_set_timev_e32, col_set_timev_e64, col_set_tsv_e32, col_set_tsv_e64
         procedure, private :: col_is_null_i32  !! %is_null specific, whole row, int32 index.
         procedure, private :: col_is_null_i64  !! %is_null specific, whole row, int64 index.
         procedure, private :: col_is_null_e32  !! %is_null specific, one element, int32 indices.
@@ -1026,9 +1162,38 @@ module parquet_tables
         !! whatever was there; clearing a null does not write one.
         generic :: clear_null => col_clear_null_i32, col_clear_null_i64, col_clear_null_e32, col_clear_null_e64
 
-        procedure :: is_valid => col_is_valid !! Whether the handle is attached AND still current.
-        procedure :: index => col_index       !! This column's 1-based position in the table.
-        procedure :: kind => col_kind         !! This column's PK_* kind.
+
+        procedure, private :: col_ref_i32 !! %ref specific, i32 storage.
+        procedure, private :: col_ref_i64 !! %ref specific, i64 storage.
+        procedure, private :: col_ref_f32 !! %ref specific, f32 storage.
+        procedure, private :: col_ref_f64 !! %ref specific, f64 storage.
+        procedure, private :: col_ref_bool !! %ref specific, bool storage.
+        procedure, private :: col_ref_date !! %ref specific, date storage.
+        procedure, private :: col_ref_time !! %ref specific, time storage.
+        procedure, private :: col_ref_ts !! %ref specific, ts storage.
+        procedure, private :: col_ref_i32v !! %ref specific, i32v storage.
+        procedure, private :: col_ref_i64v !! %ref specific, i64v storage.
+        procedure, private :: col_ref_f32v !! %ref specific, f32v storage.
+        procedure, private :: col_ref_f64v !! %ref specific, f64v storage.
+        procedure, private :: col_ref_boolv !! %ref specific, boolv storage.
+        procedure, private :: col_ref_datev !! %ref specific, datev storage.
+        procedure, private :: col_ref_timev !! %ref specific, timev storage.
+        procedure, private :: col_ref_tsv !! %ref specific, tsv storage.
+        procedure, private :: col_ref_strcol !! %ref specific, the packed string store.
+        !> Points `p` at this column's live storage -- the `%col` pointer, without the name
+        !! lookup. Same rules: the kind must match exactly (a pointer never widens), a write
+        !! through `p` changes the table, and REORDERING one column through its pointer
+        !! breaks the table's row alignment with nothing to report it.
+        generic :: ref => col_ref_i32, col_ref_i64, col_ref_f32, col_ref_f64, col_ref_bool, col_ref_date, col_ref_time, &
+            col_ref_ts, col_ref_i32v, col_ref_i64v, col_ref_f32v, col_ref_f64v, col_ref_boolv, col_ref_datev, col_ref_timev, &
+            col_ref_tsv, col_ref_strcol
+        procedure :: is_valid => col_is_valid   !! Whether the handle is attached AND still current.
+        procedure :: index => col_index         !! This column's 1-based position in the table.
+        procedure :: kind => col_kind           !! This column's PK_* kind.
+        procedure :: name => col_name           !! This column's name.
+        procedure :: width => col_width         !! This column's values per row (1 for a scalar kind).
+        procedure :: unit => col_unit           !! This column's unit string, or "".
+        procedure :: residency => col_residency !! Whether this column is RES_EMPTY/RES_PARTIAL/RES_FULL.
         ! NO `final` -- see the type's own doc-comment. This is a decision, not an omission.
     end type parquet_table_col
     !
@@ -1663,12 +1828,38 @@ module parquet_tables
             class(parquet_table_col), intent(in) :: self !! the handle.
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
         end subroutine col_resolve
+        !> This column's name.
+        module subroutine col_name(self, nm)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            character(len=:), allocatable, intent(out) :: nm !! receives the name.
+        end subroutine col_name
+        !> This column's values per row -- 1 for a scalar kind, the vector length otherwise.
+        module function col_width(self) result(wdt)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer :: wdt                               !! values per row.
+        end function col_width
+        !> This column's unit string, or "" when it has none.
+        module subroutine col_unit(self, u)
+            class(parquet_table_col), intent(in) :: self    !! the handle.
+            character(len=:), allocatable, intent(out) :: u !! receives the unit, or "".
+        end subroutine col_unit
+        !> Whether this column is RES_EMPTY, RES_PARTIAL or RES_FULL.
+        module function col_residency(self) result(r)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer :: r                                 !! one of the RES_* constants.
+        end function col_residency
         !> Aborts unless `i` is a valid 1-based row index for the handle's own row scope.
         module subroutine col_require_row(self, i, proc)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! the row index to check.
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
         end subroutine col_require_row
+        !> Aborts unless `e` is a valid 1-based element index within one of this column's rows.
+        !!
+        !! Not declared here on purpose: `parquet_column%get_elem`/`%set_elem` run `check_element`
+        !! themselves, and its message already names the ELEMENT axis rather than reading like an
+        !! out-of-range row. A second check in this layer would be a second copy of the column's
+        !! own width rule.
         !> Reports that this column's kind cannot serve the caller's variable.
         module subroutine col_kind_error(self, want, proc)
             class(parquet_table_col), intent(in) :: self !! the handle.
@@ -1686,7 +1877,7 @@ module parquet_tables
             integer, intent(in) :: slot                    !! validated slot index.
             integer, intent(in) :: colkind                 !! that slot's PK_* kind.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            integer(int32), intent(out) :: value             !! receives the value.
+            integer(int32), intent(out) :: value !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_i32
         !> The shared i32 body behind both `%set_element(name, i, v)` and a column
@@ -1696,7 +1887,7 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            integer(int32), intent(in) :: value              !! the value to write.
+            integer(int32), intent(in) :: value !! the value to write.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_store_i32
         !> The shared i64 body behind both `%get_element(name, i, v)` and a column
@@ -1709,7 +1900,7 @@ module parquet_tables
             integer, intent(in) :: slot                    !! validated slot index.
             integer, intent(in) :: colkind                 !! that slot's PK_* kind.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            integer(int64), intent(out) :: value             !! receives the value.
+            integer(int64), intent(out) :: value !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_i64
         !> The shared i64 body behind both `%set_element(name, i, v)` and a column
@@ -1719,7 +1910,7 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            integer(int64), intent(in) :: value              !! the value to write.
+            integer(int64), intent(in) :: value !! the value to write.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_store_i64
         !> The shared f32 body behind both `%get_element(name, i, v)` and a column
@@ -1732,7 +1923,7 @@ module parquet_tables
             integer, intent(in) :: slot                    !! validated slot index.
             integer, intent(in) :: colkind                 !! that slot's PK_* kind.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            real(real32), intent(out) :: value             !! receives the value.
+            real(real32), intent(out) :: value !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_f32
         !> The shared f32 body behind both `%set_element(name, i, v)` and a column
@@ -1742,7 +1933,7 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            real(real32), intent(in) :: value              !! the value to write.
+            real(real32), intent(in) :: value !! the value to write.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_store_f32
         !> The shared f64 body behind both `%get_element(name, i, v)` and a column
@@ -1755,7 +1946,7 @@ module parquet_tables
             integer, intent(in) :: slot                    !! validated slot index.
             integer, intent(in) :: colkind                 !! that slot's PK_* kind.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            real(real64), intent(out) :: value             !! receives the value.
+            real(real64), intent(out) :: value !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_f64
         !> The shared f64 body behind both `%set_element(name, i, v)` and a column
@@ -1765,7 +1956,7 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            real(real64), intent(in) :: value              !! the value to write.
+            real(real64), intent(in) :: value !! the value to write.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_store_f64
         !> The shared bool body behind both `%get_element(name, i, v)` and a column
@@ -1778,7 +1969,7 @@ module parquet_tables
             integer, intent(in) :: slot                    !! validated slot index.
             integer, intent(in) :: colkind                 !! that slot's PK_* kind.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            logical, intent(out) :: value             !! receives the value.
+            logical, intent(out) :: value !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_bool
         !> The shared bool body behind both `%set_element(name, i, v)` and a column
@@ -1788,9 +1979,32 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            logical, intent(in) :: value              !! the value to write.
+            logical, intent(in) :: value !! the value to write.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_store_bool
+        !> The shared str body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_str(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            character(len=:), allocatable, intent(out) :: value !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_str
+        !> The shared str body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_str(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            character(len=*), intent(in) :: value !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_str
         !> The shared date body behind both `%get_element(name, i, v)` and a column
         !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
         !! once. Takes the resolved pieces rather than a handle -- building one purely
@@ -1801,7 +2015,7 @@ module parquet_tables
             integer, intent(in) :: slot                    !! validated slot index.
             integer, intent(in) :: colkind                 !! that slot's PK_* kind.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            type(parquet_date), intent(out) :: value             !! receives the value.
+            type(parquet_date), intent(out) :: value !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_date
         !> The shared date body behind both `%set_element(name, i, v)` and a column
@@ -1811,7 +2025,7 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            type(parquet_date), intent(in) :: value              !! the value to write.
+            type(parquet_date), intent(in) :: value !! the value to write.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_store_date
         !> The shared time body behind both `%get_element(name, i, v)` and a column
@@ -1824,7 +2038,7 @@ module parquet_tables
             integer, intent(in) :: slot                    !! validated slot index.
             integer, intent(in) :: colkind                 !! that slot's PK_* kind.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            type(parquet_time), intent(out) :: value             !! receives the value.
+            type(parquet_time), intent(out) :: value !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_time
         !> The shared time body behind both `%set_element(name, i, v)` and a column
@@ -1834,7 +2048,7 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            type(parquet_time), intent(in) :: value              !! the value to write.
+            type(parquet_time), intent(in) :: value !! the value to write.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_store_time
         !> The shared ts body behind both `%get_element(name, i, v)` and a column
@@ -1847,7 +2061,7 @@ module parquet_tables
             integer, intent(in) :: slot                    !! validated slot index.
             integer, intent(in) :: colkind                 !! that slot's PK_* kind.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            type(parquet_timestamp), intent(out) :: value             !! receives the value.
+            type(parquet_timestamp), intent(out) :: value !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_ts
         !> The shared ts body behind both `%set_element(name, i, v)` and a column
@@ -1857,203 +2071,956 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
             integer(int64), intent(in) :: i                !! validated 1-based row index.
-            type(parquet_timestamp), intent(in) :: value              !! the value to write.
+            type(parquet_timestamp), intent(in) :: value !! the value to write.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_store_ts
+        !> The shared i32v body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_i32v(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            integer(int32), allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_i32v
+        !> The shared i32v body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_i32v(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            integer(int32), intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_i32v
+        !> The shared i64v body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_i64v(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            integer(int64), allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_i64v
+        !> The shared i64v body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_i64v(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            integer(int64), intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_i64v
+        !> The shared f32v body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_f32v(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            real(real32), allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_f32v
+        !> The shared f32v body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_f32v(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            real(real32), intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_f32v
+        !> The shared f64v body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_f64v(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            real(real64), allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_f64v
+        !> The shared f64v body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_f64v(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            real(real64), intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_f64v
+        !> The shared boolv body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_boolv(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            logical, allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_boolv
+        !> The shared boolv body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_boolv(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            logical, intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_boolv
+        !> The shared strv body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_strv(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in), target :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            character(len=:), allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_strv
+        !> The shared strv body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_strv(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            character(len=*), intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_strv
+        !> The shared datev body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_datev(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_date), allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_datev
+        !> The shared datev body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_datev(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_date), intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_datev
+        !> The shared timev body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_timev(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_time), allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_timev
+        !> The shared timev body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_timev(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_time), intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_timev
+        !> The shared tsv body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_tsv(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_timestamp), allocatable, intent(out) :: value(:) !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_tsv
+        !> The shared tsv body behind both `%set_element(name, i, v)` and a column
+        !! handle's `%set(i, v)`. Exact kind, never widening -- a write that silently
+        !! converted would lose information the caller did not agree to lose.
+        module subroutine col_store_tsv(cache, slot, i, value, proc)
+            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_timestamp), intent(in) :: value(:) !! the value to write.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_store_tsv
         !> Writes one row's i32 value through a handle (i32 row index).
         module subroutine col_set_i32_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i               !! 1-based row index.
-            integer(int32), intent(in) :: value             !! the value to write.
+            integer(int32), intent(in) :: value !! the value to write.
         end subroutine col_set_i32_i32
         !> Writes one row's i32 value through a handle (i64 row index).
         module subroutine col_set_i32_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i               !! 1-based row index.
-            integer(int32), intent(in) :: value             !! the value to write.
+            integer(int32), intent(in) :: value !! the value to write.
         end subroutine col_set_i32_i64
         !> Writes one row's i64 value through a handle (i32 row index).
         module subroutine col_set_i64_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i               !! 1-based row index.
-            integer(int64), intent(in) :: value             !! the value to write.
+            integer(int64), intent(in) :: value !! the value to write.
         end subroutine col_set_i64_i32
         !> Writes one row's i64 value through a handle (i64 row index).
         module subroutine col_set_i64_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i               !! 1-based row index.
-            integer(int64), intent(in) :: value             !! the value to write.
+            integer(int64), intent(in) :: value !! the value to write.
         end subroutine col_set_i64_i64
         !> Writes one row's f32 value through a handle (i32 row index).
         module subroutine col_set_f32_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i               !! 1-based row index.
-            real(real32), intent(in) :: value             !! the value to write.
+            real(real32), intent(in) :: value !! the value to write.
         end subroutine col_set_f32_i32
         !> Writes one row's f32 value through a handle (i64 row index).
         module subroutine col_set_f32_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i               !! 1-based row index.
-            real(real32), intent(in) :: value             !! the value to write.
+            real(real32), intent(in) :: value !! the value to write.
         end subroutine col_set_f32_i64
         !> Writes one row's f64 value through a handle (i32 row index).
         module subroutine col_set_f64_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i               !! 1-based row index.
-            real(real64), intent(in) :: value             !! the value to write.
+            real(real64), intent(in) :: value !! the value to write.
         end subroutine col_set_f64_i32
         !> Writes one row's f64 value through a handle (i64 row index).
         module subroutine col_set_f64_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i               !! 1-based row index.
-            real(real64), intent(in) :: value             !! the value to write.
+            real(real64), intent(in) :: value !! the value to write.
         end subroutine col_set_f64_i64
         !> Writes one row's bool value through a handle (i32 row index).
         module subroutine col_set_bool_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i               !! 1-based row index.
-            logical, intent(in) :: value             !! the value to write.
+            logical, intent(in) :: value !! the value to write.
         end subroutine col_set_bool_i32
         !> Writes one row's bool value through a handle (i64 row index).
         module subroutine col_set_bool_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i               !! 1-based row index.
-            logical, intent(in) :: value             !! the value to write.
+            logical, intent(in) :: value !! the value to write.
         end subroutine col_set_bool_i64
+        !> Writes one row's str value through a handle (i32 row index).
+        module subroutine col_set_str_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            character(len=*), intent(in) :: value !! the value to write.
+        end subroutine col_set_str_i32
+        !> Writes one row's str value through a handle (i64 row index).
+        module subroutine col_set_str_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            character(len=*), intent(in) :: value !! the value to write.
+        end subroutine col_set_str_i64
         !> Writes one row's date value through a handle (i32 row index).
         module subroutine col_set_date_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i               !! 1-based row index.
-            type(parquet_date), intent(in) :: value             !! the value to write.
+            type(parquet_date), intent(in) :: value !! the value to write.
         end subroutine col_set_date_i32
         !> Writes one row's date value through a handle (i64 row index).
         module subroutine col_set_date_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i               !! 1-based row index.
-            type(parquet_date), intent(in) :: value             !! the value to write.
+            type(parquet_date), intent(in) :: value !! the value to write.
         end subroutine col_set_date_i64
         !> Writes one row's time value through a handle (i32 row index).
         module subroutine col_set_time_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i               !! 1-based row index.
-            type(parquet_time), intent(in) :: value             !! the value to write.
+            type(parquet_time), intent(in) :: value !! the value to write.
         end subroutine col_set_time_i32
         !> Writes one row's time value through a handle (i64 row index).
         module subroutine col_set_time_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i               !! 1-based row index.
-            type(parquet_time), intent(in) :: value             !! the value to write.
+            type(parquet_time), intent(in) :: value !! the value to write.
         end subroutine col_set_time_i64
         !> Writes one row's ts value through a handle (i32 row index).
         module subroutine col_set_ts_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i               !! 1-based row index.
-            type(parquet_timestamp), intent(in) :: value             !! the value to write.
+            type(parquet_timestamp), intent(in) :: value !! the value to write.
         end subroutine col_set_ts_i32
         !> Writes one row's ts value through a handle (i64 row index).
         module subroutine col_set_ts_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i               !! 1-based row index.
-            type(parquet_timestamp), intent(in) :: value             !! the value to write.
+            type(parquet_timestamp), intent(in) :: value !! the value to write.
         end subroutine col_set_ts_i64
+        !> Writes one row's i32v value through a handle (i32 row index).
+        module subroutine col_set_i32v_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            integer(int32), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_i32v_i32
+        !> Writes one row's i32v value through a handle (i64 row index).
+        module subroutine col_set_i32v_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            integer(int32), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_i32v_i64
+        !> Writes one row's i64v value through a handle (i32 row index).
+        module subroutine col_set_i64v_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            integer(int64), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_i64v_i32
+        !> Writes one row's i64v value through a handle (i64 row index).
+        module subroutine col_set_i64v_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            integer(int64), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_i64v_i64
+        !> Writes one row's f32v value through a handle (i32 row index).
+        module subroutine col_set_f32v_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            real(real32), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_f32v_i32
+        !> Writes one row's f32v value through a handle (i64 row index).
+        module subroutine col_set_f32v_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            real(real32), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_f32v_i64
+        !> Writes one row's f64v value through a handle (i32 row index).
+        module subroutine col_set_f64v_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            real(real64), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_f64v_i32
+        !> Writes one row's f64v value through a handle (i64 row index).
+        module subroutine col_set_f64v_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            real(real64), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_f64v_i64
+        !> Writes one row's boolv value through a handle (i32 row index).
+        module subroutine col_set_boolv_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            logical, intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_boolv_i32
+        !> Writes one row's boolv value through a handle (i64 row index).
+        module subroutine col_set_boolv_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            logical, intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_boolv_i64
+        !> Writes one row's strv value through a handle (i32 row index).
+        module subroutine col_set_strv_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            character(len=*), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_strv_i32
+        !> Writes one row's strv value through a handle (i64 row index).
+        module subroutine col_set_strv_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            character(len=*), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_strv_i64
+        !> Writes one row's datev value through a handle (i32 row index).
+        module subroutine col_set_datev_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            type(parquet_date), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_datev_i32
+        !> Writes one row's datev value through a handle (i64 row index).
+        module subroutine col_set_datev_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            type(parquet_date), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_datev_i64
+        !> Writes one row's timev value through a handle (i32 row index).
+        module subroutine col_set_timev_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            type(parquet_time), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_timev_i32
+        !> Writes one row's timev value through a handle (i64 row index).
+        module subroutine col_set_timev_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            type(parquet_time), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_timev_i64
+        !> Writes one row's tsv value through a handle (i32 row index).
+        module subroutine col_set_tsv_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i               !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_tsv_i32
+        !> Writes one row's tsv value through a handle (i64 row index).
+        module subroutine col_set_tsv_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i               !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value(:) !! the value to write.
+        end subroutine col_set_tsv_i64
 
 
         !> One row's i32 value through a handle (i32 row index).
         module subroutine col_get_i32_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
-            integer(int32), intent(out) :: value           !! receives the value.
+            integer(int32), intent(out) :: value !! receives the value.
         end subroutine col_get_i32_i32
         !> One row's i32 value through a handle (i64 row index).
         module subroutine col_get_i32_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
-            integer(int32), intent(out) :: value           !! receives the value.
+            integer(int32), intent(out) :: value !! receives the value.
         end subroutine col_get_i32_i64
         !> One row's i64 value through a handle (i32 row index).
         module subroutine col_get_i64_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
-            integer(int64), intent(out) :: value           !! receives the value.
+            integer(int64), intent(out) :: value !! receives the value.
         end subroutine col_get_i64_i32
         !> One row's i64 value through a handle (i64 row index).
         module subroutine col_get_i64_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
-            integer(int64), intent(out) :: value           !! receives the value.
+            integer(int64), intent(out) :: value !! receives the value.
         end subroutine col_get_i64_i64
         !> One row's f32 value through a handle (i32 row index).
         module subroutine col_get_f32_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
-            real(real32), intent(out) :: value           !! receives the value.
+            real(real32), intent(out) :: value !! receives the value.
         end subroutine col_get_f32_i32
         !> One row's f32 value through a handle (i64 row index).
         module subroutine col_get_f32_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
-            real(real32), intent(out) :: value           !! receives the value.
+            real(real32), intent(out) :: value !! receives the value.
         end subroutine col_get_f32_i64
         !> One row's f64 value through a handle (i32 row index).
         module subroutine col_get_f64_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
-            real(real64), intent(out) :: value           !! receives the value.
+            real(real64), intent(out) :: value !! receives the value.
         end subroutine col_get_f64_i32
         !> One row's f64 value through a handle (i64 row index).
         module subroutine col_get_f64_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
-            real(real64), intent(out) :: value           !! receives the value.
+            real(real64), intent(out) :: value !! receives the value.
         end subroutine col_get_f64_i64
         !> One row's bool value through a handle (i32 row index).
         module subroutine col_get_bool_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
-            logical, intent(out) :: value           !! receives the value.
+            logical, intent(out) :: value !! receives the value.
         end subroutine col_get_bool_i32
         !> One row's bool value through a handle (i64 row index).
         module subroutine col_get_bool_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
-            logical, intent(out) :: value           !! receives the value.
+            logical, intent(out) :: value !! receives the value.
         end subroutine col_get_bool_i64
+        !> One row's str value through a handle (i32 row index).
+        module subroutine col_get_str_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            character(len=:), allocatable, intent(out) :: value !! receives the value.
+        end subroutine col_get_str_i32
+        !> One row's str value through a handle (i64 row index).
+        module subroutine col_get_str_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            character(len=:), allocatable, intent(out) :: value !! receives the value.
+        end subroutine col_get_str_i64
         !> One row's date value through a handle (i32 row index).
         module subroutine col_get_date_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
-            type(parquet_date), intent(out) :: value           !! receives the value.
+            type(parquet_date), intent(out) :: value !! receives the value.
         end subroutine col_get_date_i32
         !> One row's date value through a handle (i64 row index).
         module subroutine col_get_date_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
-            type(parquet_date), intent(out) :: value           !! receives the value.
+            type(parquet_date), intent(out) :: value !! receives the value.
         end subroutine col_get_date_i64
         !> One row's time value through a handle (i32 row index).
         module subroutine col_get_time_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
-            type(parquet_time), intent(out) :: value           !! receives the value.
+            type(parquet_time), intent(out) :: value !! receives the value.
         end subroutine col_get_time_i32
         !> One row's time value through a handle (i64 row index).
         module subroutine col_get_time_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
-            type(parquet_time), intent(out) :: value           !! receives the value.
+            type(parquet_time), intent(out) :: value !! receives the value.
         end subroutine col_get_time_i64
         !> One row's ts value through a handle (i32 row index).
         module subroutine col_get_ts_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
-            type(parquet_timestamp), intent(out) :: value           !! receives the value.
+            type(parquet_timestamp), intent(out) :: value !! receives the value.
         end subroutine col_get_ts_i32
         !> One row's ts value through a handle (i64 row index).
         module subroutine col_get_ts_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
-            type(parquet_timestamp), intent(out) :: value           !! receives the value.
+            type(parquet_timestamp), intent(out) :: value !! receives the value.
         end subroutine col_get_ts_i64
+        !> One row's i32v value through a handle (i32 row index).
+        module subroutine col_get_i32v_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_i32v_i32
+        !> One row's i32v value through a handle (i64 row index).
+        module subroutine col_get_i32v_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int32), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_i32v_i64
+        !> One row's i64v value through a handle (i32 row index).
+        module subroutine col_get_i64v_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int64), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_i64v_i32
+        !> One row's i64v value through a handle (i64 row index).
+        module subroutine col_get_i64v_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_i64v_i64
+        !> One row's f32v value through a handle (i32 row index).
+        module subroutine col_get_f32v_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            real(real32), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_f32v_i32
+        !> One row's f32v value through a handle (i64 row index).
+        module subroutine col_get_f32v_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            real(real32), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_f32v_i64
+        !> One row's f64v value through a handle (i32 row index).
+        module subroutine col_get_f64v_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            real(real64), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_f64v_i32
+        !> One row's f64v value through a handle (i64 row index).
+        module subroutine col_get_f64v_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            real(real64), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_f64v_i64
+        !> One row's boolv value through a handle (i32 row index).
+        module subroutine col_get_boolv_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            logical, allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_boolv_i32
+        !> One row's boolv value through a handle (i64 row index).
+        module subroutine col_get_boolv_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            logical, allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_boolv_i64
+        !> One row's strv value through a handle (i32 row index).
+        module subroutine col_get_strv_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            character(len=:), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_strv_i32
+        !> One row's strv value through a handle (i64 row index).
+        module subroutine col_get_strv_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            character(len=:), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_strv_i64
+        !> One row's datev value through a handle (i32 row index).
+        module subroutine col_get_datev_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            type(parquet_date), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_datev_i32
+        !> One row's datev value through a handle (i64 row index).
+        module subroutine col_get_datev_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_date), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_datev_i64
+        !> One row's timev value through a handle (i32 row index).
+        module subroutine col_get_timev_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            type(parquet_time), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_timev_i32
+        !> One row's timev value through a handle (i64 row index).
+        module subroutine col_get_timev_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_time), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_timev_i64
+        !> One row's tsv value through a handle (i32 row index).
+        module subroutine col_get_tsv_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            type(parquet_timestamp), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_tsv_i32
+        !> One row's tsv value through a handle (i64 row index).
+        module subroutine col_get_tsv_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_timestamp), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine col_get_tsv_i64
+        !> ONE ELEMENT of one row of a i32v column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_i32v_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            integer(int32), intent(out) :: value             !! receives the value.
+        end subroutine col_get_i32v_e32
+        !> Writes ONE ELEMENT of one row of a i32v column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_i32v_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            integer(int32), intent(in) :: value              !! the value to write.
+        end subroutine col_set_i32v_e32
+        !> ONE ELEMENT of one row of a i32v column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_i32v_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            integer(int32), intent(out) :: value             !! receives the value.
+        end subroutine col_get_i32v_e64
+        !> Writes ONE ELEMENT of one row of a i32v column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_i32v_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            integer(int32), intent(in) :: value              !! the value to write.
+        end subroutine col_set_i32v_e64
+        !> ONE ELEMENT of one row of a i64v column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_i64v_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            integer(int64), intent(out) :: value             !! receives the value.
+        end subroutine col_get_i64v_e32
+        !> Writes ONE ELEMENT of one row of a i64v column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_i64v_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            integer(int64), intent(in) :: value              !! the value to write.
+        end subroutine col_set_i64v_e32
+        !> ONE ELEMENT of one row of a i64v column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_i64v_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            integer(int64), intent(out) :: value             !! receives the value.
+        end subroutine col_get_i64v_e64
+        !> Writes ONE ELEMENT of one row of a i64v column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_i64v_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            integer(int64), intent(in) :: value              !! the value to write.
+        end subroutine col_set_i64v_e64
+        !> ONE ELEMENT of one row of a f32v column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_f32v_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            real(real32), intent(out) :: value             !! receives the value.
+        end subroutine col_get_f32v_e32
+        !> Writes ONE ELEMENT of one row of a f32v column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_f32v_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            real(real32), intent(in) :: value              !! the value to write.
+        end subroutine col_set_f32v_e32
+        !> ONE ELEMENT of one row of a f32v column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_f32v_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            real(real32), intent(out) :: value             !! receives the value.
+        end subroutine col_get_f32v_e64
+        !> Writes ONE ELEMENT of one row of a f32v column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_f32v_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            real(real32), intent(in) :: value              !! the value to write.
+        end subroutine col_set_f32v_e64
+        !> ONE ELEMENT of one row of a f64v column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_f64v_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            real(real64), intent(out) :: value             !! receives the value.
+        end subroutine col_get_f64v_e32
+        !> Writes ONE ELEMENT of one row of a f64v column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_f64v_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            real(real64), intent(in) :: value              !! the value to write.
+        end subroutine col_set_f64v_e32
+        !> ONE ELEMENT of one row of a f64v column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_f64v_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            real(real64), intent(out) :: value             !! receives the value.
+        end subroutine col_get_f64v_e64
+        !> Writes ONE ELEMENT of one row of a f64v column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_f64v_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            real(real64), intent(in) :: value              !! the value to write.
+        end subroutine col_set_f64v_e64
+        !> ONE ELEMENT of one row of a boolv column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_boolv_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            logical, intent(out) :: value             !! receives the value.
+        end subroutine col_get_boolv_e32
+        !> Writes ONE ELEMENT of one row of a boolv column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_boolv_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            logical, intent(in) :: value              !! the value to write.
+        end subroutine col_set_boolv_e32
+        !> ONE ELEMENT of one row of a boolv column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_boolv_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            logical, intent(out) :: value             !! receives the value.
+        end subroutine col_get_boolv_e64
+        !> Writes ONE ELEMENT of one row of a boolv column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_boolv_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            logical, intent(in) :: value              !! the value to write.
+        end subroutine col_set_boolv_e64
+        !> ONE ELEMENT of one row of a strv column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_strv_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            character(len=:), allocatable, intent(out) :: value             !! receives the value.
+        end subroutine col_get_strv_e32
+        !> Writes ONE ELEMENT of one row of a strv column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_strv_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            character(len=*), intent(in) :: value              !! the value to write.
+        end subroutine col_set_strv_e32
+        !> ONE ELEMENT of one row of a strv column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_strv_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            character(len=:), allocatable, intent(out) :: value             !! receives the value.
+        end subroutine col_get_strv_e64
+        !> Writes ONE ELEMENT of one row of a strv column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_strv_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            character(len=*), intent(in) :: value              !! the value to write.
+        end subroutine col_set_strv_e64
+        !> ONE ELEMENT of one row of a datev column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_datev_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_date), intent(out) :: value             !! receives the value.
+        end subroutine col_get_datev_e32
+        !> Writes ONE ELEMENT of one row of a datev column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_datev_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_date), intent(in) :: value              !! the value to write.
+        end subroutine col_set_datev_e32
+        !> ONE ELEMENT of one row of a datev column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_datev_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_date), intent(out) :: value             !! receives the value.
+        end subroutine col_get_datev_e64
+        !> Writes ONE ELEMENT of one row of a datev column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_datev_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_date), intent(in) :: value              !! the value to write.
+        end subroutine col_set_datev_e64
+        !> ONE ELEMENT of one row of a timev column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_timev_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_time), intent(out) :: value             !! receives the value.
+        end subroutine col_get_timev_e32
+        !> Writes ONE ELEMENT of one row of a timev column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_timev_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_time), intent(in) :: value              !! the value to write.
+        end subroutine col_set_timev_e32
+        !> ONE ELEMENT of one row of a timev column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_timev_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_time), intent(out) :: value             !! receives the value.
+        end subroutine col_get_timev_e64
+        !> Writes ONE ELEMENT of one row of a timev column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_timev_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_time), intent(in) :: value              !! the value to write.
+        end subroutine col_set_timev_e64
+        !> ONE ELEMENT of one row of a tsv column, without materialising the
+        !! row (e32 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_tsv_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_timestamp), intent(out) :: value             !! receives the value.
+        end subroutine col_get_tsv_e32
+        !> Writes ONE ELEMENT of one row of a tsv column (e32 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_tsv_e32(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_timestamp), intent(in) :: value              !! the value to write.
+        end subroutine col_set_tsv_e32
+        !> ONE ELEMENT of one row of a tsv column, without materialising the
+        !! row (e64 indices). The table has no name-taking counterpart -- reading
+        !! a single element of a vector row is new capability, not a faster spelling.
+        module subroutine col_get_tsv_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_timestamp), intent(out) :: value             !! receives the value.
+        end subroutine col_get_tsv_e64
+        !> Writes ONE ELEMENT of one row of a tsv column (e64 indices). Exact
+        !! kind, and the write clears that element's null -- not the whole row's.
+        module subroutine col_set_tsv_e64(self, i, e, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(in) :: e              !! 1-based element index within the row.
+            type(parquet_timestamp), intent(in) :: value              !! the value to write.
+        end subroutine col_set_tsv_e64
 
         !> The TAIL of `table_resolve`, on a slot that is already known good: the unsupported-type
         !! refusal, the lazy first touch, and the shared-write rule. Split out so that a caller
@@ -2260,6 +3227,19 @@ module parquet_tables
             integer, intent(in) :: kind              !! required PK_* discriminator.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine cache_require_kind
+        !> Aborts unless slot `idx`'s STORED kind is exactly `kind`, with the POINTER path's own
+        !! message rather than `cache_require_kind`'s.
+        !!
+        !! Separate from `cache_require_kind` because the remedy is different and worth saying: a
+        !! copying accessor would have widened here, and the caller reaching for a pointer needs to
+        !! be told that is why this one will not. Shared by the table's `%col` and a column
+        !! handle's `%ref`, which are the same operation reached two ways.
+        module subroutine cache_require_ptr_kind(cache, idx, kind, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: idx                     !! validated slot index.
+            integer, intent(in) :: kind                    !! the PK_* the pointer requires.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine cache_require_ptr_kind
         !> error stops unless slot `idx` holds exactly `n` rows -- a %set replaces values, never
         !! the row set, so a different length is a row-structural change and not allowed here.
         module subroutine table_require_length(self, idx, n, proc)
@@ -2976,6 +3956,193 @@ module parquet_tables
             type(parquet_string_column), pointer, intent(out) :: p    !! alias to the packed store.
             logical, intent(out), optional :: found                   !! present: report a miss instead of aborting.
         end subroutine col_ptr_strcol
+        !> Points `p` at a PK_INT32 column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_i32(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            integer(int32), pointer, intent(out) :: p(:)    !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+        end subroutine col_ref_i32
+        !> Points `p` at a PK_INT64 column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_i64(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            integer(int64), pointer, intent(out) :: p(:)    !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+        end subroutine col_ref_i64
+        !> Points `p` at a PK_FLOAT32 column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_f32(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            real(real32), pointer, intent(out) :: p(:)      !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+        end subroutine col_ref_f32
+        !> Points `p` at a PK_FLOAT64 column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_f64(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            real(real64), pointer, intent(out) :: p(:)      !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+        end subroutine col_ref_f64
+        !> Points `p` at a PK_LOGICAL column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_bool(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            logical, pointer, intent(out) :: p(:)           !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+        end subroutine col_ref_bool
+        !> Points `p` at a PK_DATE column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_date(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            type(parquet_date), pointer, intent(out) :: p(:) !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+        end subroutine col_ref_date
+        !> Points `p` at a PK_TIME column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_time(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            type(parquet_time), pointer, intent(out) :: p(:) !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+        end subroutine col_ref_time
+        !> Points `p` at a PK_TIMESTAMP column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_ts(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            type(parquet_timestamp), pointer, intent(out) :: p(:) !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:) !! present: per-row validity, .true. = value.
+        end subroutine col_ref_ts
+        !> Points `p` at a PK_INT32_VEC column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_i32v(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            integer(int32), pointer, intent(out) :: p(:,:)  !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
+        end subroutine col_ref_i32v
+        !> Points `p` at a PK_INT64_VEC column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_i64v(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            integer(int64), pointer, intent(out) :: p(:,:)  !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
+        end subroutine col_ref_i64v
+        !> Points `p` at a PK_FLOAT32_VEC column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_f32v(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            real(real32), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
+        end subroutine col_ref_f32v
+        !> Points `p` at a PK_FLOAT64_VEC column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_f64v(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            real(real64), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
+        end subroutine col_ref_f64v
+        !> Points `p` at a PK_LOGICAL_VEC column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_boolv(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            logical, pointer, intent(out) :: p(:,:)         !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
+        end subroutine col_ref_boolv
+        !> Points `p` at a PK_DATE_VEC column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_datev(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            type(parquet_date), pointer, intent(out) :: p(:,:) !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
+        end subroutine col_ref_datev
+        !> Points `p` at a PK_TIME_VEC column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_timev(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            type(parquet_time), pointer, intent(out) :: p(:,:) !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
+        end subroutine col_ref_timev
+        !> Points `p` at a PK_TIMESTAMP_VEC column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_tsv(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            type(parquet_timestamp), pointer, intent(out) :: p(:,:) !! alias to the live storage.
+            logical, allocatable, intent(out), optional :: is_valid(:,:) !! present: per-element validity, (width, nrows).
+        end subroutine col_ref_tsv
+        !> Points `p` at a PK_STRING column's packed store, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`'s string form, carrying its warning verbatim: this is the one
+        !! pointer this layer hands out that a caller could use to change the column's SHAPE.
+        !! Reading and in-place value edits are supported; appending to it, or otherwise changing
+        !! how many elements it holds, is not -- the column's own row count is kept separately and
+        !! would stop matching.
+        module subroutine col_ref_strcol(self, p)
+            class(parquet_table_col), intent(in) :: self              !! the handle.
+            type(parquet_string_column), pointer, intent(out) :: p    !! alias to the packed store.
+        end subroutine col_ref_strcol
     end interface
     !
     ! ---- Copy out (parquet_tables_access) ----
@@ -4762,6 +5929,23 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             integer, intent(in) :: idx                   !! slot index.
         end subroutine row_kind_error
+        !> Aborts unless column handle `c` can be used to reach a cell of THIS row.
+        !!
+        !! Three checks, and the third is the one a caller cannot make for itself: the row handle
+        !! must be attached, `c` must be attached and current (`col_resolve`), and the two must
+        !! name the SAME table. A handle from another table would otherwise read that table's
+        !! column at this row's index -- a wrong answer rather than an error, since both tables
+        !! are perfectly valid objects.
+        !!
+        !! It then checks the row index against `c`'s scope, which is current because `c` is. So
+        !! `r%get(c, v)` catches a row handle left over from before a shrink, where `r%get(name, v)`
+        !! still cannot -- the row handle has no generation stamp of its own yet (feature_colindex.md
+        !! Q7).
+        module subroutine row_require_col(self, c, proc)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! the column handle to validate.
+            character(len=*), intent(in) :: proc         !! calling procedure, for the message.
+        end subroutine row_require_col
         !> This row's value from a PK_INT32 column.
         module subroutine row_get_i32(self, name, value)
             class(parquet_table_row), intent(in) :: self !! the row handle.
@@ -4982,6 +6166,294 @@ module parquet_tables
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_timestamp), intent(in) :: value(:) !! that row's whole vector.
         end subroutine row_set_tsv
+        !> This row's value from a PK_INT32 column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_i32(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            integer(int32), intent(out) :: value !! receives the value.
+        end subroutine row_get_col_i32
+        !> Writes this row's value in a PK_INT32 column named by an already-resolved handle.
+        module subroutine row_set_col_i32(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            integer(int32), intent(in) :: value !! the value to write.
+        end subroutine row_set_col_i32
+        !> This row's value from a PK_INT64 column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_i64(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            integer(int64), intent(out) :: value !! receives the value.
+        end subroutine row_get_col_i64
+        !> Writes this row's value in a PK_INT64 column named by an already-resolved handle.
+        module subroutine row_set_col_i64(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            integer(int64), intent(in) :: value !! the value to write.
+        end subroutine row_set_col_i64
+        !> This row's value from a PK_FLOAT32 column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_f32(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            real(real32), intent(out) :: value !! receives the value.
+        end subroutine row_get_col_f32
+        !> Writes this row's value in a PK_FLOAT32 column named by an already-resolved handle.
+        module subroutine row_set_col_f32(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            real(real32), intent(in) :: value !! the value to write.
+        end subroutine row_set_col_f32
+        !> This row's value from a PK_FLOAT64 column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_f64(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            real(real64), intent(out) :: value !! receives the value.
+        end subroutine row_get_col_f64
+        !> Writes this row's value in a PK_FLOAT64 column named by an already-resolved handle.
+        module subroutine row_set_col_f64(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            real(real64), intent(in) :: value !! the value to write.
+        end subroutine row_set_col_f64
+        !> This row's value from a PK_LOGICAL column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_bool(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            logical, intent(out) :: value !! receives the value.
+        end subroutine row_get_col_bool
+        !> Writes this row's value in a PK_LOGICAL column named by an already-resolved handle.
+        module subroutine row_set_col_bool(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            logical, intent(in) :: value !! the value to write.
+        end subroutine row_set_col_bool
+        !> This row's value from a PK_STRING column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_str(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            character(len=:), allocatable, intent(out) :: value !! receives the value.
+        end subroutine row_get_col_str
+        !> Writes this row's value in a PK_STRING column named by an already-resolved handle.
+        module subroutine row_set_col_str(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            character(len=*), intent(in) :: value !! the value to write.
+        end subroutine row_set_col_str
+        !> This row's value from a PK_DATE column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_date(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            type(parquet_date), intent(out) :: value !! receives the value.
+        end subroutine row_get_col_date
+        !> Writes this row's value in a PK_DATE column named by an already-resolved handle.
+        module subroutine row_set_col_date(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            type(parquet_date), intent(in) :: value !! the value to write.
+        end subroutine row_set_col_date
+        !> This row's value from a PK_TIME column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_time(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            type(parquet_time), intent(out) :: value !! receives the value.
+        end subroutine row_get_col_time
+        !> Writes this row's value in a PK_TIME column named by an already-resolved handle.
+        module subroutine row_set_col_time(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            type(parquet_time), intent(in) :: value !! the value to write.
+        end subroutine row_set_col_time
+        !> This row's value from a PK_TIMESTAMP column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_ts(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            type(parquet_timestamp), intent(out) :: value !! receives the value.
+        end subroutine row_get_col_ts
+        !> Writes this row's value in a PK_TIMESTAMP column named by an already-resolved handle.
+        module subroutine row_set_col_ts(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            type(parquet_timestamp), intent(in) :: value !! the value to write.
+        end subroutine row_set_col_ts
+        !> This row's value from a PK_INT32_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_i32v(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            integer(int32), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_i32v
+        !> Writes this row's value in a PK_INT32_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_i32v(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            integer(int32), intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_i32v
+        !> This row's value from a PK_INT64_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_i64v(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            integer(int64), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_i64v
+        !> Writes this row's value in a PK_INT64_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_i64v(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            integer(int64), intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_i64v
+        !> This row's value from a PK_FLOAT32_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_f32v(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            real(real32), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_f32v
+        !> Writes this row's value in a PK_FLOAT32_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_f32v(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            real(real32), intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_f32v
+        !> This row's value from a PK_FLOAT64_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_f64v(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            real(real64), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_f64v
+        !> Writes this row's value in a PK_FLOAT64_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_f64v(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            real(real64), intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_f64v
+        !> This row's value from a PK_LOGICAL_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_boolv(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            logical, allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_boolv
+        !> Writes this row's value in a PK_LOGICAL_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_boolv(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            logical, intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_boolv
+        !> This row's value from a PK_STRING_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_strv(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            character(len=:), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_strv
+        !> Writes this row's value in a PK_STRING_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_strv(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            character(len=*), intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_strv
+        !> This row's value from a PK_DATE_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_datev(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            type(parquet_date), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_datev
+        !> Writes this row's value in a PK_DATE_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_datev(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            type(parquet_date), intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_datev
+        !> This row's value from a PK_TIME_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_timev(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            type(parquet_time), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_timev
+        !> Writes this row's value in a PK_TIME_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_timev(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            type(parquet_time), intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_timev
+        !> This row's value from a PK_TIMESTAMP_VEC column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_tsv(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            type(parquet_timestamp), allocatable, intent(out) :: value(:) !! receives the value.
+        end subroutine row_get_col_tsv
+        !> Writes this row's value in a PK_TIMESTAMP_VEC column named by an already-resolved handle.
+        module subroutine row_set_col_tsv(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            type(parquet_timestamp), intent(in) :: value(:) !! the value to write.
+        end subroutine row_set_col_tsv
         !> Points `p` at this row's storage in a PK_INT32 column. The kind must match EXACTLY.
         module subroutine row_ref_i32(self, name, p)
             class(parquet_table_row), intent(in) :: self !! the row handle.

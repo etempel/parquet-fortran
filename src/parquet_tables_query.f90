@@ -1048,6 +1048,16 @@ contains
         error stop EP // trim(proc) // ": column kind is " // got // ", not " // want // sfx
     end procedure cache_require_kind
     !
+    module procedure cache_require_ptr_kind
+        character(len=:), allocatable :: sfx, kname
+        !
+        if (cache%cols(idx)%values%kindof() == kind) return
+        call table_context_suffix(cache, cache%cols(idx)%name, sfx)
+        call parquet_kind_name(cache%cols(idx)%values%kindof(), kname)
+        error stop EP // trim(proc) // ": pointer kind does not match the stored kind (" // kname // &
+            "); the pointer path never widens -- use %get to copy with widening" // sfx
+    end procedure cache_require_ptr_kind
+    !
     module procedure table_require_length
         character(len=:), allocatable :: sfx
         character(len=32) :: gots, wants

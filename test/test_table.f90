@@ -321,8 +321,16 @@ contains
                 test_col_handle_staleness), &
             new_unittest("a column handle's %set writes the table, and never widens", &
                 test_col_handle_set_writes_table), &
-            new_unittest("the handle's null trio works on kinds it has no %get for", &
-                test_col_handle_null_trio) &
+            new_unittest("the handle's null trio works on a string and a vector column", &
+                test_col_handle_null_trio), &
+            new_unittest("a column handle reads and writes the ten allocating kinds", &
+                test_col_handle_allocating_kinds), &
+            new_unittest("a column handle reaches one element of a vector row", &
+                test_col_handle_element_within_row), &
+            new_unittest("a column handle's %ref aliases the same storage as %col", &
+                test_col_handle_ref), &
+            new_unittest("a row handle reads and writes through a column handle", &
+                test_row_handle_takes_column_handle) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -8228,9 +8236,9 @@ contains
         call check(error, abs(v - 1.0_real64) < 1.0e-12_real64, "writing one column left the other alone")
     end subroutine test_col_handle_set_writes_table
     !
-    !> The null trio takes no value argument, so one body serves every kind -- including the ten
-    !! that stage 3a gave no `%get`/`%set`. This asserts exactly that: it drives the trio on a
-    !! STRING column and a vector column, neither of which the handle can read yet.
+    !> The null trio takes no value argument, so one body serves every kind. It is driven here on a
+    !! STRING column and a vector column — the two shapes whose storage is least like the scalar
+    !! one the trio's implementation reads most naturally.
     subroutine test_col_handle_null_trio(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_table) :: t
@@ -8283,5 +8291,377 @@ contains
         call check(error, t%is_null(t%column_index("pair"), 3_int64) .eqv. t%is_null("pair", 3_int64), &
             "by-position and by-name %is_null agree")
     end subroutine test_col_handle_null_trio
+    !
+    !> The ten ALLOCATING kinds — `str`, `strv` and the eight vectors — read and written through a
+    !! handle, against the name form that shares their body. Four shapes rather than ten cases: a
+    !! numeric vector (with the widening case, which the vector path has to allocate twice for), a
+    !! temporal vector, a string scalar and a string vector.
+    !!
+    !! The last two also pin the **trim asymmetry** the handle inherits rather than reimplements: a
+    !! character ARRAY is trimmed on the way into a column and a character SCALAR is not, because
+    !! every element of an array shares one declared length and the padding cannot be what the
+    !! caller meant. A handle that had grown its own write path would be the obvious place for that
+    !! rule to go missing.
+    subroutine test_col_handle_allocating_kinds(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        integer(int32) :: iv(2, 3)
+        real(real32) :: fv(2, 3)
+        character(len=4) :: s(3), sv(2, 3)
+        type(parquet_date) :: dv(2, 3)
+        integer(int32), allocatable :: g32(:)
+        integer(int64), allocatable :: g64(:)
+        real(real64), allocatable :: gf(:), nf(:)
+        character(len=:), allocatable :: gs, ns, gsv(:), nsv(:)
+        type(parquet_date), allocatable :: gd(:), nd(:)
+        integer :: i, e
+        !
+        do i = 1, 3
+            do e = 1, 2
+                iv(e, i) = int(10*i + e, int32)
+                fv(e, i) = real(100*i + e, real32) + 0.5_real32
+                call dv(e, i)%set(2020 + i, e, 15)
+            end do
+        end do
+        s = [character(len=4) :: "aa", "bbb", "cccc"]
+        sv(1, :) = [character(len=4) :: "p", "qq", "rrr"]
+        sv(2, :) = [character(len=4) :: "s", "tt", "uuu"]
+        call parquet_new_table(t)
+        call t%add_column("iv", iv)
+        call t%add_column("fv", fv)
+        call t%add_column("dv", dv)
+        call t%add_column("s", s)
+        call t%add_column("sv", sv)
+        ! --- numeric vector, exact kind: the body allocates the result to the column's width ---
+        call t%column("iv", c)
+        do i = 1, 3
+            call c%get(int(i, int64), g32)
+            call check(error, size(g32) == 2, "a vector %get allocates the result to the column width")
+            if (allocated(error)) return
+            call check(error, all(g32 == iv(:, i)), "handle %get returns the stored vector row")
+            if (allocated(error)) return
+        end do
+        ! --- numeric vector, WIDENING: an int32 vector column read into an int64 array ---
+        call c%get(2_int64, g64)
+        call check(error, size(g64) == 2 .and. all(g64 == int(iv(:, 2), int64)), &
+            "a vector %get widens int32 storage into an int64 result")
+        if (allocated(error)) return
+        ! --- and a float32 vector column into a real64 array, the other half of the WIDEN set ---
+        call t%column("fv", c)
+        call c%get(3_int64, gf)
+        call t%get_element("fv", 3_int64, nf)
+        call check(error, size(gf) == 2 .and. all(abs(gf - real(fv(:, 3), real64)) < 1.0e-4_real64), &
+            "a vector %get widens float32 storage into a real64 result")
+        if (allocated(error)) return
+        call check(error, all(abs(gf - nf) < 1.0e-12_real64), "handle and name forms agree on a widened vector")
+        if (allocated(error)) return
+        ! --- temporal vector: the elements carry their own null state, so compare the parts ---
+        call t%column("dv", c)
+        call c%get(2_int64, gd)
+        call t%get_element("dv", 2_int64, nd)
+        call check(error, size(gd) == 2 .and. size(nd) == 2, "a temporal vector %get is sized to the width")
+        if (allocated(error)) return
+        call check(error, gd(1)%year() == 2022 .and. gd(1)%month() == 1 .and. gd(1)%day() == 15 &
+            .and. gd(2)%month() == 2, "handle %get returns the stored date vector")
+        if (allocated(error)) return
+        call check(error, gd(2)%year() == nd(2)%year() .and. gd(2)%month() == nd(2)%month(), &
+            "handle and name forms agree on a date vector")
+        if (allocated(error)) return
+        ! --- string scalar: deferred length, sized to the value rather than the declared width ---
+        call t%column("s", c)
+        call c%get(3_int64, gs)
+        call t%get_element("s", 3_int64, ns)
+        call check(error, gs == ns, "handle and name forms agree on a string")
+        if (allocated(error)) return
+        call check(error, gs == "cccc", "handle %get returns the stored string")
+        if (allocated(error)) return
+        call c%get(1_int64, gs)
+        call check(error, gs == "aa" .and. len(gs) == 2, &
+            "a string %get is sized to the value, not to the column's declared width")
+        if (allocated(error)) return
+        ! A SCALAR is stored verbatim -- its trailing blanks are exactly as long as the caller wrote.
+        call c%set(1_int64, "z  ")
+        call c%get(1_int64, gs)
+        call check(error, gs == "z  " .and. len(gs) == 3, "a handle %set of a string SCALAR does not trim")
+        if (allocated(error)) return
+        call t%get_element("s", 1_int64, ns)
+        call check(error, ns == gs .and. len(ns) == len(gs), "a handle %set of a string is visible by name")
+        if (allocated(error)) return
+        ! --- string vector: an ARRAY is trimmed, because its padding is Fortran's and not the
+        !     caller's. Same rule, opposite answer, one line apart.
+        call t%column("sv", c)
+        call c%get(2_int64, gsv)
+        call t%get_element("sv", 2_int64, nsv)
+        call check(error, size(gsv) == 2, "a string vector %get is sized to the width")
+        if (allocated(error)) return
+        call check(error, gsv(1) == "qq" .and. gsv(2) == "tt", "handle %get returns the stored string vector")
+        if (allocated(error)) return
+        call check(error, size(nsv) == size(gsv) .and. gsv(1) == nsv(1) .and. gsv(2) == nsv(2), &
+            "handle and name forms agree on a string vector")
+        if (allocated(error)) return
+        call c%set(2_int64, [character(len=5) :: "hi   ", "there"])
+        call c%get(2_int64, gsv)
+        call check(error, gsv(1) == "hi" .and. len_trim(gsv(1)) == 2, &
+            "a handle %set of a string ARRAY trims each element")
+        if (allocated(error)) return
+        call check(error, gsv(2) == "there", "the untrimmed element of the same array is unchanged")
+        if (allocated(error)) return
+        ! --- a write through the handle reaches the table, on a vector column too ---
+        call t%column("iv", c)
+        call c%set(1_int64, [77_int32, 88_int32])
+        call t%get_element("iv", 1_int64, g32)
+        call check(error, g32(1) == 77_int32 .and. g32(2) == 88_int32, &
+            "a handle %set of a vector row is visible through %get_element")
+        if (allocated(error)) return
+        call c%get(2_int64, g32)
+        call check(error, all(g32 == iv(:, 2)), "writing one vector row left its neighbour alone")
+    end subroutine test_col_handle_allocating_kinds
+    !
+    !> ONE ELEMENT of one row — the capability the name form has never had, so there is nothing to
+    !! compare it against except the whole-row read it exists to avoid. That row read is the
+    !! oracle here, element by element, on a numeric kind, a widening one, a temporal one and a
+    !! string one.
+    !!
+    !! The sharp assertions are the two null rules, both of which a plausible implementation gets
+    !! wrong SILENTLY. Writing one element must clear THAT element's null and leave its neighbours
+    !! alone; and on a temporal column, where the null state IS the element, writing a
+    !! default-initialised value must be visible to `%has_nulls` — which answers from a cache the
+    !! column recomputes lazily, so a write that reached the storage without invalidating it would
+    !! read back as "no nulls" for the rest of the program.
+    subroutine test_col_handle_element_within_row(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        integer(int32) :: iv(3, 4), one32
+        type(parquet_date) :: dv(2, 4), one_date, blank
+        character(len=4) :: sv(2, 4)
+        integer(int64) :: one64
+        integer(int32), allocatable :: rowv(:)
+        character(len=:), allocatable :: ones, nm, u
+        integer :: i, e
+        !
+        do i = 1, 4
+            do e = 1, 3
+                iv(e, i) = int(10*i + e, int32)
+            end do
+            do e = 1, 2
+                call dv(e, i)%set(2020 + i, e, 10 + e)
+            end do
+        end do
+        sv(1, :) = [character(len=4) :: "a", "bb", "ccc", "dddd"]
+        sv(2, :) = [character(len=4) :: "w", "xx", "yyy", "zzzz"]
+        call parquet_new_table(t)
+        call t%add_column("iv", iv, unit="m")
+        call t%add_column("dv", dv)
+        call t%add_column("sv", sv)
+        ! --- the four descriptor queries the handle answers about itself ---
+        call t%column("iv", c)
+        call c%name(nm)
+        call check(error, nm == "iv", "the handle reports its own name")
+        if (allocated(error)) return
+        call check(error, c%width() == 3, "the handle reports its own width")
+        if (allocated(error)) return
+        call c%unit(u)
+        call check(error, u == "m", "the handle reports its own unit")
+        if (allocated(error)) return
+        call check(error, c%residency() == RES_FULL, "an in-memory column is fully resident")
+        if (allocated(error)) return
+        ! --- every element, against the whole-row read ---
+        do i = 1, 4
+            call c%get(int(i, int64), rowv)
+            do e = 1, 3
+                call c%get(int(i, int64), int(e, int64), one32)
+                call check(error, one32 == rowv(e), "the element form agrees with the row form")
+                if (allocated(error)) return
+                call check(error, one32 == iv(e, i), "the element form returns the stored value")
+                if (allocated(error)) return
+            end do
+        end do
+        ! --- widening applies to an element exactly as it does to a row ---
+        call c%get(3_int64, 2_int64, one64)
+        call check(error, one64 == int(iv(2, 3), int64), "an element read widens int32 into int64")
+        if (allocated(error)) return
+        ! --- a write reaches exactly one element ---
+        call c%set(2_int64, 3_int64, 555_int32)
+        call c%get(2_int64, rowv)
+        call check(error, rowv(3) == 555_int32 .and. rowv(1) == iv(1, 2) .and. rowv(2) == iv(2, 2), &
+            "an element write changes that element and no other in the row")
+        if (allocated(error)) return
+        call c%get(1_int64, rowv)
+        call check(error, all(rowv == iv(:, 1)), "an element write left the neighbouring row alone")
+        if (allocated(error)) return
+        ! --- and it clears THAT element's null, not the whole row's ---
+        call c%set_null(4_int64, 1_int64)
+        call c%set_null(4_int64, 2_int64)
+        call c%set(4_int64, 1_int64, 7_int32)
+        call check(error, .not. c%is_null(4_int64, 1_int64), "writing an element clears that element's null")
+        if (allocated(error)) return
+        call check(error, c%is_null(4_int64, 2_int64), "and leaves the row's other null element alone")
+        if (allocated(error)) return
+        ! --- temporal: the element carries its own null state, and the column CACHES the answer ---
+        call t%column("dv", c)
+        call c%get(3_int64, 2_int64, one_date)
+        call check(error, one_date%year() == 2023 .and. one_date%month() == 2 .and. one_date%day() == 12, &
+            "an element read returns the stored date")
+        if (allocated(error)) return
+        call check(error, .not. t%has_nulls("dv"), "the date vector starts with no nulls")
+        if (allocated(error)) return
+        ! `blank` was never set, so it IS a null date. The assertion is not that the element is
+        ! null -- it is that %has_nulls, which just cached "no nulls" one line above, notices.
+        call c%set(1_int64, 1_int64, blank)
+        call check(error, c%is_null(1_int64, 1_int64), "writing a default date makes that element null")
+        if (allocated(error)) return
+        call check(error, t%has_nulls("dv"), &
+            "writing a null element invalidates the column's cached null answer")
+        if (allocated(error)) return
+        call one_date%set(1999, 7, 4)
+        call c%set(1_int64, 1_int64, one_date)
+        call check(error, .not. c%is_null(1_int64, 1_int64), "writing a real date makes it valid again")
+        if (allocated(error)) return
+        ! --- string: read and write one element of a vector, with no array anywhere ---
+        call t%column("sv", c)
+        call c%get(3_int64, 2_int64, ones)
+        call check(error, ones == "yyy" .and. len(ones) == 3, &
+            "a string element read is sized to the value, not to the declared width")
+        if (allocated(error)) return
+        call c%set(3_int64, 2_int64, "q ")
+        call c%get(3_int64, 2_int64, ones)
+        call check(error, ones == "q " .and. len(ones) == 2, &
+            "a string element write stores a SCALAR verbatim, trailing blank included")
+        if (allocated(error)) return
+        call c%get(3_int64, 1_int64, ones)
+        call check(error, ones == "ccc", "the row's other string element is untouched")
+    end subroutine test_col_handle_element_within_row
+    !
+    !> `%ref` is `%col` without the name lookup, so the assertion that matters is that it hands
+    !! back the SAME storage rather than a copy that happens to compare equal: a write through one
+    !! pointer has to be visible through the other, and through `%get`. It also carries `%col`'s
+    !! `is_valid=` snapshot and its string-store form, so a caller converting a `%col` loop to a
+    !! handle loop finds nothing missing.
+    subroutine test_col_handle_ref(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table), target :: t
+        type(parquet_table_col) :: c
+        real(real64) :: d(4), v
+        integer(int32) :: iv(2, 4)
+        character(len=4) :: s(4)
+        real(real64), pointer :: pd(:), pd2(:)
+        integer(int32), pointer :: pv(:,:)
+        type(parquet_string_column), pointer :: ps
+        logical, allocatable :: mask(:), emask(:,:)
+        character(len=:), allocatable :: got
+        integer :: k
+        !
+        d = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        iv = reshape([(int(k, int32), k = 1, 8)], [2, 4])
+        s = [character(len=4) :: "aa", "bb", "cc", "dd"]
+        call parquet_new_table(t)
+        call t%add_column("x", d)
+        call t%add_column("v", iv)
+        call t%add_column("s", s)
+        ! --- the same storage, not an equal copy ---
+        call t%column("x", c)
+        call c%ref(pd)
+        call t%col("x", pd2)
+        call check(error, associated(pd, pd2), "%ref and %col alias the same storage")
+        if (allocated(error)) return
+        call check(error, size(pd) == 4, "%ref hands back the whole column")
+        if (allocated(error)) return
+        pd(2) = 99.0_real64
+        call check(error, abs(pd2(2) - 99.0_real64) < 1.0e-12_real64, &
+            "a write through %ref is visible through the %col pointer")
+        if (allocated(error)) return
+        call c%get(2_int64, v)
+        call check(error, abs(v - 99.0_real64) < 1.0e-12_real64, &
+            "a write through %ref is visible through the handle's own %get")
+        if (allocated(error)) return
+        ! --- the is_valid snapshot, which %col also offers ---
+        call c%set_null(3_int64)
+        call c%ref(pd, is_valid=mask)
+        call check(error, size(mask) == 4, "%ref's mask has one entry per row")
+        if (allocated(error)) return
+        call check(error, .not. mask(3) .and. mask(1) .and. mask(4), &
+            "%ref's mask marks exactly the null row")
+        if (allocated(error)) return
+        ! --- a vector column: rank-2 pointer, rank-2 mask ---
+        call t%column("v", c)
+        call c%ref(pv, is_valid=emask)
+        call check(error, size(pv, 1) == 2 .and. size(pv, 2) == 4, "%ref on a vector column is rank-2")
+        if (allocated(error)) return
+        call check(error, all(shape(emask) == shape(pv)), "a vector column's mask has the values' shape")
+        if (allocated(error)) return
+        call check(error, pv(2, 4) == 8_int32, "%ref on a vector column points at the stored values")
+        if (allocated(error)) return
+        ! --- the string store, the 17th specific ---
+        call t%column("s", c)
+        call c%ref(ps)
+        call ps%get(2_int64, got, allow_null=.true.)
+        call check(error, got == "bb", "%ref on a string column reaches the packed store")
+        if (allocated(error)) return
+        call check(error, ps%size() == 4_int64, "the packed store holds the whole column")
+    end subroutine test_col_handle_ref
+    !
+    !> The cross product closed: a ROW handle taking a COLUMN handle. The pair `(column handle,
+    !! row index)` names one cell whichever handle the caller happens to be holding, so all three
+    !! spellings — `t%get_element(name, i, v)`, `c%get(i, v)` and `r%get(c, v)` — must agree, and
+    !! they do because all three run one body.
+    !!
+    !! The check with no counterpart anywhere else is the SAME-TABLE one. A column handle from
+    !! another table is not invalid — it is a perfectly good handle on a different object — so
+    !! without that check `r%get(c, v)` would read the other table's column at this row's index
+    !! and return a number rather than an error.
+    subroutine test_row_handle_takes_column_handle(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_row) :: r
+        type(parquet_table_col) :: c, cs
+        real(real64) :: d(3), v_row, v_col, v_name
+        character(len=4) :: s(3)
+        character(len=:), allocatable :: sv
+        integer(int64) :: i
+        !
+        d = [1.5_real64, 2.5_real64, 3.5_real64]
+        s = [character(len=4) :: "aa", "bb", "cc"]
+        call parquet_new_table(t)
+        call t%add_column("x", d)
+        call t%add_column("s", s)
+        call t%column("x", c)
+        call t%column("s", cs)
+        ! --- all three spellings of one cell agree, for every row ---
+        do i = 1_int64, 3_int64
+            r = t%row(i)
+            call r%get(c, v_row)
+            call c%get(i, v_col)
+            call t%get_element("x", i, v_name)
+            call check(error, abs(v_row - v_col) < 1.0e-12_real64, &
+                "r%get(c, v) agrees with c%get(i, v)")
+            if (allocated(error)) return
+            call check(error, abs(v_row - v_name) < 1.0e-12_real64, &
+                "r%get(c, v) agrees with %get_element")
+            if (allocated(error)) return
+            call check(error, abs(v_row - d(int(i))) < 1.0e-12_real64, &
+                "r%get(c, v) returns the stored value")
+            if (allocated(error)) return
+        end do
+        ! --- and the same for a string column, which reaches a different shared body ---
+        r = t%row(2_int64)
+        call r%get(cs, sv)
+        call check(error, sv == "bb", "r%get(c, v) reads a string column through a handle")
+        if (allocated(error)) return
+        ! --- a write through the pair reaches the table ---
+        call r%set(c, 77.0_real64)
+        call t%get_element("x", 2_int64, v_name)
+        call check(error, abs(v_name - 77.0_real64) < 1.0e-12_real64, &
+            "r%set(c, v) writes the table")
+        if (allocated(error)) return
+        call c%get(1_int64, v_col)
+        call check(error, abs(v_col - d(1)) < 1.0e-12_real64, "r%set(c, v) left the other rows alone")
+        if (allocated(error)) return
+        ! --- the name form still works on the same handle, so nothing was displaced ---
+        call r%get("x", v_row)
+        call check(error, abs(v_row - 77.0_real64) < 1.0e-12_real64, &
+            "the row handle's name form still reads the same cell")
+    end subroutine test_row_handle_takes_column_handle
     !
 end module test_table

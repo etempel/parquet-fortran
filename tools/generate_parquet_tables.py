@@ -887,18 +887,29 @@ def gen_row_type():
     for k in KINDS:
         tag = k[0]
         w(f"        procedure, private :: row_get_{tag} !! %get specific for the {tag} kind.")
+    for k in KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: row_get_col_{tag} !! %get specific, {tag} kind, column by handle.")
     w("        !> Copies this row's value for a column into the caller's own variable, widening")
-    w("        !! int32 -> int64 and float32 -> float64 exactly as the table's own %get does.")
-    w("        generic :: get => " + wrap_list([f"row_get_{k[0]}" for k in KINDS], 12,
-                                               first_prefix=len("        generic :: get => ")))
+    w("        !! int32 -> int64 and float32 -> float64 exactly as the table's own %get does. The")
+    w("        !! column may be named by a string or by a `parquet_table_col` handle; the handle")
+    w("        !! form does no name lookup, which is what a loop over rows would otherwise repeat.")
+    w("        generic :: get => " + wrap_list(
+        [f"row_get_{k[0]}" for k in KINDS] + [f"row_get_col_{k[0]}" for k in KINDS], 12,
+        first_prefix=len("        generic :: get => ")))
     for k in KINDS:
         tag = k[0]
         w(f"        procedure, private :: row_set_{tag} !! %set specific for the {tag} kind.")
+    for k in KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: row_set_col_{tag} !! %set specific, {tag} kind, column by handle.")
     w("        !> Writes this row's value for a column. The kind must match the column's exactly")
     w("        !! (a write never widens), and writing a value CLEARS that row's null. The TABLE is")
-    w("        !! updated -- a handle is a view of it, not a copy.")
-    w("        generic :: set => " + wrap_list([f"row_set_{k[0]}" for k in KINDS], 12,
-                                               first_prefix=len("        generic :: set => ")))
+    w("        !! updated -- a handle is a view of it, not a copy. The column may be named by a")
+    w("        !! string or by a `parquet_table_col` handle.")
+    w("        generic :: set => " + wrap_list(
+        [f"row_set_{k[0]}" for k in KINDS] + [f"row_set_col_{k[0]}" for k in KINDS], 12,
+        first_prefix=len("        generic :: set => ")))
     for k in ARRAY_KINDS:
         tag = k[0]
         w(f"        procedure, private :: row_ref_{tag} !! %ref specific for the {tag} kind.")
@@ -947,24 +958,37 @@ def gen_row_type():
         type(table_scope) :: scope                 !! the table's row scope, by value.
     contains
 """)
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         tag = k[0]
         w(f"        procedure, private :: col_get_{tag}_i32 !! %get specific, {tag} value, int32 row index.")
         w(f"        procedure, private :: col_get_{tag}_i64 !! %get specific, {tag} value, int64 row index.")
+    for k in VEC_KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: col_get_{tag}_e32 !! %get specific, one {tag} element, int32 indices.")
+        w(f"        procedure, private :: col_get_{tag}_e64 !! %get specific, one {tag} element, int64 indices.")
     w("        !> Copies one row's value into the caller's variable, widening exactly as the table's")
     w("        !! own `%get_element` does. No name, no lookup -- the handle already knows the slot.")
+    w("        !! Given `e` as well, copies ONE ELEMENT of that row without materialising the rest,")
+    w("        !! which the name form cannot do at all.")
     w("        generic :: get => " + wrap_list(
-        [f"col_get_{k[0]}_{ik}" for k in SCALAR_FREE_KINDS for ik in ("i32", "i64")], 12,
+        [f"col_get_{k[0]}_{ik}" for k in KINDS for ik in ("i32", "i64")]
+        + [f"col_get_{k[0]}_{ik}" for k in VEC_KINDS for ik in ("e32", "e64")], 12,
         first_prefix=len("        generic :: get => ")))
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         tag = k[0]
         w(f"        procedure, private :: col_set_{tag}_i32 !! %set specific, {tag} value, int32 row index.")
         w(f"        procedure, private :: col_set_{tag}_i64 !! %set specific, {tag} value, int64 row index.")
+    for k in VEC_KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: col_set_{tag}_e32 !! %set specific, one {tag} element, int32 indices.")
+        w(f"        procedure, private :: col_set_{tag}_e64 !! %set specific, one {tag} element, int64 indices.")
     w("        !> Writes one row's value. The kind must match the column's exactly (a write never")
     w("        !! widens), and writing a value CLEARS that row's null. The TABLE is updated -- a")
-    w("        !! handle is a view of it, not a copy.")
+    w("        !! handle is a view of it, not a copy. Given `e` as well, writes ONE ELEMENT and")
+    w("        !! clears that element's null rather than the whole row's.")
     w("        generic :: set => " + wrap_list(
-        [f"col_set_{k[0]}_{ik}" for k in SCALAR_FREE_KINDS for ik in ("i32", "i64")], 12,
+        [f"col_set_{k[0]}_{ik}" for k in KINDS for ik in ("i32", "i64")]
+        + [f"col_set_{k[0]}_{ik}" for k in VEC_KINDS for ik in ("e32", "e64")], 12,
         first_prefix=len("        generic :: set => ")))
     w("""        procedure, private :: col_is_null_i32  !! %is_null specific, whole row, int32 index.
         procedure, private :: col_is_null_i64  !! %is_null specific, whole row, int64 index.
@@ -988,19 +1012,29 @@ def gen_row_type():
         !! whatever was there; clearing a null does not write one.
         generic :: clear_null => col_clear_null_i32, col_clear_null_i64, col_clear_null_e32, col_clear_null_e64""")
     w("""
-        procedure :: is_valid => col_is_valid !! Whether the handle is attached AND still current.
-        procedure :: index => col_index       !! This column's 1-based position in the table.
-        procedure :: kind => col_kind         !! This column's PK_* kind.
+""")
+    for k in PTR_KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: col_ref_{tag} !! %ref specific, {tag} storage.")
+    w("        procedure, private :: col_ref_strcol !! %ref specific, the packed string store.")
+    w("        !> Points `p` at this column's live storage -- the `%col` pointer, without the name")
+    w("        !! lookup. Same rules: the kind must match exactly (a pointer never widens), a write")
+    w("        !! through `p` changes the table, and REORDERING one column through its pointer")
+    w("        !! breaks the table's row alignment with nothing to report it.")
+    w("        generic :: ref => " + wrap_list(
+        [f"col_ref_{k[0]}" for k in PTR_KINDS] + ["col_ref_strcol"], 12,
+        first_prefix=len("        generic :: ref => ")))
+    w("""        procedure :: is_valid => col_is_valid   !! Whether the handle is attached AND still current.
+        procedure :: index => col_index         !! This column's 1-based position in the table.
+        procedure :: kind => col_kind           !! This column's PK_* kind.
+        procedure :: name => col_name           !! This column's name.
+        procedure :: width => col_width         !! This column's values per row (1 for a scalar kind).
+        procedure :: unit => col_unit           !! This column's unit string, or "".
+        procedure :: residency => col_residency !! Whether this column is RES_EMPTY/RES_PARTIAL/RES_FULL.
         ! NO `final` -- see the type's own doc-comment. This is a decision, not an omission.
     end type parquet_table_col""")
     return "\n".join(o)
 
-
-# Kinds whose table-level `%get_element` delegates to the column handle instead of carrying its
-# own body. STAGE 2 PROTOTYPE: deliberately one kind, so the cost of the delegation to the name
-# form can be measured on a real accessor before 17 more are converted. See feature_colindex.md
-# 6.3 and its criterion (3). Empty this set to revert every accessor to its own body.
-DELEGATING_KINDS = {"i32", "i64", "f32", "f64", "bool", "date", "time", "ts"}
 
 
 def wrap_list(names, indent, first_prefix=0):
@@ -1660,12 +1694,38 @@ def gen_spec_interfaces():
             class(parquet_table_col), intent(in) :: self !! the handle.
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
         end subroutine col_resolve
+        !> This column's name.
+        module subroutine col_name(self, nm)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+            character(len=:), allocatable, intent(out) :: nm !! receives the name.
+        end subroutine col_name
+        !> This column's values per row -- 1 for a scalar kind, the vector length otherwise.
+        module function col_width(self) result(wdt)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer :: wdt                               !! values per row.
+        end function col_width
+        !> This column's unit string, or "" when it has none.
+        module subroutine col_unit(self, u)
+            class(parquet_table_col), intent(in) :: self    !! the handle.
+            character(len=:), allocatable, intent(out) :: u !! receives the unit, or "".
+        end subroutine col_unit
+        !> Whether this column is RES_EMPTY, RES_PARTIAL or RES_FULL.
+        module function col_residency(self) result(r)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer :: r                                 !! one of the RES_* constants.
+        end function col_residency
         !> Aborts unless `i` is a valid 1-based row index for the handle's own row scope.
         module subroutine col_require_row(self, i, proc)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! the row index to check.
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
         end subroutine col_require_row
+        !> Aborts unless `e` is a valid 1-based element index within one of this column's rows.
+        !!
+        !! Not declared here on purpose: `parquet_column%get_elem`/`%set_elem` run `check_element`
+        !! themselves, and its message already names the ELEMENT axis rather than reading like an
+        !! out-of-range row. A second check in this layer would be a second copy of the column's
+        !! own width rule.
         !> Reports that this column's kind cannot serve the caller's variable.
         module subroutine col_kind_error(self, want, proc)
             class(parquet_table_col), intent(in) :: self !! the handle.
@@ -1673,7 +1733,7 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
         end subroutine col_kind_error
 """)
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         tag, _pk, decl, _comp, _rank, _cat = k
         w(f"        !> The shared {tag} body behind both `%get_element(name, i, v)` and a column")
         w("        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,")
@@ -1681,11 +1741,12 @@ def gen_spec_interfaces():
         w("        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so")
         w("        !! each entry point keeps the messages it always produced.")
         w(f"        module subroutine col_fetch_{tag}(cache, slot, colkind, i, value, proc)")
-        w("            type(parquet_table_cache), intent(in) :: cache !! the table's column store.")
+        w(f"            type(parquet_table_cache), intent(in){fetch_cache_attr(k)} :: cache "
+          "!! the table's column store.")
         w("            integer, intent(in) :: slot                    !! validated slot index.")
         w("            integer, intent(in) :: colkind                 !! that slot's PK_* kind.")
         w("            integer(int64), intent(in) :: i                !! validated 1-based row index.")
-        w(f"            {decl}, intent(out) :: value             !! receives the value.")
+        w(f"            {fetch_val_decl(k)} !! receives the value.")
         w("            character(len=*), intent(in) :: proc           !! calling procedure, for the message.")
         w(f"        end subroutine col_fetch_{tag}")
         w(f"        !> The shared {tag} body behind both `%set_element(name, i, v)` and a column")
@@ -1695,29 +1756,52 @@ def gen_spec_interfaces():
         w("            type(parquet_table_cache), intent(inout) :: cache !! the table's column store.")
         w("            integer, intent(in) :: slot                    !! validated slot index.")
         w("            integer(int64), intent(in) :: i                !! validated 1-based row index.")
-        w(f"            {decl}, intent(in) :: value              !! the value to write.")
+        w(f"            {store_val_decl(k)} !! the value to write.")
         w("            character(len=*), intent(in) :: proc           !! calling procedure, for the message.")
         w(f"        end subroutine col_store_{tag}")
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         tag, _pk, decl, _comp, _rank, _cat = k
         for ik, ikdecl in (("i32", "integer(int32)"), ("i64", "integer(int64)")):
             w(f"        !> Writes one row's {tag} value through a handle ({ik} row index).")
             w(f"        module subroutine col_set_{tag}_{ik}(self, i, value)")
             w("            class(parquet_table_col), intent(in) :: self !! the handle.")
             w(f"            {ikdecl}, intent(in) :: i               !! 1-based row index.")
-            w(f"            {decl}, intent(in) :: value             !! the value to write.")
+            w(f"            {store_val_decl(k)} !! the value to write.")
             w(f"        end subroutine col_set_{tag}_{ik}")
     w("""
 """)
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         tag, _pk, decl, _comp, _rank, _cat = k
         for ik, ikdecl in (("i32", "integer(int32)"), ("i64", "integer(int64)")):
             w(f"        !> One row's {tag} value through a handle ({ik} row index).")
             w(f"        module subroutine col_get_{tag}_{ik}(self, i, value)")
             w("            class(parquet_table_col), intent(in) :: self !! the handle.")
             w(f"            {ikdecl}, intent(in) :: i              !! 1-based row index.")
-            w(f"            {decl}, intent(out) :: value           !! receives the value.")
+            w(f"            {fetch_val_decl(k)} !! receives the value.")
             w(f"        end subroutine col_get_{tag}_{ik}")
+    for k in VEC_KINDS:
+        tag, _pk, decl, _comp, _rank, cat = k
+        rd = "character(len=:), allocatable" if cat == "str" else decl
+        wr = "character(len=*)" if cat == "str" else decl
+        for ik, ikdecl in (("e32", "integer(int32)"), ("e64", "integer(int64)")):
+            w(f"        !> ONE ELEMENT of one row of a {tag} column, without materialising the")
+            w("        !! row ({ik} indices). The table has no name-taking counterpart -- reading"
+              .replace("{ik}", ik))
+            w("        !! a single element of a vector row is new capability, not a faster spelling.")
+            w(f"        module subroutine col_get_{tag}_{ik}(self, i, e, value)")
+            w("            class(parquet_table_col), intent(in) :: self !! the handle.")
+            w(f"            {ikdecl}, intent(in) :: i              !! 1-based row index.")
+            w(f"            {ikdecl}, intent(in) :: e              !! 1-based element index within the row.")
+            w(f"            {rd}, intent(out) :: value             !! receives the value.")
+            w(f"        end subroutine col_get_{tag}_{ik}")
+            w(f"        !> Writes ONE ELEMENT of one row of a {tag} column ({ik} indices). Exact")
+            w("        !! kind, and the write clears that element's null -- not the whole row's.")
+            w(f"        module subroutine col_set_{tag}_{ik}(self, i, e, value)")
+            w("            class(parquet_table_col), intent(in) :: self !! the handle.")
+            w(f"            {ikdecl}, intent(in) :: i              !! 1-based row index.")
+            w(f"            {ikdecl}, intent(in) :: e              !! 1-based element index within the row.")
+            w(f"            {wr}, intent(in) :: value              !! the value to write.")
+            w(f"        end subroutine col_set_{tag}_{ik}")
     w("""
         !> The TAIL of `table_resolve`, on a slot that is already known good: the unsupported-type
         !! refusal, the lazy first touch, and the shared-write rule. Split out so that a caller
@@ -1924,6 +2008,19 @@ def gen_spec_interfaces():
             integer, intent(in) :: kind              !! required PK_* discriminator.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine cache_require_kind
+        !> Aborts unless slot `idx`'s STORED kind is exactly `kind`, with the POINTER path's own
+        !! message rather than `cache_require_kind`'s.
+        !!
+        !! Separate from `cache_require_kind` because the remedy is different and worth saying: a
+        !! copying accessor would have widened here, and the caller reaching for a pointer needs to
+        !! be told that is why this one will not. Shared by the table's `%col` and a column
+        !! handle's `%ref`, which are the same operation reached two ways.
+        module subroutine cache_require_ptr_kind(cache, idx, kind, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: idx                     !! validated slot index.
+            integer, intent(in) :: kind                    !! the PK_* the pointer requires.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine cache_require_ptr_kind
         !> error stops unless slot `idx` holds exactly `n` rows -- a %set replaces values, never
         !! the row set, so a different length is a row-structural change and not allowed here.
         module subroutine table_require_length(self, idx, n, proc)
@@ -2503,6 +2600,9 @@ def gen_spec_interfaces():
     for k in PTR_KINDS:
         w(ptr_iface(k))
     w(ptr_str_iface())
+    for k in PTR_KINDS:
+        w(ref_iface(k))
+    w(ref_str_iface())
     w("    end interface")
     w("    !")
     w("    ! ---- Copy out (parquet_tables_access) ----")
@@ -3206,11 +3306,30 @@ def gen_spec_interfaces():
             class(parquet_table_row), intent(in) :: self !! the row handle.
             character(len=*), intent(in) :: name         !! column name.
             integer, intent(in) :: idx                   !! slot index.
-        end subroutine row_kind_error""")
+        end subroutine row_kind_error
+        !> Aborts unless column handle `c` can be used to reach a cell of THIS row.
+        !!
+        !! Three checks, and the third is the one a caller cannot make for itself: the row handle
+        !! must be attached, `c` must be attached and current (`col_resolve`), and the two must
+        !! name the SAME table. A handle from another table would otherwise read that table's
+        !! column at this row's index -- a wrong answer rather than an error, since both tables
+        !! are perfectly valid objects.
+        !!
+        !! It then checks the row index against `c`'s scope, which is current because `c` is. So
+        !! `r%get(c, v)` catches a row handle left over from before a shrink, where `r%get(name, v)`
+        !! still cannot -- the row handle has no generation stamp of its own yet (feature_colindex.md
+        !! Q7).
+        module subroutine row_require_col(self, c, proc)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! the column handle to validate.
+            character(len=*), intent(in) :: proc         !! calling procedure, for the message.
+        end subroutine row_require_col""")
     for k in KINDS:
         w(rowget_iface(k))
     for k in KINDS:
         w(rowset_iface(k))
+    for k in KINDS:
+        w(rowget_col_iface(k))
     for k in ARRAY_KINDS:
         w(rowref_iface(k))
     for k in ARRAY_KINDS:
@@ -3280,6 +3399,36 @@ def ptr_str_iface():
             type(parquet_string_column), pointer, intent(out) :: p    !! alias to the packed store.
             logical, intent(out), optional :: found                   !! present: report a miss instead of aborting.
         end subroutine col_ptr_strcol"""
+
+
+def ref_iface(k):
+    tag, pk, decl, comp, rank, cat = k
+    mdims, mdoc = mask_dims(rank), valid_out_comment(rank)
+    return f"""        !> Points `p` at a {pk} column's storage, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`, with the same warning: `p` aliases the LIVE column, so a
+        !! write through it changes the table and nothing revalidates the result. Reordering one
+        !! column through its pointer breaks the table's row alignment silently. The stored kind
+        !! must match EXACTLY -- the pointer path never widens.
+        module subroutine col_ref_{tag}(self, p, is_valid)
+            class(parquet_table_col), intent(in) :: self     !! the handle.
+{decl_line(12, f"{decl}, pointer, intent(out) :: p{dims(rank)}", "!! alias to the live storage.")}
+            logical, allocatable, intent(out), optional :: is_valid{mdims} {mdoc}
+        end subroutine col_ref_{tag}"""
+
+
+def ref_str_iface():
+    return """        !> Points `p` at a PK_STRING column's packed store, from an already-resolved handle.
+        !!
+        !! The handle twin of `%col`'s string form, carrying its warning verbatim: this is the one
+        !! pointer this layer hands out that a caller could use to change the column's SHAPE.
+        !! Reading and in-place value edits are supported; appending to it, or otherwise changing
+        !! how many elements it holds, is not -- the column's own row count is kept separately and
+        !! would stop matching.
+        module subroutine col_ref_strcol(self, p)
+            class(parquet_table_col), intent(in) :: self              !! the handle.
+            type(parquet_string_column), pointer, intent(out) :: p    !! alias to the packed store.
+        end subroutine col_ref_strcol"""
 
 
 def get_iface(k):
@@ -3644,6 +3793,28 @@ def rowget_iface(k):
         end subroutine row_get_{tag}"""
 
 
+def rowget_col_iface(k):
+    """`r%get(c, value)` -- the same read, with the column named by a HANDLE rather than a
+    string, so a row-major loop stops resolving the name on every access."""
+    tag, pk, decl, comp, rank, cat = k
+    return f"""        !> This row's value from a {pk} column named by an already-resolved handle.
+        !!
+        !! The same operation as `%get(name, value)` over the same body -- what it saves is the
+        !! name lookup, which a loop over rows would otherwise pay once per access. The handle
+        !! must belong to THIS row's table and must still be current.
+        module subroutine row_get_col_{tag}(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to read.
+            {fetch_val_decl(k)} !! receives the value.
+        end subroutine row_get_col_{tag}
+        !> Writes this row's value in a {pk} column named by an already-resolved handle.
+        module subroutine row_set_col_{tag}(self, c, value)
+            class(parquet_table_row), intent(in) :: self !! the row handle.
+            type(parquet_table_col), intent(in) :: c     !! a handle on the column to write.
+            {store_val_decl(k)} !! the value to write.
+        end subroutine row_set_col_{tag}"""
+
+
 def getslice_iface(k):
     tag, pk, decl, comp, rank, cat = k
     widen_note = ""
@@ -3785,6 +3956,10 @@ contains
         w(rowget_impl(k))
     for k in KINDS:
         w(rowset_impl(k))
+    for k in KINDS:
+        w(rowget_col_impl(k))
+    for k in KINDS:
+        w(rowset_col_impl(k))
     for k in ARRAY_KINDS:
         w(rowref_impl(k))
     for k in ARRAY_KINDS:
@@ -3996,6 +4171,32 @@ def getslice_str_impl():
     !"""
 
 
+def rowget_col_impl(k):
+    """`r%get(c, value)` -- the row handle taking a COLUMN HANDLE in place of a name.
+
+    This is what makes a row-major loop (`do i; r = t%row(i); ...`) as cheap as the column-major
+    one: the row handle resolves the column by name on every access, and a handle hoisted out of
+    the loop resolves it never. It runs the same `col_fetch_<tag>` body both other spellings do.
+    """
+    tag = k[0]
+    return f"""    module procedure row_get_col_{tag}
+        call row_require_col(self, c, "get")
+        call col_fetch_{tag}(self%cache, c%slot, c%colkind, self%irow, value, "get")
+    end procedure row_get_col_{tag}
+    !"""
+
+
+def rowset_col_impl(k):
+    """`r%set(c, value)`. Exact kind, like every other write in this layer."""
+    tag = k[0]
+    return f"""    module procedure row_set_col_{tag}
+        call row_require_col(self, c, "set")
+        call cache_check_shared_write(self%cache, c%slot, "set", nulling=.false.)
+        call col_store_{tag}(self%cache, c%slot, self%irow, value, "set")
+    end procedure row_set_col_{tag}
+    !"""
+
+
 def rowset_impl(k):
     """Write one row's value through a handle: exact kind, and it changes the TABLE.
 
@@ -4124,7 +4325,6 @@ def ptr_impl(k):
     mzero = "(0)" if rank == 1 else "(0,0)"
     return f"""    module procedure col_ptr_{tag}
         integer :: idx
-        character(len=:), allocatable :: sfx, kname
         !
         nullify(p)
         call table_resolve(self, name, "col", idx, found)
@@ -4136,14 +4336,28 @@ def ptr_impl(k):
         ! column for a pointer to refer to. It is a snapshot -- writing through `p` afterwards
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of{msuf}(self%cache, idx, is_valid)
-        if (self%cache%cols(idx)%values%kindof() /= {pk}) then
-            call table_context_suffix(self%cache, name, sfx)
-            call parquet_kind_name(self%cache%cols(idx)%values%kindof(), kname)
-            error stop EP // "col: pointer kind does not match the stored kind (" // kname // &
-                "); the pointer path never widens -- use %get to copy with widening" // sfx
-        end if
+        call cache_require_ptr_kind(self%cache, idx, {pk}, "col")
         call self%cache%cols(idx)%values%data_ptr(p)
     end procedure col_ptr_{tag}
+    !"""
+
+
+def col_ref_impl(k):
+    """The same pointer, from an already-resolved handle.
+
+    A drop-in for `%col`: same kind rule, same `is_valid=` snapshot, same warning about what a
+    pointer lets a caller do. What it does not have is `found=` -- a handle that could not be
+    resolved never came into existence, so there is nothing left to report here.
+    """
+    tag, pk, decl, comp, rank, cat = k
+    msuf = "" if rank == 1 else "_elem"
+    return f"""    module procedure col_ref_{tag}
+        call col_resolve(self, "ref")
+        nullify(p)
+        if (present(is_valid)) call table_valid_mask_of{msuf}(self%cache, self%slot, is_valid)
+        call cache_require_ptr_kind(self%cache, self%slot, {pk}, "ref")
+        call self%cache%cols(self%slot)%values%data_ptr(p)
+    end procedure col_ref_{tag}
     !"""
 
 
@@ -4157,6 +4371,17 @@ def ptr_str_impl():
         call table_require_kind(self, idx, PK_STRING, "col")
         call self%cache%cols(idx)%values%string_column(p)
     end procedure col_ptr_strcol
+    !"""
+
+
+def col_ref_str_impl():
+    """The string store, from an already-resolved handle -- `%ref`'s 17th specific."""
+    return """    module procedure col_ref_strcol
+        call col_resolve(self, "ref")
+        nullify(p)
+        call cache_require_kind(self%cache, self%slot, PK_STRING, "ref")
+        call self%cache%cols(self%slot)%values%string_column(p)
+    end procedure col_ref_strcol
     !"""
 
 
@@ -4556,32 +4781,12 @@ def set_impl(k):
 
 
 def _setelem_pair(tag, pk):
-    """(see below) -- delegating form for the kinds stage 3a converted."""
-    if tag in DELEGATING_KINDS:
-        return f"""    module procedure set_element_{tag}_i32
-        call self%set_element(name, int(i, int64), value, found)
-    end procedure set_element_{tag}_i32
-    !
-    module procedure set_element_{tag}_i64
-        integer :: idx
-        !
-        ! The lookup happens BEFORE anything is written, which is what lets found=.false. mean
-        ! "nothing was changed" rather than "something was changed and then a problem arose".
-        call table_resolve(self, name, "set_element", idx, found, writing=.true.)
-        if (idx == 0) return
-        call table_require_row(self, i, "set_element")
-        call col_store_{tag}(self%cache, idx, i, value, "set_element")
-    end procedure set_element_{tag}_i64
-    !"""
-    return _setelem_pair_own(tag, pk)
-
-
-def _setelem_pair_own(tag, pk):
     """One kind's two %set_element specifics: the int64 worker and its int32 delegation.
 
     The int32 form exists so a caller with a plain default-kind INTEGER loop variable can write
     `call t%set_element("x", i, v)` without an int() cast -- the project-wide dual-kind rule for
-    a public numeric argument.
+    a public numeric argument. The worker runs `col_store_<tag>`, the same body a column handle's
+    `%set` runs; `tag` is the accessor's name and BODY_TAG maps the two string ones onto theirs.
     """
     return f"""    module procedure set_element_{tag}_i32
         call self%set_element(name, int(i, int64), value, found)
@@ -4594,10 +4799,8 @@ def _setelem_pair_own(tag, pk):
         ! "nothing was changed" rather than "something was changed and then a problem arose".
         call table_resolve(self, name, "set_element", idx, found, writing=.true.)
         if (idx == 0) return
-        call table_require_kind(self, idx, {pk}, "set_element")
         call table_require_row(self, i, "set_element")
-        call self%cache%cols(idx)%values%set_at(i, value)
-        self%cache%cols(idx)%user_populated = .true.
+        call col_store_{BODY_TAG.get(tag, tag)}(self%cache, idx, i, value, "set_element")
     end procedure set_element_{tag}_i64
     !"""
 
@@ -4609,31 +4812,33 @@ ZERO = {
 
 
 def getelem_impl(k):
-    """One row's value by index, widening exactly as the row handle's %get does.
+    """One row's value by name, over the SAME body a column handle's `%get` runs.
 
-    The int32 specific forwards to the int64 one; the int64 one carries the body. Widening is a
-    `select case` on the stored kind for the same reason it is in row_get: generic resolution
-    picks the specific from the CALLER's variable, and what the column holds is a run-time fact.
+    The int32 specific forwards to the int64 one; the int64 one resolves the name, checks the
+    row, and hands the resolved pieces to `col_fetch_<tag>`. Every rule about this operation --
+    the widening set, the kind error, the null convention -- lives in that body and nowhere else,
+    which is what stops the two spellings of one operation from answering differently
+    (feature_colindex.md 6.3). It is the FIVE-ARGUMENT variant, not the handle-delegating sketch:
+    building a `parquet_table_col` here purely to delegate through it measured +16.3% on this
+    accessor, three times criterion (3)'s bar, against +2.16% for this shape.
     """
     tag, pk, decl, comp, rank, cat = k
     out = [f"""    module procedure get_element_{tag}_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_{tag}_i32
     !"""]
-    if tag in DELEGATING_KINDS:
-        # STAGE 3a -- one kind only, to measure what sharing the body costs the NAME
-        # form before the other 17 are converted. This is feature_colindex.md 6.3's FIVE-ARGUMENT
-        # variant, not its handle-delegating sketch: building a `parquet_table_col` here just to
-        # delegate through it measured +16.3% on this accessor, three times criterion (3)'s bar.
-        # The body is shared, so the two forms still cannot diverge -- which was the point.
-        # The miss path must leave `value` defined -- it is intent(out). A numeric kind gets its
-        # type's zero; a temporal one gets a default-initialised element, which IS its null state
-        # (see the parquet_temporal note in CLAUDE.md), so there is no zero constant to use.
-        if cat == "num":
-            miss_decl, miss = "", f"        value = {ZERO[tag]}"
-        else:
-            miss_decl, miss = f"        {decl} :: blank\n", "        value = blank"
-        out.append(f"""    module procedure get_element_{tag}_i64
+    # The miss path must leave `value` defined -- it is intent(out). A scalar numeric kind gets
+    # its type's zero; a scalar temporal one gets a default-initialised element, which IS its null
+    # state (CLAUDE.md's parquet_temporal note), so there is no zero constant to use; an
+    # allocatable result simply stays unallocated, which is how %get reports a miss too.
+    miss_decl = ""
+    if rank == 2:
+        miss = "        ! `value` stays unallocated, which is how %get reports a miss too."
+    elif cat == "num":
+        miss = f"        value = {ZERO[tag]}"
+    else:
+        miss_decl, miss = f"        {decl} :: blank\n", "        value = blank"
+    out.append(f"""    module procedure get_element_{tag}_i64
         integer :: idx
 {miss_decl}        !
 {miss}
@@ -4642,109 +4847,30 @@ def getelem_impl(k):
         call table_require_row(self, i, "get_element")
         call col_fetch_{tag}(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_{tag}_i64""")
-        return "\n".join(out)
-    lines = [f"    module procedure get_element_{tag}_i64", "        integer :: idx"]
-    for _, src in WIDEN.get(tag, []):
-        srcdecl = next(kk[2] for kk in KINDS if kk[0] == src)
-        if rank == 1:
-            lines.append(f"        {srcdecl} :: v_{src}")
-        else:
-            lines.append(f"        {srcdecl}, allocatable :: v_{src}(:)")
-    lines.append("        !")
-    # A miss has to leave `value` defined, since it is intent(out): a scalar gets its type's
-    # zero, an allocatable result stays unallocated (the same "nothing here" %get already uses).
-    if rank == 1 and cat == "num":
-        miss = f"            value = {ZERO[tag]}"
-    elif rank == 1:
-        lines.append(f"        {decl} :: blank")
-        miss = "            value = blank"
-    else:
-        miss = "            ! `value` stays unallocated, which is how %get reports a miss too."
-    lines += ['        call table_resolve(self, name, "get_element", idx, found)',
-              "        if (idx == 0) then",
-              miss,
-              "            return",
-              "        end if",
-              '        call table_require_row(self, i, "get_element")',
-              "        select case (self%cache%cols(idx)%declared_kind)",
-              f"        case ({pk})"]
-    if rank == 1:
-        lines.append("            call self%cache%cols(idx)%values%get_at(i, value)")
-    else:
-        lines += ["            allocate(value(self%cache%cols(idx)%width))",
-                  "            call self%cache%cols(idx)%values%get_at(i, value)"]
-    for srcpk, src in WIDEN.get(tag, []):
-        lines.append(f"        case ({srcpk})")
-        if rank == 1:
-            lines += [f"            call self%cache%cols(idx)%values%get_at(i, v_{src})",
-                      f"            value = v_{src}"]
-        else:
-            lines += [f"            allocate(v_{src}(self%cache%cols(idx)%width))",
-                      f"            call self%cache%cols(idx)%values%get_at(i, v_{src})",
-                      "            allocate(value(self%cache%cols(idx)%width))",
-                      f"            value = v_{src}"]
-    lines += ["        case default",
-              # Always fails here, which is the point: it produces the same "column kind is X,
-              # not Y" message every other exact-kind path in this layer produces.
-              f'            call table_require_kind(self, idx, {pk}, "get_element")',
-              "        end select",
-              f"    end procedure get_element_{tag}_i64",
-              "    !"]
-    out.append("\n".join(lines))
     return "\n".join(out)
 
 
-def getelem_str_impl():
-    return """    module procedure get_element_chr_i32
+def _getelem_str_pair(tag, body):
+    """One string kind's two `%get_element` specifics. `tag` is the accessor's name (`chr`), and
+    `body` the kind table's (`str`) -- see BODY_TAG."""
+    blank = '        value = ""\n' if body == "str" else ""
+    return f"""    module procedure get_element_{tag}_i32
         call self%get_element(name, int(i, int64), value, found)
-    end procedure get_element_chr_i32
+    end procedure get_element_{tag}_i32
     !
-    module procedure get_element_chr_i64
+    module procedure get_element_{tag}_i64
         integer :: idx
-        type(parquet_string_column), pointer :: store
         !
-        value = ""
-        call table_resolve(self, name, "get_element", idx, found)
+{blank}        call table_resolve(self, name, "get_element", idx, found)
         if (idx == 0) return
-        call table_require_kind(self, idx, PK_STRING, "get_element")
         call table_require_row(self, i, "get_element")
-        call self%cache%cols(idx)%values%string_column(store)
-        ! allow_null keeps a null row from aborting: it reads back as "", and %is_null is how a
-        ! caller tells the two apart -- the same rule the row handle's %get follows.
-        call store%get(i, value, allow_null=.true.)
-    end procedure get_element_chr_i64
-    !
-    module procedure get_element_chrv_i32
-        call self%get_element(name, int(i, int64), value, found)
-    end procedure get_element_chrv_i32
-    !
-    module procedure get_element_chrv_i64
-        integer :: idx, e, wdt, maxlen
-        integer(int64) :: flat
-        character(len=:), allocatable :: str1
-        type(parquet_string_column), pointer :: store
-        !
-        call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
-        call table_require_kind(self, idx, PK_STRING_VEC, "get_element")
-        call table_require_row(self, i, "get_element")
-        wdt = self%cache%cols(idx)%width
-        ! A vector string column is ONE flat store of width*nrows elements, element (e, row) at
-        ! (row-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
-        call self%cache%cols(idx)%values%string_column(store)
-        ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
-        maxlen = 1
-        do e = 1, wdt
-            flat = (i - 1_int64) * int(wdt, int64) + int(e, int64)
-            if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
-        end do
-        allocate(character(len=maxlen) :: value(wdt))
-        do e = 1, wdt
-            flat = (i - 1_int64) * int(wdt, int64) + int(e, int64)
-            call store%copy_to(flat, value(e), allow_null=.true.)
-        end do
-    end procedure get_element_chrv_i64
+        call col_fetch_{body}(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
+    end procedure get_element_{tag}_i64
     !"""
+
+
+def getelem_str_impl():
+    return "\n".join([_getelem_str_pair("chr", "str"), _getelem_str_pair("chrv", "strv")])
 
 
 def setelem_impl(k):
@@ -4788,13 +4914,55 @@ def set_str_impl():
 # src/parquet_tables_colaccess.f90 -- the column handle's per-kind accessors, and the SHARED
 # bodies the table's own %get_element calls.
 #
-# STAGE 3a covers the 8 allocation-free SCALAR kinds, which is where the measured speed case
-# lives; the 10 allocating kinds (str, strv and the eight *_VEC) follow in 3b. A missing kind is
-# a COMPILE-TIME error here, not a runtime one -- `c%get(i, value)` picks its specific from the
-# type of the caller's `value` -- so a partial kind set cannot produce a surprise that depends on
-# the file's schema. See feature_colindex.md's stage 3 for why that makes the split safe.
+# All 18 kinds have a shared body, and every table-level `%get_element`/`%set_element` is a
+# caller of one -- there is no second copy of the widening set, the kind error or the null rule
+# anywhere in this layer. Stage 3a built the 8 allocation-free scalar kinds first (where the
+# measured speed case lives) and 3b added the 10 allocating ones; the split is gone now that
+# both halves exist.
 # --------------------------------------------------------------------------------------
-SCALAR_FREE_KINDS = [k for k in KINDS if k[4] == 1 and k[5] != "str"]
+# Kinds whose element can be reached one at a time WITHIN a row: the 9 rank-2 kinds. This is new
+# capability rather than a faster spelling -- the table has no `%get_element(name, i, e, v)` to
+# wrap, because reading one element of a vector row has never been expressible without
+# materialising the whole row (feature_colindex.md 4.1).
+VEC_KINDS = [k for k in KINDS if k[4] == 2]
+
+# Table-level `%get_element`/`%set_element` name the two string kinds `chr`/`chrv`, while the
+# kind table -- and therefore every shared body -- names them `str`/`strv`. One map rather than a
+# second naming convention.
+BODY_TAG = {"chr": "str", "chrv": "strv"}
+
+
+def fetch_val_decl(k):
+    """Declaration of `value` on a READ: the shape the caller receives.
+
+    A vector kind hands back an allocatable array (the body allocates it to the column's width),
+    and a string kind an allocatable of deferred length, because neither length nor width is
+    something the caller can be asked to know in advance.
+    """
+    tag, pk, decl, comp, rank, cat = k
+    if cat == "str":
+        return "character(len=:), allocatable, intent(out) :: value" + ("(:)" if rank == 2 else "")
+    if rank == 2:
+        return f"{decl}, allocatable, intent(out) :: value(:)"
+    return f"{decl}, intent(out) :: value"
+
+
+def store_val_decl(k):
+    """Declaration of `value` on a WRITE. A character ARRAY is trimmed on the way in and a
+    character SCALAR is not -- `parquet_column`'s rule, inherited rather than restated here."""
+    tag, pk, decl, comp, rank, cat = k
+    base = "character(len=*)" if cat == "str" else decl
+    return f"{base}, intent(in) :: value" + ("(:)" if rank == 2 else "")
+
+
+def fetch_cache_attr(k):
+    """`, target` for the one body that takes a POINTER into the cache.
+
+    `col_fetch_strv` needs `%string_column(store)`, and a pointer to a subobject of a plain dummy
+    is undefined the moment that dummy goes out of scope. Only that body needs it, so only that
+    body pays whatever the attribute costs the optimiser.
+    """
+    return ", target" if k[0] == "strv" else ""
 
 
 def col_fetch_impl(k):
@@ -4806,18 +4974,31 @@ def col_fetch_impl(k):
     entry point keeps the messages it always produced.
     """
     tag, pk, decl, comp, rank, cat = k
+    if cat == "str":
+        return col_fetch_str_impl(k)
     lines = [f"    module procedure col_fetch_{tag}"]
     for _, src in WIDEN.get(tag, []):
         srcdecl = next(kk[2] for kk in KINDS if kk[0] == src)
-        lines.append(f"        {srcdecl} :: v_{src}")
+        lines.append(f"        {srcdecl} :: v_{src}" if rank == 1
+                     else f"        {srcdecl}, allocatable :: v_{src}(:)")
     lines += ["        !",
               "        select case (colkind)",
-              f"        case ({pk})",
-              "            call cache%cols(slot)%values%get_at(i, value)"]
+              f"        case ({pk})"]
+    if rank == 1:
+        lines.append("            call cache%cols(slot)%values%get_at(i, value)")
+    else:
+        lines += ["            allocate(value(cache%cols(slot)%width))",
+                  "            call cache%cols(slot)%values%get_at(i, value)"]
     for srcpk, src in WIDEN.get(tag, []):
-        lines += [f"        case ({srcpk})",
-                  f"            call cache%cols(slot)%values%get_at(i, v_{src})",
-                  f"            value = v_{src}"]
+        lines.append(f"        case ({srcpk})")
+        if rank == 1:
+            lines += [f"            call cache%cols(slot)%values%get_at(i, v_{src})",
+                      f"            value = v_{src}"]
+        else:
+            lines += [f"            allocate(v_{src}(cache%cols(slot)%width))",
+                      f"            call cache%cols(slot)%values%get_at(i, v_{src})",
+                      "            allocate(value(cache%cols(slot)%width))",
+                      f"            value = v_{src}"]
     lines += ["        case default",
               # The SAME wording a name-form accessor produces, via the same helper. Inventing a
               # second one here is exactly the drift a shared body exists to prevent, and it is
@@ -4827,6 +5008,41 @@ def col_fetch_impl(k):
               f"    end procedure col_fetch_{tag}",
               "    !"]
     return "\n".join(lines)
+
+
+def col_fetch_str_impl(k):
+    """The two string kinds' shared read bodies. No widening -- there is nothing to widen to."""
+    if k[4] == 1:
+        return """    module procedure col_fetch_str
+        call cache_require_kind(cache, slot, PK_STRING, proc)
+        ! %get_at reads with allow_null, so a null row comes back as "" rather than aborting;
+        ! %is_null is how a caller tells an empty string from a missing one.
+        call cache%cols(slot)%values%get_at(i, value)
+    end procedure col_fetch_str
+    !"""
+    return """    module procedure col_fetch_strv
+        integer :: e, wdt, maxlen
+        integer(int64) :: flat
+        type(parquet_string_column), pointer :: store
+        !
+        call cache_require_kind(cache, slot, PK_STRING_VEC, proc)
+        wdt = cache%cols(slot)%width
+        ! A vector string column is ONE flat store of width*nrows elements, element (e, row) at
+        ! (row-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
+        call cache%cols(slot)%values%string_column(store)
+        ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
+        maxlen = 1
+        do e = 1, wdt
+            flat = (i - 1_int64) * int(wdt, int64) + int(e, int64)
+            if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
+        end do
+        allocate(character(len=maxlen) :: value(wdt))
+        do e = 1, wdt
+            flat = (i - 1_int64) * int(wdt, int64) + int(e, int64)
+            call store%copy_to(flat, value(e), allow_null=.true.)
+        end do
+    end procedure col_fetch_strv
+    !"""
 
 
 def col_get_impl(k):
@@ -4877,6 +5093,69 @@ def col_set_impl(k):
     !"""
 
 
+def col_getelem_impl(k):
+    """One ELEMENT of one row, through a handle.
+
+    New capability rather than a faster spelling: the table has no name-taking counterpart,
+    because reading a single element of a vector row has never been expressible without
+    materialising the whole row (feature_colindex.md 4.1).
+
+    It runs `parquet_column%get_elem`, which was added for this and is where the bounds check and
+    the storage layout live. Reaching around it through `%data_ptr` would have put a second copy
+    of that column's own rules in this module -- and on the write side, silently wrong ones.
+    """
+    tag, pk, decl, comp, rank, cat = k
+    lines = [f"""    module procedure col_get_{tag}_e32
+        call self%get(int(i, int64), int(e, int64), value)
+    end procedure col_get_{tag}_e32
+    !""",
+             f"    module procedure col_get_{tag}_e64"]
+    for _, src in WIDEN.get(tag, []):
+        srcdecl = next(kk[2] for kk in KINDS if kk[0] == src)
+        lines.append(f"        {srcdecl} :: v_{src}")
+    lines += ["        !",
+              '        call col_resolve(self, "get")',
+              '        call col_require_row(self, i, "get")',
+              "        select case (self%colkind)",
+              f"        case ({pk})",
+              "            call self%cache%cols(self%slot)%values%get_elem(i, e, value)"]
+    for srcpk, src in WIDEN.get(tag, []):
+        lines += [f"        case ({srcpk})",
+                  f"            call self%cache%cols(self%slot)%values%get_elem(i, e, v_{src})",
+                  f"            value = v_{src}"]
+    lines += ["        case default",
+              f'            call cache_require_kind(self%cache, self%slot, {pk}, "get")',
+              "        end select",
+              f"    end procedure col_get_{tag}_e64",
+              "    !"]
+    return "\n".join(lines)
+
+
+def col_setelem_impl(k):
+    """Writes one ELEMENT of one row, through a handle.
+
+    `parquet_column%set_elem` carries the validity rule, and that rule is not one rule: a numeric
+    element's null lives in the column's bitmap, a temporal element IS its own null state, and a
+    string element's lives in the string store. All three are private to that type, and a write
+    that bypassed them would be silent -- the value stored, the cell still reading back as
+    missing, or `%any_null()` answering from a cache nothing invalidated.
+    """
+    tag, pk = k[0], k[1]
+    return f"""    module procedure col_set_{tag}_e32
+        call self%set(int(i, int64), int(e, int64), value)
+    end procedure col_set_{tag}_e32
+    !
+    module procedure col_set_{tag}_e64
+        call col_resolve(self, "set")
+        call col_require_row(self, i, "set")
+        call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
+        call cache_require_kind(self%cache, self%slot, {pk}, "set")
+        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        self%cache%cols(self%slot)%user_populated = .true.
+    end procedure col_set_{tag}_e64
+    !"""
+
+
 def gen_colaccess():
     o = []
     w = o.append
@@ -4892,14 +5171,21 @@ submodule (parquet_tables) parquet_tables_colaccess
     !
 contains
     !""")
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         w(col_fetch_impl(k))
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         w(col_get_impl(k))
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         w(col_store_impl(k))
-    for k in SCALAR_FREE_KINDS:
+    for k in KINDS:
         w(col_set_impl(k))
+    for k in VEC_KINDS:
+        w(col_getelem_impl(k))
+    for k in VEC_KINDS:
+        w(col_setelem_impl(k))
+    for k in PTR_KINDS:
+        w(col_ref_impl(k))
+    w(col_ref_str_impl())
     w("end submodule parquet_tables_colaccess ! GCOVR_EXCL_LINE")
     return "\n".join(o)
 

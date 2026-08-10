@@ -85,6 +85,40 @@ contains
         k = self%colkind
     end procedure col_kind
     !
+    ! The four descriptor queries below read the slot directly, with no `table_resolve_width` call
+    ! of the sort `slot_kind`/`slot_width` make on the table's own forms. That is not a shortcut:
+    ! a handle can only exist once `table_resolve_slot` has run, which is where a plain LIST
+    ! column's width is proven and its kind settled — so by the time there is a handle to ask,
+    ! the descriptor is already the resolved answer rather than the open-time guess. Anything that
+    ! could change it is structural and invalidates the handle first.
+    !
+    module procedure col_name
+        call col_resolve(self, "name")
+        nm = self%cache%cols(self%slot)%name
+    end procedure col_name
+    !
+    module procedure col_width
+        call col_resolve(self, "width")
+        wdt = self%cache%cols(self%slot)%width
+    end procedure col_width
+    !
+    module procedure col_unit
+        call col_resolve(self, "unit")
+        ! The descriptor first, because it answers for a column nothing has read yet — a
+        ! file-backed column's unit comes from the read-in MAML at open, not from its values.
+        ! Same order as the table's own %unit, which is where this rule is explained in full.
+        if (allocated(self%cache%cols(self%slot)%unit)) then
+            u = self%cache%cols(self%slot)%unit
+            return
+        end if
+        call self%cache%cols(self%slot)%values%unit_string(u)
+    end procedure col_unit
+    !
+    module procedure col_residency
+        call col_resolve(self, "residency")
+        r = self%cache%cols(self%slot)%residency
+    end procedure col_residency
+    !
     module procedure col_resolve
         character(len=:), allocatable :: sfx
         character(len=32) :: g_now, g_then

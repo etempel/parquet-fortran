@@ -1176,6 +1176,12 @@ program error_scenarios
         call scenario_col_handle_stale_after_mutation()
     case ("col_handle_row_out_of_range")
         call scenario_col_handle_row_out_of_range()
+    case ("col_handle_ref_after_mutation")
+        call scenario_col_handle_ref_after_mutation()
+    case ("col_handle_ref_kind_mismatch")
+        call scenario_col_handle_ref_kind_mismatch()
+    case ("row_handle_foreign_column")
+        call scenario_row_handle_foreign_column()
     case ("col_handle_never_attached")
         call scenario_col_handle_never_attached()
     case ("table_pointer_kind_mismatch")
@@ -10234,6 +10240,68 @@ contains
         call c%get(3_int64, v)          ! one past the end -> aborts
         print '(a,f8.3)', "unexpectedly read past the last row through a handle, v=", v
     end subroutine scenario_col_handle_row_out_of_range
+    !
+    !> `%ref` on a stale handle is the worst thing this feature can do — it would hand back a raw
+    !! pointer into storage the mutation reallocated, which no later check can catch. Its own
+    !! `col_resolve` call is the only thing preventing it, and deleting that one line is invisible
+    !! to every value test, so it gets a scenario of its own rather than relying on `%get`'s.
+    subroutine scenario_col_handle_ref_after_mutation()
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        real(real64) :: d(2)
+        real(real64), pointer :: p(:)
+        d = [1.0_real64, 2.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("a", d)
+        call t%add_column("b", d)
+        call t%column("a", c)
+        call c%ref(p)                   ! negative control: the handle works before the change
+        print '(a,i0)', "fresh handle ref, size=", size(p)
+        call t%delete_rows([1_int64])   ! reallocates every column's storage -> the handle is stale
+        call c%ref(p)                   ! aborts
+        print '(a,i0)', "unexpectedly aliased storage through a stale handle, size=", size(p)
+    end subroutine scenario_col_handle_ref_after_mutation
+    !
+    !> `%ref` never widens, exactly as `%col` never does, and must say so in the same words.
+    subroutine scenario_col_handle_ref_kind_mismatch()
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        integer(int32) :: iv(2)
+        integer(int32), pointer :: p32(:)
+        integer(int64), pointer :: p64(:)
+        iv = [1_int32, 2_int32]
+        call parquet_new_table(t)
+        call t%add_column("a", iv)
+        call t%column("a", c)
+        call c%ref(p32)                 ! negative control: the matching kind works
+        print '(a,i0)', "matching-kind ref, size=", size(p32)
+        call c%ref(p64)                 ! int64 pointer into an int32 column -> aborts
+        print '(a,i0)', "unexpectedly aliased an int32 column through an int64 pointer, size=", size(p64)
+    end subroutine scenario_col_handle_ref_kind_mismatch
+    !
+    !> A column handle from ANOTHER table is not stale and not detached — it is a perfectly valid
+    !! handle on a different object, so nothing else in the library would object to it. Without
+    !! this check `r%get(c, v)` would read that other table's column at this row's index and
+    !! return a plausible number, which is the one failure mode in the handle design that produces
+    !! a wrong answer rather than an error.
+    subroutine scenario_row_handle_foreign_column()
+        type(parquet_table) :: t1, t2
+        type(parquet_table_row) :: r
+        type(parquet_table_col) :: c1, c2
+        real(real64) :: d(2), v
+        d = [1.0_real64, 2.0_real64]
+        call parquet_new_table(t1)
+        call t1%add_column("a", d)
+        call parquet_new_table(t2)
+        call t2%add_column("a", d * 10.0_real64)
+        r = t1%row(1_int64)
+        call t1%column("a", c1)
+        call t2%column("a", c2)
+        call r%get(c1, v)               ! negative control: this table's own handle works
+        print '(a,f8.3)', "own-table handle read, v=", v
+        call r%get(c2, v)               ! a handle on the OTHER table -> aborts
+        print '(a,f8.3)', "unexpectedly read another table's column through a row handle, v=", v
+    end subroutine scenario_row_handle_foreign_column
     !
     !> A handle that was never produced by %column points at nothing and must say so.
     subroutine scenario_col_handle_never_attached()

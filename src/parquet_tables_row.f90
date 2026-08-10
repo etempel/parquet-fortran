@@ -61,6 +61,25 @@ contains
         isnull = self%cache%cols(idx)%values%is_null(self%irow, e)
     end procedure row_is_null_elem
     !
+    module procedure row_require_col
+        if (.not. associated(self%cache)) then
+            error stop EP // "row " // trim(proc) // ": this row handle is not attached to a table"
+        end if
+        ! `c` first, because a stale column handle is the likelier mistake and its message names
+        ! the remedy. It also makes the two checks below meaningful: only a CURRENT handle's cache
+        ! pointer and scope say anything about the table as it is now.
+        call col_resolve(c, proc)
+        if (.not. associated(self%cache, c%cache)) then
+            error stop EP // "row " // trim(proc) // ": this column handle belongs to a different " // &
+                "table than this row handle; a handle carries its own table and cannot be reused " // &
+                "across two"
+        end if
+        ! Against `c`'s scope, not the row handle's own: the row handle keeps a by-value scope that
+        ! goes silently stale, and `c` has just been proved current. This is the one place a row
+        ! handle left over from before a shrink is caught -- see feature_colindex.md Q7.
+        call col_require_row(c, self%irow, proc)
+    end procedure row_require_col
+    !
     module procedure row_resolve
         character(len=:), allocatable :: sfx
         !

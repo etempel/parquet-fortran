@@ -61,6 +61,29 @@ contains
         end do
     end procedure get_at_strv
     !
+    !> Reads ONE element of row `i`'s vector out of a PK_STRING_VEC column.
+    !!
+    !! A vector string column is one flat store of `width * nrows` elements, element (e, row) at
+    !! `(row-1)*width + e`. Reading a single one therefore needs no array and no padding, which is
+    !! the whole difference from `get_at_strv` above.
+    module procedure get_elem_strv
+        call check_kind(self, PK_STRING_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        ! allow_null keeps a null element from aborting: it reads back as "", and %is_null is how
+        ! a caller tells the two apart.
+        call self%str%get((i - 1_int64)*int(self%width, int64) + e, value, allow_null=.true.)
+    end procedure get_elem_strv
+    !
+    !> Writes ONE element of row `i`'s vector in a PK_STRING_VEC column.
+    module procedure set_elem_strv
+        call check_kind(self, PK_STRING_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        ! The store's own %set clears that element's null, exactly as it does for `set_at_str`.
+        call self%str%set((i - 1_int64)*int(self%width, int64) + e, value)
+    end procedure set_elem_strv
+    !
     !> Writes string element `i` of a PK_STRING column.
     module procedure set_at_str
         logical :: mod_nulls

@@ -544,6 +544,21 @@ contains
         end if
     end procedure set_at_i32v
     !
+    module procedure get_elem_i32v
+        call check_kind(self, PK_INT32_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        value = self%i32v(e, i)
+    end procedure get_elem_i32v
+    !
+    module procedure set_elem_i32v
+        call check_kind(self, PK_INT32_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%i32v(e, i) = value
+        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+    end procedure set_elem_i32v
+    !
     module procedure set_all_i32v
         logical :: mod_nulls
         integer(int64) :: k, e
@@ -621,6 +636,21 @@ contains
             end do
         end if
     end procedure set_at_i64v
+    !
+    module procedure get_elem_i64v
+        call check_kind(self, PK_INT64_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        value = self%i64v(e, i)
+    end procedure get_elem_i64v
+    !
+    module procedure set_elem_i64v
+        call check_kind(self, PK_INT64_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%i64v(e, i) = value
+        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+    end procedure set_elem_i64v
     !
     module procedure set_all_i64v
         logical :: mod_nulls
@@ -700,6 +730,21 @@ contains
         end if
     end procedure set_at_f32v
     !
+    module procedure get_elem_f32v
+        call check_kind(self, PK_FLOAT32_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        value = self%f32v(e, i)
+    end procedure get_elem_f32v
+    !
+    module procedure set_elem_f32v
+        call check_kind(self, PK_FLOAT32_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%f32v(e, i) = value
+        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+    end procedure set_elem_f32v
+    !
     module procedure set_all_f32v
         logical :: mod_nulls
         integer(int64) :: k, e
@@ -777,6 +822,21 @@ contains
             end do
         end if
     end procedure set_at_f64v
+    !
+    module procedure get_elem_f64v
+        call check_kind(self, PK_FLOAT64_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        value = self%f64v(e, i)
+    end procedure get_elem_f64v
+    !
+    module procedure set_elem_f64v
+        call check_kind(self, PK_FLOAT64_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%f64v(e, i) = value
+        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+    end procedure set_elem_f64v
     !
     module procedure set_all_f64v
         logical :: mod_nulls
@@ -856,6 +916,21 @@ contains
         end if
     end procedure set_at_boolv
     !
+    module procedure get_elem_boolv
+        call check_kind(self, PK_LOGICAL_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        value = self%boolv(e, i)
+    end procedure get_elem_boolv
+    !
+    module procedure set_elem_boolv
+        call check_kind(self, PK_LOGICAL_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%boolv(e, i) = value
+        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+    end procedure set_elem_boolv
+    !
     module procedure set_all_boolv
         logical :: mod_nulls
         integer(int64) :: k, e
@@ -928,6 +1003,21 @@ contains
         self%dtv(:, i) = value
         self%nulls_dirty = .true.
     end procedure set_at_datev
+    !
+    module procedure get_elem_datev
+        call check_kind(self, PK_DATE_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        value = self%dtv(e, i)
+    end procedure get_elem_datev
+    !
+    module procedure set_elem_datev
+        call check_kind(self, PK_DATE_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%dtv(e, i) = value
+        self%nulls_dirty = .true.
+    end procedure set_elem_datev
     !
     module procedure set_all_datev
         logical :: mod_nulls
@@ -1004,6 +1094,21 @@ contains
         self%nulls_dirty = .true.
     end procedure set_at_timev
     !
+    module procedure get_elem_timev
+        call check_kind(self, PK_TIME_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        value = self%tmv(e, i)
+    end procedure get_elem_timev
+    !
+    module procedure set_elem_timev
+        call check_kind(self, PK_TIME_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%tmv(e, i) = value
+        self%nulls_dirty = .true.
+    end procedure set_elem_timev
+    !
     module procedure set_all_timev
         logical :: mod_nulls
         integer(int64) :: k, e
@@ -1078,6 +1183,21 @@ contains
         self%tsv(:, i) = value
         self%nulls_dirty = .true.
     end procedure set_at_tsv
+    !
+    module procedure get_elem_tsv
+        call check_kind(self, PK_TIMESTAMP_VEC, "get_elem")
+        call check_index(self, i, "get_elem")
+        call check_element(self, e, "get_elem")
+        value = self%tsv(e, i)
+    end procedure get_elem_tsv
+    !
+    module procedure set_elem_tsv
+        call check_kind(self, PK_TIMESTAMP_VEC, "set_elem")
+        call check_index(self, i, "set_elem")
+        call check_element(self, e, "set_elem")
+        self%tsv(e, i) = value
+        self%nulls_dirty = .true.
+    end procedure set_elem_tsv
     !
     module procedure set_all_tsv
         logical :: mod_nulls

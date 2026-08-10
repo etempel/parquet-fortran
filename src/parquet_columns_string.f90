@@ -25,20 +25,40 @@ contains
     !
     !> Aliases the embedded string store, so callers can use `parquet_string_column`'s own API
     !! (handles, searching, statistics) on a string column's values.
-    module procedure string_column
-        if (.not. is_string_kind(self%kind)) then
-            error stop EP//"string_column: column kind is "//trim(kind_text(self%kind))// &
+    !!
+    !! **This is the implementation; the `string_column` binding below forwards to it.** Every
+    !! per-cell accessor in this file comes in that pair -- see feature_ifx.md, and the typed-tier
+    !! banner in `parquet_columns.f90`, for why the body has to live at the `type` end.
+    !!
+    !! Note the residual this file cannot remove: `col%str` is a `parquet_string_column` and its
+    !! own accessors are type-bound, so a string read still converts `type` to `class` on the way
+    !! into `parquet_strings`. That descriptor is one record of 248 bytes against `parquet_column`'s
+    !! twenty of 1248, and closing it would mean adding public names to a deliberately
+    !! near-independent module for an allocation-dominated path. Measure before widening scope.
+    module procedure parquet_column_string_column
+        if (.not. is_string_kind(col%kind)) then
+            error stop EP//"string_column: column kind is "//trim(kind_text(col%kind))// &
                 ", but this call requires a string kind"
         end if
-        if (.not. allocated(self%str)) error stop EP//"string_column: string storage is not allocated"
-        p => self%str
+        if (.not. allocated(col%str)) error stop EP//"string_column: string storage is not allocated"
+        p => col%str
+    end procedure parquet_column_string_column
+    !
+    !> Aliases the embedded string store (polymorphic form).
+    module procedure string_column
+        call parquet_column_string_column(self, p)
     end procedure string_column
     !
     !> Reads string element `i` out of a PK_STRING column.
+    module procedure parquet_column_get_at_str
+        call parquet_column_check_kind(col, PK_STRING, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call col%str%get(i, value, allow_null=.true.)
+    end procedure parquet_column_get_at_str
+    !
+    !> Reads string element `i` out of a PK_STRING column (polymorphic form).
     module procedure get_at_str
-        call check_kind(self, PK_STRING, "get_at")
-        call check_index(self, i, "get_at")
-        call self%str%get(i, value, allow_null=.true.)
+        call parquet_column_get_at_str(self, i, value)
     end procedure get_at_str
     !
     !> Reads row `i`'s whole string vector out of a PK_STRING_VEC column.
@@ -46,19 +66,24 @@ contains
     !! Values are blank-padded into the caller's fixed-length array; a value longer than the
     !! caller's element length is truncated by the assignment, which is the same contract the
     !! library's existing fixed-width string reads use.
-    module procedure get_at_strv
+    module procedure parquet_column_get_at_strv
         integer(int64) :: e, base, w
-        call check_kind(self, PK_STRING_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        w = int(self%width, int64)
-        call check_width(self, size(value, kind=int64), "get_at")
+        call parquet_column_check_kind(col, PK_STRING_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        w = int(col%width, int64)
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
         base = (i - 1_int64)*w
         ! `%copy_to` rather than `%get` into a temporary: `value(e)` is already a fixed-length slot,
         ! so going through an allocatable string costs a heap round trip per element for a copy that
         ! ends up blank-padded either way. Truncation semantics are identical -- see `%copy_to`.
         do e = 1_int64, w
-            call self%str%copy_to(base + e, value(e), allow_null=.true.)
+            call col%str%copy_to(base + e, value(e), allow_null=.true.)
         end do
+    end procedure parquet_column_get_at_strv
+    !
+    !> Reads row `i`'s whole string vector out of a PK_STRING_VEC column (polymorphic form).
+    module procedure get_at_strv
+        call parquet_column_get_at_strv(self, i, value)
     end procedure get_at_strv
     !
     !> Reads ONE element of row `i`'s vector out of a PK_STRING_VEC column.
@@ -66,58 +91,78 @@ contains
     !! A vector string column is one flat store of `width * nrows` elements, element (e, row) at
     !! `(row-1)*width + e`. Reading a single one therefore needs no array and no padding, which is
     !! the whole difference from `get_at_strv` above.
-    module procedure get_elem_strv
-        call check_kind(self, PK_STRING_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
+    module procedure parquet_column_get_elem_strv
+        call parquet_column_check_kind(col, PK_STRING_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
         ! allow_null keeps a null element from aborting: it reads back as "", and %is_null is how
         ! a caller tells the two apart.
-        call self%str%get((i - 1_int64)*int(self%width, int64) + e, value, allow_null=.true.)
+        call col%str%get((i - 1_int64)*int(col%width, int64) + e, value, allow_null=.true.)
+    end procedure parquet_column_get_elem_strv
+    !
+    !> Reads ONE element of row `i`'s string vector (polymorphic form).
+    module procedure get_elem_strv
+        call parquet_column_get_elem_strv(self, i, e, value)
     end procedure get_elem_strv
     !
     !> Writes ONE element of row `i`'s vector in a PK_STRING_VEC column.
-    module procedure set_elem_strv
-        call check_kind(self, PK_STRING_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
+    module procedure parquet_column_set_elem_strv
+        call parquet_column_check_kind(col, PK_STRING_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
         ! The store's own %set clears that element's null, exactly as it does for `set_at_str`.
-        call self%str%set((i - 1_int64)*int(self%width, int64) + e, value)
+        call col%str%set((i - 1_int64)*int(col%width, int64) + e, value)
+    end procedure parquet_column_set_elem_strv
+    !
+    !> Writes ONE element of row `i`'s string vector (polymorphic form).
+    module procedure set_elem_strv
+        call parquet_column_set_elem_strv(self, i, e, value)
     end procedure set_elem_strv
     !
     !> Writes string element `i` of a PK_STRING column.
-    module procedure set_at_str
+    module procedure parquet_column_set_at_str
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_STRING, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_STRING, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%str%is_null(i)) return
+            if (col%str%is_null(i)) return
         end if
-        call self%str%set(i, value)
+        call col%str%set(i, value)
+    end procedure parquet_column_set_at_str
+    !
+    !> Writes string element `i` of a PK_STRING column (polymorphic form).
+    module procedure set_at_str
+        call parquet_column_set_at_str(self, i, value, modify_nulls)
     end procedure set_at_str
     !
     !> Writes row `i`'s whole string vector in a PK_STRING_VEC column. `value` is an ARRAY, so its
     !! trailing blanks are trimmed for the reason `refill_string_store` gives; `set_at_str` above
     !! takes a scalar and stores it verbatim.
-    module procedure set_at_strv
+    module procedure parquet_column_set_at_strv
         logical :: mod_nulls
         integer(int64) :: e, base, w
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_STRING_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
-        w = int(self%width, int64)
+        call parquet_column_check_kind(col, PK_STRING_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
+        w = int(col%width, int64)
         base = (i - 1_int64)*w
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: a row with
         ! one null element still has its other elements written.
         do e = 1_int64, w
             if (.not. mod_nulls) then
-                if (self%str%is_null(base + e)) cycle
+                if (col%str%is_null(base + e)) cycle
             end if
-            call self%str%set(base + e, value(e), trim=.true.)
+            call col%str%set(base + e, value(e), trim=.true.)
         end do
+    end procedure parquet_column_set_at_strv
+    !
+    !> Writes row `i`'s whole string vector (polymorphic form).
+    module procedure set_at_strv
+        call parquet_column_set_at_strv(self, i, value, modify_nulls)
     end procedure set_at_strv
     !
     !> Replaces every value of a PK_STRING column. Trailing blanks are trimmed -- see

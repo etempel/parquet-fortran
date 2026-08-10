@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handle that owns nothing: neither handle type is finalizable now, so both may be declared in an
   OpenMP `private()` clause as well as in a `block`.
 
+  **Per-cell access is substantially faster under the Intel compiler.** Every per-cell path in the
+  table layer — both handles, `%get_element`/`%set_element`, and the per-element null queries —
+  now reaches a column's storage through a non-polymorphic internal accessor rather than a
+  type-bound call. `ifx` builds a runtime type descriptor for `parquet_column` whenever a
+  `type(parquet_column)` is passed to a polymorphic dummy in another compilation unit, and emits
+  it unconditionally in the calling procedure's prologue ahead of any branch: 178 stores on every
+  access, ~35 ns, which was 78% of what a resolved-handle `%get(i, value)` cost. Answers, guards
+  and error messages are unchanged, and `gfortran`, which never emitted the block, is unaffected.
+
 - **Filling a string `parquet_column` from a character array is 6.2x faster**, and
   `parquet_string_column%build_from` gains a **character-array form** to make it so:
   `call col%build_from(values [, is_null])` clears the column and rebuilds it from a

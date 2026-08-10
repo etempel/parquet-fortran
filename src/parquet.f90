@@ -67,6 +67,17 @@ module parquet
     ! emits has to reach them, so parquet_settings makes them public, and the facade hides them.
     private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
     private :: parquet_output_is_suppressed
+    ! parquet_columns' typed per-cell accessor tier, hidden for the same reason again. These are
+    ! how parquet_tables reaches a column's storage without a type-bound call -- which is what
+    ! keeps ifx from building a runtime type descriptor in the caller's prologue on every access
+    ! (feature_ifx.md). They duplicate no user-facing capability: the identical operations are
+    ! already on parquet_column as %get_at/%set_at/%get_elem/%set_elem/%is_null/%set_null/
+    ! %clear_null/%data_ptr/%string_column, which is what a user calls. Adding a typed accessor
+    ! means adding a line here too.
+    private :: parquet_column_get_at, parquet_column_set_at
+    private :: parquet_column_get_elem, parquet_column_set_elem
+    private :: parquet_column_data_ptr, parquet_column_string_column
+    private :: parquet_column_is_null, parquet_column_set_null, parquet_column_clear_null
     !
     character(len=*),parameter:: cversion = "v1.5.0 (2026-08-08)" !! version info
 #ifndef RELEASE_VERSION

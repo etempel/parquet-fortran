@@ -176,7 +176,7 @@ contains
     module procedure col_is_null_i64
         call col_resolve(self, "is_null")
         call col_require_row(self, i, "is_null")
-        isnull = self%cache%cols(self%slot)%values%is_null(i)
+        isnull = parquet_column_is_null(self%cache%cols(self%slot)%values, i)
     end procedure col_is_null_i64
     !
     module procedure col_is_null_e32
@@ -188,7 +188,7 @@ contains
         call col_require_row(self, i, "is_null")
         ! The element index is bounds-checked by parquet_column itself, which names the element
         ! axis in its message -- the mistake this guards is passing a FLAT element position.
-        isnull = self%cache%cols(self%slot)%values%is_null(i, e)
+        isnull = parquet_column_is_null(self%cache%cols(self%slot)%values, i, e)
     end procedure col_is_null_e64
     !
     module procedure col_set_null_i32
@@ -201,7 +201,7 @@ contains
         ! nulling=.true.: the FIRST null on a column allocates its validity storage, and two
         ! threads doing that race with no diagnostic. Same rule the table's own %set_null obeys.
         call cache_check_shared_write(self%cache, self%slot, "set_null", nulling=.true.)
-        call self%cache%cols(self%slot)%values%set_null(i)
+        call parquet_column_set_null(self%cache%cols(self%slot)%values, i)
     end procedure col_set_null_i64
     !
     module procedure col_set_null_e32
@@ -212,7 +212,7 @@ contains
         call col_resolve(self, "set_null")
         call col_require_row(self, i, "set_null")
         call cache_check_shared_write(self%cache, self%slot, "set_null", nulling=.true.)
-        call self%cache%cols(self%slot)%values%set_null(i, e)
+        call parquet_column_set_null(self%cache%cols(self%slot)%values, i, e)
     end procedure col_set_null_e64
     !
     module procedure col_clear_null_i32
@@ -225,7 +225,7 @@ contains
         ! nulling=.false.: clearing a null cannot be the write that first allocates validity
         ! storage, because there is nothing to clear until something allocated it.
         call cache_check_shared_write(self%cache, self%slot, "clear_null", nulling=.false.)
-        call self%cache%cols(self%slot)%values%clear_null(i)
+        call parquet_column_clear_null(self%cache%cols(self%slot)%values, i)
     end procedure col_clear_null_i64
     !
     module procedure col_clear_null_e32
@@ -236,7 +236,7 @@ contains
         call col_resolve(self, "clear_null")
         call col_require_row(self, i, "clear_null")
         call cache_check_shared_write(self%cache, self%slot, "clear_null", nulling=.false.)
-        call self%cache%cols(self%slot)%values%clear_null(i, e)
+        call parquet_column_clear_null(self%cache%cols(self%slot)%values, i, e)
     end procedure col_clear_null_e64
     !
 end submodule parquet_tables_col ! GCOVR_EXCL_LINE

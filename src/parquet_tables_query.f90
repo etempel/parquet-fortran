@@ -651,7 +651,7 @@ contains
         call table_resolve(self, name, "is_null", idx, found)
         if (idx == 0) return
         call table_require_row(self, i, "is_null")
-        isnull = self%cache%cols(idx)%values%is_null(i)
+        isnull = parquet_column_is_null(self%cache%cols(idx)%values, i)
     end procedure table_is_null_i64
     !
     module procedure table_is_null_e32
@@ -669,7 +669,7 @@ contains
         ! The element index is bounds-checked by parquet_column itself (check_element), which
         ! names the element axis in its message -- the mistake this guards is passing a FLAT
         ! element position where a row and an element were wanted.
-        isnull = self%cache%cols(idx)%values%is_null(i, e)
+        isnull = parquet_column_is_null(self%cache%cols(idx)%values, i, e)
     end procedure table_is_null_e64
     !
     module procedure table_is_null_at_i32
@@ -687,7 +687,7 @@ contains
         call table_resolve_slot(self, idx, "is_null", found)
         if (idx == 0) return
         call table_require_row(self, i, "is_null")
-        isnull = self%cache%cols(idx)%values%is_null(i)
+        isnull = parquet_column_is_null(self%cache%cols(idx)%values, i)
     end procedure table_is_null_at_i64
     !
     module procedure table_is_null_at_e32
@@ -703,7 +703,7 @@ contains
         call table_resolve_slot(self, idx, "is_null", found)
         if (idx == 0) return
         call table_require_row(self, i, "is_null")
-        isnull = self%cache%cols(idx)%values%is_null(i, e)
+        isnull = parquet_column_is_null(self%cache%cols(idx)%values, i, e)
     end procedure table_is_null_at_e64
     !
     module procedure table_require_row
@@ -883,7 +883,7 @@ contains
             end if
             nulls = 0_int64
             do k = 1_int64, self%cache%cols(i)%values%length()
-                if (self%cache%cols(i)%values%is_null(k)) nulls = nulls + 1_int64
+                if (parquet_column_is_null(self%cache%cols(i)%values, k)) nulls = nulls + 1_int64
             end do
             write(nulls_s, "(I0)") nulls
             call table_column_stat_text(self%cache%cols(i)%values, min_s, max_s)
@@ -928,7 +928,7 @@ contains
         !
         allocate(mask(size(rows)))
         do k = 1_int64, size(rows, kind=int64)
-            mask(k) = .not. cache%cols(idx)%values%is_null(rows(k))
+            mask(k) = .not. parquet_column_is_null(cache%cols(idx)%values, rows(k))
         end do
     end procedure table_valid_mask_rows
     !
@@ -964,7 +964,7 @@ contains
         ! Kept per row, unlike table_apply_valid above: `rows` selects a SCATTERED set, so there
         ! is no contiguous mask over the column for the bulk setter to take.
         do k = 1_int64, size(rows, kind=int64)
-            if (.not. is_valid(k)) call self%cache%cols(idx)%values%set_null(rows(k))
+            if (.not. is_valid(k)) call parquet_column_set_null(self%cache%cols(idx)%values, rows(k))
         end do
     end procedure table_apply_valid_rows
     !
@@ -980,7 +980,7 @@ contains
         allocate(mask(wdt, size(rows)))
         do k = 1_int64, size(rows, kind=int64)
             do e = 1_int64, int(wdt, int64)
-                mask(e, k) = .not. cache%cols(idx)%values%is_null(rows(k), e)
+                mask(e, k) = .not. parquet_column_is_null(cache%cols(idx)%values, rows(k), e)
             end do
         end do
     end procedure table_valid_mask_rows_elem
@@ -1017,7 +1017,7 @@ contains
         end if
         do k = 1_int64, size(rows, kind=int64)
             do e = 1_int64, w
-                if (.not. is_valid(e, k)) call self%cache%cols(idx)%values%set_null(rows(k), e)
+                if (.not. is_valid(e, k)) call parquet_column_set_null(self%cache%cols(idx)%values, rows(k), e)
             end do
         end do
     end procedure table_apply_valid_rows_elem

@@ -72,48 +72,52 @@ contains
     !! convention this replaced. That is the narrow, deliberate price of the correctness: a row
     !! whose third element was null used to answer `.false.` here. The bulk paths do not pay it --
     !! `row_validity` walks the bitmap by machine word instead of calling this per row.
-    module procedure is_null_row
+    !! **This is the implementation; the `is_null_row` binding below forwards to it.** See
+    !! feature_ifx.md and the typed-tier banner in `parquet_columns.f90` for why the body lives
+    !! at the `type` end -- and note that a typed body must call the TYPED guards, or the whole
+    !! descriptor block it exists to remove comes straight back.
+    module procedure parquet_column_is_null_row
         integer(int64) :: e, base, w
-        call check_index(self, i, "is_null")
+        call parquet_column_check_index(col, i, "is_null")
         res = .false.
-        w = int(self%width, int64)
-        select case (self%kind)
+        w = int(col%width, int64)
+        select case (col%kind)
         case (PK_STRING, PK_STRING_VEC)
-            if (.not. allocated(self%str)) return
-            if (self%kind == PK_STRING) then
-                res = self%str%is_null(i)
+            if (.not. allocated(col%str)) return
+            if (col%kind == PK_STRING) then
+                res = col%str%is_null(i)
             else
                 base = (i - 1_int64)*w
                 do e = 1_int64, w
-                    if (self%str%is_null(base + e)) then
+                    if (col%str%is_null(base + e)) then
                         res = .true.
                         return
                     end if
                 end do
             end if
         case (PK_DATE)
-            res = self%dt(i)%is_null()
+            res = col%dt(i)%is_null()
         case (PK_TIME)
-            res = self%tm(i)%is_null()
+            res = col%tm(i)%is_null()
         case (PK_TIMESTAMP)
-            res = self%ts(i)%is_null()
+            res = col%ts(i)%is_null()
         case (PK_DATE_VEC)
             do e = 1_int64, w
-                if (self%dtv(e, i)%is_null()) then
+                if (col%dtv(e, i)%is_null()) then
                     res = .true.
                     return
                 end if
             end do
         case (PK_TIME_VEC)
             do e = 1_int64, w
-                if (self%tmv(e, i)%is_null()) then
+                if (col%tmv(e, i)%is_null()) then
                     res = .true.
                     return
                 end if
             end do
         case (PK_TIMESTAMP_VEC)
             do e = 1_int64, w
-                if (self%tsv(e, i)%is_null()) then
+                if (col%tsv(e, i)%is_null()) then
                     res = .true.
                     return
                 end if
@@ -123,15 +127,21 @@ contains
             ! kindless column (its row count is 0), so this arm is defensive only.
             error stop EP//"is_null: column has no kind assigned" ! GCOVR_EXCL_LINE
         case default
-            if (.not. self%has_nulls) return
+            if (.not. col%has_nulls) return
             base = (i - 1_int64)*w
             do e = 1_int64, w
-                if (bit_test(self%validity, base + e)) then
+                if (bit_test(col%validity, base + e)) then
                     res = .true.
                     return
                 end if
             end do
         end select
+    end procedure parquet_column_is_null_row
+    !
+    !> Whether row `i` is null -- meaning, on a vector kind, that ANY element of it is null
+    !! (polymorphic form).
+    module procedure is_null_row
+        res = parquet_column_is_null_row(self, i)
     end procedure is_null_row
     !
     !> Whether element `e` of row `i` is null.
@@ -140,35 +150,40 @@ contains
     !! be 1 and the answer equals the row form. Keeping it defined there rather than an error is
     !! what lets generic code (the generated table accessors, a caller's own loop over elements)
     !! use one shape for both without branching on the kind.
-    module procedure is_null_elem
+    module procedure parquet_column_is_null_elem
         integer(int64) :: w
-        call check_index(self, i, "is_null")
-        w = int(self%width, int64)
-        call check_element(self, e, "is_null")
+        call parquet_column_check_index(col, i, "is_null")
+        w = int(col%width, int64)
+        call parquet_column_check_element(col, e, "is_null")
         res = .false.
-        select case (self%kind)
+        select case (col%kind)
         case (PK_STRING, PK_STRING_VEC)
-            if (.not. allocated(self%str)) return
-            res = self%str%is_null((i - 1_int64)*w + e)
+            if (.not. allocated(col%str)) return
+            res = col%str%is_null((i - 1_int64)*w + e)
         case (PK_DATE)
-            res = self%dt(i)%is_null()
+            res = col%dt(i)%is_null()
         case (PK_TIME)
-            res = self%tm(i)%is_null()
+            res = col%tm(i)%is_null()
         case (PK_TIMESTAMP)
-            res = self%ts(i)%is_null()
+            res = col%ts(i)%is_null()
         case (PK_DATE_VEC)
-            res = self%dtv(e, i)%is_null()
+            res = col%dtv(e, i)%is_null()
         case (PK_TIME_VEC)
-            res = self%tmv(e, i)%is_null()
+            res = col%tmv(e, i)%is_null()
         case (PK_TIMESTAMP_VEC)
-            res = self%tsv(e, i)%is_null()
+            res = col%tsv(e, i)%is_null()
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in is_null_row above.
             error stop EP//"is_null: column has no kind assigned" ! GCOVR_EXCL_LINE
         case default
-            if (.not. self%has_nulls) return
-            res = bit_test(self%validity, (i - 1_int64)*w + e)
+            if (.not. col%has_nulls) return
+            res = bit_test(col%validity, (i - 1_int64)*w + e)
         end select
+    end procedure parquet_column_is_null_elem
+    !
+    !> Whether element `e` of row `i` is null (polymorphic form).
+    module procedure is_null_elem
+        res = parquet_column_is_null_elem(self, i, e)
     end procedure is_null_elem
     !
     !> Builds the whole per-row validity mask in one pass.
@@ -511,93 +526,104 @@ contains
     !! Deliberately whole-row, unlike the row QUERY `is_null(i)` which answers "any element": a
     !! caller naming only a row is saying the row is missing, while a caller asking about a row
     !! wants to know whether anything in it is. `set_null(i, e)` is the way to null one element.
-    module procedure set_null_row
+    module procedure parquet_column_set_null_row
         integer(int64) :: e, base, w
-        call check_index(self, i, "set_null")
-        w = int(self%width, int64)
-        select case (self%kind)
+        call parquet_column_check_index(col, i, "set_null")
+        w = int(col%width, int64)
+        select case (col%kind)
         case (PK_STRING)
-            call self%str%set_null(i)
+            call col%str%set_null(i)
         case (PK_STRING_VEC)
             base = (i - 1_int64)*w
             do e = 1_int64, w
-                call self%str%set_null(base + e)
+                call col%str%set_null(base + e)
             end do
         case (PK_DATE)
-            call self%dt(i)%set_null()
-            self%nulls_dirty = .true.
+            call col%dt(i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_TIME)
-            call self%tm(i)%set_null()
-            self%nulls_dirty = .true.
+            call col%tm(i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_TIMESTAMP)
-            call self%ts(i)%set_null()
-            self%nulls_dirty = .true.
+            call col%ts(i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_DATE_VEC)
             do e = 1_int64, w
-                call self%dtv(e, i)%set_null()
+                call col%dtv(e, i)%set_null()
             end do
-            self%nulls_dirty = .true.
+            col%nulls_dirty = .true.
         case (PK_TIME_VEC)
             do e = 1_int64, w
-                call self%tmv(e, i)%set_null()
+                call col%tmv(e, i)%set_null()
             end do
-            self%nulls_dirty = .true.
+            col%nulls_dirty = .true.
         case (PK_TIMESTAMP_VEC)
             do e = 1_int64, w
-                call self%tsv(e, i)%set_null()
+                call col%tsv(e, i)%set_null()
             end do
-            self%nulls_dirty = .true.
+            col%nulls_dirty = .true.
         case (PK_NONE)
             ! Unreachable through the public API: check_index above rejects every index on a
             ! kindless column (its row count is 0), so this arm is defensive only.
             error stop EP//"set_null: column has no kind assigned" ! GCOVR_EXCL_LINE
         case default
-            call ensure_bitmap(self)
+            call ensure_bitmap(col)
             base = (i - 1_int64)*w
             do e = 1_int64, w
-                call bit_set(self%validity, base + e)
+                call bit_set(col%validity, base + e)
             end do
         end select
+    end procedure parquet_column_set_null_row
+    !
+    !> Marks EVERY element of row `i` null (polymorphic form).
+    module procedure set_null_row
+        call parquet_column_set_null_row(self, i)
     end procedure set_null_row
     !
     !> Marks element `e` of row `i` null, leaving the row's other elements alone.
     !!
     !! Defined on a scalar column too (`width == 1`, so `e` can only be 1), where it is exactly
     !! the row form -- see `is_null_elem` for why that is deliberate rather than an oversight.
-    module procedure set_null_elem
+    module procedure parquet_column_set_null_elem
         integer(int64) :: w, flat
-        call check_index(self, i, "set_null")
-        w = int(self%width, int64)
-        call check_element(self, e, "set_null")
+        call parquet_column_check_index(col, i, "set_null")
+        w = int(col%width, int64)
+        call parquet_column_check_element(col, e, "set_null")
         flat = (i - 1_int64)*w + e
-        select case (self%kind)
+        select case (col%kind)
         case (PK_STRING, PK_STRING_VEC)
-            call self%str%set_null(flat)
+            call col%str%set_null(flat)
         case (PK_DATE)
-            call self%dt(i)%set_null()
-            self%nulls_dirty = .true.
+            call col%dt(i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_TIME)
-            call self%tm(i)%set_null()
-            self%nulls_dirty = .true.
+            call col%tm(i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_TIMESTAMP)
-            call self%ts(i)%set_null()
-            self%nulls_dirty = .true.
+            call col%ts(i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_DATE_VEC)
-            call self%dtv(e, i)%set_null()
-            self%nulls_dirty = .true.
+            call col%dtv(e, i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_TIME_VEC)
-            call self%tmv(e, i)%set_null()
-            self%nulls_dirty = .true.
+            call col%tmv(e, i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_TIMESTAMP_VEC)
-            call self%tsv(e, i)%set_null()
-            self%nulls_dirty = .true.
+            call col%tsv(e, i)%set_null()
+            col%nulls_dirty = .true.
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in set_null_row above.
             error stop EP//"set_null: column has no kind assigned" ! GCOVR_EXCL_LINE
         case default
-            call ensure_bitmap(self)
-            call bit_set(self%validity, flat)
+            call ensure_bitmap(col)
+            call bit_set(col%validity, flat)
         end select
+    end procedure parquet_column_set_null_elem
+    !
+    !> Marks element `e` of row `i` null, leaving the row's other elements alone
+    !! (polymorphic form).
+    module procedure set_null_elem
+        call parquet_column_set_null_elem(self, i, e)
     end procedure set_null_elem
     !
     !> Marks EVERY element of row `i` valid without writing a value.
@@ -608,17 +634,17 @@ contains
     !! that. On a column that has no bitmap and no nulls it is a no-op.
     !!
     !! Whole-row, mirroring `set_null(i)`; `clear_null(i, e)` clears one element.
-    module procedure clear_null_row
+    module procedure parquet_column_clear_null_row
         integer(int64) :: e, base, w
-        call check_index(self, i, "clear_null")
-        w = int(self%width, int64)
-        select case (self%kind)
+        call parquet_column_check_index(col, i, "clear_null")
+        w = int(col%width, int64)
+        select case (col%kind)
         case (PK_STRING)
-            call self%str%set(i, "")
+            call col%str%set(i, "")
         case (PK_STRING_VEC)
             base = (i - 1_int64)*w
             do e = 1_int64, w
-                call self%str%set(base + e, "")
+                call col%str%set(base + e, "")
             end do
         case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
             error stop EP//"clear_null: a temporal element becomes valid by writing a value to it"
@@ -627,12 +653,17 @@ contains
             ! kindless column (its row count is 0), so this arm is defensive only.
             error stop EP//"clear_null: column has no kind assigned" ! GCOVR_EXCL_LINE
         case default
-            if (.not. self%has_nulls) return
+            if (.not. col%has_nulls) return
             base = (i - 1_int64)*w
             do e = 1_int64, w
-                call bit_clear(self%validity, base + e)
+                call bit_clear(col%validity, base + e)
             end do
         end select
+    end procedure parquet_column_clear_null_row
+    !
+    !> Marks EVERY element of row `i` valid without writing a value (polymorphic form).
+    module procedure clear_null_row
+        call parquet_column_clear_null_row(self, i)
     end procedure clear_null_row
     !
     !> Marks element `e` of row `i` valid, leaving the row's other elements alone.
@@ -640,24 +671,30 @@ contains
     !! Same rules as the row form: the value behind it is unspecified until written, the bitmap is
     !! never dropped here, and the temporal kinds reject it because a temporal element becomes
     !! valid only by having a value written to it.
-    module procedure clear_null_elem
+    module procedure parquet_column_clear_null_elem
         integer(int64) :: w, flat
-        call check_index(self, i, "clear_null")
-        w = int(self%width, int64)
-        call check_element(self, e, "clear_null")
+        call parquet_column_check_index(col, i, "clear_null")
+        w = int(col%width, int64)
+        call parquet_column_check_element(col, e, "clear_null")
         flat = (i - 1_int64)*w + e
-        select case (self%kind)
+        select case (col%kind)
         case (PK_STRING, PK_STRING_VEC)
-            call self%str%set(flat, "")
+            call col%str%set(flat, "")
         case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
             error stop EP//"clear_null: a temporal element becomes valid by writing a value to it"
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in clear_null_row above.
             error stop EP//"clear_null: column has no kind assigned" ! GCOVR_EXCL_LINE
         case default
-            if (.not. self%has_nulls) return
-            call bit_clear(self%validity, flat)
+            if (.not. col%has_nulls) return
+            call bit_clear(col%validity, flat)
         end select
+    end procedure parquet_column_clear_null_elem
+    !
+    !> Marks element `e` of row `i` valid, leaving the row's other elements alone
+    !! (polymorphic form).
+    module procedure clear_null_elem
+        call parquet_column_clear_null_elem(self, i, e)
     end procedure clear_null_elem
     !
     !> Scans for remaining nulls and releases the bitmap when there are none (R2 iv).

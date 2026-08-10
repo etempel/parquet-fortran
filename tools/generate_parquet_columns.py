@@ -79,12 +79,53 @@ ARRAY_KINDS = [k for k in KINDS if k[5] != "str"]
 # exist for these and nothing else.
 VEC_KINDS = [k for k in KINDS if k[4] == 2]
 
+# --------------------------------------------------------------------------------------
+# The TYPED per-cell accessor tier (feature_ifx.md).
+#
+# Every per-cell accessor's body lives behind a `type(parquet_column)` dummy, and the type-bound
+# binding is a one-line forwarder onto it. These are the only names `parquet_tables` may use to
+# reach storage -- see check_no_type_bound_column_access in tools/check_source_conventions.py.
+#
+# Only the GENERICS are public (a generic may be public while every specific stays private, as
+# `parquet_get_metadata` in parquet_core.f90 already does); `src/parquet.f90` privatises them
+# again, so nothing here reaches a `use parquet` program.
+# --------------------------------------------------------------------------------------
+TYPED_PREFIX = "parquet_column_"
+
+#: generic name -> the specific TAGS it covers. `data_ptr` excludes the string kinds, which own
+#: no Fortran array; `get_elem`/`set_elem` exist only for the vector kinds.
+TYPED_FAMILIES = [
+    ("get_at", [k[0] for k in KINDS]),
+    ("set_at", [k[0] for k in KINDS]),
+    ("get_elem", [k[0] for k in VEC_KINDS]),
+    ("set_elem", [k[0] for k in VEC_KINDS]),
+    ("data_ptr", [k[0] for k in ARRAY_KINDS]),
+    ("is_null", ["row", "elem"]),
+    ("set_null", ["row", "elem"]),
+    ("clear_null", ["row", "elem"]),
+]
+
+#: Typed procedures that belong to no family and so stay solo public names.
+TYPED_SOLO = ["string_column"]
+
+#: Every public name this tier adds, in the order the module declares them.
+TYPED_PUBLIC_NAMES = [TYPED_PREFIX + base for base, _ in TYPED_FAMILIES] + \
+                     [TYPED_PREFIX + base for base in TYPED_SOLO]
+
+#: The guards, which stay PRIVATE -- only this module and its submodules call them.
+TYPED_GUARDS = ["check_kind", "check_index", "check_element", "check_width"]
+
 # Set by --bench-guards. MEASUREMENT BRANCHES ONLY -- see cell_guards() below.
 BENCH_GUARDS = False
 
 
-def cell_guards(pk, proc, indent=8):
+def cell_guards(pk, proc, indent=8, obj="col", pfx=TYPED_PREFIX):
     """The kind and index guards for one per-element accessor (`get_at`/`set_at`).
+
+    `obj`/`pfx` select which tier the guards are emitted for: the typed implementations pass the
+    defaults (`col`, and the typed guards), while a class-dummy body would pass `self` and no
+    prefix. A typed body MUST call the typed guards -- the class ones take `class(parquet_column)`,
+    so calling one from a typed body reintroduces the whole descriptor block (feature_ifx.md §7.2).
 
     Normally two plain calls into `parquet_columns_util`, which is exactly what ships. Under
     `--bench-guards` the same two guards are emitted three ways behind cpp `#ifdef`s, so one
@@ -103,14 +144,14 @@ def cell_guards(pk, proc, indent=8):
     would be inlined, measuring the opposite. It must be the real source.
     """
     sp = " " * indent
-    plain = (f'{sp}call check_kind(self, {pk}, "{proc}")\n'
-             f'{sp}call check_index(self, i, "{proc}")')
+    plain = (f'{sp}call {pfx}check_kind({obj}, {pk}, "{proc}")\n'
+             f'{sp}call {pfx}check_index({obj}, i, "{proc}")')
     if not BENCH_GUARDS:
         return plain
     return (f'#if defined(PF_BENCH_NO_GUARDS)\n'
             f'#elif defined(PF_BENCH_INLINE_GUARDS)\n'
-            f'{sp}if (self%kind /= {pk}) call check_kind(self, {pk}, "{proc}")\n'
-            f'{sp}if (i < 1_int64 .or. i > self%nrows) call check_index(self, i, "{proc}")\n'
+            f'{sp}if ({obj}%kind /= {pk}) call {pfx}check_kind({obj}, {pk}, "{proc}")\n'
+            f'{sp}if (i < 1_int64 .or. i > {obj}%nrows) call {pfx}check_index({obj}, i, "{proc}")\n'
             f'#else\n'
             f'{plain}\n'
             f'#endif')
@@ -161,6 +202,204 @@ def storage_decl(k):
 # --------------------------------------------------------------------------------------
 # src/parquet_columns.f90 -- the module spec
 # --------------------------------------------------------------------------------------
+def gen_typed_interfaces():
+    """The typed per-cell tier's interfaces, plus the generics that make it callable.
+
+    Grouped by the submodule that implements each block, per CLAUDE.md's interface-block rule.
+    The array kinds are generated into `parquet_columns_access`; the string kinds and the
+    validity forms are hand-written (`parquet_columns_string`, `parquet_columns_validity`), and
+    the guards are hand-written in `parquet_columns_util` and stay private.
+    """
+    o = []
+    w = o.append
+    w("""    ! ---- Typed per-cell access: the NON-POLYMORPHIC implementation tier (feature_ifx.md) ----
+    !
+    ! Every per-cell accessor's body lives here, behind a `type(parquet_column)` dummy. The
+    ! type-bound bindings declared above are one-line forwarders onto these, and `parquet_tables`
+    ! calls these directly instead of going through a binding.
+    !
+    ! The direction is the whole point and must never be flipped. A `class` actual passed to a
+    ! `type` dummy hands over the declared-type part for nothing; a `type` actual passed to a
+    ! `class` dummy makes ifx construct a runtime type descriptor in the CALLER's prologue --
+    ! 178 stores, emitted unconditionally ahead of any branch, ~35 ns on every call -- because
+    ! `parquet_column` has 20 allocatable components and one finalizable component. Re-homing the
+    ! bodies down here removes that conversion from every per-cell path in the table layer;
+    ! re-homing them the other way would silently restore it, with no test failure and no warning.
+    ! `check_no_type_bound_column_access` (tools/check_source_conventions.py) is what enforces it.
+    !
+    ! ---- Typed value access per kind (parquet_columns_access, GENERATED) ----
+    interface""")
+    for k in ARRAY_KINDS:
+        tag, pk, decl, comp, rank, cat = k
+        dim1 = "" if rank == 1 else "(:)"
+        dim2 = "(:)" if rank == 1 else "(:,:)"
+        rowdoc = "element" if rank == 1 else "row's vector"
+        plural = "s" if rank == 2 else ""
+        w(f"""        !> Typed `get_at` for a {pk} column: reads row `i`'s {rowdoc}.
+        module subroutine {TYPED_PREFIX}get_at_{tag}(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            {decl}, intent(out) :: value{dim1}   !! receives the value{plural}.
+        end subroutine {TYPED_PREFIX}get_at_{tag}
+        !> Typed `set_at` for a {pk} column: writes row `i`'s {rowdoc}.
+        module subroutine {TYPED_PREFIX}set_at_{tag}(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            {decl}, intent(in) :: value{dim1}     !! the new value{plural}.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine {TYPED_PREFIX}set_at_{tag}""")
+        if rank == 2:
+            w(f"""        !> Typed `get_elem` for a {pk} column: reads ONE element of row `i`'s vector.
+        module subroutine {TYPED_PREFIX}get_elem_{tag}(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            {decl}, intent(out) :: value       !! receives the element's value.
+        end subroutine {TYPED_PREFIX}get_elem_{tag}
+        !> Typed `set_elem` for a {pk} column: writes ONE element of row `i`'s vector.
+        module subroutine {TYPED_PREFIX}set_elem_{tag}(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            {decl}, intent(in) :: value           !! the new value.
+        end subroutine {TYPED_PREFIX}set_elem_{tag}""")
+        w(f"""        !> Typed `data_ptr` for a {pk} column: zero-copy pointer to the live storage.
+        module subroutine {TYPED_PREFIX}data_ptr_{tag}(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            {decl}, pointer, intent(out) :: p{dim2}    !! alias to the live storage.
+        end subroutine {TYPED_PREFIX}data_ptr_{tag}""")
+    w("    end interface")
+    w("    !")
+    w(f"""    ! ---- Typed string-kind access (parquet_columns_string) ----
+    interface
+        !> Typed `string_column`: pointer to the embedded string store (PK_STRING/PK_STRING_VEC).
+        module subroutine {TYPED_PREFIX}string_column(col, p)
+            type(parquet_column), intent(in), target :: col         !! the column.
+            type(parquet_string_column), pointer, intent(out) :: p  !! alias to the string store.
+        end subroutine {TYPED_PREFIX}string_column
+        !> Typed `get_at` for PK_STRING: reads element `i` into an allocatable string.
+        module subroutine {TYPED_PREFIX}get_at_str(col, i, value)
+            type(parquet_column), intent(in) :: col             !! the column.
+            integer(int64), intent(in) :: i                     !! 1-based row index.
+            character(len=:), allocatable, intent(out) :: value !! the element's value.
+        end subroutine {TYPED_PREFIX}get_at_str
+        !> Typed `get_at` for PK_STRING_VEC: reads row `i`'s whole string vector, blank-padded.
+        module subroutine {TYPED_PREFIX}get_at_strv(col, i, value)
+            type(parquet_column), intent(in) :: col   !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            character(len=*), intent(out) :: value(:) !! receives width values, blank-padded.
+        end subroutine {TYPED_PREFIX}get_at_strv
+        !> Typed `get_elem` for PK_STRING_VEC: reads ONE element, sized to the stored value.
+        module subroutine {TYPED_PREFIX}get_elem_strv(col, i, e, value)
+            type(parquet_column), intent(in) :: col             !! the column.
+            integer(int64), intent(in) :: i                     !! 1-based row index.
+            integer(int64), intent(in) :: e                     !! 1-based element index in the row.
+            character(len=:), allocatable, intent(out) :: value !! the element's value.
+        end subroutine {TYPED_PREFIX}get_elem_strv
+        !> Typed `set_at` for PK_STRING. `value` is a SCALAR, so it is stored verbatim.
+        module subroutine {TYPED_PREFIX}set_at_str(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            character(len=*), intent(in) :: value      !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine {TYPED_PREFIX}set_at_str
+        !> Typed `set_at` for PK_STRING_VEC. `value` is an ARRAY, so trailing blanks are trimmed.
+        module subroutine {TYPED_PREFIX}set_at_strv(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            character(len=*), intent(in) :: value(:)   !! width values for row i.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine {TYPED_PREFIX}set_at_strv
+        !> Typed `set_elem` for PK_STRING_VEC. `value` is a SCALAR, so it is stored verbatim.
+        module subroutine {TYPED_PREFIX}set_elem_strv(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            character(len=*), intent(in) :: value      !! the new value.
+        end subroutine {TYPED_PREFIX}set_elem_strv
+    end interface
+    !
+    ! ---- Typed validity access (parquet_columns_validity) ----
+    interface
+        !> Typed `is_null` row form: .true. when ANY element of row `i` is null.
+        module function {TYPED_PREFIX}is_null_row(col, i) result(res)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            logical :: res                          !! .true. when any element of the row is null.
+        end function {TYPED_PREFIX}is_null_row
+        !> Typed `is_null` element form: the null state of element `e` of row `i` alone.
+        module function {TYPED_PREFIX}is_null_elem(col, i, e) result(res)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            logical :: res                          !! .true. when that element is null.
+        end function {TYPED_PREFIX}is_null_elem
+        !> Typed `set_null` row form: marks EVERY element of row `i` null.
+        module subroutine {TYPED_PREFIX}set_null_row(col, i)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+        end subroutine {TYPED_PREFIX}set_null_row
+        !> Typed `set_null` element form: marks element `e` of row `i` null.
+        module subroutine {TYPED_PREFIX}set_null_elem(col, i, e)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+        end subroutine {TYPED_PREFIX}set_null_elem
+        !> Typed `clear_null` row form: clears the null flag of EVERY element of row `i`.
+        module subroutine {TYPED_PREFIX}clear_null_row(col, i)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+        end subroutine {TYPED_PREFIX}clear_null_row
+        !> Typed `clear_null` element form: clears the null flag of element `e` of row `i`.
+        module subroutine {TYPED_PREFIX}clear_null_elem(col, i, e)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+        end subroutine {TYPED_PREFIX}clear_null_elem
+    end interface
+    !
+    ! ---- Typed guards (parquet_columns_util) ----
+    !
+    ! PRIVATE, unlike the accessors above: only this module and its submodules call them. The
+    ! `class`-dummy guards declared further up are one-line forwarders onto these, so a body that
+    ! still takes a polymorphic passed object keeps working unchanged.
+    interface
+        !> Typed `check_kind`: aborts unless the column's active kind is `expected`.
+        module subroutine {TYPED_PREFIX}check_kind(col, expected, proc)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer, intent(in) :: expected         !! the PK_* kind the caller requires.
+            character(len=*), intent(in) :: proc    !! calling procedure name (for the message).
+        end subroutine {TYPED_PREFIX}check_kind
+        !> Typed `check_index`: aborts unless `i` is a valid 1-based row index.
+        module subroutine {TYPED_PREFIX}check_index(col, i, proc)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! the offending 1-based row index.
+            character(len=*), intent(in) :: proc    !! calling procedure name (for the message).
+        end subroutine {TYPED_PREFIX}check_index
+        !> Typed `check_element`: aborts unless `1 <= e <= width`.
+        module subroutine {TYPED_PREFIX}check_element(col, e, proc)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: e         !! the offending 1-based element index.
+            character(len=*), intent(in) :: proc    !! calling procedure name (for the message).
+        end subroutine {TYPED_PREFIX}check_element
+        !> Typed `check_width`: aborts unless `n` matches the column's own vector width.
+        module subroutine {TYPED_PREFIX}check_width(col, n, proc)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: n         !! the supplied element count per row.
+            character(len=*), intent(in) :: proc    !! calling procedure name (for the message).
+        end subroutine {TYPED_PREFIX}check_width
+    end interface
+    !""")
+    w("    ! ---- The typed tier's generics: the ONLY names parquet_tables uses (feature_ifx.md) ----")
+    for base, tags in TYPED_FAMILIES:
+        w(f"    interface {TYPED_PREFIX}{base}")
+        for tag in tags:
+            w(f"        module procedure {TYPED_PREFIX}{base}_{tag}")
+        w(f"    end interface {TYPED_PREFIX}{base}")
+    w("    !")
+    return "\n".join(o)
+
+
 def gen_spec():
     o = []
     w = o.append
@@ -207,6 +446,15 @@ module parquet_columns
     public :: parquet_column
     public :: parquet_kind_name""")
     for name, _, _ in PK_VALUES:
+        w(f"    public :: {name}")
+    w("""    !
+    ! The typed per-cell accessor tier (feature_ifx.md). INTERNAL API: public only because
+    ! `parquet_tables` is a different module and this type's components are private, so there is
+    ! no other way for it to reach storage without a type-bound call -- which is the thing being
+    ! avoided. `src/parquet.f90` privatises every one of these again, so none reaches a
+    ! `use parquet` program, and none is covered by the library's semantic-versioning promise or
+    ! listed in README's API overview. Only the generics are public; every specific is private.""")
+    for name in TYPED_PUBLIC_NAMES:
         w(f"    public :: {name}")
     w("""    !
     !> Error-message prefix for every `error stop` raised by this module.
@@ -849,6 +1097,7 @@ module parquet_columns
         end subroutine data_ptr_{tag}""")
     w("    end interface")
     w("    !")
+    w(gen_typed_interfaces())
     w("    ! ---- Value append per kind + storage helpers (parquet_columns_mutate, GENERATED) ----")
     w("    interface")
     for k in ARRAY_KINDS:
@@ -1027,8 +1276,14 @@ module parquet_columns
         end subroutine bits_copy_range
         !> Ensures the bitmap exists and covers every element, zero-filling new blocks (0 = valid),
         !! and marks the column bitmap-backed.
-        module subroutine ensure_bitmap(self)
-            class(parquet_column), intent(inout) :: self !! the column.
+        !!
+        !! Takes a NON-polymorphic dummy, unlike its neighbours here: the typed `set_null` forms
+        !! call it, and a typed body handing a `type(parquet_column)` to a `class` dummy rebuilds
+        !! the whole descriptor block the typed tier exists to remove (feature_ifx.md). It is
+        !! private plumbing and never a binding, so it needs no polymorphic form at all -- every
+        !! existing caller passes a `class` actual, which a `type` dummy accepts for free.
+        module subroutine ensure_bitmap(col)
+            type(parquet_column), intent(inout) :: col !! the column.
         end subroutine ensure_bitmap
         !> Whether this column's validity storage already exists, i.e. whether nulling an element
         !! would still have to ALLOCATE something.
@@ -1174,30 +1429,39 @@ def gen_access():
 submodule (parquet_columns) parquet_columns_access
     implicit none
 contains""")
+    P = TYPED_PREFIX
     for k in ARRAY_KINDS:
         tag, pk, decl, comp, rank, cat = k
         temporal = cat == "tmp"
         if rank == 1:
             w(f"""    !
-    module procedure get_at_{tag}
+    module procedure {P}get_at_{tag}
 {cell_guards(pk, "get_at")}
-        value = self%{comp}(i)
+        value = col%{comp}(i)
+    end procedure {P}get_at_{tag}
+    !
+    module procedure get_at_{tag}
+        call {P}get_at_{tag}(self, i, value)
     end procedure get_at_{tag}
     !
-    module procedure set_at_{tag}
+    module procedure {P}set_at_{tag}
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
 {cell_guards(pk, "set_at")}
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if ({P}is_null(col, i)) return
         end if
-        self%{comp}(i) = value""")
+        col%{comp}(i) = value""")
             if temporal:
-                w("        self%nulls_dirty = .true.")
+                w("        col%nulls_dirty = .true.")
             else:
-                w("        if (self%has_nulls) call bit_clear(self%validity, i)")
-            w(f"""    end procedure set_at_{tag}
+                w("        if (col%has_nulls) call bit_clear(col%validity, i)")
+            w(f"""    end procedure {P}set_at_{tag}
+    !
+    module procedure set_at_{tag}
+        call {P}set_at_{tag}(self, i, value, modify_nulls)
+    end procedure set_at_{tag}
     !
     module procedure set_all_{tag}
         logical :: mod_nulls
@@ -1242,68 +1506,88 @@ contains""")
                 w("        self%nulls_dirty = .true.")
             w(f"""    end procedure adopt_{tag}
     !
+    module procedure {P}data_ptr_{tag}
+        call {P}check_kind(col, {pk}, "data_ptr")
+        p => col%{comp}(1:col%nrows)
+    end procedure {P}data_ptr_{tag}
+    !
     module procedure data_ptr_{tag}
-        call check_kind(self, {pk}, "data_ptr")
-        p => self%{comp}(1:self%nrows)
+        call {P}data_ptr_{tag}(self, p)
     end procedure data_ptr_{tag}""")
         else:
             w(f"""    !
-    module procedure get_at_{tag}
+    module procedure {P}get_at_{tag}
 {cell_guards(pk, "get_at")}
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%{comp}(:, i)
+        call {P}check_width(col, size(value, kind=int64), "get_at")
+        value = col%{comp}(:, i)
+    end procedure {P}get_at_{tag}
+    !
+    module procedure get_at_{tag}
+        call {P}get_at_{tag}(self, i, value)
     end procedure get_at_{tag}
     !
-    module procedure set_at_{tag}
+    module procedure {P}set_at_{tag}
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, {pk}, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call {P}check_kind(col, {pk}, "set_at")
+        call {P}check_index(col, i, "set_at")
+        call {P}check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%{comp}(e, i) = value(e)
+                if ({P}is_null(col, i, e)) cycle
+                col%{comp}(e, i) = value(e)
             end do
             return
         end if
-        self%{comp}(:, i) = value""")
+        col%{comp}(:, i) = value""")
             if temporal:
-                w("        self%nulls_dirty = .true.")
+                w("        col%nulls_dirty = .true.")
             else:
-                w("""        if (self%has_nulls) then
-            base = (i - 1_int64)*int(self%width, int64)
-            do e = 1_int64, int(self%width, int64)
-                call bit_clear(self%validity, base + e)
+                w("""        if (col%has_nulls) then
+            base = (i - 1_int64)*int(col%width, int64)
+            do e = 1_int64, int(col%width, int64)
+                call bit_clear(col%validity, base + e)
             end do
         end if""")
-            w(f"""    end procedure set_at_{tag}
+            w(f"""    end procedure {P}set_at_{tag}
+    !
+    module procedure set_at_{tag}
+        call {P}set_at_{tag}(self, i, value, modify_nulls)
+    end procedure set_at_{tag}
+    !
+    module procedure {P}get_elem_{tag}
+{cell_guards(pk, "get_elem")}
+        call {P}check_element(col, e, "get_elem")
+        value = col%{comp}(e, i)
+    end procedure {P}get_elem_{tag}
     !
     module procedure get_elem_{tag}
-{cell_guards(pk, "get_elem")}
-        call check_element(self, e, "get_elem")
-        value = self%{comp}(e, i)
+        call {P}get_elem_{tag}(self, i, e, value)
     end procedure get_elem_{tag}
     !
-    module procedure set_elem_{tag}
-        call check_kind(self, {pk}, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%{comp}(e, i) = value""")
+    module procedure {P}set_elem_{tag}
+        call {P}check_kind(col, {pk}, "set_elem")
+        call {P}check_index(col, i, "set_elem")
+        call {P}check_element(col, e, "set_elem")
+        col%{comp}(e, i) = value""")
             if temporal:
                 # A temporal element IS its own null state, so assigning it is what makes it valid
                 # -- or null, if the caller assigned a default-initialised one. Either way the
                 # cached answer no longer describes the data, hence the flag rather than a guess.
-                w("        self%nulls_dirty = .true.")
+                w("        col%nulls_dirty = .true.")
             else:
-                w("        if (self%has_nulls) call bit_clear(self%validity, "
-                  "(i - 1_int64)*int(self%width, int64) + e)")
-            w(f"""    end procedure set_elem_{tag}
+                w("        if (col%has_nulls) call bit_clear(col%validity, "
+                  "(i - 1_int64)*int(col%width, int64) + e)")
+            w(f"""    end procedure {P}set_elem_{tag}
+    !
+    module procedure set_elem_{tag}
+        call {P}set_elem_{tag}(self, i, e, value)
+    end procedure set_elem_{tag}
     !
     module procedure set_all_{tag}
         logical :: mod_nulls
@@ -1351,9 +1635,13 @@ contains""")
                 w("        self%nulls_dirty = .true.")
             w(f"""    end procedure adopt_{tag}
     !
+    module procedure {P}data_ptr_{tag}
+        call {P}check_kind(col, {pk}, "data_ptr")
+        p => col%{comp}(:, 1:col%nrows)
+    end procedure {P}data_ptr_{tag}
+    !
     module procedure data_ptr_{tag}
-        call check_kind(self, {pk}, "data_ptr")
-        p => self%{comp}(:, 1:self%nrows)
+        call {P}data_ptr_{tag}(self, p)
     end procedure data_ptr_{tag}""")
     w("    !")
     w("end submodule parquet_columns_access ! GCOVR_EXCL_LINE")

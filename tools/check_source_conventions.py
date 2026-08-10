@@ -247,6 +247,168 @@ def check_pointers_go_through_cache():
     return problems
 
 
+#: The files holding `parquet_column`'s own implementation, typed tier included.
+COLUMN_FILES = sorted(SRC.glob("parquet_columns*.f90"))
+
+#: Prefix of the typed (non-polymorphic) accessor tier -- see feature_ifx.md.
+TYPED_PREFIX = "parquet_column_"
+
+#: The bindings whose typed twin exists, i.e. the ones a per-cell path must NOT reach through a
+#: type-bound call. Derived by shape below rather than trusted from here: this list is only used
+#: to phrase the message, and an entry with no matching `parquet_column_<name>` generic is
+#: reported, so the list cannot quietly go stale in either direction.
+TYPED_TWINNED_BINDINGS = (
+    "get_at", "set_at", "get_elem", "set_elem",
+    "is_null", "set_null", "clear_null", "data_ptr", "string_column",
+)
+
+
+def _typed_generics_declared():
+    """The `parquet_column_*` generic names `parquet_columns` actually exports."""
+    text = (SRC / "parquet_columns.f90").read_text()
+    return set(re.findall(r"^\s*interface\s+(" + TYPED_PREFIX + r"\w+)\s*$", text, re.M)) | \
+        set(re.findall(r"^\s*public\s*::\s*(" + TYPED_PREFIX + r"\w+)\s*$", text, re.M))
+
+
+def _class_column_procedures():
+    """Module procedures declared with a `class(parquet_column)` dummy.
+
+    A typed body calling one of these hands a `type(parquet_column)` to a `class` dummy, which is
+    the exact conversion the typed tier exists to remove -- so it silently restores the whole cost.
+    """
+    text = (SRC / "parquet_columns.f90").read_text()
+    names = set()
+    current = None
+    for line in text.split("\n"):
+        code = strip_comment(line)
+        header = re.match(r"^\s*module\s+(?:subroutine|function)\s+(\w+)\s*\(", code, re.I)
+        if header:
+            current = header.group(1)
+            continue
+        if re.match(r"^\s*end\s+(?:subroutine|function)\b", code, re.I):
+            current = None
+            continue
+        if current and re.search(r"^\s*class\s*\(\s*parquet_column\s*\)", code, re.I):
+            names.add(current)
+    return names
+
+
+def _column_bindings():
+    """Every type-bound name on `parquet_column` (`generic ::` names and `procedure ::` bindings).
+
+    Reads the type's `contains` section, which is exactly the part `type_body_lines` stops at --
+    that helper answers "which COMPONENTS does this type have", and this needs the bindings.
+    """
+    lines = (SRC / "parquet_columns.f90").read_text().split("\n")
+    names, inside = set(), False
+    for line in lines:
+        code = strip_comment(line)
+        if re.match(r"^\s*type\s*(,\s*[^:]*)?::\s*parquet_column\s*$", code, re.I):
+            inside = True
+            continue
+        if not inside:
+            continue
+        if re.match(r"^\s*end\s+type\b", code, re.I):
+            break
+        match = re.match(r"^\s*generic\s*::\s*(\w+)\s*=>", code, re.I)
+        if match:
+            names.add(match.group(1).lower())
+            continue
+        match = re.match(r"^\s*procedure\s*(?:,[^:]*?)?\s*::\s*(\w+)", code, re.I)
+        if match:
+            names.add(match.group(1).lower())
+    return names
+
+
+def check_no_type_bound_column_access():
+    """feature_ifx.md -- no per-cell path may reach a `type(parquet_column)` through a binding.
+
+    Two halves, because the cost comes back through either one and NOTHING fails when it does:
+    every answer stays correct, every test stays green, and only an ifx `objdump` store count
+    shows the ~35 ns per call returning.
+
+      1. The TABLE layer must call the typed generics, never `%values%<binding>`.
+      2. The typed tier itself must call the TYPED guards and helpers, never a `class`-dummy
+         procedure and never a binding on its own `col` dummy.
+
+    Matched by shape, not from an enumerated list of procedure names, per this file's own rule.
+    """
+    problems = []
+    generics = _typed_generics_declared()
+    for name in TYPED_TWINNED_BINDINGS:
+        if TYPED_PREFIX + name not in generics:
+            problems.append(
+                "src/parquet_columns.f90: no public `%s%s` -- this check's binding list has gone "
+                "stale, or the typed tier lost a family (feature_ifx.md)" % (TYPED_PREFIX, name)
+            )
+    # An empty derivation means the source moved, not that the invariant holds -- fail rather than
+    # report a vacuous [ok] (this file's own "a static check that enumerates names goes stale
+    # silently" rule; both sets came back empty once during development).
+    class_procs = _class_column_procedures()
+    bindings = _column_bindings()
+    if not class_procs:
+        problems.append("src/parquet_columns.f90: found no `class(parquet_column)` procedure -- "
+                        "this check can no longer see the spec and is passing vacuously")
+    if not bindings:
+        problems.append("src/parquet_columns.f90: found no type-bound procedure on parquet_column "
+                        "-- this check can no longer see the type and is passing vacuously")
+
+    # 1. The table layer.
+    binding_re = re.compile(r"%\s*values\s*%\s*(" + "|".join(TYPED_TWINNED_BINDINGS) + r")\s*\(", re.I)
+    for path in TABLE_FILES:
+        for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
+            match = binding_re.search(strip_comment(raw))
+            if match:
+                problems.append(
+                    "%s:%d: reaches column storage through the type-bound `%%values%%%s(...)`. "
+                    "Call `%s%s(<designator>%%values, ...)` instead -- a `type(parquet_column)` "
+                    "actual passed to a `class` dummy makes ifx build a runtime type descriptor in "
+                    "this procedure's prologue, unconditionally, on every call (~35 ns; "
+                    "feature_ifx.md). Nothing fails if this regresses:\n    %s"
+                    % (path.relative_to(REPO_ROOT), lineno, match.group(1), TYPED_PREFIX,
+                       match.group(1), raw.strip())
+                )
+
+    # 2. The typed tier itself.
+    for path in COLUMN_FILES:
+        text = path.read_text()
+        # Bodies live in the SUBMODULES; `parquet_columns.f90` is the spec and holds only
+        # declarations -- including `module procedure <name>` lines inside generic interface
+        # blocks, which are not bodies at all and would otherwise be read as one.
+        if not re.search(r"^\s*submodule\s*\(\s*parquet_columns\s*\)", text, re.M | re.I):
+            continue
+        current = None
+        for lineno, raw in enumerate(text.split("\n"), start=1):
+            code = strip_comment(raw)
+            header = re.match(r"^\s*module\s+procedure\s+(\w+)\s*$", code, re.I)
+            if header:
+                current = header.group(1)
+                continue
+            if re.match(r"^\s*end\s+(?:procedure|interface)\b", code, re.I):
+                current = None
+                continue
+            if not current or not current.lower().startswith(TYPED_PREFIX):
+                continue
+            for called in re.findall(r"\b(\w+)\s*\(", code):
+                if called in class_procs:
+                    problems.append(
+                        "%s:%d: typed procedure `%s` calls `%s`, which takes a "
+                        "`class(parquet_column)` dummy -- that rebuilds the descriptor block this "
+                        "tier exists to remove. Call the `%s%s` form (feature_ifx.md §7.2):\n    %s"
+                        % (path.relative_to(REPO_ROOT), lineno, current, called,
+                           TYPED_PREFIX, called, raw.strip())
+                    )
+            for bound in re.findall(r"\bcol\s*%\s*(\w+)\s*\(", code, re.I):
+                if bound.lower() in bindings:
+                    problems.append(
+                        "%s:%d: typed procedure `%s` makes the type-bound call `col%%%s(...)` on "
+                        "its own non-polymorphic dummy, which is the conversion this tier exists "
+                        "to remove. Call the typed form instead (feature_ifx.md §8.2):\n    %s"
+                        % (path.relative_to(REPO_ROOT), lineno, current, bound, raw.strip())
+                    )
+    return problems
+
+
 def check_generated_file_conventions():
     """feature_risks.md Risk-19 -- a template omission is invisible to the generators' --check modes."""
     problems = []
@@ -1184,6 +1346,7 @@ def check_doc_page_index_consistency():
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
+    ("no per-cell path reaches a column through a binding", check_no_type_bound_column_access),
     ("generated files carry their conventions", check_generated_file_conventions),
     ("the schema-less write declares auto sizes", check_schemaless_write_declares_auto),
     ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),

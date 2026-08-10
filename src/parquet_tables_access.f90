@@ -27,7 +27,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_INT32, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_i32
     !
     module procedure col_ptr_i64
@@ -44,7 +44,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_INT64, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_i64
     !
     module procedure col_ptr_f32
@@ -61,7 +61,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_FLOAT32, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_f32
     !
     module procedure col_ptr_f64
@@ -78,7 +78,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_FLOAT64, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_f64
     !
     module procedure col_ptr_bool
@@ -95,7 +95,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_LOGICAL, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_bool
     !
     module procedure col_ptr_date
@@ -112,7 +112,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_DATE, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_date
     !
     module procedure col_ptr_time
@@ -129,7 +129,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_TIME, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_time
     !
     module procedure col_ptr_ts
@@ -146,7 +146,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_TIMESTAMP, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_ts
     !
     module procedure col_ptr_i32v
@@ -163,7 +163,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_INT32_VEC, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_i32v
     !
     module procedure col_ptr_i64v
@@ -180,7 +180,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_INT64_VEC, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_i64v
     !
     module procedure col_ptr_f32v
@@ -197,7 +197,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_FLOAT32_VEC, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_f32v
     !
     module procedure col_ptr_f64v
@@ -214,7 +214,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_FLOAT64_VEC, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_f64v
     !
     module procedure col_ptr_boolv
@@ -231,7 +231,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_LOGICAL_VEC, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_boolv
     !
     module procedure col_ptr_datev
@@ -248,7 +248,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_DATE_VEC, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_datev
     !
     module procedure col_ptr_timev
@@ -265,7 +265,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_TIME_VEC, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_timev
     !
     module procedure col_ptr_tsv
@@ -282,7 +282,7 @@ contains
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, PK_TIMESTAMP_VEC, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_tsv
     !
     module procedure col_ptr_strcol
@@ -292,7 +292,7 @@ contains
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING, "col")
-        call self%cache%cols(idx)%values%string_column(p)
+        call parquet_column_string_column(self%cache%cols(idx)%values, p)
     end procedure col_ptr_strcol
     !
     module procedure set_arr_strcol
@@ -306,7 +306,7 @@ contains
         ! Replaces the packed store wholesale with an independent copy, so the caller's own column
         ! and the table's do not end up sharing storage. %set is a value replacement, exactly as
         ! the character-array form is; it is not a way to hand ownership over.
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         store = arr%clone()
         if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
@@ -980,7 +980,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT32)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p)))
             arr = p
         case default
@@ -1005,11 +1005,11 @@ contains
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT64)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p)))
             arr = p
         case (PK_INT32)
-            call self%cache%cols(idx)%values%data_ptr(p_i32)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p_i32)
             allocate(arr(size(p_i32)))
             arr = p_i32
         case default
@@ -1033,7 +1033,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT32)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p)))
             arr = p
         case default
@@ -1058,11 +1058,11 @@ contains
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT64)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p)))
             arr = p
         case (PK_FLOAT32)
-            call self%cache%cols(idx)%values%data_ptr(p_f32)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p_f32)
             allocate(arr(size(p_f32)))
             arr = p_f32
         case default
@@ -1086,7 +1086,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_LOGICAL)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p)))
             arr = p
         case default
@@ -1110,7 +1110,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_DATE)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p)))
             arr = p
         case default
@@ -1134,7 +1134,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIME)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p)))
             arr = p
         case default
@@ -1158,7 +1158,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIMESTAMP)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p)))
             arr = p
         case default
@@ -1182,7 +1182,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT32_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
@@ -1207,11 +1207,11 @@ contains
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT64_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case (PK_INT32_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p_i32v)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p_i32v)
             allocate(arr(size(p_i32v,1), size(p_i32v,2)))
             arr = p_i32v
         case default
@@ -1235,7 +1235,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT32_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
@@ -1260,11 +1260,11 @@ contains
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT64_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case (PK_FLOAT32_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p_f32v)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p_f32v)
             allocate(arr(size(p_f32v,1), size(p_f32v,2)))
             arr = p_f32v
         case default
@@ -1288,7 +1288,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_LOGICAL_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
@@ -1312,7 +1312,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_DATE_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
@@ -1336,7 +1336,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIME_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
@@ -1360,7 +1360,7 @@ contains
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, idx, is_valid)
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIMESTAMP_VEC)
-            call self%cache%cols(idx)%values%data_ptr(p)
+            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
             allocate(arr(size(p,1), size(p,2)))
             arr = p
         case default
@@ -1381,7 +1381,7 @@ contains
         end if
         call table_require_kind(self, idx, PK_STRING, "get")
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        call self%cache%cols(idx)%values%string_column(src)
+        call parquet_column_string_column(self%cache%cols(idx)%values, src)
         arr = src%clone()
     end procedure get_arr_str
     !
@@ -1402,7 +1402,7 @@ contains
         n = self%cache%cols(idx)%values%length()
         ! Two passes: the width must be the longest element present, and a fixed-length array
         ! cannot be grown per element. A null reads back as "" and so contributes length 0.
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! `%length` measures without allocating and `%copy_to` fills a fixed-length slot without
         ! allocating, so neither pass materializes a string. `maxlen` starts at 1 so that an
         ! all-empty column still yields `character(len=1)` rather than `len=0`.
@@ -1435,7 +1435,7 @@ contains
         ! A vector string column is ONE flat string store of width*nrows elements, element
         ! (e, i) living at (i-1)*width + e -- reaching it directly is what lets each element
         ! come back as an allocatable string, which the two-pass width measurement needs.
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do i = 1, n
@@ -2201,7 +2201,7 @@ contains
         call row_resolve(self, name, "get", idx)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT32)
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2214,9 +2214,9 @@ contains
         call row_resolve(self, name, "get", idx)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT64)
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case (PK_INT32)
-            call self%cache%cols(idx)%values%get_at(self%irow, v_i32)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, v_i32)
             value = v_i32
         case default
             call row_kind_error(self, name, idx)
@@ -2229,7 +2229,7 @@ contains
         call row_resolve(self, name, "get", idx)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT32)
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2242,9 +2242,9 @@ contains
         call row_resolve(self, name, "get", idx)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT64)
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case (PK_FLOAT32)
-            call self%cache%cols(idx)%values%get_at(self%irow, v_f32)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, v_f32)
             value = v_f32
         case default
             call row_kind_error(self, name, idx)
@@ -2257,7 +2257,7 @@ contains
         call row_resolve(self, name, "get", idx)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_LOGICAL)
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2269,7 +2269,7 @@ contains
         !
         call row_resolve(self, name, "get", idx)
         call row_require_kind(self, name, idx, PK_STRING)
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! allow_null keeps a null row from aborting: it reads back as "", and %is_null is how a
         ! caller tells the two apart.
         call store%get(self%irow, value, allow_null=.true.)
@@ -2281,7 +2281,7 @@ contains
         call row_resolve(self, name, "get", idx)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_DATE)
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2293,7 +2293,7 @@ contains
         call row_resolve(self, name, "get", idx)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIME)
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2305,7 +2305,7 @@ contains
         call row_resolve(self, name, "get", idx)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIMESTAMP)
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2318,7 +2318,7 @@ contains
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT32_VEC)
             allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2332,10 +2332,10 @@ contains
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT64_VEC)
             allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case (PK_INT32_VEC)
             allocate(v_i32v(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, v_i32v)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, v_i32v)
             allocate(value(self%cache%cols(idx)%width))
             value = v_i32v
         case default
@@ -2350,7 +2350,7 @@ contains
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT32_VEC)
             allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2364,10 +2364,10 @@ contains
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT64_VEC)
             allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case (PK_FLOAT32_VEC)
             allocate(v_f32v(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, v_f32v)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, v_f32v)
             allocate(value(self%cache%cols(idx)%width))
             value = v_f32v
         case default
@@ -2382,7 +2382,7 @@ contains
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_LOGICAL_VEC)
             allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2399,7 +2399,7 @@ contains
         wdt = self%cache%cols(idx)%width
         ! A vector string column is ONE flat store of width*nrows elements, element (e, i) at
         ! (i-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do e = 1, wdt
@@ -2420,7 +2420,7 @@ contains
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_DATE_VEC)
             allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2433,7 +2433,7 @@ contains
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIME_VEC)
             allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2446,7 +2446,7 @@ contains
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIMESTAMP_VEC)
             allocate(value(self%cache%cols(idx)%width))
-            call self%cache%cols(idx)%values%get_at(self%irow, value)
+            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)
         case default
             call row_kind_error(self, name, idx)
         end select
@@ -2457,7 +2457,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_INT32)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_i32
     !
@@ -2466,7 +2466,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_INT64)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_i64
     !
@@ -2475,7 +2475,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_FLOAT32)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_f32
     !
@@ -2484,7 +2484,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_FLOAT64)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_f64
     !
@@ -2493,7 +2493,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_LOGICAL)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_bool
     !
@@ -2502,7 +2502,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_STRING)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_str
     !
@@ -2511,7 +2511,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_DATE)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_date
     !
@@ -2520,7 +2520,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_TIME)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_time
     !
@@ -2529,7 +2529,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_TIMESTAMP)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_ts
     !
@@ -2538,7 +2538,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_INT32_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_i32v
     !
@@ -2547,7 +2547,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_INT64_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_i64v
     !
@@ -2556,7 +2556,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_FLOAT32_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_f32v
     !
@@ -2565,7 +2565,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_FLOAT64_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_f64v
     !
@@ -2574,7 +2574,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_LOGICAL_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_boolv
     !
@@ -2583,7 +2583,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_STRING_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_strv
     !
@@ -2592,7 +2592,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_DATE_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_datev
     !
@@ -2601,7 +2601,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_TIME_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_timev
     !
@@ -2610,7 +2610,7 @@ contains
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, PK_TIMESTAMP_VEC)
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_tsv
     !
@@ -2819,7 +2819,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_INT32)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)
     end procedure row_ref_i32
     !
@@ -2830,7 +2830,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_INT64)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)
     end procedure row_ref_i64
     !
@@ -2841,7 +2841,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_FLOAT32)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)
     end procedure row_ref_f32
     !
@@ -2852,7 +2852,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_FLOAT64)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)
     end procedure row_ref_f64
     !
@@ -2863,7 +2863,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_LOGICAL)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)
     end procedure row_ref_bool
     !
@@ -2874,7 +2874,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_DATE)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)
     end procedure row_ref_date
     !
@@ -2885,7 +2885,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_TIME)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)
     end procedure row_ref_time
     !
@@ -2896,7 +2896,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_TIMESTAMP)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)
     end procedure row_ref_ts
     !
@@ -2907,7 +2907,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_INT32_VEC)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)
     end procedure row_ref_i32v
     !
@@ -2918,7 +2918,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_INT64_VEC)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)
     end procedure row_ref_i64v
     !
@@ -2929,7 +2929,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_FLOAT32_VEC)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)
     end procedure row_ref_f32v
     !
@@ -2940,7 +2940,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_FLOAT64_VEC)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)
     end procedure row_ref_f64v
     !
@@ -2951,7 +2951,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_LOGICAL_VEC)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)
     end procedure row_ref_boolv
     !
@@ -2962,7 +2962,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_DATE_VEC)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)
     end procedure row_ref_datev
     !
@@ -2973,7 +2973,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_TIME_VEC)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)
     end procedure row_ref_timev
     !
@@ -2984,7 +2984,7 @@ contains
         nullify(p)
         call row_resolve(self, name, "ref", idx)
         call row_require_kind(self, name, idx, PK_TIMESTAMP_VEC)
-        call self%cache%cols(idx)%values%data_ptr(store)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)
     end procedure row_ref_tsv
     !
@@ -3005,7 +3005,7 @@ contains
         case (PK_INT32)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3030,12 +3030,12 @@ contains
         case (PK_INT64)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case (PK_INT32)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), v_i32)
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_i32)
                 arr(k) = v_i32
             end do
         case default
@@ -3060,7 +3060,7 @@ contains
         case (PK_FLOAT32)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3085,12 +3085,12 @@ contains
         case (PK_FLOAT64)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case (PK_FLOAT32)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), v_f32)
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_f32)
                 arr(k) = v_f32
             end do
         case default
@@ -3115,7 +3115,7 @@ contains
         case (PK_LOGICAL)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3139,7 +3139,7 @@ contains
         case (PK_DATE)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3163,7 +3163,7 @@ contains
         case (PK_TIME)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3187,7 +3187,7 @@ contains
         case (PK_TIMESTAMP)
             allocate(arr(size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3211,7 +3211,7 @@ contains
         case (PK_INT32_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3236,13 +3236,13 @@ contains
         case (PK_INT64_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case (PK_INT32_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             allocate(v_i32v(self%cache%cols(idx)%width))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), v_i32v)
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_i32v)
                 arr(:, k) = v_i32v
             end do
         case default
@@ -3267,7 +3267,7 @@ contains
         case (PK_FLOAT32_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3292,13 +3292,13 @@ contains
         case (PK_FLOAT64_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case (PK_FLOAT32_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             allocate(v_f32v(self%cache%cols(idx)%width))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), v_f32v)
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_f32v)
                 arr(:, k) = v_f32v
             end do
         case default
@@ -3323,7 +3323,7 @@ contains
         case (PK_LOGICAL_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3347,7 +3347,7 @@ contains
         case (PK_DATE_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3371,7 +3371,7 @@ contains
         case (PK_TIME_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3395,7 +3395,7 @@ contains
         case (PK_TIMESTAMP_VEC)
             allocate(arr(self%cache%cols(idx)%width, size(rows)))
             do k = 1, size(rows, kind=int64)
-                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))
+                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case default
             call slice_kind_error(self, name, idx)
@@ -3414,7 +3414,7 @@ contains
         call table_require_kind(self, idx, PK_STRING, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Built element by element rather than copied and trimmed: a gather has no contiguous
         ! source range to clone from, and appending keeps the result compact.
         ! `%append_from` carries both the bytes and the null state, so the is_null fork this
@@ -3436,7 +3436,7 @@ contains
         call table_require_kind(self, idx, PK_STRING, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Two passes: a fixed-length array's width must be the longest element SELECTED, which
         ! is not known until every selected row has been looked at.
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
@@ -3463,7 +3463,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         wdt = self%cache%cols(idx)%width
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do k = 1, size(rows, kind=int64)
@@ -3492,7 +3492,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3509,7 +3509,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3526,7 +3526,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3543,7 +3543,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3560,7 +3560,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3577,7 +3577,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3594,7 +3594,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3611,7 +3611,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3628,7 +3628,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3645,7 +3645,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3662,7 +3662,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3679,7 +3679,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3696,7 +3696,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3713,7 +3713,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3730,7 +3730,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3747,7 +3747,7 @@ contains
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, size(arr, 2, kind=int64), size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3766,7 +3766,7 @@ contains
         ! One row at a time through set_at, which the string store supports in place -- unlike
         ! %paste, which cannot overwrite a packed variable-length store's range wholesale.
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -3785,7 +3785,7 @@ contains
         ! One row at a time through set_at, which the string store supports in place -- unlike
         ! %paste, which cannot overwrite a packed variable-length store's range wholesale.
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), arr(:, k), modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), arr(:, k), modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows_elem(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.

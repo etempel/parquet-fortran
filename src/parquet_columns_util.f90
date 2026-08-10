@@ -32,18 +32,33 @@ contains
     !! Kind checking is exact everywhere, with no widening (DD2): a `PK_INT32` column is not
     !! readable through an int64 accessor even though the value would fit. Widening is a
     !! decision the table layer makes once, when it materializes a column from a file.
-    module procedure check_kind
-        if (self%kind /= expected) then
-            error stop EP//proc//": column kind is "//trim(kind_text(self%kind))// &
+    !!
+    !! **This is the implementation; `check_kind` below forwards to it.** Every guard in this
+    !! file comes in that pair, because a typed per-cell accessor calling a `class`-dummy guard
+    !! would reintroduce the descriptor block the typed tier exists to remove -- feature_ifx.md
+    !! §7.2 lists the guards as part of the problem for exactly this reason.
+    module procedure parquet_column_check_kind
+        if (col%kind /= expected) then
+            error stop EP//proc//": column kind is "//trim(kind_text(col%kind))// &
                 ", but this call requires "//trim(kind_text(expected))
         end if
+    end procedure parquet_column_check_kind
+    !
+    !> Aborts unless the column's active kind is exactly `expected` (polymorphic form).
+    module procedure check_kind
+        call parquet_column_check_kind(self, expected, proc)
     end procedure check_kind
     !
     !> Aborts unless `i` is a valid 1-based row index for this column.
-    module procedure check_index
-        if (i < 1_int64 .or. i > self%nrows) then
+    module procedure parquet_column_check_index
+        if (i < 1_int64 .or. i > col%nrows) then
             error stop EP//proc//": row index out of range"
         end if
+    end procedure parquet_column_check_index
+    !
+    !> Aborts unless `i` is a valid 1-based row index (polymorphic form).
+    module procedure check_index
+        call parquet_column_check_index(self, i, proc)
     end procedure check_index
     !
     !> Aborts unless `e` is a valid 1-based element index within a row (`1 <= e <= width`).
@@ -52,10 +67,15 @@ contains
     !! this wrong is to pass a FLAT element position where a row index and an element index were
     !! wanted -- naming the element axis is what makes that visible instead of looking like an
     !! ordinary out-of-range row.
-    module procedure check_element
-        if (e < 1_int64 .or. e > int(self%width, int64)) then
+    module procedure parquet_column_check_element
+        if (e < 1_int64 .or. e > int(col%width, int64)) then
             error stop EP//proc//": element index out of range (must be 1 <= e <= the column's width)"
         end if
+    end procedure parquet_column_check_element
+    !
+    !> Aborts unless `e` is a valid 1-based element index within a row (polymorphic form).
+    module procedure check_element
+        call parquet_column_check_element(self, e, proc)
     end procedure check_element
     !
     !> Aborts unless `n` matches the column's own row count.
@@ -66,10 +86,15 @@ contains
     end procedure check_nrows
     !
     !> Aborts unless `n` matches the column's own vector width.
-    module procedure check_width
-        if (n /= int(self%width, int64)) then
+    module procedure parquet_column_check_width
+        if (n /= int(col%width, int64)) then
             error stop EP//proc//": value count per row does not match the column width"
         end if
+    end procedure parquet_column_check_width
+    !
+    !> Aborts unless `n` matches the column's own vector width (polymorphic form).
+    module procedure check_width
+        call parquet_column_check_width(self, n, proc)
     end procedure check_width
     !
     !> Number of validity bits the column needs: one per element.
@@ -259,21 +284,21 @@ contains
         ! remove, on a column that happens to carry a null, with every test still passing. The
         ! extra blocks are zero-filled below, so rows in the spare capacity read as valid if a
         ! later append ever brings them into range.
-        want_bits = max(self%cap, self%nrows)*int(self%width, int64)
+        want_bits = max(col%cap, col%nrows)*int(col%width, int64)
         need = max(blocks_for(want_bits), 1_int64)
-        if (.not. allocated(self%validity)) then
-            allocate(self%validity(need))
-            self%validity = 0_int64
+        if (.not. allocated(col%validity)) then
+            allocate(col%validity(need))
+            col%validity = 0_int64
         else
-            have = size(self%validity, kind=int64)
+            have = size(col%validity, kind=int64)
             if (have < need) then
                 allocate(tmp(need))
                 tmp = 0_int64
-                tmp(1:have) = self%validity(1:have)
-                call move_alloc(tmp, self%validity)
+                tmp(1:have) = col%validity(1:have)
+                call move_alloc(tmp, col%validity)
             end if
         end if
-        self%has_nulls = .true.
+        col%has_nulls = .true.
     end procedure ensure_bitmap
     !
     !> Releases the bitmap: every row becomes valid again and the column costs one scalar.

@@ -24,23 +24,31 @@ submodule (parquet_columns) parquet_columns_access
     implicit none
 contains
     !
+    module procedure parquet_column_get_at_i32
+        call parquet_column_check_kind(col, PK_INT32, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        value = col%i32(i)
+    end procedure parquet_column_get_at_i32
+    !
     module procedure get_at_i32
-        call check_kind(self, PK_INT32, "get_at")
-        call check_index(self, i, "get_at")
-        value = self%i32(i)
+        call parquet_column_get_at_i32(self, i, value)
     end procedure get_at_i32
     !
-    module procedure set_at_i32
+    module procedure parquet_column_set_at_i32
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_INT32, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_INT32, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if (parquet_column_is_null(col, i)) return
         end if
-        self%i32(i) = value
-        if (self%has_nulls) call bit_clear(self%validity, i)
+        col%i32(i) = value
+        if (col%has_nulls) call bit_clear(col%validity, i)
+    end procedure parquet_column_set_at_i32
+    !
+    module procedure set_at_i32
+        call parquet_column_set_at_i32(self, i, value, modify_nulls)
     end procedure set_at_i32
     !
     module procedure set_all_i32
@@ -79,28 +87,40 @@ contains
         call move_alloc(values, self%i32)
     end procedure adopt_i32
     !
+    module procedure parquet_column_data_ptr_i32
+        call parquet_column_check_kind(col, PK_INT32, "data_ptr")
+        p => col%i32(1:col%nrows)
+    end procedure parquet_column_data_ptr_i32
+    !
     module procedure data_ptr_i32
-        call check_kind(self, PK_INT32, "data_ptr")
-        p => self%i32(1:self%nrows)
+        call parquet_column_data_ptr_i32(self, p)
     end procedure data_ptr_i32
     !
+    module procedure parquet_column_get_at_i64
+        call parquet_column_check_kind(col, PK_INT64, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        value = col%i64(i)
+    end procedure parquet_column_get_at_i64
+    !
     module procedure get_at_i64
-        call check_kind(self, PK_INT64, "get_at")
-        call check_index(self, i, "get_at")
-        value = self%i64(i)
+        call parquet_column_get_at_i64(self, i, value)
     end procedure get_at_i64
     !
-    module procedure set_at_i64
+    module procedure parquet_column_set_at_i64
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_INT64, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_INT64, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if (parquet_column_is_null(col, i)) return
         end if
-        self%i64(i) = value
-        if (self%has_nulls) call bit_clear(self%validity, i)
+        col%i64(i) = value
+        if (col%has_nulls) call bit_clear(col%validity, i)
+    end procedure parquet_column_set_at_i64
+    !
+    module procedure set_at_i64
+        call parquet_column_set_at_i64(self, i, value, modify_nulls)
     end procedure set_at_i64
     !
     module procedure set_all_i64
@@ -139,28 +159,40 @@ contains
         call move_alloc(values, self%i64)
     end procedure adopt_i64
     !
+    module procedure parquet_column_data_ptr_i64
+        call parquet_column_check_kind(col, PK_INT64, "data_ptr")
+        p => col%i64(1:col%nrows)
+    end procedure parquet_column_data_ptr_i64
+    !
     module procedure data_ptr_i64
-        call check_kind(self, PK_INT64, "data_ptr")
-        p => self%i64(1:self%nrows)
+        call parquet_column_data_ptr_i64(self, p)
     end procedure data_ptr_i64
     !
+    module procedure parquet_column_get_at_f32
+        call parquet_column_check_kind(col, PK_FLOAT32, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        value = col%f32(i)
+    end procedure parquet_column_get_at_f32
+    !
     module procedure get_at_f32
-        call check_kind(self, PK_FLOAT32, "get_at")
-        call check_index(self, i, "get_at")
-        value = self%f32(i)
+        call parquet_column_get_at_f32(self, i, value)
     end procedure get_at_f32
     !
-    module procedure set_at_f32
+    module procedure parquet_column_set_at_f32
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_FLOAT32, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_FLOAT32, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if (parquet_column_is_null(col, i)) return
         end if
-        self%f32(i) = value
-        if (self%has_nulls) call bit_clear(self%validity, i)
+        col%f32(i) = value
+        if (col%has_nulls) call bit_clear(col%validity, i)
+    end procedure parquet_column_set_at_f32
+    !
+    module procedure set_at_f32
+        call parquet_column_set_at_f32(self, i, value, modify_nulls)
     end procedure set_at_f32
     !
     module procedure set_all_f32
@@ -199,28 +231,40 @@ contains
         call move_alloc(values, self%f32)
     end procedure adopt_f32
     !
+    module procedure parquet_column_data_ptr_f32
+        call parquet_column_check_kind(col, PK_FLOAT32, "data_ptr")
+        p => col%f32(1:col%nrows)
+    end procedure parquet_column_data_ptr_f32
+    !
     module procedure data_ptr_f32
-        call check_kind(self, PK_FLOAT32, "data_ptr")
-        p => self%f32(1:self%nrows)
+        call parquet_column_data_ptr_f32(self, p)
     end procedure data_ptr_f32
     !
+    module procedure parquet_column_get_at_f64
+        call parquet_column_check_kind(col, PK_FLOAT64, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        value = col%f64(i)
+    end procedure parquet_column_get_at_f64
+    !
     module procedure get_at_f64
-        call check_kind(self, PK_FLOAT64, "get_at")
-        call check_index(self, i, "get_at")
-        value = self%f64(i)
+        call parquet_column_get_at_f64(self, i, value)
     end procedure get_at_f64
     !
-    module procedure set_at_f64
+    module procedure parquet_column_set_at_f64
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_FLOAT64, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_FLOAT64, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if (parquet_column_is_null(col, i)) return
         end if
-        self%f64(i) = value
-        if (self%has_nulls) call bit_clear(self%validity, i)
+        col%f64(i) = value
+        if (col%has_nulls) call bit_clear(col%validity, i)
+    end procedure parquet_column_set_at_f64
+    !
+    module procedure set_at_f64
+        call parquet_column_set_at_f64(self, i, value, modify_nulls)
     end procedure set_at_f64
     !
     module procedure set_all_f64
@@ -259,28 +303,40 @@ contains
         call move_alloc(values, self%f64)
     end procedure adopt_f64
     !
+    module procedure parquet_column_data_ptr_f64
+        call parquet_column_check_kind(col, PK_FLOAT64, "data_ptr")
+        p => col%f64(1:col%nrows)
+    end procedure parquet_column_data_ptr_f64
+    !
     module procedure data_ptr_f64
-        call check_kind(self, PK_FLOAT64, "data_ptr")
-        p => self%f64(1:self%nrows)
+        call parquet_column_data_ptr_f64(self, p)
     end procedure data_ptr_f64
     !
+    module procedure parquet_column_get_at_bool
+        call parquet_column_check_kind(col, PK_LOGICAL, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        value = col%bool(i)
+    end procedure parquet_column_get_at_bool
+    !
     module procedure get_at_bool
-        call check_kind(self, PK_LOGICAL, "get_at")
-        call check_index(self, i, "get_at")
-        value = self%bool(i)
+        call parquet_column_get_at_bool(self, i, value)
     end procedure get_at_bool
     !
-    module procedure set_at_bool
+    module procedure parquet_column_set_at_bool
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_LOGICAL, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_LOGICAL, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if (parquet_column_is_null(col, i)) return
         end if
-        self%bool(i) = value
-        if (self%has_nulls) call bit_clear(self%validity, i)
+        col%bool(i) = value
+        if (col%has_nulls) call bit_clear(col%validity, i)
+    end procedure parquet_column_set_at_bool
+    !
+    module procedure set_at_bool
+        call parquet_column_set_at_bool(self, i, value, modify_nulls)
     end procedure set_at_bool
     !
     module procedure set_all_bool
@@ -319,28 +375,40 @@ contains
         call move_alloc(values, self%bool)
     end procedure adopt_bool
     !
+    module procedure parquet_column_data_ptr_bool
+        call parquet_column_check_kind(col, PK_LOGICAL, "data_ptr")
+        p => col%bool(1:col%nrows)
+    end procedure parquet_column_data_ptr_bool
+    !
     module procedure data_ptr_bool
-        call check_kind(self, PK_LOGICAL, "data_ptr")
-        p => self%bool(1:self%nrows)
+        call parquet_column_data_ptr_bool(self, p)
     end procedure data_ptr_bool
     !
+    module procedure parquet_column_get_at_date
+        call parquet_column_check_kind(col, PK_DATE, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        value = col%dt(i)
+    end procedure parquet_column_get_at_date
+    !
     module procedure get_at_date
-        call check_kind(self, PK_DATE, "get_at")
-        call check_index(self, i, "get_at")
-        value = self%dt(i)
+        call parquet_column_get_at_date(self, i, value)
     end procedure get_at_date
     !
-    module procedure set_at_date
+    module procedure parquet_column_set_at_date
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_DATE, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_DATE, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if (parquet_column_is_null(col, i)) return
         end if
-        self%dt(i) = value
-        self%nulls_dirty = .true.
+        col%dt(i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_at_date
+    !
+    module procedure set_at_date
+        call parquet_column_set_at_date(self, i, value, modify_nulls)
     end procedure set_at_date
     !
     module procedure set_all_date
@@ -381,28 +449,40 @@ contains
         self%nulls_dirty = .true.
     end procedure adopt_date
     !
+    module procedure parquet_column_data_ptr_date
+        call parquet_column_check_kind(col, PK_DATE, "data_ptr")
+        p => col%dt(1:col%nrows)
+    end procedure parquet_column_data_ptr_date
+    !
     module procedure data_ptr_date
-        call check_kind(self, PK_DATE, "data_ptr")
-        p => self%dt(1:self%nrows)
+        call parquet_column_data_ptr_date(self, p)
     end procedure data_ptr_date
     !
+    module procedure parquet_column_get_at_time
+        call parquet_column_check_kind(col, PK_TIME, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        value = col%tm(i)
+    end procedure parquet_column_get_at_time
+    !
     module procedure get_at_time
-        call check_kind(self, PK_TIME, "get_at")
-        call check_index(self, i, "get_at")
-        value = self%tm(i)
+        call parquet_column_get_at_time(self, i, value)
     end procedure get_at_time
     !
-    module procedure set_at_time
+    module procedure parquet_column_set_at_time
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_TIME, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_TIME, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if (parquet_column_is_null(col, i)) return
         end if
-        self%tm(i) = value
-        self%nulls_dirty = .true.
+        col%tm(i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_at_time
+    !
+    module procedure set_at_time
+        call parquet_column_set_at_time(self, i, value, modify_nulls)
     end procedure set_at_time
     !
     module procedure set_all_time
@@ -443,28 +523,40 @@ contains
         self%nulls_dirty = .true.
     end procedure adopt_time
     !
+    module procedure parquet_column_data_ptr_time
+        call parquet_column_check_kind(col, PK_TIME, "data_ptr")
+        p => col%tm(1:col%nrows)
+    end procedure parquet_column_data_ptr_time
+    !
     module procedure data_ptr_time
-        call check_kind(self, PK_TIME, "data_ptr")
-        p => self%tm(1:self%nrows)
+        call parquet_column_data_ptr_time(self, p)
     end procedure data_ptr_time
     !
+    module procedure parquet_column_get_at_ts
+        call parquet_column_check_kind(col, PK_TIMESTAMP, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        value = col%ts(i)
+    end procedure parquet_column_get_at_ts
+    !
     module procedure get_at_ts
-        call check_kind(self, PK_TIMESTAMP, "get_at")
-        call check_index(self, i, "get_at")
-        value = self%ts(i)
+        call parquet_column_get_at_ts(self, i, value)
     end procedure get_at_ts
     !
-    module procedure set_at_ts
+    module procedure parquet_column_set_at_ts
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_TIMESTAMP, "set_at")
-        call check_index(self, i, "set_at")
+        call parquet_column_check_kind(col, PK_TIMESTAMP, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
         if (.not. mod_nulls) then
-            if (self%is_null(i)) return
+            if (parquet_column_is_null(col, i)) return
         end if
-        self%ts(i) = value
-        self%nulls_dirty = .true.
+        col%ts(i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_at_ts
+    !
+    module procedure set_at_ts
+        call parquet_column_set_at_ts(self, i, value, modify_nulls)
     end procedure set_at_ts
     !
     module procedure set_all_ts
@@ -505,58 +597,78 @@ contains
         self%nulls_dirty = .true.
     end procedure adopt_ts
     !
+    module procedure parquet_column_data_ptr_ts
+        call parquet_column_check_kind(col, PK_TIMESTAMP, "data_ptr")
+        p => col%ts(1:col%nrows)
+    end procedure parquet_column_data_ptr_ts
+    !
     module procedure data_ptr_ts
-        call check_kind(self, PK_TIMESTAMP, "data_ptr")
-        p => self%ts(1:self%nrows)
+        call parquet_column_data_ptr_ts(self, p)
     end procedure data_ptr_ts
     !
+    module procedure parquet_column_get_at_i32v
+        call parquet_column_check_kind(col, PK_INT32_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
+        value = col%i32v(:, i)
+    end procedure parquet_column_get_at_i32v
+    !
     module procedure get_at_i32v
-        call check_kind(self, PK_INT32_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%i32v(:, i)
+        call parquet_column_get_at_i32v(self, i, value)
     end procedure get_at_i32v
     !
-    module procedure set_at_i32v
+    module procedure parquet_column_set_at_i32v
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_INT32_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call parquet_column_check_kind(col, PK_INT32_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%i32v(e, i) = value(e)
+                if (parquet_column_is_null(col, i, e)) cycle
+                col%i32v(e, i) = value(e)
             end do
             return
         end if
-        self%i32v(:, i) = value
-        if (self%has_nulls) then
-            base = (i - 1_int64)*int(self%width, int64)
-            do e = 1_int64, int(self%width, int64)
-                call bit_clear(self%validity, base + e)
+        col%i32v(:, i) = value
+        if (col%has_nulls) then
+            base = (i - 1_int64)*int(col%width, int64)
+            do e = 1_int64, int(col%width, int64)
+                call bit_clear(col%validity, base + e)
             end do
         end if
+    end procedure parquet_column_set_at_i32v
+    !
+    module procedure set_at_i32v
+        call parquet_column_set_at_i32v(self, i, value, modify_nulls)
     end procedure set_at_i32v
     !
+    module procedure parquet_column_get_elem_i32v
+        call parquet_column_check_kind(col, PK_INT32_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
+        value = col%i32v(e, i)
+    end procedure parquet_column_get_elem_i32v
+    !
     module procedure get_elem_i32v
-        call check_kind(self, PK_INT32_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
-        value = self%i32v(e, i)
+        call parquet_column_get_elem_i32v(self, i, e, value)
     end procedure get_elem_i32v
     !
+    module procedure parquet_column_set_elem_i32v
+        call parquet_column_check_kind(col, PK_INT32_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
+        col%i32v(e, i) = value
+        if (col%has_nulls) call bit_clear(col%validity, (i - 1_int64)*int(col%width, int64) + e)
+    end procedure parquet_column_set_elem_i32v
+    !
     module procedure set_elem_i32v
-        call check_kind(self, PK_INT32_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%i32v(e, i) = value
-        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+        call parquet_column_set_elem_i32v(self, i, e, value)
     end procedure set_elem_i32v
     !
     module procedure set_all_i32v
@@ -598,58 +710,78 @@ contains
         call move_alloc(values, self%i32v)
     end procedure adopt_i32v
     !
+    module procedure parquet_column_data_ptr_i32v
+        call parquet_column_check_kind(col, PK_INT32_VEC, "data_ptr")
+        p => col%i32v(:, 1:col%nrows)
+    end procedure parquet_column_data_ptr_i32v
+    !
     module procedure data_ptr_i32v
-        call check_kind(self, PK_INT32_VEC, "data_ptr")
-        p => self%i32v(:, 1:self%nrows)
+        call parquet_column_data_ptr_i32v(self, p)
     end procedure data_ptr_i32v
     !
+    module procedure parquet_column_get_at_i64v
+        call parquet_column_check_kind(col, PK_INT64_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
+        value = col%i64v(:, i)
+    end procedure parquet_column_get_at_i64v
+    !
     module procedure get_at_i64v
-        call check_kind(self, PK_INT64_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%i64v(:, i)
+        call parquet_column_get_at_i64v(self, i, value)
     end procedure get_at_i64v
     !
-    module procedure set_at_i64v
+    module procedure parquet_column_set_at_i64v
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_INT64_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call parquet_column_check_kind(col, PK_INT64_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%i64v(e, i) = value(e)
+                if (parquet_column_is_null(col, i, e)) cycle
+                col%i64v(e, i) = value(e)
             end do
             return
         end if
-        self%i64v(:, i) = value
-        if (self%has_nulls) then
-            base = (i - 1_int64)*int(self%width, int64)
-            do e = 1_int64, int(self%width, int64)
-                call bit_clear(self%validity, base + e)
+        col%i64v(:, i) = value
+        if (col%has_nulls) then
+            base = (i - 1_int64)*int(col%width, int64)
+            do e = 1_int64, int(col%width, int64)
+                call bit_clear(col%validity, base + e)
             end do
         end if
+    end procedure parquet_column_set_at_i64v
+    !
+    module procedure set_at_i64v
+        call parquet_column_set_at_i64v(self, i, value, modify_nulls)
     end procedure set_at_i64v
     !
+    module procedure parquet_column_get_elem_i64v
+        call parquet_column_check_kind(col, PK_INT64_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
+        value = col%i64v(e, i)
+    end procedure parquet_column_get_elem_i64v
+    !
     module procedure get_elem_i64v
-        call check_kind(self, PK_INT64_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
-        value = self%i64v(e, i)
+        call parquet_column_get_elem_i64v(self, i, e, value)
     end procedure get_elem_i64v
     !
+    module procedure parquet_column_set_elem_i64v
+        call parquet_column_check_kind(col, PK_INT64_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
+        col%i64v(e, i) = value
+        if (col%has_nulls) call bit_clear(col%validity, (i - 1_int64)*int(col%width, int64) + e)
+    end procedure parquet_column_set_elem_i64v
+    !
     module procedure set_elem_i64v
-        call check_kind(self, PK_INT64_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%i64v(e, i) = value
-        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+        call parquet_column_set_elem_i64v(self, i, e, value)
     end procedure set_elem_i64v
     !
     module procedure set_all_i64v
@@ -691,58 +823,78 @@ contains
         call move_alloc(values, self%i64v)
     end procedure adopt_i64v
     !
+    module procedure parquet_column_data_ptr_i64v
+        call parquet_column_check_kind(col, PK_INT64_VEC, "data_ptr")
+        p => col%i64v(:, 1:col%nrows)
+    end procedure parquet_column_data_ptr_i64v
+    !
     module procedure data_ptr_i64v
-        call check_kind(self, PK_INT64_VEC, "data_ptr")
-        p => self%i64v(:, 1:self%nrows)
+        call parquet_column_data_ptr_i64v(self, p)
     end procedure data_ptr_i64v
     !
+    module procedure parquet_column_get_at_f32v
+        call parquet_column_check_kind(col, PK_FLOAT32_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
+        value = col%f32v(:, i)
+    end procedure parquet_column_get_at_f32v
+    !
     module procedure get_at_f32v
-        call check_kind(self, PK_FLOAT32_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%f32v(:, i)
+        call parquet_column_get_at_f32v(self, i, value)
     end procedure get_at_f32v
     !
-    module procedure set_at_f32v
+    module procedure parquet_column_set_at_f32v
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_FLOAT32_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call parquet_column_check_kind(col, PK_FLOAT32_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%f32v(e, i) = value(e)
+                if (parquet_column_is_null(col, i, e)) cycle
+                col%f32v(e, i) = value(e)
             end do
             return
         end if
-        self%f32v(:, i) = value
-        if (self%has_nulls) then
-            base = (i - 1_int64)*int(self%width, int64)
-            do e = 1_int64, int(self%width, int64)
-                call bit_clear(self%validity, base + e)
+        col%f32v(:, i) = value
+        if (col%has_nulls) then
+            base = (i - 1_int64)*int(col%width, int64)
+            do e = 1_int64, int(col%width, int64)
+                call bit_clear(col%validity, base + e)
             end do
         end if
+    end procedure parquet_column_set_at_f32v
+    !
+    module procedure set_at_f32v
+        call parquet_column_set_at_f32v(self, i, value, modify_nulls)
     end procedure set_at_f32v
     !
+    module procedure parquet_column_get_elem_f32v
+        call parquet_column_check_kind(col, PK_FLOAT32_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
+        value = col%f32v(e, i)
+    end procedure parquet_column_get_elem_f32v
+    !
     module procedure get_elem_f32v
-        call check_kind(self, PK_FLOAT32_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
-        value = self%f32v(e, i)
+        call parquet_column_get_elem_f32v(self, i, e, value)
     end procedure get_elem_f32v
     !
+    module procedure parquet_column_set_elem_f32v
+        call parquet_column_check_kind(col, PK_FLOAT32_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
+        col%f32v(e, i) = value
+        if (col%has_nulls) call bit_clear(col%validity, (i - 1_int64)*int(col%width, int64) + e)
+    end procedure parquet_column_set_elem_f32v
+    !
     module procedure set_elem_f32v
-        call check_kind(self, PK_FLOAT32_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%f32v(e, i) = value
-        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+        call parquet_column_set_elem_f32v(self, i, e, value)
     end procedure set_elem_f32v
     !
     module procedure set_all_f32v
@@ -784,58 +936,78 @@ contains
         call move_alloc(values, self%f32v)
     end procedure adopt_f32v
     !
+    module procedure parquet_column_data_ptr_f32v
+        call parquet_column_check_kind(col, PK_FLOAT32_VEC, "data_ptr")
+        p => col%f32v(:, 1:col%nrows)
+    end procedure parquet_column_data_ptr_f32v
+    !
     module procedure data_ptr_f32v
-        call check_kind(self, PK_FLOAT32_VEC, "data_ptr")
-        p => self%f32v(:, 1:self%nrows)
+        call parquet_column_data_ptr_f32v(self, p)
     end procedure data_ptr_f32v
     !
+    module procedure parquet_column_get_at_f64v
+        call parquet_column_check_kind(col, PK_FLOAT64_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
+        value = col%f64v(:, i)
+    end procedure parquet_column_get_at_f64v
+    !
     module procedure get_at_f64v
-        call check_kind(self, PK_FLOAT64_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%f64v(:, i)
+        call parquet_column_get_at_f64v(self, i, value)
     end procedure get_at_f64v
     !
-    module procedure set_at_f64v
+    module procedure parquet_column_set_at_f64v
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_FLOAT64_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call parquet_column_check_kind(col, PK_FLOAT64_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%f64v(e, i) = value(e)
+                if (parquet_column_is_null(col, i, e)) cycle
+                col%f64v(e, i) = value(e)
             end do
             return
         end if
-        self%f64v(:, i) = value
-        if (self%has_nulls) then
-            base = (i - 1_int64)*int(self%width, int64)
-            do e = 1_int64, int(self%width, int64)
-                call bit_clear(self%validity, base + e)
+        col%f64v(:, i) = value
+        if (col%has_nulls) then
+            base = (i - 1_int64)*int(col%width, int64)
+            do e = 1_int64, int(col%width, int64)
+                call bit_clear(col%validity, base + e)
             end do
         end if
+    end procedure parquet_column_set_at_f64v
+    !
+    module procedure set_at_f64v
+        call parquet_column_set_at_f64v(self, i, value, modify_nulls)
     end procedure set_at_f64v
     !
+    module procedure parquet_column_get_elem_f64v
+        call parquet_column_check_kind(col, PK_FLOAT64_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
+        value = col%f64v(e, i)
+    end procedure parquet_column_get_elem_f64v
+    !
     module procedure get_elem_f64v
-        call check_kind(self, PK_FLOAT64_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
-        value = self%f64v(e, i)
+        call parquet_column_get_elem_f64v(self, i, e, value)
     end procedure get_elem_f64v
     !
+    module procedure parquet_column_set_elem_f64v
+        call parquet_column_check_kind(col, PK_FLOAT64_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
+        col%f64v(e, i) = value
+        if (col%has_nulls) call bit_clear(col%validity, (i - 1_int64)*int(col%width, int64) + e)
+    end procedure parquet_column_set_elem_f64v
+    !
     module procedure set_elem_f64v
-        call check_kind(self, PK_FLOAT64_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%f64v(e, i) = value
-        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+        call parquet_column_set_elem_f64v(self, i, e, value)
     end procedure set_elem_f64v
     !
     module procedure set_all_f64v
@@ -877,58 +1049,78 @@ contains
         call move_alloc(values, self%f64v)
     end procedure adopt_f64v
     !
+    module procedure parquet_column_data_ptr_f64v
+        call parquet_column_check_kind(col, PK_FLOAT64_VEC, "data_ptr")
+        p => col%f64v(:, 1:col%nrows)
+    end procedure parquet_column_data_ptr_f64v
+    !
     module procedure data_ptr_f64v
-        call check_kind(self, PK_FLOAT64_VEC, "data_ptr")
-        p => self%f64v(:, 1:self%nrows)
+        call parquet_column_data_ptr_f64v(self, p)
     end procedure data_ptr_f64v
     !
+    module procedure parquet_column_get_at_boolv
+        call parquet_column_check_kind(col, PK_LOGICAL_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
+        value = col%boolv(:, i)
+    end procedure parquet_column_get_at_boolv
+    !
     module procedure get_at_boolv
-        call check_kind(self, PK_LOGICAL_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%boolv(:, i)
+        call parquet_column_get_at_boolv(self, i, value)
     end procedure get_at_boolv
     !
-    module procedure set_at_boolv
+    module procedure parquet_column_set_at_boolv
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_LOGICAL_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call parquet_column_check_kind(col, PK_LOGICAL_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%boolv(e, i) = value(e)
+                if (parquet_column_is_null(col, i, e)) cycle
+                col%boolv(e, i) = value(e)
             end do
             return
         end if
-        self%boolv(:, i) = value
-        if (self%has_nulls) then
-            base = (i - 1_int64)*int(self%width, int64)
-            do e = 1_int64, int(self%width, int64)
-                call bit_clear(self%validity, base + e)
+        col%boolv(:, i) = value
+        if (col%has_nulls) then
+            base = (i - 1_int64)*int(col%width, int64)
+            do e = 1_int64, int(col%width, int64)
+                call bit_clear(col%validity, base + e)
             end do
         end if
+    end procedure parquet_column_set_at_boolv
+    !
+    module procedure set_at_boolv
+        call parquet_column_set_at_boolv(self, i, value, modify_nulls)
     end procedure set_at_boolv
     !
+    module procedure parquet_column_get_elem_boolv
+        call parquet_column_check_kind(col, PK_LOGICAL_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
+        value = col%boolv(e, i)
+    end procedure parquet_column_get_elem_boolv
+    !
     module procedure get_elem_boolv
-        call check_kind(self, PK_LOGICAL_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
-        value = self%boolv(e, i)
+        call parquet_column_get_elem_boolv(self, i, e, value)
     end procedure get_elem_boolv
     !
+    module procedure parquet_column_set_elem_boolv
+        call parquet_column_check_kind(col, PK_LOGICAL_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
+        col%boolv(e, i) = value
+        if (col%has_nulls) call bit_clear(col%validity, (i - 1_int64)*int(col%width, int64) + e)
+    end procedure parquet_column_set_elem_boolv
+    !
     module procedure set_elem_boolv
-        call check_kind(self, PK_LOGICAL_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%boolv(e, i) = value
-        if (self%has_nulls) call bit_clear(self%validity, (i - 1_int64)*int(self%width, int64) + e)
+        call parquet_column_set_elem_boolv(self, i, e, value)
     end procedure set_elem_boolv
     !
     module procedure set_all_boolv
@@ -970,53 +1162,73 @@ contains
         call move_alloc(values, self%boolv)
     end procedure adopt_boolv
     !
+    module procedure parquet_column_data_ptr_boolv
+        call parquet_column_check_kind(col, PK_LOGICAL_VEC, "data_ptr")
+        p => col%boolv(:, 1:col%nrows)
+    end procedure parquet_column_data_ptr_boolv
+    !
     module procedure data_ptr_boolv
-        call check_kind(self, PK_LOGICAL_VEC, "data_ptr")
-        p => self%boolv(:, 1:self%nrows)
+        call parquet_column_data_ptr_boolv(self, p)
     end procedure data_ptr_boolv
     !
+    module procedure parquet_column_get_at_datev
+        call parquet_column_check_kind(col, PK_DATE_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
+        value = col%dtv(:, i)
+    end procedure parquet_column_get_at_datev
+    !
     module procedure get_at_datev
-        call check_kind(self, PK_DATE_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%dtv(:, i)
+        call parquet_column_get_at_datev(self, i, value)
     end procedure get_at_datev
     !
-    module procedure set_at_datev
+    module procedure parquet_column_set_at_datev
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_DATE_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call parquet_column_check_kind(col, PK_DATE_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%dtv(e, i) = value(e)
+                if (parquet_column_is_null(col, i, e)) cycle
+                col%dtv(e, i) = value(e)
             end do
             return
         end if
-        self%dtv(:, i) = value
-        self%nulls_dirty = .true.
+        col%dtv(:, i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_at_datev
+    !
+    module procedure set_at_datev
+        call parquet_column_set_at_datev(self, i, value, modify_nulls)
     end procedure set_at_datev
     !
+    module procedure parquet_column_get_elem_datev
+        call parquet_column_check_kind(col, PK_DATE_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
+        value = col%dtv(e, i)
+    end procedure parquet_column_get_elem_datev
+    !
     module procedure get_elem_datev
-        call check_kind(self, PK_DATE_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
-        value = self%dtv(e, i)
+        call parquet_column_get_elem_datev(self, i, e, value)
     end procedure get_elem_datev
     !
+    module procedure parquet_column_set_elem_datev
+        call parquet_column_check_kind(col, PK_DATE_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
+        col%dtv(e, i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_elem_datev
+    !
     module procedure set_elem_datev
-        call check_kind(self, PK_DATE_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%dtv(e, i) = value
-        self%nulls_dirty = .true.
+        call parquet_column_set_elem_datev(self, i, e, value)
     end procedure set_elem_datev
     !
     module procedure set_all_datev
@@ -1060,53 +1272,73 @@ contains
         self%nulls_dirty = .true.
     end procedure adopt_datev
     !
+    module procedure parquet_column_data_ptr_datev
+        call parquet_column_check_kind(col, PK_DATE_VEC, "data_ptr")
+        p => col%dtv(:, 1:col%nrows)
+    end procedure parquet_column_data_ptr_datev
+    !
     module procedure data_ptr_datev
-        call check_kind(self, PK_DATE_VEC, "data_ptr")
-        p => self%dtv(:, 1:self%nrows)
+        call parquet_column_data_ptr_datev(self, p)
     end procedure data_ptr_datev
     !
+    module procedure parquet_column_get_at_timev
+        call parquet_column_check_kind(col, PK_TIME_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
+        value = col%tmv(:, i)
+    end procedure parquet_column_get_at_timev
+    !
     module procedure get_at_timev
-        call check_kind(self, PK_TIME_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%tmv(:, i)
+        call parquet_column_get_at_timev(self, i, value)
     end procedure get_at_timev
     !
-    module procedure set_at_timev
+    module procedure parquet_column_set_at_timev
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_TIME_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call parquet_column_check_kind(col, PK_TIME_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%tmv(e, i) = value(e)
+                if (parquet_column_is_null(col, i, e)) cycle
+                col%tmv(e, i) = value(e)
             end do
             return
         end if
-        self%tmv(:, i) = value
-        self%nulls_dirty = .true.
+        col%tmv(:, i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_at_timev
+    !
+    module procedure set_at_timev
+        call parquet_column_set_at_timev(self, i, value, modify_nulls)
     end procedure set_at_timev
     !
+    module procedure parquet_column_get_elem_timev
+        call parquet_column_check_kind(col, PK_TIME_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
+        value = col%tmv(e, i)
+    end procedure parquet_column_get_elem_timev
+    !
     module procedure get_elem_timev
-        call check_kind(self, PK_TIME_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
-        value = self%tmv(e, i)
+        call parquet_column_get_elem_timev(self, i, e, value)
     end procedure get_elem_timev
     !
+    module procedure parquet_column_set_elem_timev
+        call parquet_column_check_kind(col, PK_TIME_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
+        col%tmv(e, i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_elem_timev
+    !
     module procedure set_elem_timev
-        call check_kind(self, PK_TIME_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%tmv(e, i) = value
-        self%nulls_dirty = .true.
+        call parquet_column_set_elem_timev(self, i, e, value)
     end procedure set_elem_timev
     !
     module procedure set_all_timev
@@ -1150,53 +1382,73 @@ contains
         self%nulls_dirty = .true.
     end procedure adopt_timev
     !
+    module procedure parquet_column_data_ptr_timev
+        call parquet_column_check_kind(col, PK_TIME_VEC, "data_ptr")
+        p => col%tmv(:, 1:col%nrows)
+    end procedure parquet_column_data_ptr_timev
+    !
     module procedure data_ptr_timev
-        call check_kind(self, PK_TIME_VEC, "data_ptr")
-        p => self%tmv(:, 1:self%nrows)
+        call parquet_column_data_ptr_timev(self, p)
     end procedure data_ptr_timev
     !
+    module procedure parquet_column_get_at_tsv
+        call parquet_column_check_kind(col, PK_TIMESTAMP_VEC, "get_at")
+        call parquet_column_check_index(col, i, "get_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "get_at")
+        value = col%tsv(:, i)
+    end procedure parquet_column_get_at_tsv
+    !
     module procedure get_at_tsv
-        call check_kind(self, PK_TIMESTAMP_VEC, "get_at")
-        call check_index(self, i, "get_at")
-        call check_width(self, size(value, kind=int64), "get_at")
-        value = self%tsv(:, i)
+        call parquet_column_get_at_tsv(self, i, value)
     end procedure get_at_tsv
     !
-    module procedure set_at_tsv
+    module procedure parquet_column_set_at_tsv
         logical :: mod_nulls
         integer(int64) :: e, base
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, PK_TIMESTAMP_VEC, "set_at")
-        call check_index(self, i, "set_at")
-        call check_width(self, size(value, kind=int64), "set_at")
+        call parquet_column_check_kind(col, PK_TIMESTAMP_VEC, "set_at")
+        call parquet_column_check_index(col, i, "set_at")
+        call parquet_column_check_width(col, size(value, kind=int64), "set_at")
         ! modify_nulls=.false. protects individual null ELEMENTS, not the whole row: every
         ! element whose own bit is clear is written, and the null ones are left as they are.
         if (.not. mod_nulls) then
-            base = int(self%width, int64)
+            base = int(col%width, int64)
             do e = 1_int64, base
-                if (self%is_null(i, e)) cycle
-                self%tsv(e, i) = value(e)
+                if (parquet_column_is_null(col, i, e)) cycle
+                col%tsv(e, i) = value(e)
             end do
             return
         end if
-        self%tsv(:, i) = value
-        self%nulls_dirty = .true.
+        col%tsv(:, i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_at_tsv
+    !
+    module procedure set_at_tsv
+        call parquet_column_set_at_tsv(self, i, value, modify_nulls)
     end procedure set_at_tsv
     !
+    module procedure parquet_column_get_elem_tsv
+        call parquet_column_check_kind(col, PK_TIMESTAMP_VEC, "get_elem")
+        call parquet_column_check_index(col, i, "get_elem")
+        call parquet_column_check_element(col, e, "get_elem")
+        value = col%tsv(e, i)
+    end procedure parquet_column_get_elem_tsv
+    !
     module procedure get_elem_tsv
-        call check_kind(self, PK_TIMESTAMP_VEC, "get_elem")
-        call check_index(self, i, "get_elem")
-        call check_element(self, e, "get_elem")
-        value = self%tsv(e, i)
+        call parquet_column_get_elem_tsv(self, i, e, value)
     end procedure get_elem_tsv
     !
+    module procedure parquet_column_set_elem_tsv
+        call parquet_column_check_kind(col, PK_TIMESTAMP_VEC, "set_elem")
+        call parquet_column_check_index(col, i, "set_elem")
+        call parquet_column_check_element(col, e, "set_elem")
+        col%tsv(e, i) = value
+        col%nulls_dirty = .true.
+    end procedure parquet_column_set_elem_tsv
+    !
     module procedure set_elem_tsv
-        call check_kind(self, PK_TIMESTAMP_VEC, "set_elem")
-        call check_index(self, i, "set_elem")
-        call check_element(self, e, "set_elem")
-        self%tsv(e, i) = value
-        self%nulls_dirty = .true.
+        call parquet_column_set_elem_tsv(self, i, e, value)
     end procedure set_elem_tsv
     !
     module procedure set_all_tsv
@@ -1240,9 +1492,13 @@ contains
         self%nulls_dirty = .true.
     end procedure adopt_tsv
     !
+    module procedure parquet_column_data_ptr_tsv
+        call parquet_column_check_kind(col, PK_TIMESTAMP_VEC, "data_ptr")
+        p => col%tsv(:, 1:col%nrows)
+    end procedure parquet_column_data_ptr_tsv
+    !
     module procedure data_ptr_tsv
-        call check_kind(self, PK_TIMESTAMP_VEC, "data_ptr")
-        p => self%tsv(:, 1:self%nrows)
+        call parquet_column_data_ptr_tsv(self, p)
     end procedure data_ptr_tsv
     !
 end submodule parquet_columns_access ! GCOVR_EXCL_LINE

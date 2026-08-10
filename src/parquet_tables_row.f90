@@ -69,14 +69,14 @@ contains
         integer :: idx
         !
         call row_resolve(self, name, "is_null", idx)
-        isnull = self%cache%cols(idx)%values%is_null(self%irow)
+        isnull = parquet_column_is_null(self%cache%cols(idx)%values, self%irow)
     end procedure row_is_null
     !
     module procedure row_is_null_elem
         integer :: idx
         !
         call row_resolve(self, name, "is_null", idx)
-        isnull = self%cache%cols(idx)%values%is_null(self%irow, e)
+        isnull = parquet_column_is_null(self%cache%cols(idx)%values, self%irow, e)
     end procedure row_is_null_elem
     !
     module procedure row_require_col

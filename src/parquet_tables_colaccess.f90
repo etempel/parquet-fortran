@@ -21,7 +21,7 @@ contains
         !
         select case (colkind)
         case (PK_INT32)
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_INT32, proc)
         end select
@@ -32,9 +32,9 @@ contains
         !
         select case (colkind)
         case (PK_INT64)
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case (PK_INT32)
-            call cache%cols(slot)%values%get_at(i, v_i32)
+            call parquet_column_get_at(cache%cols(slot)%values, i, v_i32)
             value = v_i32
         case default
             call cache_require_kind(cache, slot, PK_INT64, proc)
@@ -45,7 +45,7 @@ contains
         !
         select case (colkind)
         case (PK_FLOAT32)
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_FLOAT32, proc)
         end select
@@ -56,9 +56,9 @@ contains
         !
         select case (colkind)
         case (PK_FLOAT64)
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case (PK_FLOAT32)
-            call cache%cols(slot)%values%get_at(i, v_f32)
+            call parquet_column_get_at(cache%cols(slot)%values, i, v_f32)
             value = v_f32
         case default
             call cache_require_kind(cache, slot, PK_FLOAT64, proc)
@@ -69,7 +69,7 @@ contains
         !
         select case (colkind)
         case (PK_LOGICAL)
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_LOGICAL, proc)
         end select
@@ -79,14 +79,14 @@ contains
         call cache_require_kind(cache, slot, PK_STRING, proc)
         ! %get_at reads with allow_null, so a null row comes back as "" rather than aborting;
         ! %is_null is how a caller tells an empty string from a missing one.
-        call cache%cols(slot)%values%get_at(i, value)
+        call parquet_column_get_at(cache%cols(slot)%values, i, value)
     end procedure col_fetch_str
     !
     module procedure col_fetch_date
         !
         select case (colkind)
         case (PK_DATE)
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_DATE, proc)
         end select
@@ -96,7 +96,7 @@ contains
         !
         select case (colkind)
         case (PK_TIME)
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_TIME, proc)
         end select
@@ -106,7 +106,7 @@ contains
         !
         select case (colkind)
         case (PK_TIMESTAMP)
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_TIMESTAMP, proc)
         end select
@@ -117,7 +117,7 @@ contains
         select case (colkind)
         case (PK_INT32_VEC)
             allocate(value(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_INT32_VEC, proc)
         end select
@@ -129,10 +129,10 @@ contains
         select case (colkind)
         case (PK_INT64_VEC)
             allocate(value(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case (PK_INT32_VEC)
             allocate(v_i32v(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, v_i32v)
+            call parquet_column_get_at(cache%cols(slot)%values, i, v_i32v)
             allocate(value(cache%cols(slot)%width))
             value = v_i32v
         case default
@@ -145,7 +145,7 @@ contains
         select case (colkind)
         case (PK_FLOAT32_VEC)
             allocate(value(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_FLOAT32_VEC, proc)
         end select
@@ -157,10 +157,10 @@ contains
         select case (colkind)
         case (PK_FLOAT64_VEC)
             allocate(value(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case (PK_FLOAT32_VEC)
             allocate(v_f32v(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, v_f32v)
+            call parquet_column_get_at(cache%cols(slot)%values, i, v_f32v)
             allocate(value(cache%cols(slot)%width))
             value = v_f32v
         case default
@@ -173,7 +173,7 @@ contains
         select case (colkind)
         case (PK_LOGICAL_VEC)
             allocate(value(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_LOGICAL_VEC, proc)
         end select
@@ -188,7 +188,7 @@ contains
         wdt = cache%cols(slot)%width
         ! A vector string column is ONE flat store of width*nrows elements, element (e, row) at
         ! (row-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
-        call cache%cols(slot)%values%string_column(store)
+        call parquet_column_string_column(cache%cols(slot)%values, store)
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do e = 1, wdt
@@ -207,7 +207,7 @@ contains
         select case (colkind)
         case (PK_DATE_VEC)
             allocate(value(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_DATE_VEC, proc)
         end select
@@ -218,7 +218,7 @@ contains
         select case (colkind)
         case (PK_TIME_VEC)
             allocate(value(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_TIME_VEC, proc)
         end select
@@ -229,7 +229,7 @@ contains
         select case (colkind)
         case (PK_TIMESTAMP_VEC)
             allocate(value(cache%cols(slot)%width))
-            call cache%cols(slot)%values%get_at(i, value)
+            call parquet_column_get_at(cache%cols(slot)%values, i, value)
         case default
             call cache_require_kind(cache, slot, PK_TIMESTAMP_VEC, proc)
         end select
@@ -417,109 +417,109 @@ contains
     !
     module procedure col_store_i32
         call cache_require_kind(cache, slot, PK_INT32, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_i32
     !
     module procedure col_store_i64
         call cache_require_kind(cache, slot, PK_INT64, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_i64
     !
     module procedure col_store_f32
         call cache_require_kind(cache, slot, PK_FLOAT32, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_f32
     !
     module procedure col_store_f64
         call cache_require_kind(cache, slot, PK_FLOAT64, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_f64
     !
     module procedure col_store_bool
         call cache_require_kind(cache, slot, PK_LOGICAL, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_bool
     !
     module procedure col_store_str
         call cache_require_kind(cache, slot, PK_STRING, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_str
     !
     module procedure col_store_date
         call cache_require_kind(cache, slot, PK_DATE, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_date
     !
     module procedure col_store_time
         call cache_require_kind(cache, slot, PK_TIME, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_time
     !
     module procedure col_store_ts
         call cache_require_kind(cache, slot, PK_TIMESTAMP, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_ts
     !
     module procedure col_store_i32v
         call cache_require_kind(cache, slot, PK_INT32_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_i32v
     !
     module procedure col_store_i64v
         call cache_require_kind(cache, slot, PK_INT64_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_i64v
     !
     module procedure col_store_f32v
         call cache_require_kind(cache, slot, PK_FLOAT32_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_f32v
     !
     module procedure col_store_f64v
         call cache_require_kind(cache, slot, PK_FLOAT64_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_f64v
     !
     module procedure col_store_boolv
         call cache_require_kind(cache, slot, PK_LOGICAL_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_boolv
     !
     module procedure col_store_strv
         call cache_require_kind(cache, slot, PK_STRING_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_strv
     !
     module procedure col_store_datev
         call cache_require_kind(cache, slot, PK_DATE_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_datev
     !
     module procedure col_store_timev
         call cache_require_kind(cache, slot, PK_TIME_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_timev
     !
     module procedure col_store_tsv
         call cache_require_kind(cache, slot, PK_TIMESTAMP_VEC, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_tsv
     !
@@ -731,7 +731,7 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_INT32_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case default
             call cache_require_kind(self%cache, self%slot, PK_INT32_VEC, "get")
         end select
@@ -748,9 +748,9 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_INT64_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case (PK_INT32_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, v_i32v)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, v_i32v)
             value = v_i32v
         case default
             call cache_require_kind(self%cache, self%slot, PK_INT64_VEC, "get")
@@ -767,7 +767,7 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_FLOAT32_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case default
             call cache_require_kind(self%cache, self%slot, PK_FLOAT32_VEC, "get")
         end select
@@ -784,9 +784,9 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_FLOAT64_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case (PK_FLOAT32_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, v_f32v)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, v_f32v)
             value = v_f32v
         case default
             call cache_require_kind(self%cache, self%slot, PK_FLOAT64_VEC, "get")
@@ -803,7 +803,7 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_LOGICAL_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case default
             call cache_require_kind(self%cache, self%slot, PK_LOGICAL_VEC, "get")
         end select
@@ -819,7 +819,7 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_STRING_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case default
             call cache_require_kind(self%cache, self%slot, PK_STRING_VEC, "get")
         end select
@@ -835,7 +835,7 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_DATE_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case default
             call cache_require_kind(self%cache, self%slot, PK_DATE_VEC, "get")
         end select
@@ -851,7 +851,7 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_TIME_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case default
             call cache_require_kind(self%cache, self%slot, PK_TIME_VEC, "get")
         end select
@@ -867,7 +867,7 @@ contains
         call col_require_row(self, i, "get")
         select case (self%colkind)
         case (PK_TIMESTAMP_VEC)
-            call self%cache%cols(self%slot)%values%get_elem(i, e, value)
+            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)
         case default
             call cache_require_kind(self%cache, self%slot, PK_TIMESTAMP_VEC, "get")
         end select
@@ -882,7 +882,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_INT32_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_i32v_e64
     !
@@ -895,7 +895,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_INT64_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_i64v_e64
     !
@@ -908,7 +908,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_FLOAT32_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_f32v_e64
     !
@@ -921,7 +921,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_FLOAT64_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_f64v_e64
     !
@@ -934,7 +934,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_LOGICAL_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_boolv_e64
     !
@@ -947,7 +947,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_STRING_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_strv_e64
     !
@@ -960,7 +960,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_DATE_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_datev_e64
     !
@@ -973,7 +973,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_TIME_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_timev_e64
     !
@@ -986,7 +986,7 @@ contains
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, PK_TIMESTAMP_VEC, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_tsv_e64
     !
@@ -995,7 +995,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_INT32, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_i32
     !
     module procedure col_ref_i64
@@ -1003,7 +1003,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_INT64, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_i64
     !
     module procedure col_ref_f32
@@ -1011,7 +1011,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_FLOAT32, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_f32
     !
     module procedure col_ref_f64
@@ -1019,7 +1019,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_FLOAT64, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_f64
     !
     module procedure col_ref_bool
@@ -1027,7 +1027,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_LOGICAL, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_bool
     !
     module procedure col_ref_date
@@ -1035,7 +1035,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_DATE, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_date
     !
     module procedure col_ref_time
@@ -1043,7 +1043,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_TIME, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_time
     !
     module procedure col_ref_ts
@@ -1051,7 +1051,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_TIMESTAMP, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_ts
     !
     module procedure col_ref_i32v
@@ -1059,7 +1059,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_INT32_VEC, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_i32v
     !
     module procedure col_ref_i64v
@@ -1067,7 +1067,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_INT64_VEC, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_i64v
     !
     module procedure col_ref_f32v
@@ -1075,7 +1075,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_FLOAT32_VEC, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_f32v
     !
     module procedure col_ref_f64v
@@ -1083,7 +1083,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_FLOAT64_VEC, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_f64v
     !
     module procedure col_ref_boolv
@@ -1091,7 +1091,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_LOGICAL_VEC, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_boolv
     !
     module procedure col_ref_datev
@@ -1099,7 +1099,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_DATE_VEC, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_datev
     !
     module procedure col_ref_timev
@@ -1107,7 +1107,7 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_TIME_VEC, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_timev
     !
     module procedure col_ref_tsv
@@ -1115,14 +1115,14 @@ contains
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of_elem(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, PK_TIMESTAMP_VEC, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_tsv
     !
     module procedure col_ref_strcol
         call col_resolve(self, "ref")
         nullify(p)
         call cache_require_kind(self%cache, self%slot, PK_STRING, "ref")
-        call self%cache%cols(self%slot)%values%string_column(p)
+        call parquet_column_string_column(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_strcol
     !
 end submodule parquet_tables_colaccess ! GCOVR_EXCL_LINE

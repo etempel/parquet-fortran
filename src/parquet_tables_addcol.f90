@@ -274,7 +274,7 @@ contains
         call table_fix_nrows(self, name, values%size())
         call table_new_slot(self, name, force, idx)
         call self%cache%cols(idx)%values%init(PK_STRING, values%size(), 1_int32, unit)
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         store = values%clone()
         self%cache%cols(idx)%declared_kind = PK_STRING
         self%cache%cols(idx)%width = 1

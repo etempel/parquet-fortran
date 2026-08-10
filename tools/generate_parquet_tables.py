@@ -4037,26 +4037,26 @@ def getslice_impl(k):
     if rank == 1:
         lines += ["            allocate(arr(size(rows)))",
                   "            do k = 1, size(rows, kind=int64)",
-                  "                call self%cache%cols(idx)%values%get_at(rows(k), arr(k))",
+                  "                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))",
                   "            end do"]
     else:
         lines += ["            allocate(arr(self%cache%cols(idx)%width, size(rows)))",
                   "            do k = 1, size(rows, kind=int64)",
-                  "                call self%cache%cols(idx)%values%get_at(rows(k), arr(:, k))",
+                  "                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))",
                   "            end do"]
     for srcpk, src in WIDEN.get(tag, []):
         lines.append(f"        case ({srcpk})")
         if rank == 1:
             lines += ["            allocate(arr(size(rows)))",
                       "            do k = 1, size(rows, kind=int64)",
-                      f"                call self%cache%cols(idx)%values%get_at(rows(k), v_{src})",
+                      f"                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_{src})",
                       f"                arr(k) = v_{src}",
                       "            end do"]
         else:
             lines += ["            allocate(arr(self%cache%cols(idx)%width, size(rows)))",
                       f"            allocate(v_{src}(self%cache%cols(idx)%width))",
                       "            do k = 1, size(rows, kind=int64)",
-                      f"                call self%cache%cols(idx)%values%get_at(rows(k), v_{src})",
+                      f"                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_{src})",
                       f"                arr(:, k) = v_{src}",
                       "            end do"]
     lines += ["        case default",
@@ -4088,7 +4088,7 @@ def setslice_impl(k):
         call slice_resolve(s, self%row_count, rows, "set_slice")
         call table_require_slice_size(self, {n_arr}, size(rows, kind=int64), name, "set_slice")
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), {val}, modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), {val}, modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows{msuf}(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -4113,7 +4113,7 @@ def setslice_str_impl():
         ! One row at a time through set_at, which the string store supports in place -- unlike
         ! %paste, which cannot overwrite a packed variable-length store's range wholesale.
         do k = 1, size(rows, kind=int64)
-            call self%cache%cols(idx)%values%set_at(rows(k), {val}, modify_nulls)
+            call parquet_column_set_at(self%cache%cols(idx)%values, rows(k), {val}, modify_nulls)
         end do
         if (present(is_valid)) call table_apply_valid_rows{msuf}(self, idx, rows, is_valid, name, "set_slice")
         self%cache%cols(idx)%user_populated = .true.
@@ -4135,7 +4135,7 @@ def getslice_str_impl():
         call table_require_kind(self, idx, PK_STRING, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Built element by element rather than copied and trimmed: a gather has no contiguous
         ! source range to clone from, and appending keeps the result compact.
         ! `%append_from` carries both the bytes and the null state, so the is_null fork this
@@ -4157,7 +4157,7 @@ def getslice_str_impl():
         call table_require_kind(self, idx, PK_STRING, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Two passes: a fixed-length array's width must be the longest element SELECTED, which
         ! is not known until every selected row has been looked at.
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
@@ -4184,7 +4184,7 @@ def getslice_str_impl():
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         wdt = self%cache%cols(idx)%width
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do k = 1, size(rows, kind=int64)
@@ -4242,7 +4242,7 @@ def rowset_impl(k):
         !
         call row_resolve(self, name, "set", idx)
         call row_require_kind(self, name, idx, {pk})
-        call self%cache%cols(idx)%values%set_at(self%irow, value)
+        call parquet_column_set_at(self%cache%cols(idx)%values, self%irow, value)
         self%cache%cols(idx)%user_populated = .true.
     end procedure row_set_{tag}
     !"""
@@ -4252,11 +4252,11 @@ def rowref_impl(k):
     """A pointer to one row's storage: the whole-column pointer, narrowed to this row."""
     tag, pk, decl, comp, rank, cat = k
     if rank == 1:
-        body = """        call self%cache%cols(idx)%values%data_ptr(store)
+        body = """        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(self%irow)"""
         decl_store = f"        {decl}, pointer :: store(:)"
     else:
-        body = """        call self%cache%cols(idx)%values%data_ptr(store)
+        body = """        call parquet_column_data_ptr(self%cache%cols(idx)%values, store)
         p => store(:, self%irow)"""
         decl_store = f"        {decl}, pointer :: store(:,:)"
     return f"""    module procedure row_ref_{tag}
@@ -4287,7 +4287,7 @@ def rowget_impl(k):
         !
         call row_resolve(self, name, "get", idx)
         call row_require_kind(self, name, idx, PK_STRING)
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! allow_null keeps a null row from aborting: it reads back as "", and %is_null is how a
         ! caller tells the two apart.
         call store%get(self%irow, value, allow_null=.true.)
@@ -4304,7 +4304,7 @@ def rowget_impl(k):
         wdt = self%cache%cols(idx)%width
         ! A vector string column is ONE flat store of width*nrows elements, element (e, i) at
         ! (i-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do e = 1, wdt
@@ -4330,18 +4330,18 @@ def rowget_impl(k):
               "        select case (self%cache%cols(idx)%declared_kind)",
               f"        case ({pk})"]
     if rank == 1:
-        lines.append("            call self%cache%cols(idx)%values%get_at(self%irow, value)")
+        lines.append("            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)")
     else:
         lines += ["            allocate(value(self%cache%cols(idx)%width))",
-                  "            call self%cache%cols(idx)%values%get_at(self%irow, value)"]
+                  "            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, value)"]
     for srcpk, src in WIDEN.get(tag, []):
         lines.append(f"        case ({srcpk})")
         if rank == 1:
-            lines += [f"            call self%cache%cols(idx)%values%get_at(self%irow, v_{src})",
+            lines += [f"            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, v_{src})",
                       f"            value = v_{src}"]
         else:
             lines += [f"            allocate(v_{src}(self%cache%cols(idx)%width))",
-                      f"            call self%cache%cols(idx)%values%get_at(self%irow, v_{src})",
+                      f"            call parquet_column_get_at(self%cache%cols(idx)%values, self%irow, v_{src})",
                       "            allocate(value(self%cache%cols(idx)%width))",
                       f"            value = v_{src}"]
     lines += ["        case default",
@@ -4370,7 +4370,7 @@ def ptr_impl(k):
         ! does not update it, and nor does %set_null.
         if (present(is_valid)) call table_valid_mask_of{msuf}(self%cache, idx, is_valid)
         call cache_require_ptr_kind(self%cache, idx, {pk}, "col")
-        call self%cache%cols(idx)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
     end procedure col_ptr_{tag}
     !"""
 
@@ -4389,7 +4389,7 @@ def col_ref_impl(k):
         nullify(p)
         if (present(is_valid)) call table_valid_mask_of{msuf}(self%cache, self%slot, is_valid)
         call cache_require_ptr_kind(self%cache, self%slot, {pk}, "ref")
-        call self%cache%cols(self%slot)%values%data_ptr(p)
+        call parquet_column_data_ptr(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_{tag}
     !"""
 
@@ -4402,7 +4402,7 @@ def ptr_str_impl():
         call table_resolve(self, name, "col", idx, found)
         if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING, "col")
-        call self%cache%cols(idx)%values%string_column(p)
+        call parquet_column_string_column(self%cache%cols(idx)%values, p)
     end procedure col_ptr_strcol
     !"""
 
@@ -4413,7 +4413,7 @@ def col_ref_str_impl():
         call col_resolve(self, "ref")
         nullify(p)
         call cache_require_kind(self%cache, self%slot, PK_STRING, "ref")
-        call self%cache%cols(self%slot)%values%string_column(p)
+        call parquet_column_string_column(self%cache%cols(self%slot)%values, p)
     end procedure col_ref_strcol
     !"""
 
@@ -4430,7 +4430,7 @@ def set_strcol_impl():
         ! Replaces the packed store wholesale with an independent copy, so the caller's own column
         ! and the table's do not end up sharing storage. %set is a value replacement, exactly as
         ! the character-array form is; it is not a way to hand ownership over.
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         store = arr%clone()
         if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
@@ -4447,7 +4447,7 @@ def add_strcol_impl():
         call table_fix_nrows(self, name, values%size())
         call table_new_slot(self, name, force, idx)
         call self%cache%cols(idx)%values%init(PK_STRING, values%size(), 1_int32, unit)
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         store = values%clone()
         self%cache%cols(idx)%declared_kind = PK_STRING
         self%cache%cols(idx)%width = 1
@@ -4690,12 +4690,12 @@ def get_impl(k):
               f"        if (present(is_valid)) call table_valid_mask_of{msuf}(self%cache, idx, is_valid)",
               "        select case (self%cache%cols(idx)%values%kindof())",
               f"        case ({pk})",
-              "            call self%cache%cols(idx)%values%data_ptr(p)",
+              "            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)",
               f"            allocate(arr{'(size(p))' if rank == 1 else '(size(p,1), size(p,2))'})",
               "            arr = p"]
     for srcpk, src in WIDEN.get(tag, []):
         lines += [f"        case ({srcpk})",
-                  f"            call self%cache%cols(idx)%values%data_ptr(p_{src})",
+                  f"            call parquet_column_data_ptr(self%cache%cols(idx)%values, p_{src})",
                   f"            allocate(arr{f'(size(p_{src}))' if rank == 1 else f'(size(p_{src},1), size(p_{src},2))'})",
                   f"            arr = p_{src}"]
     lines += ["        case default",
@@ -4720,7 +4720,7 @@ def get_str_impl():
         end if
         call table_require_kind(self, idx, PK_STRING, "get")
         if (present(is_valid)) call table_valid_mask_of(self%cache, idx, is_valid)
-        call self%cache%cols(idx)%values%string_column(src)
+        call parquet_column_string_column(self%cache%cols(idx)%values, src)
         arr = src%clone()
     end procedure get_arr_str
     !
@@ -4741,7 +4741,7 @@ def get_str_impl():
         n = self%cache%cols(idx)%values%length()
         ! Two passes: the width must be the longest element present, and a fixed-length array
         ! cannot be grown per element. A null reads back as "" and so contributes length 0.
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! `%length` measures without allocating and `%copy_to` fills a fixed-length slot without
         ! allocating, so neither pass materializes a string. `maxlen` starts at 1 so that an
         ! all-empty column still yields `character(len=1)` rather than `len=0`.
@@ -4774,7 +4774,7 @@ def get_str_impl():
         ! A vector string column is ONE flat string store of width*nrows elements, element
         ! (e, i) living at (i-1)*width + e -- reaching it directly is what lets each element
         ! come back as an allocatable string, which the two-pass width measurement needs.
-        call self%cache%cols(idx)%values%string_column(store)
+        call parquet_column_string_column(self%cache%cols(idx)%values, store)
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do i = 1, n
@@ -5018,18 +5018,18 @@ def col_fetch_impl(k):
               "        select case (colkind)",
               f"        case ({pk})"]
     if rank == 1:
-        lines.append("            call cache%cols(slot)%values%get_at(i, value)")
+        lines.append("            call parquet_column_get_at(cache%cols(slot)%values, i, value)")
     else:
         lines += ["            allocate(value(cache%cols(slot)%width))",
-                  "            call cache%cols(slot)%values%get_at(i, value)"]
+                  "            call parquet_column_get_at(cache%cols(slot)%values, i, value)"]
     for srcpk, src in WIDEN.get(tag, []):
         lines.append(f"        case ({srcpk})")
         if rank == 1:
-            lines += [f"            call cache%cols(slot)%values%get_at(i, v_{src})",
+            lines += [f"            call parquet_column_get_at(cache%cols(slot)%values, i, v_{src})",
                       f"            value = v_{src}"]
         else:
             lines += [f"            allocate(v_{src}(cache%cols(slot)%width))",
-                      f"            call cache%cols(slot)%values%get_at(i, v_{src})",
+                      f"            call parquet_column_get_at(cache%cols(slot)%values, i, v_{src})",
                       "            allocate(value(cache%cols(slot)%width))",
                       f"            value = v_{src}"]
     lines += ["        case default",
@@ -5050,7 +5050,7 @@ def col_fetch_str_impl(k):
         call cache_require_kind(cache, slot, PK_STRING, proc)
         ! %get_at reads with allow_null, so a null row comes back as "" rather than aborting;
         ! %is_null is how a caller tells an empty string from a missing one.
-        call cache%cols(slot)%values%get_at(i, value)
+        call parquet_column_get_at(cache%cols(slot)%values, i, value)
     end procedure col_fetch_str
     !"""
     return """    module procedure col_fetch_strv
@@ -5062,7 +5062,7 @@ def col_fetch_str_impl(k):
         wdt = cache%cols(slot)%width
         ! A vector string column is ONE flat store of width*nrows elements, element (e, row) at
         ! (row-1)*width + e. Two passes, because a fixed-length array cannot be grown per element.
-        call cache%cols(slot)%values%string_column(store)
+        call parquet_column_string_column(cache%cols(slot)%values, store)
         ! Measured with `%length` and filled with `%copy_to`, so neither pass allocates.
         maxlen = 1
         do e = 1, wdt
@@ -5103,7 +5103,7 @@ def col_store_impl(k):
     tag, pk = k[0], k[1]
     return f"""    module procedure col_store_{tag}
         call cache_require_kind(cache, slot, {pk}, proc)
-        call cache%cols(slot)%values%set_at(i, value)
+        call parquet_column_set_at(cache%cols(slot)%values, i, value)
         cache%cols(slot)%user_populated = .true.
     end procedure col_store_{tag}
     !"""
@@ -5151,10 +5151,10 @@ def col_getelem_impl(k):
               '        call col_require_row(self, i, "get")',
               "        select case (self%colkind)",
               f"        case ({pk})",
-              "            call self%cache%cols(self%slot)%values%get_elem(i, e, value)"]
+              "            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, value)"]
     for srcpk, src in WIDEN.get(tag, []):
         lines += [f"        case ({srcpk})",
-                  f"            call self%cache%cols(self%slot)%values%get_elem(i, e, v_{src})",
+                  f"            call parquet_column_get_elem(self%cache%cols(self%slot)%values, i, e, v_{src})",
                   f"            value = v_{src}"]
     lines += ["        case default",
               f'            call cache_require_kind(self%cache, self%slot, {pk}, "get")',
@@ -5183,7 +5183,7 @@ def col_setelem_impl(k):
         call col_require_row(self, i, "set")
         call cache_check_shared_write(self%cache, self%slot, "set", nulling=.false.)
         call cache_require_kind(self%cache, self%slot, {pk}, "set")
-        call self%cache%cols(self%slot)%values%set_elem(i, e, value)
+        call parquet_column_set_elem(self%cache%cols(self%slot)%values, i, e, value)
         self%cache%cols(self%slot)%user_populated = .true.
     end procedure col_set_{tag}_e64
     !"""

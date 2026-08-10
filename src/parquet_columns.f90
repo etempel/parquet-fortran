@@ -70,6 +70,22 @@ module parquet_columns
     public :: PK_MAP
     public :: PK_STRUCT
     !
+    ! The typed per-cell accessor tier (feature_ifx.md). INTERNAL API: public only because
+    ! `parquet_tables` is a different module and this type's components are private, so there is
+    ! no other way for it to reach storage without a type-bound call -- which is the thing being
+    ! avoided. `src/parquet.f90` privatises every one of these again, so none reaches a
+    ! `use parquet` program, and none is covered by the library's semantic-versioning promise or
+    ! listed in README's API overview. Only the generics are public; every specific is private.
+    public :: parquet_column_get_at
+    public :: parquet_column_set_at
+    public :: parquet_column_get_elem
+    public :: parquet_column_set_elem
+    public :: parquet_column_data_ptr
+    public :: parquet_column_is_null
+    public :: parquet_column_set_null
+    public :: parquet_column_clear_null
+    public :: parquet_column_string_column
+    !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_columns: "
     !
@@ -1646,6 +1662,639 @@ module parquet_columns
         end subroutine data_ptr_tsv
     end interface
     !
+    ! ---- Typed per-cell access: the NON-POLYMORPHIC implementation tier (feature_ifx.md) ----
+    !
+    ! Every per-cell accessor's body lives here, behind a `type(parquet_column)` dummy. The
+    ! type-bound bindings declared above are one-line forwarders onto these, and `parquet_tables`
+    ! calls these directly instead of going through a binding.
+    !
+    ! The direction is the whole point and must never be flipped. A `class` actual passed to a
+    ! `type` dummy hands over the declared-type part for nothing; a `type` actual passed to a
+    ! `class` dummy makes ifx construct a runtime type descriptor in the CALLER's prologue --
+    ! 178 stores, emitted unconditionally ahead of any branch, ~35 ns on every call -- because
+    ! `parquet_column` has 20 allocatable components and one finalizable component. Re-homing the
+    ! bodies down here removes that conversion from every per-cell path in the table layer;
+    ! re-homing them the other way would silently restore it, with no test failure and no warning.
+    ! `check_no_type_bound_column_access` (tools/check_source_conventions.py) is what enforces it.
+    !
+    ! ---- Typed value access per kind (parquet_columns_access, GENERATED) ----
+    interface
+        !> Typed `get_at` for a PK_INT32 column: reads row `i`'s element.
+        module subroutine parquet_column_get_at_i32(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int32), intent(out) :: value   !! receives the value.
+        end subroutine parquet_column_get_at_i32
+        !> Typed `set_at` for a PK_INT32 column: writes row `i`'s element.
+        module subroutine parquet_column_set_at_i32(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int32), intent(in) :: value     !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_i32
+        !> Typed `data_ptr` for a PK_INT32 column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_i32(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            integer(int32), pointer, intent(out) :: p(:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_i32
+        !> Typed `get_at` for a PK_INT64 column: reads row `i`'s element.
+        module subroutine parquet_column_get_at_i64(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(out) :: value   !! receives the value.
+        end subroutine parquet_column_get_at_i64
+        !> Typed `set_at` for a PK_INT64 column: writes row `i`'s element.
+        module subroutine parquet_column_set_at_i64(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: value     !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_i64
+        !> Typed `data_ptr` for a PK_INT64 column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_i64(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            integer(int64), pointer, intent(out) :: p(:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_i64
+        !> Typed `get_at` for a PK_FLOAT32 column: reads row `i`'s element.
+        module subroutine parquet_column_get_at_f32(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            real(real32), intent(out) :: value   !! receives the value.
+        end subroutine parquet_column_get_at_f32
+        !> Typed `set_at` for a PK_FLOAT32 column: writes row `i`'s element.
+        module subroutine parquet_column_set_at_f32(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            real(real32), intent(in) :: value     !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_f32
+        !> Typed `data_ptr` for a PK_FLOAT32 column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_f32(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            real(real32), pointer, intent(out) :: p(:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_f32
+        !> Typed `get_at` for a PK_FLOAT64 column: reads row `i`'s element.
+        module subroutine parquet_column_get_at_f64(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            real(real64), intent(out) :: value   !! receives the value.
+        end subroutine parquet_column_get_at_f64
+        !> Typed `set_at` for a PK_FLOAT64 column: writes row `i`'s element.
+        module subroutine parquet_column_set_at_f64(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            real(real64), intent(in) :: value     !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_f64
+        !> Typed `data_ptr` for a PK_FLOAT64 column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_f64(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            real(real64), pointer, intent(out) :: p(:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_f64
+        !> Typed `get_at` for a PK_LOGICAL column: reads row `i`'s element.
+        module subroutine parquet_column_get_at_bool(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            logical, intent(out) :: value   !! receives the value.
+        end subroutine parquet_column_get_at_bool
+        !> Typed `set_at` for a PK_LOGICAL column: writes row `i`'s element.
+        module subroutine parquet_column_set_at_bool(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            logical, intent(in) :: value     !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_bool
+        !> Typed `data_ptr` for a PK_LOGICAL column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_bool(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            logical, pointer, intent(out) :: p(:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_bool
+        !> Typed `get_at` for a PK_DATE column: reads row `i`'s element.
+        module subroutine parquet_column_get_at_date(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            type(parquet_date), intent(out) :: value   !! receives the value.
+        end subroutine parquet_column_get_at_date
+        !> Typed `set_at` for a PK_DATE column: writes row `i`'s element.
+        module subroutine parquet_column_set_at_date(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            type(parquet_date), intent(in) :: value     !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_date
+        !> Typed `data_ptr` for a PK_DATE column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_date(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            type(parquet_date), pointer, intent(out) :: p(:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_date
+        !> Typed `get_at` for a PK_TIME column: reads row `i`'s element.
+        module subroutine parquet_column_get_at_time(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            type(parquet_time), intent(out) :: value   !! receives the value.
+        end subroutine parquet_column_get_at_time
+        !> Typed `set_at` for a PK_TIME column: writes row `i`'s element.
+        module subroutine parquet_column_set_at_time(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            type(parquet_time), intent(in) :: value     !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_time
+        !> Typed `data_ptr` for a PK_TIME column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_time(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            type(parquet_time), pointer, intent(out) :: p(:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_time
+        !> Typed `get_at` for a PK_TIMESTAMP column: reads row `i`'s element.
+        module subroutine parquet_column_get_at_ts(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            type(parquet_timestamp), intent(out) :: value   !! receives the value.
+        end subroutine parquet_column_get_at_ts
+        !> Typed `set_at` for a PK_TIMESTAMP column: writes row `i`'s element.
+        module subroutine parquet_column_set_at_ts(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value     !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_ts
+        !> Typed `data_ptr` for a PK_TIMESTAMP column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_ts(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            type(parquet_timestamp), pointer, intent(out) :: p(:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_ts
+        !> Typed `get_at` for a PK_INT32_VEC column: reads row `i`'s row's vector.
+        module subroutine parquet_column_get_at_i32v(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int32), intent(out) :: value(:)   !! receives the values.
+        end subroutine parquet_column_get_at_i32v
+        !> Typed `set_at` for a PK_INT32_VEC column: writes row `i`'s row's vector.
+        module subroutine parquet_column_set_at_i32v(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int32), intent(in) :: value(:)     !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_i32v
+        !> Typed `get_elem` for a PK_INT32_VEC column: reads ONE element of row `i`'s vector.
+        module subroutine parquet_column_get_elem_i32v(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            integer(int32), intent(out) :: value       !! receives the element's value.
+        end subroutine parquet_column_get_elem_i32v
+        !> Typed `set_elem` for a PK_INT32_VEC column: writes ONE element of row `i`'s vector.
+        module subroutine parquet_column_set_elem_i32v(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            integer(int32), intent(in) :: value           !! the new value.
+        end subroutine parquet_column_set_elem_i32v
+        !> Typed `data_ptr` for a PK_INT32_VEC column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_i32v(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            integer(int32), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_i32v
+        !> Typed `get_at` for a PK_INT64_VEC column: reads row `i`'s row's vector.
+        module subroutine parquet_column_get_at_i64v(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(out) :: value(:)   !! receives the values.
+        end subroutine parquet_column_get_at_i64v
+        !> Typed `set_at` for a PK_INT64_VEC column: writes row `i`'s row's vector.
+        module subroutine parquet_column_set_at_i64v(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: value(:)     !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_i64v
+        !> Typed `get_elem` for a PK_INT64_VEC column: reads ONE element of row `i`'s vector.
+        module subroutine parquet_column_get_elem_i64v(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            integer(int64), intent(out) :: value       !! receives the element's value.
+        end subroutine parquet_column_get_elem_i64v
+        !> Typed `set_elem` for a PK_INT64_VEC column: writes ONE element of row `i`'s vector.
+        module subroutine parquet_column_set_elem_i64v(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            integer(int64), intent(in) :: value           !! the new value.
+        end subroutine parquet_column_set_elem_i64v
+        !> Typed `data_ptr` for a PK_INT64_VEC column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_i64v(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            integer(int64), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_i64v
+        !> Typed `get_at` for a PK_FLOAT32_VEC column: reads row `i`'s row's vector.
+        module subroutine parquet_column_get_at_f32v(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            real(real32), intent(out) :: value(:)   !! receives the values.
+        end subroutine parquet_column_get_at_f32v
+        !> Typed `set_at` for a PK_FLOAT32_VEC column: writes row `i`'s row's vector.
+        module subroutine parquet_column_set_at_f32v(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            real(real32), intent(in) :: value(:)     !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_f32v
+        !> Typed `get_elem` for a PK_FLOAT32_VEC column: reads ONE element of row `i`'s vector.
+        module subroutine parquet_column_get_elem_f32v(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            real(real32), intent(out) :: value       !! receives the element's value.
+        end subroutine parquet_column_get_elem_f32v
+        !> Typed `set_elem` for a PK_FLOAT32_VEC column: writes ONE element of row `i`'s vector.
+        module subroutine parquet_column_set_elem_f32v(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            real(real32), intent(in) :: value           !! the new value.
+        end subroutine parquet_column_set_elem_f32v
+        !> Typed `data_ptr` for a PK_FLOAT32_VEC column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_f32v(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            real(real32), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_f32v
+        !> Typed `get_at` for a PK_FLOAT64_VEC column: reads row `i`'s row's vector.
+        module subroutine parquet_column_get_at_f64v(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            real(real64), intent(out) :: value(:)   !! receives the values.
+        end subroutine parquet_column_get_at_f64v
+        !> Typed `set_at` for a PK_FLOAT64_VEC column: writes row `i`'s row's vector.
+        module subroutine parquet_column_set_at_f64v(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            real(real64), intent(in) :: value(:)     !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_f64v
+        !> Typed `get_elem` for a PK_FLOAT64_VEC column: reads ONE element of row `i`'s vector.
+        module subroutine parquet_column_get_elem_f64v(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            real(real64), intent(out) :: value       !! receives the element's value.
+        end subroutine parquet_column_get_elem_f64v
+        !> Typed `set_elem` for a PK_FLOAT64_VEC column: writes ONE element of row `i`'s vector.
+        module subroutine parquet_column_set_elem_f64v(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            real(real64), intent(in) :: value           !! the new value.
+        end subroutine parquet_column_set_elem_f64v
+        !> Typed `data_ptr` for a PK_FLOAT64_VEC column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_f64v(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            real(real64), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_f64v
+        !> Typed `get_at` for a PK_LOGICAL_VEC column: reads row `i`'s row's vector.
+        module subroutine parquet_column_get_at_boolv(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            logical, intent(out) :: value(:)   !! receives the values.
+        end subroutine parquet_column_get_at_boolv
+        !> Typed `set_at` for a PK_LOGICAL_VEC column: writes row `i`'s row's vector.
+        module subroutine parquet_column_set_at_boolv(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            logical, intent(in) :: value(:)     !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_boolv
+        !> Typed `get_elem` for a PK_LOGICAL_VEC column: reads ONE element of row `i`'s vector.
+        module subroutine parquet_column_get_elem_boolv(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            logical, intent(out) :: value       !! receives the element's value.
+        end subroutine parquet_column_get_elem_boolv
+        !> Typed `set_elem` for a PK_LOGICAL_VEC column: writes ONE element of row `i`'s vector.
+        module subroutine parquet_column_set_elem_boolv(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            logical, intent(in) :: value           !! the new value.
+        end subroutine parquet_column_set_elem_boolv
+        !> Typed `data_ptr` for a PK_LOGICAL_VEC column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_boolv(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            logical, pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_boolv
+        !> Typed `get_at` for a PK_DATE_VEC column: reads row `i`'s row's vector.
+        module subroutine parquet_column_get_at_datev(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            type(parquet_date), intent(out) :: value(:)   !! receives the values.
+        end subroutine parquet_column_get_at_datev
+        !> Typed `set_at` for a PK_DATE_VEC column: writes row `i`'s row's vector.
+        module subroutine parquet_column_set_at_datev(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            type(parquet_date), intent(in) :: value(:)     !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_datev
+        !> Typed `get_elem` for a PK_DATE_VEC column: reads ONE element of row `i`'s vector.
+        module subroutine parquet_column_get_elem_datev(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            type(parquet_date), intent(out) :: value       !! receives the element's value.
+        end subroutine parquet_column_get_elem_datev
+        !> Typed `set_elem` for a PK_DATE_VEC column: writes ONE element of row `i`'s vector.
+        module subroutine parquet_column_set_elem_datev(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            type(parquet_date), intent(in) :: value           !! the new value.
+        end subroutine parquet_column_set_elem_datev
+        !> Typed `data_ptr` for a PK_DATE_VEC column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_datev(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            type(parquet_date), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_datev
+        !> Typed `get_at` for a PK_TIME_VEC column: reads row `i`'s row's vector.
+        module subroutine parquet_column_get_at_timev(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            type(parquet_time), intent(out) :: value(:)   !! receives the values.
+        end subroutine parquet_column_get_at_timev
+        !> Typed `set_at` for a PK_TIME_VEC column: writes row `i`'s row's vector.
+        module subroutine parquet_column_set_at_timev(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            type(parquet_time), intent(in) :: value(:)     !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_timev
+        !> Typed `get_elem` for a PK_TIME_VEC column: reads ONE element of row `i`'s vector.
+        module subroutine parquet_column_get_elem_timev(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            type(parquet_time), intent(out) :: value       !! receives the element's value.
+        end subroutine parquet_column_get_elem_timev
+        !> Typed `set_elem` for a PK_TIME_VEC column: writes ONE element of row `i`'s vector.
+        module subroutine parquet_column_set_elem_timev(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            type(parquet_time), intent(in) :: value           !! the new value.
+        end subroutine parquet_column_set_elem_timev
+        !> Typed `data_ptr` for a PK_TIME_VEC column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_timev(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            type(parquet_time), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_timev
+        !> Typed `get_at` for a PK_TIMESTAMP_VEC column: reads row `i`'s row's vector.
+        module subroutine parquet_column_get_at_tsv(col, i, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            type(parquet_timestamp), intent(out) :: value(:)   !! receives the values.
+        end subroutine parquet_column_get_at_tsv
+        !> Typed `set_at` for a PK_TIMESTAMP_VEC column: writes row `i`'s row's vector.
+        module subroutine parquet_column_set_at_tsv(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            type(parquet_timestamp), intent(in) :: value(:)     !! the new values.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_tsv
+        !> Typed `get_elem` for a PK_TIMESTAMP_VEC column: reads ONE element of row `i`'s vector.
+        module subroutine parquet_column_get_elem_tsv(col, i, e, value)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            type(parquet_timestamp), intent(out) :: value       !! receives the element's value.
+        end subroutine parquet_column_get_elem_tsv
+        !> Typed `set_elem` for a PK_TIMESTAMP_VEC column: writes ONE element of row `i`'s vector.
+        module subroutine parquet_column_set_elem_tsv(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            type(parquet_timestamp), intent(in) :: value           !! the new value.
+        end subroutine parquet_column_set_elem_tsv
+        !> Typed `data_ptr` for a PK_TIMESTAMP_VEC column: zero-copy pointer to the live storage.
+        module subroutine parquet_column_data_ptr_tsv(col, p)
+            type(parquet_column), intent(in), target :: col !! the column.
+            type(parquet_timestamp), pointer, intent(out) :: p(:,:)    !! alias to the live storage.
+        end subroutine parquet_column_data_ptr_tsv
+    end interface
+    !
+    ! ---- Typed string-kind access (parquet_columns_string) ----
+    interface
+        !> Typed `string_column`: pointer to the embedded string store (PK_STRING/PK_STRING_VEC).
+        module subroutine parquet_column_string_column(col, p)
+            type(parquet_column), intent(in), target :: col         !! the column.
+            type(parquet_string_column), pointer, intent(out) :: p  !! alias to the string store.
+        end subroutine parquet_column_string_column
+        !> Typed `get_at` for PK_STRING: reads element `i` into an allocatable string.
+        module subroutine parquet_column_get_at_str(col, i, value)
+            type(parquet_column), intent(in) :: col             !! the column.
+            integer(int64), intent(in) :: i                     !! 1-based row index.
+            character(len=:), allocatable, intent(out) :: value !! the element's value.
+        end subroutine parquet_column_get_at_str
+        !> Typed `get_at` for PK_STRING_VEC: reads row `i`'s whole string vector, blank-padded.
+        module subroutine parquet_column_get_at_strv(col, i, value)
+            type(parquet_column), intent(in) :: col   !! the column.
+            integer(int64), intent(in) :: i           !! 1-based row index.
+            character(len=*), intent(out) :: value(:) !! receives width values, blank-padded.
+        end subroutine parquet_column_get_at_strv
+        !> Typed `get_elem` for PK_STRING_VEC: reads ONE element, sized to the stored value.
+        module subroutine parquet_column_get_elem_strv(col, i, e, value)
+            type(parquet_column), intent(in) :: col             !! the column.
+            integer(int64), intent(in) :: i                     !! 1-based row index.
+            integer(int64), intent(in) :: e                     !! 1-based element index in the row.
+            character(len=:), allocatable, intent(out) :: value !! the element's value.
+        end subroutine parquet_column_get_elem_strv
+        !> Typed `set_at` for PK_STRING. `value` is a SCALAR, so it is stored verbatim.
+        module subroutine parquet_column_set_at_str(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            character(len=*), intent(in) :: value      !! the new value.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_str
+        !> Typed `set_at` for PK_STRING_VEC. `value` is an ARRAY, so trailing blanks are trimmed.
+        module subroutine parquet_column_set_at_strv(col, i, value, modify_nulls)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            character(len=*), intent(in) :: value(:)   !! width values for row i.
+            logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+        end subroutine parquet_column_set_at_strv
+        !> Typed `set_elem` for PK_STRING_VEC. `value` is a SCALAR, so it is stored verbatim.
+        module subroutine parquet_column_set_elem_strv(col, i, e, value)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+            character(len=*), intent(in) :: value      !! the new value.
+        end subroutine parquet_column_set_elem_strv
+    end interface
+    !
+    ! ---- Typed validity access (parquet_columns_validity) ----
+    interface
+        !> Typed `is_null` row form: .true. when ANY element of row `i` is null.
+        module function parquet_column_is_null_row(col, i) result(res)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            logical :: res                          !! .true. when any element of the row is null.
+        end function parquet_column_is_null_row
+        !> Typed `is_null` element form: the null state of element `e` of row `i` alone.
+        module function parquet_column_is_null_elem(col, i, e) result(res)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! 1-based row index.
+            integer(int64), intent(in) :: e         !! 1-based element index within the row.
+            logical :: res                          !! .true. when that element is null.
+        end function parquet_column_is_null_elem
+        !> Typed `set_null` row form: marks EVERY element of row `i` null.
+        module subroutine parquet_column_set_null_row(col, i)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+        end subroutine parquet_column_set_null_row
+        !> Typed `set_null` element form: marks element `e` of row `i` null.
+        module subroutine parquet_column_set_null_elem(col, i, e)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+        end subroutine parquet_column_set_null_elem
+        !> Typed `clear_null` row form: clears the null flag of EVERY element of row `i`.
+        module subroutine parquet_column_clear_null_row(col, i)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+        end subroutine parquet_column_clear_null_row
+        !> Typed `clear_null` element form: clears the null flag of element `e` of row `i`.
+        module subroutine parquet_column_clear_null_elem(col, i, e)
+            type(parquet_column), intent(inout) :: col !! the column.
+            integer(int64), intent(in) :: i            !! 1-based row index.
+            integer(int64), intent(in) :: e            !! 1-based element index within the row.
+        end subroutine parquet_column_clear_null_elem
+    end interface
+    !
+    ! ---- Typed guards (parquet_columns_util) ----
+    !
+    ! PRIVATE, unlike the accessors above: only this module and its submodules call them. The
+    ! `class`-dummy guards declared further up are one-line forwarders onto these, so a body that
+    ! still takes a polymorphic passed object keeps working unchanged.
+    interface
+        !> Typed `check_kind`: aborts unless the column's active kind is `expected`.
+        module subroutine parquet_column_check_kind(col, expected, proc)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer, intent(in) :: expected         !! the PK_* kind the caller requires.
+            character(len=*), intent(in) :: proc    !! calling procedure name (for the message).
+        end subroutine parquet_column_check_kind
+        !> Typed `check_index`: aborts unless `i` is a valid 1-based row index.
+        module subroutine parquet_column_check_index(col, i, proc)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: i         !! the offending 1-based row index.
+            character(len=*), intent(in) :: proc    !! calling procedure name (for the message).
+        end subroutine parquet_column_check_index
+        !> Typed `check_element`: aborts unless `1 <= e <= width`.
+        module subroutine parquet_column_check_element(col, e, proc)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: e         !! the offending 1-based element index.
+            character(len=*), intent(in) :: proc    !! calling procedure name (for the message).
+        end subroutine parquet_column_check_element
+        !> Typed `check_width`: aborts unless `n` matches the column's own vector width.
+        module subroutine parquet_column_check_width(col, n, proc)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64), intent(in) :: n         !! the supplied element count per row.
+            character(len=*), intent(in) :: proc    !! calling procedure name (for the message).
+        end subroutine parquet_column_check_width
+    end interface
+    !
+    ! ---- The typed tier's generics: the ONLY names parquet_tables uses (feature_ifx.md) ----
+    interface parquet_column_get_at
+        module procedure parquet_column_get_at_i32
+        module procedure parquet_column_get_at_i64
+        module procedure parquet_column_get_at_f32
+        module procedure parquet_column_get_at_f64
+        module procedure parquet_column_get_at_bool
+        module procedure parquet_column_get_at_str
+        module procedure parquet_column_get_at_date
+        module procedure parquet_column_get_at_time
+        module procedure parquet_column_get_at_ts
+        module procedure parquet_column_get_at_i32v
+        module procedure parquet_column_get_at_i64v
+        module procedure parquet_column_get_at_f32v
+        module procedure parquet_column_get_at_f64v
+        module procedure parquet_column_get_at_boolv
+        module procedure parquet_column_get_at_strv
+        module procedure parquet_column_get_at_datev
+        module procedure parquet_column_get_at_timev
+        module procedure parquet_column_get_at_tsv
+    end interface parquet_column_get_at
+    interface parquet_column_set_at
+        module procedure parquet_column_set_at_i32
+        module procedure parquet_column_set_at_i64
+        module procedure parquet_column_set_at_f32
+        module procedure parquet_column_set_at_f64
+        module procedure parquet_column_set_at_bool
+        module procedure parquet_column_set_at_str
+        module procedure parquet_column_set_at_date
+        module procedure parquet_column_set_at_time
+        module procedure parquet_column_set_at_ts
+        module procedure parquet_column_set_at_i32v
+        module procedure parquet_column_set_at_i64v
+        module procedure parquet_column_set_at_f32v
+        module procedure parquet_column_set_at_f64v
+        module procedure parquet_column_set_at_boolv
+        module procedure parquet_column_set_at_strv
+        module procedure parquet_column_set_at_datev
+        module procedure parquet_column_set_at_timev
+        module procedure parquet_column_set_at_tsv
+    end interface parquet_column_set_at
+    interface parquet_column_get_elem
+        module procedure parquet_column_get_elem_i32v
+        module procedure parquet_column_get_elem_i64v
+        module procedure parquet_column_get_elem_f32v
+        module procedure parquet_column_get_elem_f64v
+        module procedure parquet_column_get_elem_boolv
+        module procedure parquet_column_get_elem_strv
+        module procedure parquet_column_get_elem_datev
+        module procedure parquet_column_get_elem_timev
+        module procedure parquet_column_get_elem_tsv
+    end interface parquet_column_get_elem
+    interface parquet_column_set_elem
+        module procedure parquet_column_set_elem_i32v
+        module procedure parquet_column_set_elem_i64v
+        module procedure parquet_column_set_elem_f32v
+        module procedure parquet_column_set_elem_f64v
+        module procedure parquet_column_set_elem_boolv
+        module procedure parquet_column_set_elem_strv
+        module procedure parquet_column_set_elem_datev
+        module procedure parquet_column_set_elem_timev
+        module procedure parquet_column_set_elem_tsv
+    end interface parquet_column_set_elem
+    interface parquet_column_data_ptr
+        module procedure parquet_column_data_ptr_i32
+        module procedure parquet_column_data_ptr_i64
+        module procedure parquet_column_data_ptr_f32
+        module procedure parquet_column_data_ptr_f64
+        module procedure parquet_column_data_ptr_bool
+        module procedure parquet_column_data_ptr_date
+        module procedure parquet_column_data_ptr_time
+        module procedure parquet_column_data_ptr_ts
+        module procedure parquet_column_data_ptr_i32v
+        module procedure parquet_column_data_ptr_i64v
+        module procedure parquet_column_data_ptr_f32v
+        module procedure parquet_column_data_ptr_f64v
+        module procedure parquet_column_data_ptr_boolv
+        module procedure parquet_column_data_ptr_datev
+        module procedure parquet_column_data_ptr_timev
+        module procedure parquet_column_data_ptr_tsv
+    end interface parquet_column_data_ptr
+    interface parquet_column_is_null
+        module procedure parquet_column_is_null_row
+        module procedure parquet_column_is_null_elem
+    end interface parquet_column_is_null
+    interface parquet_column_set_null
+        module procedure parquet_column_set_null_row
+        module procedure parquet_column_set_null_elem
+    end interface parquet_column_set_null
+    interface parquet_column_clear_null
+        module procedure parquet_column_clear_null_row
+        module procedure parquet_column_clear_null_elem
+    end interface parquet_column_clear_null
+    !
     ! ---- Value append per kind + storage helpers (parquet_columns_mutate, GENERATED) ----
     interface
         !> Appends rows to a PK_INT32 column, growing its storage.
@@ -1896,8 +2545,14 @@ module parquet_columns
         end subroutine bits_copy_range
         !> Ensures the bitmap exists and covers every element, zero-filling new blocks (0 = valid),
         !! and marks the column bitmap-backed.
-        module subroutine ensure_bitmap(self)
-            class(parquet_column), intent(inout) :: self !! the column.
+        !!
+        !! Takes a NON-polymorphic dummy, unlike its neighbours here: the typed `set_null` forms
+        !! call it, and a typed body handing a `type(parquet_column)` to a `class` dummy rebuilds
+        !! the whole descriptor block the typed tier exists to remove (feature_ifx.md). It is
+        !! private plumbing and never a binding, so it needs no polymorphic form at all -- every
+        !! existing caller passes a `class` actual, which a `type` dummy accepts for free.
+        module subroutine ensure_bitmap(col)
+            type(parquet_column), intent(inout) :: col !! the column.
         end subroutine ensure_bitmap
         !> Whether this column's validity storage already exists, i.e. whether nulling an element
         !! would still have to ALLOCATE something.

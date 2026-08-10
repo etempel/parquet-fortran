@@ -45,7 +45,7 @@ contains
         if (idx == 0) return
         call table_check_shared_write(self, idx, "set_null", nulling=.true.)
         call table_require_row(self, i, "set_null")
-        call self%cache%cols(idx)%values%set_null(i)
+        call parquet_column_set_null(self%cache%cols(idx)%values, i)
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_null_i64
     !
@@ -68,7 +68,7 @@ contains
         ! Only ever adds nulls: a .true. entry says nothing about a row that is already null, and
         ! clearing it would make this the inverse of a call the caller did not make.
         do i = 1_int64, self%row_count
-            if (.not. is_valid(i)) call self%cache%cols(idx)%values%set_null(i)
+            if (.not. is_valid(i)) call parquet_column_set_null(self%cache%cols(idx)%values, i)
         end do
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_null_mask
@@ -84,7 +84,7 @@ contains
         if (idx == 0) return
         call table_check_shared_write(self, idx, "set_null", nulling=.true.)
         call table_require_row(self, i, "set_null")
-        call self%cache%cols(idx)%values%set_null(i, e)
+        call parquet_column_set_null(self%cache%cols(idx)%values, i, e)
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_null_e64
     !
@@ -109,7 +109,7 @@ contains
         ! Only ever adds nulls, exactly as the row form does and for the same reason.
         do i = 1_int64, self%row_count
             do e = 1_int64, int(wdt, int64)
-                if (.not. is_valid(e, i)) call self%cache%cols(idx)%values%set_null(i, e)
+                if (.not. is_valid(e, i)) call parquet_column_set_null(self%cache%cols(idx)%values, i, e)
             end do
         end do
         self%cache%cols(idx)%user_populated = .true.
@@ -126,7 +126,7 @@ contains
         if (idx == 0) return
         call table_check_shared_write(self, idx, "clear_null", nulling=.true.)
         call table_require_row(self, i, "clear_null")
-        call self%cache%cols(idx)%values%clear_null(i)
+        call parquet_column_clear_null(self%cache%cols(idx)%values, i)
         self%cache%cols(idx)%user_populated = .true.
     end procedure clear_null_i64
     !
@@ -141,7 +141,7 @@ contains
         if (idx == 0) return
         call table_check_shared_write(self, idx, "clear_null", nulling=.true.)
         call table_require_row(self, i, "clear_null")
-        call self%cache%cols(idx)%values%clear_null(i, e)
+        call parquet_column_clear_null(self%cache%cols(idx)%values, i, e)
         self%cache%cols(idx)%user_populated = .true.
     end procedure clear_null_e64
     !

@@ -59,6 +59,10 @@ say so explicitly in §1 when you do.)
       the campaign toggles (LTO, a cpp variant). A tree named for fewer axes than the campaign varies
       lets one arm's objects land in another's; this has now happened twice in this repository, along
       a different axis each time.
+- [ ] **If the campaign has a TEARDOWN step — restoring scaffolded source, deleting a branch —
+      make sure every measurement step is numbered before it.** One sheet put its noise-floor steps
+      after the restore, and the runner correctly reordered them: a re-run needs the build tree that
+      the teardown removes. Number the steps in the order they must actually happen.
 - [ ] **Say what a runner should do if Step 1's commit or branch does not exist.** The step says
       "stop", and three machines in one campaign instead proceeded on `main` because everything they
       needed was there — which was the right call, and left three reports filed against a commit the
@@ -116,6 +120,19 @@ This costs one command and it is the difference between a comparison that means 
 that quietly does not. A machine that skipped it once would have had its numbers silently filed
 against a different build.
 
+**Clear any build tree an earlier campaign may have left**, before the first run rather than after
+the last:
+
+```bash
+rm -rf test_run/<campaign-prefix>-*
+```
+
+Build-tree names are chosen per configuration, and two campaigns can pick the same one — one run
+found a previous campaign's tree sitting exactly where its baseline wanted to go. fpm rebuilt
+correctly there (verified by checking the object's and binary's timestamps before trusting the
+figure), but a stale-cache trap was one step away, and this repository has a whole section about
+what that costs.
+
 ### Step 2 — activate this machine's environment
 
 Some machines need nothing. Others need a `module load`, an activation script, or a conda
@@ -140,6 +157,11 @@ Read the output before continuing, and check three things:
    compiler's *family* when `FPM_CXX`/`FPM_CC` are unset, so the first `g++` on `PATH` is often not
    what will build the C++ half.
 3. **Arrow and Parquet are found** by `pkg-config`.
+
+**If you write a version guard into a driver, note that `-dumpversion` truncates**: `gfortran
+-dumpversion` returns `14`, not `14.2.1`. One campaign's guard was mis-calibrated against the long
+form and refused to run — which is the failure mode a version guard should have, and is why it is
+worth having one at all on a machine with more than one compiler installed.
 
 > **Activation scripts do not always survive being sourced non-interactively.** One machine's script
 > ends by spawning an interactive subshell; run from a script or an agent with no tty, that subshell
@@ -191,14 +213,28 @@ everything:
 If the campaign names more than one toolchain or environment, do one run per toolchain, **each in a
 fresh shell** — activation scripts leak into one another otherwise — and keep the outputs separate.
 
+**Check that the run actually produced output before you walk away from it.** A driver that dies
+before its first line looks exactly like a run that found nothing interesting. Two ways this has
+happened: `nohup … &` not surviving the environment, and a `set -u` in the driver killing an
+activation script instantly (rc 127, no output at all), leaving an empty log directory that could
+easily have been read as a completed run. `ls -l` the logs after the first rung, not after the last.
+
 **Let the machine settle between runs, and say that you did.** A run's own test phase spawns
 hundreds of subprocesses, so a second run started straight afterwards is measured against a machine
 still draining — which biases *one arm* rather than adding symmetric noise, and best-of-N does not
 remove it. On Linux:
 
 ```bash
+# Linux
 until [ "$(awk '{print int($1)}' /proc/loadavg)" -lt 2 ]; do sleep 20; done
+# macOS -- /proc does not exist
+until [ "$(sysctl -n vm.loadavg | awk '{print int($2)}')" -lt 2 ]; do sleep 20; done
 ```
+
+**Express the threshold relative to the machine's OWN idle load, not as an absolute.** A workstation
+whose idle load never drops below 2 will wait forever — one machine burned 20 minutes per rung on
+exactly that before giving up and substituting a fixed sleep, which is a perfectly good substitute
+and should be recorded as a deviation when used.
 
 ### Step 3b — measure this machine's noise floor
 
@@ -238,14 +274,28 @@ reporting a 1.2 ns difference as real.
 So:
 
 1. **Include an untouched CONTROL arm** — something the flag provably cannot affect, measured in
-   every build. If the control moves, that movement is your floor, whatever Step 3b said.
-2. **Build each variant at least twice** where the campaign's answer is close to the line, and
-   report the spread.
-3. **Quote both floors** in the report, and say which one applies to which comparison.
+   every build.
+2. **But do NOT take the control's absolute spread as the floor for a much larger arm.** This is
+   the rule three machines independently refused in one campaign, and they were right: **absolute
+   layout noise scales with the arm.** A 2.5–6 ns control arm moved 0.02–0.63 ns while the 36–124 ns
+   arm under study moved by up to **4.2 ns**. Reading the control literally understated the floor by
+   **6.6x on one machine and 23x on another**, and would have promoted pure noise into findings on
+   both. Express it as a **percentage** of the arm under study, or take it from the largest untouched
+   arm available.
+3. **Best of all, use the arms that moved in an IMPOSSIBLE direction.** A rung that *removes* work
+   and comes out slower has measured layout and nothing else, so its magnitude is a direct,
+   assumption-free floor on exactly the arm that matters. In one campaign three of eight rungs did
+   this on three separate machines, and every report ended up using them rather than the control.
+   **If none of your rungs has the wrong sign, you have no direct floor measurement** — fall back to
+   the percentage rule and say so.
+4. **Build each variant at least twice** where the answer is close to the line, and **quote both
+   floors**, saying which applies to which comparison.
 
-A control that stays flat across builds is also what proves the flag did what it claimed — one
-campaign's control being flat under one compiler and jumping 16% under another is what identified
-the second machine's numbers as layout rather than measurement.
+A control that stays flat is still worth carrying: it proves the flag did what it claimed, and its
+*relative* movement is comparable across arms even when its absolute movement is not. One campaign's
+control was flat under one compiler and moved 9.7% under another **on the same machine measuring the
+same untouched function** — a 32x difference in layout sensitivity between two toolchains, which is
+the sharpest possible statement of why this step exists.
 
 ### Step 4 — write the report into this file
 
@@ -298,6 +348,18 @@ was believed for a while.
   measured a **1.5%** floor, because its arms were single-threaded and every figure best-of-5. Say
   what the load was, measure the floor, and let the floor decide. A machine talked out of running is
   a data point nobody gets.
+- **If the harness has two differently-shaped modes, run both and use SIGN-AGREEMENT as a filter.**
+  It costs one extra invocation per configuration and it is the cheapest validity check available:
+  **a change that genuinely removes work must move both modes, in the same direction.** Three
+  independent reports converged on this rule without being asked to. It also catches the subtler
+  case — a rung whose two modes disagreed by an order of magnitude turned out to be measuring a
+  property of the *fixture* (the declared width of the harness's column names) rather than of the
+  library, which no single mode would have revealed.
+- **Say whether a variant changed the ANSWER as well as the timing.** A variant that changes timing
+  but leaves the checksum bit-identical has measured **pure overhead** — work paid on every call for
+  something that call was not using — and that is a stronger statement than the timing alone. A
+  variant whose checksum moves is timings-only by construction, and the report must say so, or the
+  next reader will file the checksum difference as a defect.
 - **A noise floor measured on a PROXY is evidence about the proxy.** One machine carried forward a
   5% floor taken on a different tool — whose arms were ~30 ms bandwidth-bound array loops — and
   concluded it could not resolve a 5% threshold. The campaign's own arms reproduced to **0.19%**:
@@ -382,7 +444,9 @@ toolchain)*:
 | commit, clean or dirty | |
 
 **Did it build and pass?** State this before any timing — a fast build that fails its tests is not a
-result.
+result. **If the campaign scaffolds the source behind macros, run the suite on the NO-MACRO build**:
+that is what proves the scaffolded default really is the shipped path, and a matching assertion
+count across two toolchains is what makes a baseline trustworthy rather than merely green.
 
 | | outcome |
 |---|---|

@@ -559,13 +559,21 @@ contains
         ! The reserved name resolves to the automatic column, materializing it on this first use.
         ! Done here, in the one lookup every value accessor goes through, so every one of them
         ! reaches it without knowing it exists.
-        if (name == PARQUET_ROW_INDEX .and. table_find(self, name) == 0) then
+        !
+        ! NESTED, not `.and.`-ed, and it must stay that way: Fortran does not short-circuit, so as
+        ! one combined condition a compiler is free to evaluate `table_find` on every accessor
+        ! call -- and ifx does, at the price of a SECOND complete name lookup per call (measured at
+        ! 33.9 ns against gfortran's 4.3, ~27% of a per-cell read). Nesting makes it unreachable
+        ! unless the name really is the reserved one.
+        if (name == PARQUET_ROW_INDEX) then
             ! `meta_keys` is allocated for every table that was opened from a file and stays so
             ! after a detach, which is exactly the question here: a table that HAD a file gets the
             ! row index (or, once detached, the message explaining why it can no longer have it),
             ! while one built in memory never had a file row to name and falls through to the
             ! ordinary "no column of this name".
-            if (allocated(self%cache%meta_keys)) call table_make_row_index(self)
+            if (table_find(self, name) == 0) then
+                if (allocated(self%cache%meta_keys)) call table_make_row_index(self)
+            end if
         end if
         idx = table_find(self, name)
         if (idx == 0) then

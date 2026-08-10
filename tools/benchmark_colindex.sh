@@ -180,6 +180,23 @@ echo "  modes       : ${MODES[*]}"
 echo "=============================================================================="
 echo
 
+# Some compilers optimise by DEFAULT, so "no -O in the flags" does not imply -O0 for them.
+#
+# The check below was a false positive on ifx and blocked machine B's whole arm: fpm gives ifx no
+# `-O` either, but ifx's own default is -O2, so that build was already optimised and refusing it was
+# wrong. The check is still the right design -- it failed rather than degrading -- but it has to
+# know the difference between "no flag, therefore -O0" (gfortran, flang) and "no flag, therefore
+# this compiler's default" (ifx, icx).
+#
+# Keep this list short and evidence-based: a compiler belongs here only once someone has confirmed
+# its default, because a wrong entry turns the check into the silent -O0 run it exists to prevent.
+compiler_defaults_to_optimised() {
+    case "$(basename "${FPM_FC:-gfortran}")" in
+        ifx|ifx-*|ifort|ifort-*|icx|icx-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # --profile release is not optional: fpm applies NO optimisation flags at all without a profile,
 # and every figure from an -O0 build is meaningless (measured 5.7x on one item in an earlier
 # campaign, enough to invert a comparison, and it did).
@@ -197,7 +214,7 @@ if [[ -z "$FLAGS_LINE" ]]; then
     echo "  Cannot confirm the build is optimised; refusing to produce numbers. Set" >&2
     echo "  SKIP_OPT_CHECK=1 to override, and SAY SO IN THE REPORT." >&2
     [[ "${SKIP_OPT_CHECK:-0}" == "0" ]] && exit 1
-elif [[ "$FLAGS_LINE" != *" -O"* ]]; then
+elif [[ "$FLAGS_LINE" != *" -O"* ]] && ! compiler_defaults_to_optimised; then
     cat >&2 <<EOF
 benchmark_colindex.sh: '--profile release' produced NO optimisation flag for this compiler.
 
@@ -205,6 +222,10 @@ benchmark_colindex.sh: '--profile release' produced NO optimisation flag for thi
 
 fpm has no release profile for some compilers (flang, as of fpm 0.13.0 alpha), so this would be an
 -O0 run reported as a release one -- measured 3.7x wrong on the headline figure when it happened.
+
+If THIS compiler optimises by default (ifx does, at -O2), add it to compiler_defaults_to_optimised()
+in this script rather than reaching for SKIP_OPT_CHECK -- an override and an appended -O3 are two
+different configurations, and mixing them across machines is a comparability trap.
 
 Fix by appending the flag yourself (append, never assign -- FPM_FFLAGS carries Arrow's paths):
 

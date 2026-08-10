@@ -1242,8 +1242,15 @@ contains
         !
         ! %materialize_all deliberately does NOT go through this: it marks the slots that exist,
         ! so a table that never asked for the row index does not acquire one from a bulk read.
-        if (name == PARQUET_ROW_INDEX .and. table_find(self, name) == 0) then
-            if (allocated(self%cache%meta_keys)) call table_make_row_index(self)
+        !
+        ! Nested rather than `.and.`-ed for the reason `table_resolve` spells out: Fortran does not
+        ! short-circuit, so the combined form lets a compiler run `table_find` on every call. This
+        ! one is per-column rather than per-cell, so it costs nothing measurable -- it is written
+        ! this way so the file carries one shape, not two.
+        if (name == PARQUET_ROW_INDEX) then
+            if (table_find(self, name) == 0) then
+                if (allocated(self%cache%meta_keys)) call table_make_row_index(self)
+            end if
         end if
         idx = table_find(self, name)
         if (idx == 0) then

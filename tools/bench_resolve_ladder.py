@@ -99,20 +99,27 @@ EDITS = [
         "#endif\n",
     ),
     # --- table_resolve: the reserved-name comparison ------------------------------------------
+    #
+    # Stage 0c nested this `if` (it was one `.and.`-ed condition when the ladder was written), so
+    # the baseline the ladder now measures ALREADY has ifx's double lookup removed -- which is the
+    # point of the fix, and means a NO_ROWINDEX_CMP rung run after it is not comparable with one
+    # run before it. See feature_colindex.md §0.
     (
-        "        if (name == PARQUET_ROW_INDEX .and. table_find(self, name) == 0) then\n",
+        "        if (name == PARQUET_ROW_INDEX) then\n",
         "#if !defined(PF_BENCH_NO_ROWINDEX_CMP) && !defined(PF_BENCH_NO_LOOKUP)\n"
-        "        if (name == PARQUET_ROW_INDEX .and. table_find(self, name) == 0) then\n",
+        "        if (name == PARQUET_ROW_INDEX) then\n",
     ),
     # Closing the reserved-name guard AND replacing the lookup, in ONE edit, because they are
     # adjacent and cannot be anchored separately: `idx = table_find(self, name)` followed by
     # `if (idx == 0) then` occurs identically in `table_lookup_or_fail`, so the only unique context
     # is the meta_keys line above it -- which the previous edit would otherwise have consumed.
     (
-        "            if (allocated(self%cache%meta_keys)) call table_make_row_index(self)\n"
+        "                if (allocated(self%cache%meta_keys)) call table_make_row_index(self)\n"
+        "            end if\n"
         "        end if\n"
         "        idx = table_find(self, name)\n",
-        "            if (allocated(self%cache%meta_keys)) call table_make_row_index(self)\n"
+        "                if (allocated(self%cache%meta_keys)) call table_make_row_index(self)\n"
+        "            end if\n"
         "        end if\n"
         "#endif\n"
         "#ifdef PF_BENCH_NO_LOOKUP\n"

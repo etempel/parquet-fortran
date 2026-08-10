@@ -2162,6 +2162,26 @@ applied to the harness instead of the source.
   size(b)) same = all(a == b)`). This has bitten twice: once in `parquet_close_writer`'s
   mask-consumed check, once in a test comparing two sample draws. Both times the guarded form looked
   obviously safe.
+
+  **The same non-short-circuiting is also a PERFORMANCE hazard, and there it is compiler-dependent
+  in a way that hides on gfortran.** `if (cheap_test .and. expensive_call() == 0)` may evaluate the
+  expensive half unconditionally. Measured instance: `table_resolve`'s
+  `if (name == PARQUET_ROW_INDEX .and. table_find(self, name) == 0)` costs **4.3 ns under gfortran**
+  -- a bare string comparison, i.e. it short-circuits -- and **33.9 ns under ifx**, which is a string
+  comparison plus very nearly a second complete `table_find` (ifx prices one at 31.4 ns). So ifx
+  performs **two full name lookups per accessor where one is needed**, on every value accessor in
+  the table layer, worth **27% of a per-cell read**. An earlier note in this project recorded that
+  gfortran short-circuits at `-O2` but not at `-O0` and concluded it was "harmless in production";
+  that conclusion was gfortran-specific and is wrong for ifx. **Nest the test rather than relying on
+  the optimiser** whenever the second operand is more than a comparison:
+
+  ```fortran
+  if (cheap_test) then
+      if (expensive_call() == 0) then
+          ...
+      end if
+  end if
+  ```
 - **A `pointer`-typed intermediate component defeats `-fcheck=bounds`'s trust in a freshly
   unallocated LHS on intrinsic assignment.** `table_clone` (`parquet_tables_clone.f90`) used to do
   `out%cache%rg_bounds = self%cache%rg_bounds` to copy an allocatable 2-D array, relying on F2003+
@@ -2634,6 +2654,61 @@ before being noticed:**
   refuse any other configuration it cannot engage. `tools/benchmark_colindex.sh` does; the older
   wrappers do not. Recovery is to append the flag (`FPM_FFLAGS="${FPM_FFLAGS:-} -O3"`, appended
   never assigned) and say so in the report.
+
+  **But "no `-O` in the flags" does NOT mean "unoptimised" — some compilers optimise by default, and
+  a check that does not know this blocks a valid arm.** fpm gives **ifx** no `-O` either, and ifx's
+  own default is **`-O2`**, so that build is already optimised and refusing it is wrong. This cost a
+  whole toolchain arm on one machine before it was diagnosed. A wrapper needs to distinguish "no
+  flag, therefore `-O0`" (gfortran, flang) from "no flag, therefore this compiler's default" (ifx,
+  icx), which means carrying a short, **evidence-based** list of compilers whose default is
+  optimised — short because a wrong entry turns the check into the silent `-O0` run it exists to
+  prevent. And note the trap in the escape hatch: someone who reaches for a `SKIP_OPT_CHECK`-style
+  override is measuring a different configuration from someone who appends `-O3`, so a campaign that
+  mixes the two across machines has quietly stopped comparing like with like.
+- **To find out WHERE the time goes on a per-element path, use a COMPILE-OUT LADDER, not phase
+  timers.** This project's usual instrument is `parquet_debug_get_*_nanos` counters around each
+  phase — how the filter's "93% of it is one helper's parameter type" finding was made — and it has
+  a hard limit: a hook may sit on a coarse operation, **never on a per-row or per-element path**. A
+  `steady_clock::now()` pair costs 20–25 ns, so on a ~37 ns per-cell accessor the timer costs more
+  than the thing timed and perturbs the code under study. The ladder inverts it: put each phase
+  behind its own cpp macro, build one binary per rung, and time the whole operation with one phase
+  removed at a time — **each rung's difference from the baseline is that phase's cost**, and no
+  timer goes near the hot path. `tools/bench_resolve_ladder.py` is the worked example (eight rungs
+  over `table_resolve`), and it settled in one afternoon a question three machines' worth of
+  end-to-end measurement had left open: the name lookup is **52–77%** of a per-cell read on four
+  toolchains, and every other phase is unresolvable.
+
+  Five rules the technique needs, all learned by breaking them:
+
+  - **It measures REMOVAL, not attribution.** A phase whose removal frees the optimiser to improve
+    what remains over-reports, so a rung is an *upper bound* on what fixing that phase could
+    recover, not a promise.
+  - **Every rung is a rebuild**, so it needs a cross-build floor (next bullet), not a re-run floor.
+  - **Some rungs will not be semantically neutral** — removing a guard changes behaviour, and one
+    rung that bypasses a lookup deliberately returns the wrong answer. Keep the scaffolding on a
+    throwaway branch, never on `main`, and have the harness **print which rung it is** so a figure
+    cannot be filed against the wrong binary.
+  - **Run the test suite on the NO-MACRO build.** That is what proves the scaffolded default really
+    is the shipped path — one campaign's `fpm test` passing with an identical assertion count under
+    two toolchains is what made its baseline trustworthy.
+  - **Apply the scaffolding with a script that validates every anchor before writing anything**, and
+    do not write a `--revert`: `git checkout` already reverses it exactly, whereas a hand-rolled
+    reverse edit is a second thing that can be subtly wrong. A *partially* applied ladder compiles,
+    runs, and silently measures a configuration nobody asked for.
+- **Take TWO independent measurements of the same binary, and use sign-agreement as a validity
+  filter.** A benchmark with two differently-shaped modes over one build — say a tight per-call loop
+  and a realistic multi-column loop with arithmetic — gives a check that costs nothing extra: **a
+  change that genuinely removes work must move both, in the same direction.** Every campaign report
+  that used this converged on the same rule, independently: a rung whose two modes disagree in sign
+  is unresolvable, whatever its magnitude looks like in either one. It also catches the opposite
+  case — one campaign found a rung the two modes sized an order of magnitude apart, which turned out
+  to measure a property of the *fixture* (the declared width of the harness's column names) rather
+  than of the library.
+- **A variant that changes the TIMING but not the ANSWER is measuring pure overhead**, and that is
+  worth saying in the report rather than leaving implicit. One rung removed a reserved-name
+  comparison and left the checksum bit-identical — which proves the 4 ns it saved was being paid on
+  every call for a feature that call was not using. Conversely, a rung whose checksum moves is a
+  timings-only rung by construction and its answers must not be compared with anything.
 - **A build-flag-selected benchmark must PRINT which variant it is, and carry an arm the flag cannot
   touch.** Two arms that differ only by a compile flag are indistinguishable in a log, so a figure
   can be filed against the wrong binary with nothing to catch it — the same failure the "negative

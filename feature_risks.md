@@ -134,6 +134,8 @@ something a reader is expected to have.
 | [Risk-68](#risk-68--a-qc-bound-is-parsed-into-float64-so-a-bound-past-253-is-silently-rounded) | A qc bound is parsed into `float64`, so a bound past 2^53 is silently rounded | 4 — covered |
 | [Risk-69](#risk-69--a-test-that-compares-a-never-written-column-with-itself-passes-on-the-heaps-luck) | A test that compares a never-written column with itself passes on the heap's luck | 2 — proposed |
 | [Risk-70](#risk-70--an-intentinout-temporal-setter-that-skips-a-component-leaves-a-reused-element-stale) | An `intent(inout)` temporal setter that skips a component leaves a REUSED element stale | 4 — covered |
+| [Risk-71](#risk-71--a-stale-handle-reads-the-wrong-column-or-row-and-nothing-says-so) | A stale handle reads the wrong column or row, and nothing says so | 4 — covered |
+| [Risk-72](#risk-72--the-name-form-and-the-handle-form-of-one-accessor-can-silently-disagree) | The name form and the handle form of one accessor can silently disagree | 4 — covered |
 
 ---
 
@@ -141,7 +143,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-71**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-73**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2872,3 +2874,101 @@ observable from outside (all three raw accessors hard-code 0 for a null element,
 accessor aborts on null), so a mutation removing them survives the test suite by being a genuine
 semantic no-op *today*. They are kept as defence for the day an accessor exposes them, and the test's
 doc-comment says so rather than pretending the assertion covers them.
+
+### Risk-71 — A stale handle reads the wrong column or row, and nothing says so
+
+**What breaks.** `parquet_table_col` and `parquet_table_row` each capture a resolved position —
+a slot index, a row index — and reuse it on every later access. Every mutation that renumbers or
+reorders makes that captured position name something else. `%drop_column` shifts every slot above
+the dropped one down by one, so a slot taken beforehand stays **in range** and names a different
+column; `%sort_by`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append` and `%append_null_rows`
+move rows the same way; `%compact` and `%reserve` reallocate storage without changing the row set
+at all.
+
+**Why it is quiet.** The values that come back are individually valid — a real `real64` from a real
+column at a real row. Nothing is out of bounds, nothing aborts, no assertion fails. Only the
+*mapping* is wrong, and a program has no way to notice: the mass column now reads the flux column's
+numbers, and both are plausible masses.
+
+**The mitigation is the generation stamp.** Each handle records `cache%generation` when it is made
+and compares on every access (`col_resolve`, `row_check_current`); `%is_valid()` asks without
+aborting. The rule is deliberately **conservative** — `%append` does not move existing slots, so a
+column handle could survive one, and it is refused anyway — because one total rule is checkable and
+a list of exceptions is what the next mutation quietly falls outside.
+
+**This entry exists because the comparison is the kind of line a cleanup deletes.** It is one
+`integer(int64)` test sitting next to an `associated()` test, in a procedure whose name suggests it
+is only about attachment, on a path someone will one day be profiling. "We already checked
+`associated`, this is redundant" is wrong and produces exactly the silent failure above. The
+`%ref` case is the worst of them: it hands back a **raw pointer** into storage a mutation may have
+reallocated, so nothing downstream can catch it at all.
+
+**Two corollaries that are not obvious from the code.** `%index()` on a row handle is `pure` and
+therefore does **not** check — deliberately, because it answers about the handle rather than the
+table. And a `%sort_by` whose permutation moves no row returns early without bumping the
+generation, which is correct (nothing moved) but means a staleness *fixture* must actually reorder;
+one written here silently failed to abort until its data was made unsorted.
+
+**Test.** Six error scenarios, each with a negative control that uses the handle successfully first:
+`col_handle_stale_after_mutation`, `col_handle_ref_after_mutation`, `col_handle_never_attached`,
+`col_handle_row_out_of_range`, `row_handle_stale_after_sort`, and — for the case that corrupts a
+*different* table — `row_handle_foreign_column`, where a column handle from another table is neither
+stale nor detached but simply belongs somewhere else. Plus `test_col_handle_staleness` and
+`test_row_handle_staleness` (`test/test_table.f90`), which assert all four `%is_valid()` states;
+the third (`.false.` after a structural change) is the one that matters, since a predicate reporting
+only "attached" would answer `.true.` there and send the caller into an abort.
+
+**Mutation-verified, and one of them nearly escaped.** Deleting `col_resolve` from `col_ref_*` first
+read as SURVIVED — because `fpm build` does not build test targets, so the scenario binary predated
+the mutation. Check exit status, and rebuild with `fpm test`, before believing a handle mutation
+survived anything.
+
+### Risk-72 — The name form and the handle form of one accessor can silently disagree
+
+**What breaks.** Every per-element operation on a table now has two or three spellings:
+`t%get_element(name, i, v)`, `c%get(i, v)` on a column handle, and `r%get(c, v)` on a row handle.
+Each kind's rules — which source kinds widen into the caller's variable, whether a write clears the
+row's null, what a kind mismatch says — would have to be written once per spelling if the spellings
+had their own bodies. Eighteen kinds times three spellings is fifty-four places for one rule to
+live, and a fix applied to one is invisible in the others.
+
+**Why it is quiet.** Both spellings compile, both return a number, and every existing test exercises
+whichever one it was written against. A widening rule fixed in the name form and not the handle form
+shows up as a handle that refuses a column the name form accepts — or worse, as one that widens
+where the other does not, so two loops over the same data disagree in the last bits.
+
+**The mitigation is that there is only one body.** `col_fetch_<tag>`/`col_store_<tag>`
+(`src/parquet_tables_colaccess.f90`, generated) take the resolved pieces — cache, slot, kind, row —
+rather than a handle, and **all three** spellings call them. The kind-mismatch message comes from
+`cache_require_kind`, which `table_require_kind` also delegates to, so a handle and a name report a
+mismatch in identical words; the pointer path's own message comes from `cache_require_ptr_kind`,
+shared by `%col` and `%ref` for the same reason.
+
+**The five-argument shape is not a style choice.** The obvious alternative — have `%get_element`
+build a `parquet_table_col` and delegate through it — was built and measured at **+16.3%** on
+`%get_element`, three times the 5% bar the feature was held to; the shape that ships measured
+**+2.16%**, inside the cross-build noise floor. So "make the name form construct a handle" is a
+refactor that has already been tried and rejected on evidence, not one waiting to be discovered.
+
+**If a future change ever gives a spelling its own body again, this entry is what says why it must
+not.** The generator once carried a `DELEGATING_KINDS` set precisely so the two shapes could
+coexist while the cost was measured; it is deleted now, and the non-delegating branch with it,
+because a switch between two implementations of one rule is the drift it was meant to detect.
+
+**Test.** The equivalence sweeps in `test/test_table.f90` — `test_col_handle_get_matches_name_form`
+(one kind of each scalar shape, including the widening case), `test_col_handle_allocating_kinds`
+(numeric vector, temporal vector, string scalar, string vector, each read both ways) and
+`test_row_handle_takes_column_handle` (all three spellings of one cell compared against each other
+and against the stored value). Because there is one body, these are regression tests for the
+*sharing* rather than for each kind — a second body reintroduced anywhere fails them the moment its
+behaviour differs at all.
+
+**A related trap the shared body does NOT cover, recorded here because it was met while building
+it.** `parquet_column%set_elem` exists because writing one element of a vector row through
+`%data_ptr` bypasses the column's own null bookkeeping — which is three different rules (a numeric
+element's null is in the bitmap, a temporal element's null **is** the element, a string element's
+lives in the string store). The temporal one is the quiet one: `%any_null()` answers from a cache
+the column recomputes lazily, so a bypassing write leaves `%has_nulls` reporting "no nulls" for the
+rest of the program. Any future per-element operation belongs in `parquet_column`, not in a caller
+reaching around it. Covered by `test_col_handle_element_within_row`, whose `%has_nulls` assertion
+is the one that catches it.

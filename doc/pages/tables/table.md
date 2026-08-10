@@ -251,9 +251,9 @@ The brackets are notation for this documentation, never something you type.)
 
 ### Asking about a column by position instead of by name
 
-**`%kind`, `%width`, `%unit`, `%residency`, `%is_supported` and `%has_nulls` also accept a 1-based
-column position** wherever they accept a name, so a sweep over every column does not have to copy
-a name out just to ask about it:
+**`%kind`, `%width`, `%unit`, `%residency`, `%is_supported`, `%has_nulls` and `%is_null` also
+accept a 1-based column position** wherever they accept a name, so a sweep over every column does
+not have to copy a name out just to ask about it:
 
 ```fortran
 do j = 1, t%ncols()
@@ -396,15 +396,17 @@ call r%get("flux", spectrum)        ! vector kind -> allocatable rank-1 array
 print *, r%index(), r%is_null("mass")
 ```
 
-A handle has three procedures, and that is all:
+What a row handle can do:
 
 | call | answer |
 |---|---|
 | `call r%get(name, value)` | one column's value in this row — scalar for a scalar column, allocatable rank-1 array for a vector one |
 | `call r%set(name, value)` | writes that value into the table — a handle is a view of it, not a copy |
+| `call r%get(c, value)` / `call r%set(c, value)` | the same, with the column named by a [column handle](#a-column-handle) instead of a string — no name lookup |
 | `call r%ref(name, p)` | a pointer to this row's storage: zero copy, writable, exact kind |
-| `r%is_null(name)` | whether this row of that column is null |
+| `r%is_null(name [, e])` | whether this row of that column is null, or element `e` of it |
 | `r%index()` | which row this is, in the table's own numbering |
+| `r%is_valid()` | whether the handle is still usable — see below |
 
 `%set` is exact-kind (a write never widens) and clears that row's null, exactly as
 `%set_element` does. `%ref` gives a scalar pointer for a scalar column and a pointer to the whole
@@ -446,6 +448,81 @@ call r%get("mass", m)
 
 For a single cell there is no need for a handle at all — `call t%get_element("mass", 42, m)` is
 the one-call form (see [Replacing values](table-mutate.html#replacing-values)).
+
+## A column handle
+
+`t%column("mass", c)` gives a handle on one **column** — the mirror image of `t%row(i)`. A row
+handle fixes the row and names the column on every access; a column handle fixes the column and
+names the row:
+
+```fortran
+type(parquet_table_col) :: c
+real(real64) :: m
+call t%column("mass", c)
+do i = 1, t%nrows()
+    call c%get(i, m)
+    ...
+end do
+```
+
+**The point is what it removes.** `%get_element(name, i, v)` looks the column up by name on every
+call, and that lookup is **52–77% of what the call costs** — measured on four toolchains across
+three machines. A handle resolves it once. How much the loop gains depends on the compiler: a
+resolve-once loop measured between **1.5x and 4x** the name form's throughput on those same four
+toolchains.
+
+`t%column(j, c)` takes a 1-based position instead of a name, which is what makes a
+`do j = 1, t%ncols()` loop work. Both forms take `[found]`, and report a missing name or an
+out-of-range position the same way every other lookup does.
+
+What a column handle can do — brackets mark optional arguments:
+
+| call | answer |
+|---|---|
+| `call c%get(i, value)` | row `i`'s value, widening exactly as `%get_element` does |
+| `call c%set(i, value)` | writes it; exact kind, and the write clears that row's null |
+| `call c%get(i, e, value)` / `call c%set(i, e, value)` | **one element** of row `i` of a vector column, with no array allocated |
+| `c%is_null(i [, e])` | whether that row — or element `e` of it — is null |
+| `call c%set_null(i [, e])` / `call c%clear_null(i [, e])` | mark or unmark it |
+| `call c%ref(p [, is_valid])` | the same pointer `%col` gives, without the lookup |
+| `c%index()`, `c%kind()`, `c%width()`, `c%residency()` | this column's position, kind, values per row, residency |
+| `call c%name(nm)`, `call c%unit(u)` | its name and unit string |
+| `c%is_valid()` | whether the handle is still usable |
+
+**`c%get(i, e, value)` is new capability, not a faster spelling.** There has never been a way to
+read one element of a vector row without materialising the whole row — `%get_element` on a vector
+column allocates a width-long array on every call. This reads the one element.
+
+A handle is a **view**: `%set` through it changes the table, and the change is visible through the
+name form immediately. `%ref` hands back exactly the pointer `%col` does, with exactly the same
+rules and the same warning — see [Two ways to reach a column](#two-ways-to-reach-a-column).
+
+**A column handle does not survive a structural change**, on the same terms the row handle does:
+it stamps `%generation()` when it is made, refuses once they differ, and `%is_valid()` asks without
+aborting. Dropping a column renumbers the slots above it, so a handle taken beforehand would
+otherwise name a *different* column — valid values, wrong answer, no diagnostic. That is the case
+the stamp exists for.
+
+### Choosing between the three ways to read a cell
+
+| you want | use | why |
+|---|---|---|
+| the fastest possible loop; kind known at compile time, no widening | `%col` — and hoist the pointer out of the loop | a plain array read, no call at all |
+| a guarded per-cell loop: kind decided at run time, a string column, widening, or validity-aware access | a column handle | one resolve for the whole loop, and every guard still runs |
+| one cell, or a few | `%get_element(name, i, v)` | nothing to hoist, nothing to keep valid |
+
+Two traps, both of which only appear at scale:
+
+- **Hoist the handle out of the loop; never re-fetch it inside one.** Making a handle costs about
+  what one `c%get` costs, so re-fetching per cell doubles the loop and gives back everything the
+  handle won. If the loop *changes* the table's structure, do not use a handle at all — use the
+  name form, which resolves afresh each time.
+- **`t%column(j, c)` READS column `j`.** Making a handle resolves the column, which triggers the
+  same lazy first touch any value access does. A `do j = 1, t%ncols()` loop that builds a handle
+  just to print `%name()` and `%kind()` therefore reads the whole file. For a metadata sweep use
+  the by-position queries instead — `t%kind(j)`, `t%width(j)`, `t%column_name(j, nm)` — which
+  answer from the descriptor and read nothing. See
+  [Asking about a column by position](#asking-about-a-column-by-position-instead-of-by-name).
 
 ## Picking rows out of a column
 

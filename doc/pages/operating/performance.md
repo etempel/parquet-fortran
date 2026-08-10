@@ -12,3 +12,34 @@ Worth knowing before working with very large files (tens of GB and up):
 - **Build with optimizations for production use.** `fpm build`'s default profile applies no optimization to either the Fortran or the C++ side; use `fpm build --profile release` (or your own equivalent `-O` flags) — this measurably affects throughput for this library's numeric read/write paths.
 
 Practically: make sure available RAM comfortably covers a few times the decompressed logical size of the largest file(s) you'll have open at once, especially under concurrency.
+
+## Reaching a table's values cheaply
+
+Everything below is about `parquet_table`. It costs nothing to apply and it is where the largest easy wins in a value-crunching program are.
+
+**Resolve the column once, outside the loop.** Every accessor that takes a column *name* looks that name up on every call, and on a per-cell path that lookup is **52–77% of the total** — measured on four toolchains across three machines. So the shape of the loop matters more than anything inside it:
+
+```fortran
+! Slowest: one name lookup per cell.
+do i = 1, t%nrows()
+    call t%get_element("mass", i, m)
+    total = total + m
+end do
+
+! Faster: one lookup for the whole loop, every guard still in place.
+type(parquet_table_col) :: c
+call t%column("mass", c)
+do i = 1, t%nrows()
+    call c%get(i, m)
+    total = total + m
+end do
+
+! Fastest, when the kind is known at compile time and no widening is wanted.
+real(real64), pointer :: p(:)
+call t%col("mass", p)
+total = sum(p)
+```
+
+A resolve-once loop measured between **1.5x and 4x** the name form's throughput on those four toolchains; the pointer form is a plain array read with no call at all. See [A column handle](../tables/table.html#a-column-handle) for what a handle can do and the two traps to avoid — chiefly that making one is not free, so it belongs outside the loop, and that making one *reads* the column, so a metadata sweep should use the by-position queries instead.
+
+**Making a handle is not free, so do not make one per cell.** For a row handle the construction dominates its use: `r = t%row(i)` followed by one `r%get` cost **1.37x–2.50x** (three toolchains) what the same `r%get` costs on a handle that already exists. A loop over *rows* cannot hoist a row handle — the handle names the row — so for a column-at-a-time sweep reach for a column handle or a `%col` pointer instead, and keep the row handle for what it is good at: passing one row to a procedure, and reading several columns of the same row.

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_table` columns can now be reached by 1-based position, not only by name.**
+  `t%column_index(name [, found])` gives a column's position (0 when absent) and
+  `call t%column_name(j, nm [, found])` gives the name at a position; the two are inverses.
+  `%kind`, `%width`, `%unit`, `%residency`, `%is_supported` and `%has_nulls` each accept a position
+  wherever they accept a name, so a `do j = 1, t%ncols()` sweep can report on every column without
+  copying names out to ask about them. An out-of-range position reports through `found=` or aborts
+  with a message naming both the position and the table's current width. These are metadata
+  queries and read no values; positions address the table's own columns and are renumbered by
+  `%drop_column`/`%add_column`, so re-derive them after a column-set change.
+
 - **Filling a string `parquet_column` from a character array is 6.2x faster**, and
   `parquet_string_column%build_from` gains a **character-array form** to make it so:
   `call col%build_from(values [, is_null])` clears the column and rebuilds it from a

@@ -98,30 +98,29 @@ EDITS = [
         "        call table_check_no_append(self%cache, proc)\n"
         "#endif\n",
     ),
-    # --- table_resolve: the reserved-name comparison ------------------------------------------
+    # --- table_resolve: the name lookup ---------------------------------------------------------
     #
-    # Stage 0c nested this `if` (it was one `.and.`-ed condition when the ladder was written), so
-    # the baseline the ladder now measures ALREADY has ifx's double lookup removed -- which is the
-    # point of the fix, and means a NO_ROWINDEX_CMP rung run after it is not comparable with one
-    # run before it. See feature_colindex.md §0.
+    # ANCHORS RE-DERIVED TWICE, and the history is the reason each rung means what it means:
+    #
+    #   * Stage 0c nested what had been one `.and.`-ed condition, so the ladder's baseline stopped
+    #     carrying ifx's redundant second lookup.
+    #   * Stage 0d moved the reserved-name comparison BELOW the lookup, onto the miss path. So
+    #     `PF_BENCH_NO_ROWINDEX_CMP` now removes a block the harness never executes and should
+    #     measure ~0 on every toolchain -- that is not a broken rung, it is the fix being visible
+    #     from the instrument that found the problem. Anything materially above zero there means
+    #     the comparison has found its way back onto the hot path.
+    #
+    # A rung's figure is therefore only comparable with one taken at the same stage. See
+    # feature_colindex.md §0 and §7's stage 0c / 0d blocks for the measured values.
+    #
+    # NO_LOOKUP replaces the FIRST `table_find` -- the one every accessor runs. The second, inside
+    # the miss path, is unreachable in this harness (no column is named `parquet_row_index`) and is
+    # deliberately left alone: replacing it would change what the rung means without changing what
+    # it measures.
     (
-        "        if (name == PARQUET_ROW_INDEX) then\n",
-        "#if !defined(PF_BENCH_NO_ROWINDEX_CMP) && !defined(PF_BENCH_NO_LOOKUP)\n"
-        "        if (name == PARQUET_ROW_INDEX) then\n",
-    ),
-    # Closing the reserved-name guard AND replacing the lookup, in ONE edit, because they are
-    # adjacent and cannot be anchored separately: `idx = table_find(self, name)` followed by
-    # `if (idx == 0) then` occurs identically in `table_lookup_or_fail`, so the only unique context
-    # is the meta_keys line above it -- which the previous edit would otherwise have consumed.
-    (
-        "                if (allocated(self%cache%meta_keys)) call table_make_row_index(self)\n"
-        "            end if\n"
-        "        end if\n"
+        "        ! resolve it, and only the old form paid for the comparison).\n"
         "        idx = table_find(self, name)\n",
-        "                if (allocated(self%cache%meta_keys)) call table_make_row_index(self)\n"
-        "            end if\n"
-        "        end if\n"
-        "#endif\n"
+        "        ! resolve it, and only the old form paid for the comparison).\n"
         "#ifdef PF_BENCH_NO_LOOKUP\n"
         "        ! Wrong on purpose -- some other column's slot, in O(1). Timings only.\n"
         "        idx = 1 + iand(iachar(name(len(name):len(name))), 3)\n"
@@ -129,6 +128,23 @@ EDITS = [
         "#else\n"
         "        idx = table_find(self, name)\n"
         "#endif\n",
+    ),
+    # --- table_resolve: the reserved-name comparison, now on the MISS path ----------------------
+    (
+        "            if (name == PARQUET_ROW_INDEX) then\n",
+        "#ifndef PF_BENCH_NO_ROWINDEX_CMP\n"
+        "            if (name == PARQUET_ROW_INDEX) then\n",
+    ),
+    (
+        "                    idx = table_find(self, name)\n"
+        "                end if\n"
+        "            end if\n"
+        "        end if\n",
+        "                    idx = table_find(self, name)\n"
+        "                end if\n"
+        "            end if\n"
+        "#endif\n"
+        "        end if\n",
     ),
     # --- cache_find: len_trim only ------------------------------------------------------------
     #

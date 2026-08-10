@@ -1164,6 +1164,8 @@ program error_scenarios
         call scenario_table_assignment_blocked()
     case ("table_not_opened")
         call scenario_table_not_opened()
+    case ("table_column_position_out_of_range")
+        call scenario_table_column_position_out_of_range()
     case ("table_pointer_kind_mismatch")
         call scenario_table_pointer_kind_mismatch()
     case ("table_get_array_kind_mismatch")
@@ -10125,6 +10127,22 @@ contains
         n = t%nrows()   ! never opened -> aborts
         print '(a,i0)', "unexpectedly read a row count from an unopened table, n=", n
     end subroutine scenario_table_not_opened
+    !
+    !> A by-position query with no `found=` must abort rather than answer for some other column.
+    !! The negative control matters here: the same call one position lower must succeed first, or
+    !! a validator that refused everything would pass this scenario.
+    subroutine scenario_table_column_position_out_of_range()
+        type(parquet_table) :: t
+        real(real64) :: d(2)
+        integer :: k
+        d = [1.0_real64, 2.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("a", d)
+        k = t%kind(1)   ! negative control: the one valid position must answer
+        print '(a,i0)', "in-range position answered, kind=", k
+        k = t%kind(2)   ! one past the end, no found= -> aborts
+        print '(a,i0)', "unexpectedly read a kind past the last column, kind=", k
+    end subroutine scenario_table_column_position_out_of_range
 
     !> The pointer path is exact-kind by design (it aliases raw storage), so asking for an
     !! int64 pointer into an int32 column must abort rather than silently widening.

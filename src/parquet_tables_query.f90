@@ -81,6 +81,49 @@ contains
         end do
     end procedure table_column_names
     !
+    module procedure table_column_index
+        call table_lookup_or_fail(self, name, "column_index", j, found)
+        ! `table_lookup_or_fail` already leaves 0 on a reported miss and aborts otherwise, so the
+        ! slot index IS the answer -- the two concepts coincide, and saying so here is what keeps
+        ! %column_index and every index-form query agreeing on what a position means.
+    end procedure table_column_index
+    !
+    module procedure table_column_name
+        integer :: idx
+        !
+        nm = ""
+        call table_slot_or_fail(self, j, "column_name", idx, found)
+        if (idx == 0) return
+        nm = self%cache%cols(idx)%name
+    end procedure table_column_name
+    !
+    !> Validates a 1-based column position, the way `table_lookup_or_fail` validates a name.
+    !!
+    !! Deliberately reports the table's width in the message: an out-of-range position is almost
+    !! always a loop bound that has gone stale against `%ncols()` after a `%drop_column` or an
+    !! `%add_column`, and the two numbers side by side say that immediately.
+    module procedure table_slot_or_fail
+        character(len=:), allocatable :: sfx
+        character(len=32) :: got, have
+        !
+        call table_check_open(self, proc)
+        idx = 0
+        if (j >= 1 .and. j <= self%cache%ncols) then
+            idx = j
+            if (present(found)) found = .true.
+            return
+        end if
+        if (present(found)) then
+            found = .false.
+            return
+        end if
+        write(got, "(I0)") j
+        write(have, "(I0)") self%cache%ncols
+        call table_context_suffix(self%cache, "", sfx)
+        error stop EP // trim(proc) // ": column position " // trim(got) // " is outside this " // &
+            "table's 1.." // trim(have) // " columns" // sfx
+    end procedure table_slot_or_fail
+    !
     module procedure table_has_column
         call table_check_open(self, "has_column")
         found = table_find(self, name) > 0
@@ -281,22 +324,52 @@ contains
         cache%name_key(lo) = key
     end procedure cache_name_index_insert
     !
-    module procedure table_column_kind
-        integer :: idx
+    !> A resolved slot's kind. Shared by `%kind`'s name and position forms so the two can never
+    !! drift; the same pattern is used for every query that has both.
+    !!
+    !! Answers from the DESCRIPTOR, not from the value store, because a column that has not been
+    !! touched yet holds no values -- and %kind is precisely how a caller decides which %col
+    !! specific to call, so it has to work before the first read, not after it.
+    function slot_kind(self, idx) result(k)
+        class(parquet_table), intent(in) :: self !! the table.
+        integer, intent(in) :: idx               !! a validated slot index.
+        integer :: k                             !! the PK_* constant.
         !
-        ! Answers from the DESCRIPTOR, not from the value store, because a column that has not
-        ! been touched yet holds no values -- and %kind is precisely how a caller decides which
-        ! %col specific to call, so it has to work before the first read, not after it.
-        k = PK_NONE
-        call table_lookup_or_fail(self, name, "kind", idx, found)
-        if (idx == 0) return
         ! For a plain LIST/LARGE_LIST column the kind is not known until the width is, and a
         ! metadata query must not answer with a guess -- so this resolves it for real (proven),
         ! which does read data for that one column type. Every other column was classified from
         ! the schema at open and this is a no-op. See table_resolve_width.
         call table_resolve_width(self%cache, table_scope_of(self), idx, .true., "kind")
         k = self%cache%cols(idx)%declared_kind
+    end function slot_kind
+    !
+    module procedure table_column_kind
+        integer :: idx
+        !
+        k = PK_NONE
+        call table_lookup_or_fail(self, name, "kind", idx, found)
+        if (idx == 0) return
+        k = slot_kind(self, idx)
     end procedure table_column_kind
+    !
+    module procedure table_column_kind_at
+        integer :: idx
+        !
+        k = PK_NONE
+        call table_slot_or_fail(self, j, "kind", idx, found)
+        if (idx == 0) return
+        k = slot_kind(self, idx)
+    end procedure table_column_kind_at
+    !
+    !> A resolved slot's values-per-row. Proven, not guessed, exactly as `slot_kind` explains.
+    function slot_width(self, idx) result(wdt)
+        class(parquet_table), intent(in) :: self !! the table.
+        integer, intent(in) :: idx               !! a validated slot index.
+        integer :: wdt                           !! values per row.
+        !
+        call table_resolve_width(self%cache, table_scope_of(self), idx, .true., "width")
+        wdt = self%cache%cols(idx)%width
+    end function slot_width
     !
     module procedure table_column_width
         integer :: idx
@@ -304,10 +377,35 @@ contains
         wdt = 1
         call table_lookup_or_fail(self, name, "width", idx, found)
         if (idx == 0) return
-        ! Same as %kind above: proven, not guessed.
-        call table_resolve_width(self%cache, table_scope_of(self), idx, .true., "width")
-        wdt = self%cache%cols(idx)%width
+        wdt = slot_width(self, idx)
     end procedure table_column_width
+    !
+    module procedure table_column_width_at
+        integer :: idx
+        !
+        wdt = 1
+        call table_slot_or_fail(self, j, "width", idx, found)
+        if (idx == 0) return
+        wdt = slot_width(self, idx)
+    end procedure table_column_width_at
+    !
+    !> A resolved slot's unit string ("" when it has none).
+    !!
+    !! The descriptor first, because it answers for a column nothing has read yet -- a file-backed
+    !! column's unit comes from the read-in MAML at open, not from its values. The values are asked
+    !! only for a column that has no descriptor unit, which is every column built with
+    !! %add_column(unit=).
+    subroutine slot_unit(self, idx, u)
+        class(parquet_table), intent(in) :: self        !! the table.
+        integer, intent(in) :: idx                      !! a validated slot index.
+        character(len=:), allocatable, intent(out) :: u !! the unit, or "".
+        !
+        if (allocated(self%cache%cols(idx)%unit)) then
+            u = self%cache%cols(idx)%unit
+            return
+        end if
+        call self%cache%cols(idx)%values%unit_string(u)
+    end subroutine slot_unit
     !
     module procedure table_column_unit
         integer :: idx
@@ -315,16 +413,17 @@ contains
         u = ""
         call table_lookup_or_fail(self, name, "unit", idx, found)
         if (idx == 0) return
-        ! The descriptor first, because it answers for a column nothing has read yet -- a
-        ! file-backed column's unit comes from the read-in MAML at open, not from its values. The
-        ! values are asked only for a column that has no descriptor unit, which is every column
-        ! built with %add_column(unit=).
-        if (allocated(self%cache%cols(idx)%unit)) then
-            u = self%cache%cols(idx)%unit
-            return
-        end if
-        call self%cache%cols(idx)%values%unit_string(u)
+        call slot_unit(self, idx, u)
     end procedure table_column_unit
+    !
+    module procedure table_column_unit_at
+        integer :: idx
+        !
+        u = ""
+        call table_slot_or_fail(self, j, "unit", idx, found)
+        if (idx == 0) return
+        call slot_unit(self, idx, u)
+    end procedure table_column_unit_at
     !
     module procedure table_column_residency
         integer :: idx
@@ -335,6 +434,15 @@ contains
         r = self%cache%cols(idx)%residency
     end procedure table_column_residency
     !
+    module procedure table_column_residency_at
+        integer :: idx
+        !
+        r = RES_EMPTY
+        call table_slot_or_fail(self, j, "residency", idx, found)
+        if (idx == 0) return
+        r = self%cache%cols(idx)%residency
+    end procedure table_column_residency_at
+    !
     module procedure table_is_supported
         integer :: idx
         !
@@ -344,6 +452,15 @@ contains
         ok = self%cache%cols(idx)%supported
     end procedure table_is_supported
     !
+    module procedure table_is_supported_at
+        integer :: idx
+        !
+        ok = .false.
+        call table_slot_or_fail(self, j, "is_supported", idx, found)
+        if (idx == 0) return
+        ok = self%cache%cols(idx)%supported
+    end procedure table_is_supported_at
+    !
     module procedure table_generation
         call table_check_open(self, "generation")
         g = self%cache%generation
@@ -351,11 +468,30 @@ contains
     !
     module procedure table_has_nulls
         integer :: idx
-        integer(int64) :: rg_lo, rg_hi
         !
         any_null = .false.
         call table_lookup_or_fail(self, name, "has_nulls", idx, found)
         if (idx == 0) return
+        any_null = slot_has_nulls(self, idx)
+    end procedure table_has_nulls
+    !
+    module procedure table_has_nulls_at
+        integer :: idx
+        !
+        any_null = .false.
+        call table_slot_or_fail(self, j, "has_nulls", idx, found)
+        if (idx == 0) return
+        any_null = slot_has_nulls(self, idx)
+    end procedure table_has_nulls_at
+    !
+    !> Whether a resolved slot holds (or may hold) a null. Shared by `%has_nulls`' two forms.
+    function slot_has_nulls(self, idx) result(any_null)
+        class(parquet_table), intent(in) :: self !! the table.
+        integer, intent(in) :: idx               !! a validated slot index.
+        logical :: any_null                      !! .true. if it holds (or may hold) a null.
+        integer(int64) :: rg_lo, rg_hi
+        !
+        any_null = .false.
         ! A resident column knows the answer exactly. A file-backed one that has NOT been read is
         ! answered from the file's footer instead of by reading it -- the whole reason this exists
         ! rather than the caller reading the column and scanning it. The footer answer is
@@ -376,7 +512,7 @@ contains
             call rg_covering_range(self%cache%rg_bounds, self%row_lo, self%row_hi, rg_lo, rg_hi)
         end if
         any_null = parquet_column_has_nulls(self%cache%reader, self%cache%cols(idx)%file_name, rg_lo, rg_hi)
-    end procedure table_has_nulls
+    end function slot_has_nulls
     !
     module procedure table_get_valid_mask
         integer :: idx

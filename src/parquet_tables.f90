@@ -418,7 +418,12 @@ module parquet_tables
         procedure :: nrows => table_nrows            !! Number of rows every column holds.
         procedure :: ncols => table_ncols            !! Number of columns the table has.
         procedure :: column_names => table_column_names !! Copy out every column name, in order.
-        procedure :: has_nulls => table_has_nulls    !! Whether a column holds (or may hold) nulls.
+        procedure :: column_index => table_column_index !! A column's 1-based position, 0 when absent.
+        procedure :: column_name => table_column_name !! Copy out the name at a 1-based position.
+        procedure, private :: has_nulls_name => table_has_nulls !! %has_nulls specific, by name.
+        procedure, private :: has_nulls_at => table_has_nulls_at !! %has_nulls specific, by position.
+        !> Whether a column holds (or may hold) nulls -- named, or by 1-based position.
+        generic :: has_nulls => has_nulls_name, has_nulls_at
         procedure, private :: table_get_valid_mask     !! %get_valid_mask specific, per-row mask.
         procedure, private :: table_get_valid_mask_elem !! %get_valid_mask specific, per-element mask.
         !> Copy out a column's validity as a plain `logical` array. A rank-1 `mask` gives one entry
@@ -427,10 +432,22 @@ module parquet_tables
         generic :: get_valid_mask => table_get_valid_mask, table_get_valid_mask_elem
         procedure :: generation => table_generation  !! Counter bumped by every structural change.
         procedure :: has_column => table_has_column  !! Whether a column of this name exists.
-        procedure :: kind => table_column_kind       !! A column's PK_* kind discriminator.
-        procedure :: width => table_column_width     !! A column's values-per-row (1 if scalar).
-        procedure :: unit => table_column_unit       !! Copy out a column's unit string.
-        procedure :: residency => table_column_residency !! A column's RES_* residency state.
+        procedure, private :: kind_name => table_column_kind !! %kind specific, by name.
+        procedure, private :: kind_at => table_column_kind_at !! %kind specific, by position.
+        !> A column's PK_* kind discriminator -- named, or by 1-based position.
+        generic :: kind => kind_name, kind_at
+        procedure, private :: width_name => table_column_width !! %width specific, by name.
+        procedure, private :: width_at => table_column_width_at !! %width specific, by position.
+        !> A column's values-per-row (1 if scalar) -- named, or by 1-based position.
+        generic :: width => width_name, width_at
+        procedure, private :: unit_name => table_column_unit !! %unit specific, by name.
+        procedure, private :: unit_at => table_column_unit_at !! %unit specific, by position.
+        !> Copy out a column's unit string -- named, or by 1-based position.
+        generic :: unit => unit_name, unit_at
+        procedure, private :: residency_name => table_column_residency !! %residency specific, by name.
+        procedure, private :: residency_at => table_column_residency_at !! %residency specific, by position.
+        !> A column's RES_* residency state -- named, or by 1-based position.
+        generic :: residency => residency_name, residency_at
         procedure, private :: is_null_i32 => table_is_null_i32 !! %is_null specific, int32 row index.
         procedure, private :: is_null_i64 => table_is_null_i64 !! %is_null specific, int64 row index.
         procedure, private :: is_null_e32 => table_is_null_e32 !! %is_null specific, int32 row + element.
@@ -442,7 +459,10 @@ module parquet_tables
         !! be 1 and the two agree.
         generic :: is_null => is_null_i32, is_null_i64, is_null_e32, is_null_e64
         procedure :: is_detached => table_is_detached !! Whether the table has left its file behind.
-        procedure :: is_supported => table_is_supported !! Whether a column's type can be read.
+        procedure, private :: is_supported_name => table_is_supported !! %is_supported specific, by name.
+        procedure, private :: is_supported_at => table_is_supported_at !! %is_supported specific, by position.
+        !> Whether a column's type can be read -- named, or by 1-based position.
+        generic :: is_supported => is_supported_name, is_supported_at
         procedure :: filename => table_filename      !! Copy out the file this table came from.
         procedure :: get_file_metadata => table_get_file_metadata !! One key from the file's metadata.
         ! --- residency control ---
@@ -1166,6 +1186,13 @@ module parquet_tables
             logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
             logical :: any_null                       !! .true. if it holds (or may hold) a null.
         end function table_has_nulls
+        !> Whether a column holds (or may hold) nulls, by 1-based position.
+        module function table_has_nulls_at(self, j, found) result(any_null)
+            class(parquet_table), intent(in) :: self  !! the table.
+            integer, intent(in) :: j                  !! 1-based column position.
+            logical, intent(out), optional :: found   !! present: report an out-of-range j instead of aborting.
+            logical :: any_null                       !! .true. if it holds (or may hold) a null.
+        end function table_has_nulls_at
         !> Copies out a column's per-ROW validity as a plain logical array: .true. where the row
         !! holds a value, .false. where it is null.
         !!
@@ -1216,6 +1243,23 @@ module parquet_tables
             character(len=*), intent(in) :: name     !! column name.
             logical :: found                         !! .true. if the table has it.
         end function table_has_column
+        !> A column's 1-based position among the table's columns, or 0 when there is no such
+        !! column. The inverse of `%column_name`, and the cheap way to hoist a lookup out of a
+        !! loop that then queries the same column by position.
+        module function table_column_index(self, name, found) result(j)
+            class(parquet_table), intent(in) :: self  !! the table.
+            character(len=*), intent(in) :: name      !! column name.
+            logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
+            integer :: j                              !! 1-based position, or 0 on a reported miss.
+        end function table_column_index
+        !> Copies out the name of the column at 1-based position `j`. The inverse of
+        !! `%column_index`, and what makes a `do j = 1, t%ncols()` sweep able to report itself.
+        module subroutine table_column_name(self, j, nm, found)
+            class(parquet_table), intent(in) :: self             !! the table.
+            integer, intent(in) :: j                             !! 1-based column position.
+            character(len=:), allocatable, intent(out) :: nm     !! the column's name, or "".
+            logical, intent(out), optional :: found              !! present: report an out-of-range j instead of aborting.
+        end subroutine table_column_name
         !> A column's PK_* kind discriminator (PK_NONE for an unsupported column).
         module function table_column_kind(self, name, found) result(k)
             class(parquet_table), intent(in) :: self  !! the table.
@@ -1223,6 +1267,13 @@ module parquet_tables
             logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
             integer :: k                              !! the PK_* constant.
         end function table_column_kind
+        !> A column's PK_* kind discriminator, by 1-based position.
+        module function table_column_kind_at(self, j, found) result(k)
+            class(parquet_table), intent(in) :: self  !! the table.
+            integer, intent(in) :: j                  !! 1-based column position.
+            logical, intent(out), optional :: found   !! present: report an out-of-range j instead of aborting.
+            integer :: k                              !! the PK_* constant.
+        end function table_column_kind_at
         !> A column's values-per-row: 1 for a scalar kind, the vector width for a *_VEC kind.
         module function table_column_width(self, name, found) result(wdt)
             class(parquet_table), intent(in) :: self  !! the table.
@@ -1230,6 +1281,13 @@ module parquet_tables
             logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
             integer :: wdt                            !! values per row.
         end function table_column_width
+        !> A column's values-per-row, by 1-based position.
+        module function table_column_width_at(self, j, found) result(wdt)
+            class(parquet_table), intent(in) :: self  !! the table.
+            integer, intent(in) :: j                  !! 1-based column position.
+            logical, intent(out), optional :: found   !! present: report an out-of-range j instead of aborting.
+            integer :: wdt                            !! values per row.
+        end function table_column_width_at
         !> Copies out a column's unit string ("" when it has none).
         module subroutine table_column_unit(self, name, u, found)
             class(parquet_table), intent(in) :: self             !! the table.
@@ -1237,6 +1295,13 @@ module parquet_tables
             character(len=:), allocatable, intent(out) :: u      !! the unit, or "".
             logical, intent(out), optional :: found              !! present: report a miss instead of aborting.
         end subroutine table_column_unit
+        !> Copies out a column's unit string, by 1-based position.
+        module subroutine table_column_unit_at(self, j, u, found)
+            class(parquet_table), intent(in) :: self             !! the table.
+            integer, intent(in) :: j                             !! 1-based column position.
+            character(len=:), allocatable, intent(out) :: u      !! the unit, or "".
+            logical, intent(out), optional :: found              !! present: report an out-of-range j instead of aborting.
+        end subroutine table_column_unit_at
         !> A column's residency: RES_FULL once read, RES_EMPTY for an unsupported column.
         module function table_column_residency(self, name, found) result(r)
             class(parquet_table), intent(in) :: self  !! the table.
@@ -1244,6 +1309,13 @@ module parquet_tables
             logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
             integer :: r                              !! the RES_* constant.
         end function table_column_residency
+        !> A column's RES_* residency state, by 1-based position.
+        module function table_column_residency_at(self, j, found) result(r)
+            class(parquet_table), intent(in) :: self  !! the table.
+            integer, intent(in) :: j                  !! 1-based column position.
+            logical, intent(out), optional :: found   !! present: report an out-of-range j instead of aborting.
+            integer :: r                              !! the RES_* constant.
+        end function table_column_residency_at
         !> Whether a column's physical type is one this library can read.
         module function table_is_supported(self, name, found) result(ok)
             class(parquet_table), intent(in) :: self  !! the table.
@@ -1251,6 +1323,13 @@ module parquet_tables
             logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
             logical :: ok                             !! .true. if readable.
         end function table_is_supported
+        !> Whether a column's type can be read, by 1-based position.
+        module function table_is_supported_at(self, j, found) result(ok)
+            class(parquet_table), intent(in) :: self  !! the table.
+            integer, intent(in) :: j                  !! 1-based column position.
+            logical, intent(out), optional :: found   !! present: report an out-of-range j instead of aborting.
+            logical :: ok                             !! .true. if readable.
+        end function table_is_supported_at
         !> Whether the table has been detached from its file by a row-structural mutation.
         module function table_is_detached(self) result(d)
             class(parquet_table), intent(in) :: self !! the table.
@@ -1319,6 +1398,16 @@ module parquet_tables
             integer, intent(out) :: idx              !! slot index, or 0 on a reported miss.
             logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
         end subroutine table_lookup_or_fail
+        !> The by-POSITION twin of `table_lookup_or_fail`: validates that `j` is a 1-based column
+        !! position this table has, honouring `found=` and otherwise aborting. Shared by every
+        !! index-form introspection query so they all bounds-check and report the same way.
+        module subroutine table_slot_or_fail(self, j, proc, idx, found)
+            class(parquet_table), intent(in) :: self !! the table.
+            integer, intent(in) :: j                 !! 1-based column position to validate.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+            integer, intent(out) :: idx              !! the slot index (== j), or 0 on a reported miss.
+            logical, intent(out), optional :: found  !! present: report an out-of-range j instead of aborting.
+        end subroutine table_slot_or_fail
         !> Resolves `name` to its 1-based slot index, or 0 when absent. The single lookup every
         !! accessor goes through, so a rename or remap only has to change one place.
         module function table_find(self, name) result(idx)

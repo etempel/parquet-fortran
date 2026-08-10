@@ -230,6 +230,8 @@ column is numeric at all.
 | `t%ncols([resident_only])` | number of columns; `resident_only=.true.` counts only the ones already read |
 | `call t%column_names(names [, resident_only])` | every column name, in file order; `resident_only=.true.` lists only the ones already read |
 | `t%has_column(name)` | whether a column of that name exists |
+| `t%column_index(name [, found])` | its 1-based position among the table's columns, or 0 when absent |
+| `call t%column_name(j, nm [, found])` | the name of the column at 1-based position `j` |
 | `t%kind(name)` | its `PK_*` kind (`PK_NONE` if unreadable) |
 | `t%width(name)` | values per row: 1 for a scalar column, the element count for a vector one |
 | `call t%unit(name, u)` | its unit string, or `""` |
@@ -246,6 +248,29 @@ column is numeric at all.
 
 (An argument in **square brackets** is optional — `[found]` above means `found` may be omitted.
 The brackets are notation for this documentation, never something you type.)
+
+### Asking about a column by position instead of by name
+
+**`%kind`, `%width`, `%unit`, `%residency`, `%is_supported` and `%has_nulls` also accept a 1-based
+column position** wherever they accept a name, so a sweep over every column does not have to copy
+a name out just to ask about it:
+
+```fortran
+do j = 1, t%ncols()
+    call t%column_name(j, nm)
+    print *, nm, parquet_kind_name(t%kind(j)), t%width(j)
+end do
+```
+
+`%column_index(name)` and `%column_name(j, nm)` are inverses, and a position is only meaningful
+against the table's **current** width: `%drop_column`, `%add_column` and the other column-set
+changes renumber the slots, so re-derive positions after one rather than holding them across it.
+An out-of-range position is an error, and reports through `found=` exactly as a missing name does.
+
+These are metadata queries — they do **not** read a column's values, with the one documented
+exception `%kind`/`%width` already carry (a plain `LIST` column from a non-Arrow writer, whose
+width is a property of the data). Positions address the table's own columns, so they are
+unrelated to the element index within a vector column.
 
 **`found=` is available on the calls that look a column up by name**, and it turns a missing
 column from a hard error into a quiet report: `%kind`, `%width`, `%unit`, `%residency`,

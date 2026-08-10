@@ -308,7 +308,13 @@ contains
             new_unittest("column lookup is exact for prefixes, shared key prefixes and misses", &
                 test_lookup_name_index), &
             new_unittest("column lookup stays correct across every column-set mutation", &
-                test_lookup_index_after_mutations) &
+                test_lookup_index_after_mutations), &
+            new_unittest("column_index and column_name are inverses across the whole table", &
+                test_column_index_name_roundtrip), &
+            new_unittest("every by-position query agrees with its by-name twin", &
+                test_index_queries_match_name_forms), &
+            new_unittest("an out-of-range position reports through found= and moves with the table", &
+                test_index_queries_out_of_range) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -7894,5 +7900,160 @@ contains
         if (allocated(error)) return
         call check(error, .not. c%has_column("aaa"), "a clone does not resurrect a dropped column")
     end subroutine test_lookup_index_after_mutations
+    !
+    !> `%column_index` and `%column_name` must be exact inverses for every column, and must stay so
+    !! after a mutation that reorders the name index. Names are deliberately NOT in insertion order
+    !! and share seven-byte key prefixes, so a lookup that returned "some column" rather than "this
+    !! column" is caught.
+    subroutine test_column_index_name_roundtrip(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=*), parameter :: NAMES(5) = [character(len=9) :: &
+            "zulu     ", "abcdefgh1", "abcdefgh2", "mike     ", "alpha    "]
+        real(real64) :: vals(3)
+        character(len=:), allocatable :: nm
+        integer :: i, j
+        logical :: found
+        !
+        vals = [1.0_real64, 2.0_real64, 3.0_real64]
+        call parquet_new_table(t)
+        do i = 1, size(NAMES)
+            call t%add_column(trim(NAMES(i)), vals * real(i, real64))
+        end do
+        ! Insertion order IS slot order, so position i holds the name added i-th. Asserting that
+        ! rather than only the round trip is what would catch an index that sorted the slots.
+        do i = 1, size(NAMES)
+            call t%column_name(i, nm)
+            call check(error, nm == trim(NAMES(i)), "position " // char(48 + i) // " names the column added there")
+            if (allocated(error)) return
+            call check(error, t%column_index(nm) == i, "%column_index inverts %column_name at " // char(48 + i))
+            if (allocated(error)) return
+        end do
+        ! A name the table does not have is 0 through found=, not an abort and not a stale index.
+        j = t%column_index("nope", found=found)
+        call check(error, .not. found, "an absent name reports found=.false.")
+        if (allocated(error)) return
+        call check(error, j == 0, "an absent name gives position 0")
+        if (allocated(error)) return
+        ! After a drop the positions above it shift down by one, and both directions must follow.
+        call t%drop_column("abcdefgh1")
+        call check(error, t%ncols() == size(NAMES) - 1, "the drop removed exactly one column")
+        if (allocated(error)) return
+        do i = 1, t%ncols()
+            call t%column_name(i, nm)
+            call check(error, t%column_index(nm) == i, "the two stay inverses after a drop")
+            if (allocated(error)) return
+        end do
+        call check(error, t%column_index("abcdefgh1", found=found) == 0, "the dropped name is gone")
+    end subroutine test_column_index_name_roundtrip
+    !
+    !> Every by-position query must answer exactly what its by-name twin answers for the same
+    !! column. Both forms share one body per query, so this is what stops the two drifting if that
+    !! sharing is ever undone -- and it is checked over a table whose columns differ in kind, width
+    !! and unit, so an accessor wired to the wrong slot cannot pass by coincidence.
+    subroutine test_index_queries_match_name_forms(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        real(real64) :: d(3)
+        integer(int32) :: iv(3)
+        real(real32) :: vec(2, 3)
+        character(len=:), allocatable :: nm, u_at, u_name
+        integer :: j
+        !
+        d = [1.0_real64, 2.0_real64, 3.0_real64]
+        iv = [1_int32, 2_int32, 3_int32]
+        vec = reshape([1.0_real32, 2.0_real32, 3.0_real32, 4.0_real32, 5.0_real32, 6.0_real32], [2, 3])
+        call parquet_new_table(t)
+        call t%add_column("flux", d, unit="Jy")
+        call t%add_column("count", iv)
+        call t%add_column("pair", vec, unit="m")
+        do j = 1, t%ncols()
+            call t%column_name(j, nm)
+            call check(error, t%kind(j) == t%kind(nm), "%kind agrees at position " // char(48 + j))
+            if (allocated(error)) return
+            call check(error, t%width(j) == t%width(nm), "%width agrees at position " // char(48 + j))
+            if (allocated(error)) return
+            call check(error, t%residency(j) == t%residency(nm), "%residency agrees at position " // char(48 + j))
+            if (allocated(error)) return
+            call check(error, t%is_supported(j) .eqv. t%is_supported(nm), &
+                "%is_supported agrees at position " // char(48 + j))
+            if (allocated(error)) return
+            call check(error, t%has_nulls(j) .eqv. t%has_nulls(nm), "%has_nulls agrees at position " // char(48 + j))
+            if (allocated(error)) return
+            call t%unit(j, u_at)
+            call t%unit(nm, u_name)
+            call check(error, u_at == u_name, "%unit agrees at position " // char(48 + j))
+            if (allocated(error)) return
+        end do
+        ! Agreement is only evidence if the columns actually differ -- otherwise every query above
+        ! would pass against an accessor that ignored its argument entirely.
+        call check(error, t%width(1) == 1 .and. t%width(3) == 2, "the fixture really does mix widths")
+        if (allocated(error)) return
+        call check(error, t%kind(1) /= t%kind(2), "the fixture really does mix kinds")
+        if (allocated(error)) return
+        call t%unit(2, u_at)
+        call check(error, u_at == "", "a column with no unit answers empty by position")
+        if (allocated(error)) return
+        call t%unit(1, u_at)
+        call check(error, u_at == "Jy", "a column's unit comes back by position")
+    end subroutine test_index_queries_match_name_forms
+    !
+    !> An out-of-range position must report through `found=` rather than returning a plausible
+    !! answer, at both ends and on every query. The abort form of the same guard is covered by
+    !! `error_scenarios`' `table_column_position_out_of_range`.
+    subroutine test_index_queries_out_of_range(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        real(real64) :: d(2)
+        character(len=:), allocatable :: nm
+        integer :: n, k
+        logical :: found, ok
+        !
+        d = [1.0_real64, 2.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("a", d)
+        call t%add_column("b", d)
+        n = t%ncols()
+        ! Each result is taken into a variable BEFORE it is tested against `found`. Fortran does
+        ! not order the operands of `.and.`, so `t%kind(0, found=found) == PK_NONE .and. .not.
+        ! found` may read `found` before the call that defines it -- which passed here once by
+        ! luck and then failed after an unrelated edit changed the evaluation order.
+        ! Both ends, because a guard written as `j > ncols` alone passes every high test.
+        k = t%kind(0, found=found)
+        call check(error, k == PK_NONE .and. .not. found, "position 0 is out of range")
+        if (allocated(error)) return
+        k = t%kind(n + 1, found=found)
+        call check(error, k == PK_NONE .and. .not. found, "position ncols+1 is out of range")
+        if (allocated(error)) return
+        k = t%kind(-1, found=found)
+        call check(error, k == PK_NONE .and. .not. found, "a negative position is out of range")
+        if (allocated(error)) return
+        ! Every query shares one validator, so each needs its own call to prove it uses it.
+        k = t%width(n + 1, found=found)
+        call check(error, k == 1 .and. .not. found, "%width reports an out-of-range position")
+        if (allocated(error)) return
+        k = t%residency(n + 1, found=found)
+        call check(error, k == RES_EMPTY .and. .not. found, "%residency reports an out-of-range position")
+        if (allocated(error)) return
+        ok = t%is_supported(n + 1, found=found)
+        call check(error, .not. ok .and. .not. found, "%is_supported reports an out-of-range position")
+        if (allocated(error)) return
+        ok = t%has_nulls(n + 1, found=found)
+        call check(error, .not. ok .and. .not. found, "%has_nulls reports an out-of-range position")
+        if (allocated(error)) return
+        call t%column_name(n + 1, nm, found=found)
+        call check(error, .not. found, "%column_name reports an out-of-range position")
+        if (allocated(error)) return
+        call check(error, nm == "", "%column_name leaves an empty name on a miss")
+        if (allocated(error)) return
+        ! The range is the table's CURRENT width, not the width it had when the loop was written --
+        ! which is the mistake this guard exists to catch.
+        call t%drop_column("b")
+        k = t%kind(n, found=found)
+        call check(error, k == PK_NONE .and. .not. found, "a position valid before a drop is out of range after it")
+        if (allocated(error)) return
+        k = t%kind(1, found=found)
+        call check(error, k /= PK_NONE .and. found, "the surviving column still answers")
+    end subroutine test_index_queries_out_of_range
     !
 end module test_table

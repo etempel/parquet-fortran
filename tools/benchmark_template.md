@@ -244,14 +244,36 @@ easily have been read as a completed run. `ls -l` the logs after the first rung,
 **Let the machine settle between runs, and say that you did.** A run's own test phase spawns
 hundreds of subprocesses, so a second run started straight afterwards is measured against a machine
 still draining — which biases *one arm* rather than adding symmetric noise, and best-of-N does not
-remove it. On Linux:
+remove it.
+
+**The threshold must be a FRACTION OF THE CORE COUNT and the wait must be BOUNDED.** An absolute
+`until load < 2` is wrong twice over on a large or shared machine: on 384 logical cores a load of 26
+is ~7% utilisation and completely harmless to a single-threaded arm, and if another user's job holds
+the load above the threshold the gate **never returns** — one campaign's driver sat in it
+indefinitely with no output, no logs and no error, which looks exactly like a slow build. Bound it,
+and record the load you actually ran at so the figures can be read against their conditions:
 
 ```bash
-# Linux
-until [ "$(awk '{print int($1)}' /proc/loadavg)" -lt 2 ]; do sleep 20; done
-# macOS -- /proc does not exist
-until [ "$(sysctl -n vm.loadavg | awk '{print int($2)}')" -lt 2 ]; do sleep 20; done
+settle() {                     # wait for a QUIET machine, but never forever
+    local ncpu deadline load
+    ncpu=$( (nproc 2>/dev/null || sysctl -n hw.logicalcpu) )
+    deadline=$(( SECONDS + 120 ))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        load=$( (awk '{print $1}' /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg | awk '{print $2}') )
+        # quiet == below a QUARTER of the machine's cores, not below a fixed number
+        awk -v l="$load" -v n="$ncpu" 'BEGIN{exit !(l < n/4)}' && break
+        sleep 20
+    done
+    sleep 10                   # let the last stragglers drain either way
+    echo "load1 at run start: $load" >> test_run/<campaign>/load.log
+}
 ```
+
+Record `load.log` in the report. **"Loaded" is not "noisy"** (see §3): one campaign ran an arm with
+load1 up to 26 and still reproduced to 0.002% across rounds, because the arms are single-threaded
+and every figure is best-of-N. Measure the floor and let the floor decide — but do say which arms
+ran under which conditions, because **an A/B whose two arms saw different external load cannot be
+compared across toolchains** even when each within-toolchain comparison is sound.
 
 **Express the threshold relative to the machine's OWN idle load, not as an absolute.** A workstation
 whose idle load never drops below 2 will wait forever — one machine burned 20 minutes per rung on

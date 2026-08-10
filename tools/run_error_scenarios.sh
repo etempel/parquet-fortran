@@ -239,6 +239,7 @@ scenarios=(
     "columns_reindex_length_mismatch:1"
     "table_assignment_blocked:1"
     "table_not_opened:1"
+    "table_column_position_out_of_range:1"
     "table_pointer_kind_mismatch:1"
     "table_get_array_kind_mismatch:1"
     "table_col_ptr_kind_mismatch_i32:1"

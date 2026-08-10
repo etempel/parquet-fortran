@@ -717,6 +717,8 @@ contains
                 test_table_append_during_read_aborts), &
             new_unittest("using a never-opened parquet_table aborts", &
                 test_table_not_opened_aborts), &
+            new_unittest("a by-position parquet_table query past the last column aborts", &
+                test_table_column_position_out_of_range_aborts), &
             new_unittest("parquet_table %col with a mismatched pointer kind aborts", &
                 test_table_pointer_kind_mismatch_aborts), &
             new_unittest("parquet_table %col mismatch aborts on every remaining col_ptr_* kind", &
@@ -1186,6 +1188,16 @@ contains
             failure_message="querying a never-opened parquet_table was expected to abort", &
             required_stderr="parquet_table: nrows: table has not been opened")
     end subroutine test_table_not_opened_aborts
+
+    subroutine test_table_column_position_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The message names both the offending position and the table's width, because an
+        ! out-of-range position is almost always a loop bound gone stale against %ncols().
+        call check_scenario_exit_status_and_stderr(error, "table_column_position_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a by-position query past the last column was expected to abort", &
+            required_stderr="parquet_table: kind: column position 2 is outside this table's 1..1 columns")
+    end subroutine test_table_column_position_out_of_range_aborts
 
     subroutine test_table_pointer_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -310,8 +310,17 @@ TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads
 
 `tools/benchmark_colindex.sh` answers one question: where does `parquet_table%get_element`'s
 per-cell cost actually go, and is an index- or handle-based accessor worth building? It drives
-`app/benchmark_colindex.f90` over six modes (`baseline`, `decompose`, `getat`, `vector`, `loop`,
-`rowfinal`) and is the screening half of the campaign described in `feature_benchmark_colindex.md`.
+`app/benchmark_colindex.f90` over seven modes (`baseline`, `decompose`, `getat`, `vector`, `loop`,
+`rowfinal`, `handle`) and is the screening half of the campaign described in
+`feature_benchmark_colindex.md`.
+
+**`--mode=handle` is the one that measures the SHIPPED feature** rather than screening for it: it
+times `parquet_table_col` against `%get_element` on the same column, including the regression
+control (`%get_element` became a caller of the handle's own body, so it must not have got slower),
+the cost of re-fetching a handle per cell, the two creation forms, the staleness guard, a realistic
+4-column loop both ways, and reading one element of a vector row against materialising the whole
+row. Its `parquet_column%get_at` arm is untouched by anything the campaign varies and so doubles as
+a control across builds and commits.
 
 **Its central trick is that it needs no change to the library**, which is what makes it runnable
 before anything is prototyped. It builds a **standalone `parquet_column`** and times

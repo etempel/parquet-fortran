@@ -86,6 +86,8 @@ program benchmark_colindex
         call run_loop(nrows, ncols, rounds)
     case ("rowfinal")
         call run_rowfinal(nrows, ncols, rounds, naccess)
+    case ("handle")
+        call run_handle(nrows, ncols, rounds, naccess, width)
     case default
         write(error_unit, '(a)') "benchmark_colindex: unknown --mode '"//mode//"'"
         call usage()
@@ -105,7 +107,8 @@ contains
         write(output_unit, '(a)') "  --mode=getat      parquet_column%get_at alone (guard variants; see --bench-guards)"
         write(output_unit, '(a)') "  --mode=vector     a *_VEC kind: does the per-call allocate dominate?"
         write(output_unit, '(a)') "  --mode=loop       a realistic 4-column loop with arithmetic"
-        write(output_unit, '(a)') "  --mode=rowfinal   what r = t%row(i) costs, finalizers included"
+        write(output_unit, '(a)') "  --mode=rowfinal   what constructing r = t%row(i) costs"
+        write(output_unit, '(a)') "  --mode=handle     THE SHIPPED COLUMN HANDLE vs the name form (stage 1)"
         write(output_unit, '(a)') ""
         write(output_unit, '(a)') "  --nrows=<n>       rows per column        (default 100000)"
         write(output_unit, '(a)') "  --ncols=<n>       columns in the table   (default 40)"
@@ -995,5 +998,313 @@ contains
         write(output_unit, '(a)') "  so what is left here is construction alone -- see --mode=handle for the column"
         write(output_unit, '(a)') "  handle, which is what a per-cell loop should be using instead."
     end subroutine run_rowfinal
+
+    ! ---------------------------------------------------------------------------------------
+    ! Mode: handle -- the SHIPPED column handle, which no campaign has measured.
+    ! ---------------------------------------------------------------------------------------
+
+    !> `parquet_table_col` against `%get_element`, on the code that ships.
+    !!
+    !! **Every gate figure this feature was approved on came from a PROTOTYPE** -- criterion (1)'s
+    !! 1.52x-3.99x, criterion (2)'s 7.9x and criterion (3)'s +2.16% were all measured before the
+    !! handle existed. This mode is stage 1 of `feature_colindex.md` section 9, and it is the first
+    !! direct measurement of the thing users actually call.
+    !!
+    !! Two arms are load-bearing beyond the headline ratio:
+    !!
+    !! * **`%get_element` is the REGRESSION CONTROL.** Section 6.3 turned it into a caller of the
+    !!   handle's own body, and section 9 calls this "the one that can sink the feature": if
+    !!   sharing cost the name form more than 5%, the common case was made worse to improve the
+    !!   uncommon one. The prototype said +2.16%; nobody has checked the shipped shape.
+    !! * **`c%get` minus `get_at` is the ifx question (0d-ii).** ifx spends ~70 ns per call on
+    !!   width-INDEPENDENT work against gfortran's ~25, and a handle removes the name lookup but
+    !!   NOT that. If this difference is ~2.8x gfortran's under ifx, the residual is in the
+    !!   per-call machinery the handle keeps -- the polymorphic passed-object dummy or the
+    !!   generated body -- and it is worth chasing for every accessor in the library. If it
+    !!   collapses, the residual was in the lookup and is already gone. Either answer also
+    !!   explains criterion (1)'s otherwise unexplained 1.52x on ifx.
+    !!
+    !! **`c%index()` is how the safety rule is priced, and it needs no rebuild.** Section 9 asked
+    !! for a variant with the generation check compiled out; `%index()` is `col_resolve` plus one
+    !! integer load, so it measures that guard through the real code path -- with no second build,
+    !! and therefore no cross-build noise floor and no semantically-altered scaffolding on `main`.
+    !! `%is_valid()` brackets it from the other side.
+    subroutine run_handle(nrows, ncols, rounds, naccess, width)
+        integer(int64), intent(in) :: nrows   !! rows per column.
+        integer, intent(in) :: ncols          !! table width.
+        integer, intent(in) :: rounds         !! rounds; best kept.
+        integer(int64), intent(in) :: naccess !! accesses per arm.
+        integer, intent(in) :: width          !! elements per row for the vector section.
+        type(parquet_table) :: t, tv
+        type(parquet_table_col) :: c, c1, c2, c3, c4, cv
+        type(parquet_column) :: sc
+        character(len=8), allocatable :: names(:)
+        real(real64), allocatable :: raw(:), vrow(:), v2(:,:)
+        real(real64) :: t0, dt, best, acc, v, a, b, cc, d
+        real(real64) :: ns_name, ns_hand, ns_refetch, ns_getat, ns_mkname, ns_mkpos
+        real(real64) :: ns_index, ns_valid, ns_lname, ns_lhand, ns_vrow, ns_velem
+        integer(int64) :: i, k
+        integer :: r, kk, pos(4), jslot, e
+
+        write(output_unit, '(a)') "MODE handle -- the shipped parquet_table_col against the name form"
+        write(output_unit, '(a,i0,a,i0,a)') "  (ncols = ", ncols, ", ", nrows, " rows per column)"
+        write(output_unit, '(a)') ""
+
+        call make_names(ncols, names)
+        call build_table(t, names, nrows, ncols)
+        call scattered_positions(ncols, pos)
+        jslot = t%column_index(names(1))
+
+        ! A standalone column holding the same values: the storage floor, and the arm the flag
+        ! cannot touch, so it doubles as this run's cross-build control.
+        allocate(raw(nrows))
+        do i = 1_int64, nrows
+            raw(i) = 1.0_real64 + 0.5_real64*real(i, real64)
+        end do
+        call sc%init(PK_FLOAT64, nrows)
+        call sc%set_all(raw)
+
+        ! Warm every path once, so no arm pays another's first touch.
+        call t%column(names(1), c)
+        call c%get(1_int64, v)
+        call t%get_element(names(1), 1_int64, a)
+        call sc%get_at(1_int64, b)
+        checksum = checksum + v + a + b
+
+        ! --- A: the name form, and the regression control -------------------------------------
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            i = 0_int64
+            t0 = now()
+            do k = 1_int64, naccess
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
+                call t%get_element(names(1), i, v)
+                acc = acc + v
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_name = ns_per(best, naccess)
+        call emit("A %get_element(name,i,v)", best, naccess, acc)
+
+        ! --- B: the feature ---------------------------------------------------------------------
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            i = 0_int64
+            call t%column(names(1), c)
+            t0 = now()
+            do k = 1_int64, naccess
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
+                call c%get(i, v)
+                acc = acc + v
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_hand = ns_per(best, naccess)
+        call emit("B c%get(i,v), handle hoisted", best, naccess, acc)
+
+        ! --- C: the anti-pattern the guide warns about ------------------------------------------
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            i = 0_int64
+            t0 = now()
+            do k = 1_int64, naccess
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
+                call t%column(names(1), c)
+                call c%get(i, v)
+                acc = acc + v
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_refetch = ns_per(best, naccess)
+        call emit("C c%get, handle re-fetched", best, naccess, acc)
+
+        ! --- D: the storage floor, and this run's cross-build control ---------------------------
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            i = 0_int64
+            t0 = now()
+            do k = 1_int64, naccess
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
+                call sc%get_at(i, v)
+                acc = acc + v
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_getat = ns_per(best, naccess)
+        call emit("D parquet_column%get_at (control)", best, naccess, acc)
+
+        ! --- E/F: making a handle, by name and by position --------------------------------------
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            do k = 1_int64, naccess
+                call t%column(names(1), c)
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_mkname = ns_per(best, naccess)
+        call emit("E c = t%column(name)", best, naccess, real(c%index(), real64))
+
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            do k = 1_int64, naccess
+                call t%column(jslot, c)
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_mkpos = ns_per(best, naccess)
+        call emit("F c = t%column(j)", best, naccess, real(c%index(), real64))
+
+        ! --- G/H: what the staleness rule costs, without a second build -------------------------
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            t0 = now()
+            do k = 1_int64, naccess
+                acc = acc + real(c%index(), real64)
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_index = ns_per(best, naccess)
+        call emit("G c%index()  [col_resolve+load]", best, naccess, acc)
+
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            t0 = now()
+            do k = 1_int64, naccess
+                if (c%is_valid()) acc = acc + 1.0_real64
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_valid = ns_per(best, naccess)
+        call emit("H c%is_valid()", best, naccess, acc)
+
+        ! --- I/J: the 4-column loop, both ways --------------------------------------------------
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a)') "  4-column loop (ns per ROW, 4 reads each):"
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            t0 = now()
+            do i = 1_int64, nrows
+                call t%get_element(names(pos(1)), i, a)
+                call t%get_element(names(pos(2)), i, b)
+                call t%get_element(names(pos(3)), i, cc)
+                call t%get_element(names(pos(4)), i, d)
+                acc = acc + (a*b + cc - d)
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_lname = ns_per(best, nrows)
+        call emit("I loop, 4x %get_element", best, nrows, acc)
+
+        call t%column(names(pos(1)), c1)
+        call t%column(names(pos(2)), c2)
+        call t%column(names(pos(3)), c3)
+        call t%column(names(pos(4)), c4)
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            t0 = now()
+            do i = 1_int64, nrows
+                call c1%get(i, a)
+                call c2%get(i, b)
+                call c3%get(i, cc)
+                call c4%get(i, d)
+                acc = acc + (a*b + cc - d)
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_lhand = ns_per(best, nrows)
+        call emit("J loop, 4 hoisted handles", best, nrows, acc)
+
+        ! --- K/L: the capability half, on a vector column ---------------------------------------
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a,i0,a)') "  vector column, width ", width, " (ns per access):"
+        allocate(v2(width, nrows))
+        do i = 1_int64, nrows
+            do e = 1, width
+                v2(e, i) = real(e, real64) + 0.25_real64*real(i, real64)
+            end do
+        end do
+        call parquet_new_table(tv)
+        call tv%add_column("vec", v2)
+        call tv%column("vec", cv)
+        call cv%get(1_int64, vrow)
+        call cv%get(1_int64, 1_int64, v)
+        checksum = checksum + vrow(1) + v
+
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            i = 0_int64
+            t0 = now()
+            do k = 1_int64, naccess/4_int64
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
+                call cv%get(i, vrow)
+                acc = acc + vrow(1)
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_vrow = ns_per(best, naccess/4_int64)
+        call emit("K c%get(i, vec)  [allocates]", best, naccess/4_int64, acc)
+
+        best = huge(1.0_real64)
+        do r = 1, rounds
+            acc = 0.0_real64
+            i = 0_int64
+            t0 = now()
+            do k = 1_int64, naccess/4_int64
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
+                call cv%get(i, 1_int64, v)
+                acc = acc + v
+            end do
+            dt = now() - t0
+            if (dt < best) best = dt
+        end do
+        ns_velem = ns_per(best, naccess/4_int64)
+        call emit("L c%get(i, e, v)  [no array]", best, naccess/4_int64, acc)
+
+        ! --- derived ----------------------------------------------------------------------------
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a)') "  derived:"
+        call emit_diff("what a hoisted handle saves (A-B)", ns_name, ns_hand)
+        call emit_diff("handle above storage floor (B-D)", ns_hand, ns_getat)
+        call emit_diff("cost of re-fetching per cell (C-B)", ns_refetch, ns_hand)
+        call emit_diff("name lookup, from creation (E-F)", ns_mkname, ns_mkpos)
+        call emit_diff("4-col loop, name vs handle (I-J)", ns_lname, ns_lhand)
+        call emit_diff("whole row vs one element (K-L)", ns_vrow, ns_velem)
+        write(output_unit, '(a)') ""
+        write(output_unit, '(a)') "  READ THESE FIRST:"
+        write(output_unit, '(a)') "   * A is the REGRESSION CONTROL. Compare it with the pre-handle"
+        write(output_unit, '(a)') "     figure for the same machine; >5% worse sinks the feature."
+        write(output_unit, '(a)') "   * B-D is the ifx question. gfortran ~25 ns of width-independent"
+        write(output_unit, '(a)') "     work, ifx ~70. If B-D keeps that 2.8x, the residual is in the"
+        write(output_unit, '(a)') "     per-call machinery a handle KEEPS, not in the name lookup."
+        write(output_unit, '(a)') "   * G and H price the staleness guard with no rebuild at all."
+    end subroutine run_handle
 
 end program benchmark_colindex

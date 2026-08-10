@@ -21,7 +21,7 @@
 #   NCOLS=40        Columns in the table for the modes that take one.
 #   ROUNDS=5        Rounds per figure; the best is kept, per this repo's benchmarking rules.
 #   ACCESS=2000000  Accesses per arm. Independent of NROWS: the loop wraps around.
-#   WIDTH=4         Elements per row for --mode=vector.
+#   WIDTH=4         Elements per row for --mode=vector and --mode=handle's vector section.
 #   GUARDS=shipped  Which get_at guard variant to build: shipped | inline | none.
 #                    `inline` and `none` REQUIRE the source to have been regenerated with
 #                    tools/generate_parquet_columns.py --bench-guards first -- see below.
@@ -50,7 +50,7 @@ ACCESS="${ACCESS:-2000000}"
 WIDTH="${WIDTH:-4}"
 GUARDS="${GUARDS:-shipped}"
 
-MODES=(baseline decompose getat vector loop rowfinal)
+MODES=(baseline decompose getat vector loop rowfinal handle)
 want_mode=""
 for arg in "$@"; do
     case "$arg" in

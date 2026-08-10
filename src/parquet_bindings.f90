@@ -262,14 +262,19 @@ module parquet_bindings
             integer(c_long_long), value :: array_size
         end subroutine
 
-        !> Adds one flat key-value table metadata entry to `writer`.
-        subroutine parquet_add_table_metadata(writer, key, value, description) &
+        !> Adds one flat key-value table metadata entry to `writer`. `datatype` is the type
+        !> token the typed add_metadata overload recorded ("int32", "float64[]", ...), or ""
+        !> for a value that is a string; a non-empty token makes build_file_metadata emit a
+        !> companion "<key>.datatype" entry and makes build_votable_xml declare the real
+        !> VOTable type instead of char.
+        subroutine parquet_add_table_metadata(writer, key, value, description, datatype) &
                 bind(C, name="parquet_add_table_metadata")
             import
             type(c_ptr), value :: writer
             character(kind=c_char) :: key(*)
             character(kind=c_char) :: value(*)
             character(kind=c_char) :: description(*)
+            character(kind=c_char) :: datatype(*)
         end subroutine
 
         !> Appends one int32 column's values (with optional validity mask) to `writer`.

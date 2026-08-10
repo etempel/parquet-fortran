@@ -511,6 +511,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there is deliberately no global default for null ordering or quality-control enforcement. See
   [Settings](doc/pages/operating/settings.md).
 
+- **Typed table metadata now records its own type in the written file.** A parquet key-value pair
+  can only hold text, so `schema%add_metadata("NSIDE", 1024_int32)` used to arrive at a reader as
+  the indistinguishable string `1024`; it is now accompanied by an `NSIDE.datatype` entry reading
+  `int32`, mirroring the `column.<name>.<attribute>` convention. The tokens are the ones columns
+  already use (`int32`, `int64`, `float32`, `float64`, `boolean`), with a `[]` suffix for the
+  array overloads. The *string* overload records nothing, so a genuinely textual keyword stays a
+  plain string — which is what lets a reader tell the two apart — and a MAML-declared key is a
+  string by design and records nothing either. The companion lives only in the file: a typed
+  `add_metadata` call still appends exactly one `%metadata%items` entry, so `write_maml=.true.`
+  sidecars are unchanged. The VOTable sidecar declares the same types (`int`, `long`, `float`,
+  `double`, `boolean`) for those keywords instead of calling every scalar a `char`. Nothing on the
+  read side changes: a Fortran reader still selects its parse from the declared type of `value`.
+  See [A typed value records its own
+  type](doc/pages/schema/building-schema-in-code.md#a-typed-value-records-its-own-type).
+
 ### Changed
 
 - **The user guide is reorganised into a two-layer structure**, six groups of pages instead of one

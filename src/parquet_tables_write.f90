@@ -401,6 +401,12 @@ contains
         character(len=*), intent(in), optional :: keys(:)          !! only these keys, if given.
         character(len=:), allocatable :: sfx
         integer :: i, k
+        !> How many entries `sch` declared BEFORE this loop started adding to it. The loop mutates
+        !! `sch`, so "does the schema declare this key itself?" has to be asked of the original
+        !! entries only -- by the time a carried "<key>.datatype" is tested, the carried `<key>`
+        !! one line earlier is already in there, and an unbounded scan would answer .true. for a
+        !! key the schema never declared and drop a companion that should have been carried.
+        integer :: n_declared
         logical :: wanted
         !
         if (.not. allocated(table%cache%meta_keys)) then
@@ -419,6 +425,8 @@ contains
                 end if
             end do
         end if
+        n_declared = 0
+        if (allocated(sch%metadata%items)) n_declared = size(sch%metadata%items)
         do i = 1, size(table%cache%meta_keys)
             wanted = .true.
             if (present(keys)) then
@@ -429,9 +437,38 @@ contains
             end if
             if (.not. wanted) cycle
             if (schema_declares_key(sch, trim(table%cache%meta_keys(i)))) cycle
+            ! A carried "<key>.datatype" describes a key the schema declares itself, so the key it
+            ! describes was just skipped by the rule above and this one now describes nothing that
+            ! got written. Worse, the schema's own typed entry synthesizes a "<key>.datatype" of
+            ! its own at write time, so keeping this one would put TWO same-named companions in
+            ! the output, free to disagree -- and the stale carried one would be the survivor
+            ! (parquet_open_writer's collision guard suppresses the synthesized one on seeing it),
+            ! inverting this procedure's own "the schema wins a collision" rule.
+            if (carried_companion_is_superseded(sch, trim(table%cache%meta_keys(i)), n_declared)) cycle
             call sch%add_metadata(trim(table%cache%meta_keys(i)), trim(table%cache%meta_values(i)))
         end do
     end subroutine carry_source_metadata
+    !
+    !> .true. when `key` is a "<name>.datatype" companion whose own `name` the schema declared
+    !> itself, so carrying it would leave the output with two companions for one key. See the
+    !> call site. `n_declared` bounds the scan to the schema's own entries: the carry loop is
+    !> adding to `sch` as it goes, and a key it carried a moment ago must not count as declared.
+    logical function carried_companion_is_superseded(sch, key, n_declared) result(superseded)
+        type(parquet_schema), intent(in) :: sch !! the output schema.
+        character(len=*), intent(in) :: key     !! the carried key to test.
+        integer, intent(in) :: n_declared       !! entries `sch` had before the carry loop began.
+        character(len=*), parameter :: SFX = ".datatype"
+        integer :: cut, i
+        !
+        superseded = .false.
+        cut = len(key) - len(SFX)
+        if (cut < 1) return
+        if (key(cut+1:) /= SFX) return
+        if (.not. allocated(sch%metadata%items)) return
+        do i = 1, n_declared
+            if (trim(sch%metadata%items(i)%key) == key(1:cut)) superseded = .true.
+        end do
+    end function carried_companion_is_superseded
     !
     !> .true. when the table's source file carried `key`.
     logical function source_has_key(table, key) result(has)

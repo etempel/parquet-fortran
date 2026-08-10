@@ -341,6 +341,10 @@ contains
                 test_sorting_minmax_all_null_aborts), &
             new_unittest("sorting: merging unsorted input aborts", &
                 test_sorting_merge_unsorted_aborts), &
+            new_unittest("metadata: a caller's own <KEY>.datatype wins, with a warning", &
+                test_metadata_datatype_key_collision_warns), &
+            new_unittest("metadata: no <KEY>.datatype collision means no warning", &
+                test_metadata_datatype_no_collision_is_quiet), &
             new_unittest("sort: unknown column aborts", &
                 test_sort_unknown_column_aborts), &
             new_unittest("sort: vector column key aborts", &
@@ -3443,6 +3447,32 @@ contains
             failure_message="merging unsorted input was expected to abort", &
             required_stderr="b is not sorted")
     end subroutine test_sorting_merge_unsorted_aborts
+
+    !> A caller's own "<KEY>.datatype" entry beside a typed <KEY>: see
+    !> scenario_metadata_datatype_key_collision in test/error_scenarios.f90. The write SUCCEEDS
+    !> (exit 0) -- a metadata naming clash is not worth refusing an otherwise valid file over --
+    !> so the observable results are the warning and the file itself, and the scenario aborts on
+    !> its own if the file does not end up with exactly one companion carrying the caller's value.
+    subroutine test_metadata_datatype_key_collision_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "metadata_datatype_key_collision", &
+            expect_abort=.false., &
+            failure_message="an explicit <KEY>.datatype entry should warn but still write the file", &
+            required_stderr="was added explicitly, so the type recorded for 'NSIDE'")
+    end subroutine test_metadata_datatype_key_collision_warns
+
+    !> The negative control for the test above: without the colliding key there must be no
+    !> warning at all. A guard that fires unconditionally satisfies the collision test on its own,
+    !> so this is the half that proves the guard actually discriminates.
+    subroutine test_metadata_datatype_no_collision_is_quiet(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_no_output(error, "metadata_datatype_no_collision_control", &
+            expect_abort=.false., &
+            failure_message="writing a typed keyword with no collision should succeed", &
+            forbidden_text="was added explicitly, so the type recorded for")
+    end subroutine test_metadata_datatype_no_collision_is_quiet
 
     !> Read-time sort abort path: see scenario_sort_vector_column in test/error_scenarios.f90
     !> for what it does and why that state is rejected.

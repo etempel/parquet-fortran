@@ -33,6 +33,7 @@ contains
         type(parquet_metadata_entry), allocatable :: tmp(:)
         integer :: n
         character(len=:), allocatable :: desc_val
+        character(len=:), allocatable :: dt_val
 
         if (len_trim(key) == 0) return
 
@@ -40,6 +41,8 @@ contains
 
         desc_val = ""
         if (present(description)) desc_val = trim(description)
+        dt_val = ""
+        if (present(datatype)) dt_val = trim(datatype)
 
         ! See g_maml_mutex in parquet_wrapper.cpp / parquet_parse_maml_lines
         ! above: growing metadata%items this way is not safely reentrant
@@ -50,6 +53,7 @@ contains
             metadata%items(1)%key = trim(key)
             metadata%items(1)%value = trim(value)
             metadata%items(1)%description = desc_val
+            metadata%items(1)%datatype = dt_val
         else
             n = size(metadata%items)
             allocate(tmp(n+1))
@@ -57,6 +61,7 @@ contains
             tmp(n+1)%key = trim(key)
             tmp(n+1)%value = trim(value)
             tmp(n+1)%description = desc_val
+            tmp(n+1)%datatype = dt_val
             call move_alloc(tmp, metadata%items)
         end if
         call parquet_maml_unlock()
@@ -75,14 +80,14 @@ contains
         character(len=64) :: cval
 
         write(cval, '(I0)') value
-        call parquet_metadata_append_entry(this, key, trim(cval), description, warn)
+        call parquet_metadata_append_entry(this, key, trim(cval), description, warn, datatype="int32")
     end procedure add_metadata_int32
 
     module procedure add_metadata_int64
         character(len=64) :: cval
 
         write(cval, '(I0)') value
-        call parquet_metadata_append_entry(this, key, trim(cval), description, warn)
+        call parquet_metadata_append_entry(this, key, trim(cval), description, warn, datatype="int64")
     end procedure add_metadata_int64
 
     module procedure add_metadata_float32
@@ -93,7 +98,7 @@ contains
         else
             write(cval, '(ES15.7E3)') value
         end if
-        call parquet_metadata_append_entry(this, key, trim(adjustl(cval)), description, warn)
+        call parquet_metadata_append_entry(this, key, trim(adjustl(cval)), description, warn, datatype="float32")
     end procedure add_metadata_float32
 
     module procedure add_metadata_float64
@@ -104,14 +109,14 @@ contains
         else
             write(cval, '(ES24.16E3)') value
         end if
-        call parquet_metadata_append_entry(this, key, trim(adjustl(cval)), description, warn)
+        call parquet_metadata_append_entry(this, key, trim(adjustl(cval)), description, warn, datatype="float64")
     end procedure add_metadata_float64
 
     module procedure add_metadata_logical
         if (value) then
-            call parquet_metadata_append_entry(this, key, "true", description, warn)
+            call parquet_metadata_append_entry(this, key, "true", description, warn, datatype="boolean")
         else
-            call parquet_metadata_append_entry(this, key, "false", description, warn)
+            call parquet_metadata_append_entry(this, key, "false", description, warn, datatype="boolean")
         end if
     end procedure add_metadata_logical
 
@@ -131,7 +136,7 @@ contains
             joined = joined // trim(cval)
         end do
         joined = joined // "]"
-        call parquet_metadata_append_entry(this, key, joined, description, warn)
+        call parquet_metadata_append_entry(this, key, joined, description, warn, datatype="int32[]")
     end procedure add_metadata_int32_array
 
     module procedure add_metadata_int64_array
@@ -146,7 +151,7 @@ contains
             joined = joined // trim(cval)
         end do
         joined = joined // "]"
-        call parquet_metadata_append_entry(this, key, joined, description, warn)
+        call parquet_metadata_append_entry(this, key, joined, description, warn, datatype="int64[]")
     end procedure add_metadata_int64_array
 
     module procedure add_metadata_float32_array
@@ -165,7 +170,7 @@ contains
             joined = joined // trim(adjustl(cval))
         end do
         joined = joined // "]"
-        call parquet_metadata_append_entry(this, key, joined, description, warn)
+        call parquet_metadata_append_entry(this, key, joined, description, warn, datatype="float32[]")
     end procedure add_metadata_float32_array
 
     module procedure add_metadata_float64_array
@@ -184,7 +189,7 @@ contains
             joined = joined // trim(adjustl(cval))
         end do
         joined = joined // "]"
-        call parquet_metadata_append_entry(this, key, joined, description, warn)
+        call parquet_metadata_append_entry(this, key, joined, description, warn, datatype="float64[]")
     end procedure add_metadata_float64_array
 
     module procedure add_metadata_logical_array
@@ -201,7 +206,7 @@ contains
             end if
         end do
         joined = joined // "]"
-        call parquet_metadata_append_entry(this, key, joined, description, warn)
+        call parquet_metadata_append_entry(this, key, joined, description, warn, datatype="boolean[]")
     end procedure add_metadata_logical_array
 
     module procedure add_metadata_string_array
@@ -214,7 +219,7 @@ contains
             joined = joined // trim(value(i))
         end do
         joined = joined // "]"
-        call parquet_metadata_append_entry(this, key, joined, description, warn)
+        call parquet_metadata_append_entry(this, key, joined, description, warn, datatype="string[]")
     end procedure add_metadata_string_array
 
     module procedure metadata_clear_metadata

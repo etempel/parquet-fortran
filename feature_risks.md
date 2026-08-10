@@ -136,6 +136,7 @@ something a reader is expected to have.
 | [Risk-70](#risk-70--an-intentinout-temporal-setter-that-skips-a-component-leaves-a-reused-element-stale) | An `intent(inout)` temporal setter that skips a component leaves a REUSED element stale | 4 — covered |
 | [Risk-71](#risk-71--a-stale-handle-reads-the-wrong-column-or-row-and-nothing-says-so) | A stale handle reads the wrong column or row, and nothing says so | 4 — covered |
 | [Risk-72](#risk-72--the-name-form-and-the-handle-form-of-one-accessor-can-silently-disagree) | The name form and the handle form of one accessor can silently disagree | 4 — covered |
+| [Risk-73](#risk-73--a-keydatatype-entry-that-disagrees-with-its-value-is-worse-than-no-entry) | A `<KEY>.datatype` entry that disagrees with its value is worse than no entry | 4 — covered |
 
 ---
 
@@ -143,7 +144,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-73**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-74**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2972,3 +2973,52 @@ the column recomputes lazily, so a bypassing write leaves `%has_nulls` reporting
 rest of the program. Any future per-element operation belongs in `parquet_column`, not in a caller
 reaching around it. Covered by `test_col_handle_element_within_row`, whose `%has_nulls` assertion
 is the one that catches it.
+
+### Risk-73 — A `<KEY>.datatype` entry that disagrees with its value is worse than no entry
+
+**What breaks.** A typed `schema%add_metadata` call now writes a second key-value entry naming the
+value's type (`NSIDE` / `NSIDE.datatype` = `int32`), because a parquet key-value pair can only hold
+text. A reader that trusts that token coerces with it — so a token that is *wrong* turns a value
+that used to arrive as a harmless string into a wrong number, or into a `ValueError`, in a caller
+nobody in this repository can see. Nothing on the Fortran side ever reads these entries
+(`parquet_get_metadata` picks its parse from the declared type of `value`), so no test fails, no
+warning prints and nothing aborts. The library is a **write-only** producer of a fact someone else
+acts on, which is the whole reason this is a risk rather than a bug class the suite would catch.
+
+Four ways a wrong token can arise, and what forbids each:
+
+- **A mis-copied overload.** The twelve typed specifics in `src/parquet_metadata_base.f90` each
+  name their own token as a literal; a copy-paste that leaves `add_metadata_int64` saying `int32`
+  is invisible to every round-trip test, because the *value* still round-trips perfectly.
+- **Two writers of one companion key.** A caller's own `X.datatype` entry alongside a typed `X`
+  would put two same-named entries in one file. `resolve_metadata_datatype`
+  (`src/parquet_write.f90`) makes the explicit one win and warns; the synthesized one is dropped.
+- **The `copy_metadata=` path.** A source file carries both `NSIDE` and its companion as ordinary
+  entries. When the output schema declares `NSIDE` itself, the carried `NSIDE` is dropped (the
+  schema wins) and its companion must be dropped **with it**, or the output carries the schema's
+  synthesized token *and* the stale carried one. `carried_companion_is_superseded`
+  (`src/parquet_tables_write.f90`) does that — and it must ask whether the schema declared the key
+  **before the carry loop started**, since the loop is adding to that same schema as it walks: an
+  unbounded scan sees the `NSIDE` it carried one iteration earlier and drops a companion that
+  should have been kept. That is not hypothetical; it is what the first implementation did.
+- **The VOTable's boolean rewrite.** `T`/`F` is correct in the sidecar and **wrong** in the
+  key-value entry, where this library's own `parquet_metadata_parse_logical` and every external
+  reader expect `true`/`false`. This one is not silent — the existing round-trip tests fail — but
+  it is one line's reach away, so it gets a named test rather than incidental cover.
+
+**Test.** `test/test_metadata.f90`: `test_scalar_metadata_datatype_companions` and
+`test_array_metadata_datatype_companions` assert the **token**, not merely the entry's presence
+(asserting presence alone passes against every mis-copied overload at once), plus the absence of a
+companion for a scalar string; `test_metadata_datatype_not_an_item` pins that the companion never
+becomes a `%items` entry; `test_votable_declares_scalar_types` and
+`test_boolean_metadata_value_is_not_rewritten` are the two halves of the boolean rule.
+`test/test_table.f90`'s `test_copy_metadata_carries_datatype_once` writes the source as `int64` and
+declares the output schema's own as `int32` **specifically so that counting is not enough** — a
+test asserting only "exactly one" passes whichever of the two survives, which is the failure this
+entry is about. `test/test_maml.f90`'s `test_maml_keyarray_key_gets_no_datatype` pins that a
+MAML-declared value stays a string. The `metadata_datatype_key_collision` scenario and its
+`metadata_datatype_no_collision_control` negative control cover the explicit-entry rule.
+
+**What this still forbids.** Asserting a companion's *presence* without its *value*; adding a
+thirteenth typed overload without adding its token to the two token tests; and "simplifying"
+`carried_companion_is_superseded` back to an unbounded `schema_declares_key` scan.

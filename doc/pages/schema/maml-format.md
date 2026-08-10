@@ -164,4 +164,14 @@ Every entry in this table is read back on the read side with `parquet_get_metada
 and a schema can add further entries at runtime that were never in the MAML file at all — see
 [Runtime table metadata](building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata).
 
+**Every MAML-declared table-level value is a string.** MAML carries no type for these keys, and
+that is a design decision rather than a missing feature: `keyarray:` has no `datatype:` sub-key and
+is not going to grow one. The consequence worth knowing is an asymmetry with the runtime API — a
+keyword declared in a `.maml` file gets **no** `<KEY>.datatype` companion entry in the written file
+however numeric its text looks, while the same keyword added in code through a typed
+`schema%add_metadata` call does (see
+[A typed value records its own type](building-schema-in-code.html#a-typed-value-records-its-own-type)).
+So a value that reaches the file by way of MAML is a string to every reader, and a `write_maml=.true.`
+sidecar likewise records no type. If a keyword needs to arrive typed, add it in code.
+
 In short: validation is strict for the known schema (`fields`, `keyarray`, `DOIs`, etc.), permissive for `extra:`, and intentionally shallow beyond the explicitly registered nested blocks. (If you're contributing to `parquet-fortran` itself and want to extend its MAML structure, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#extending-the-maml-schema).)

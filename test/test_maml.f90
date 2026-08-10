@@ -42,6 +42,8 @@ contains
                 "silently ignored (no declared nested schema)", test_validate_maml_unmatched_nested_ok), &
             new_unittest("keyarray:/DOIs:/depends: entries parse correctly with a bare dash and first-key " // &
                 "variations", test_keyarray_dois_depends_key_variations), &
+            new_unittest("a keyarray: key gets no .datatype companion (a MAML value is a string by design)", &
+                test_maml_keyarray_key_gets_no_datatype), &
             new_unittest("a generic (non-comments/coauthors/keywords) top-level list section parses, " // &
                 "skipping a malformed indented line", test_generic_list_section_and_malformed_line), &
             new_unittest("validate a user MAML that is a valid subset", test_validate_user_maml_ok), &
@@ -1995,5 +1997,48 @@ contains
         call check(error, nrows == 4 .and. abs(ra(1) - 1.5_real64) < 1.0e-12_real64, &
             "the composed qc schema did not read the column back correctly")
     end subroutine test_compose_read_qc_enforced_on_read
+    !
+    !> A MAML-declared table-level value is a STRING, by design -- so a keyarray: entry never
+    !! gets a "<KEY>.datatype" companion however numeric its text looks, while the same keyword
+    !! added in code through a typed %add_metadata call does. This is the rule, not a gap: the
+    !! MAML schema carries no type for these keys and is not going to grow one. Without this
+    !! test, someone reading the asymmetry as an oversight can "fix" it by sniffing the value
+    !! text, and nothing else in the suite would fail.
+    subroutine test_maml_keyarray_key_gets_no_datatype(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: dt, val
+        character(len=*), parameter :: out_file = "test_run/maml_keyarray_no_datatype.parquet"
+
+        schema%maml%name = "keyarray_no_datatype.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: keyarray_no_datatype_table", &
+            "keyarray:", &
+            "- key: NSIDE", &
+            "  value: 1024", &
+            "Fields:", &
+            "- name: id0", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_metadata(reader, "NSIDE", val)
+        call check(error, val == "1024", "the keyarray: value itself should be written, got '" // val // "'")
+        if (allocated(error)) then
+            call parquet_close_reader(reader)
+            return
+        end if
+        call parquet_get_metadata(reader, "NSIDE.datatype", dt, default="<none>", warn=.false.)
+        call check(error, dt == "<none>", &
+            "a MAML-declared key must get no .datatype companion (it is a string by design), got '" // dt // "'")
+        call parquet_close_reader(reader)
+    end subroutine test_maml_keyarray_key_gets_no_datatype
     !
 end module test_maml

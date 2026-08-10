@@ -325,6 +325,12 @@ extern "C"
 		std::string key;
 		std::string value;
 		std::string description;
+		// Type token the typed add_metadata overload recorded for `value` ("int32",
+		// "float64[]", ...), or "" when the value is a string. A parquet key-value pair can
+		// only hold text, so this is what build_file_metadata turns into a companion
+		// "<key>.datatype" entry, and what build_votable_xml declares as the PARAM's real
+		// datatype instead of char. Never an entry of its own on the Fortran side.
+		std::string datatype;
 	};
 
 	struct ParquetWriterHandle
@@ -3114,6 +3120,44 @@ extern "C"
 		return s.substr(0, end);
 	}
 
+	// Maps a parquet-fortran metadata type token (TableMetadataEntry::datatype) to the VOTable 1.4
+	// datatype attribute a scalar PARAM should declare, plus the arraysize attribute it needs ("" for
+	// none). An empty/unrecognised token, and every array-valued ("...[]") token, stays
+	// char/arraysize="*": an array's stored text is a bracketed list, which is NOT a VOTable array
+	// serialisation (those are whitespace-separated), so declaring it as one would be a false claim
+	// about the value. Unrecognised falling back to char means a token added later without touching
+	// this function degrades to today's output rather than emitting an invalid attribute.
+	static void votable_type_attrs(const std::string &token, std::string &datatype, std::string &arraysize)
+	{
+		datatype = "char";
+		arraysize = "*";
+		if (token == "int32")
+		{
+			datatype = "int";
+		}
+		else if (token == "int64")
+		{
+			datatype = "long";
+		}
+		else if (token == "float32")
+		{
+			datatype = "float";
+		}
+		else if (token == "float64")
+		{
+			datatype = "double";
+		}
+		else if (token == "boolean")
+		{
+			datatype = "boolean";
+		}
+		else
+		{
+			return;
+		}
+		arraysize.clear();
+	}
+
 	// Builds the VOTable-style XML sidecar/header text describing the table's columns and metadata.
 	static std::string build_votable_xml(const std::string &table_name,
 									const std::vector<ColumnMetadata> &columns,
@@ -3137,14 +3181,33 @@ extern "C"
 
 		for (const auto &kv : table_metadata)
 		{
-			xml << "<PARAM datatype=\"char\" arraysize=\"*\" name=\""
+			std::string param_type;
+			std::string param_arraysize;
+			votable_type_attrs(kv.datatype, param_type, param_arraysize);
+			// VOTable 1.4 serialises a boolean as T/F, so the PARAM says T while the native
+			// key-value entry this was built from still says true/false. This is the ONE place
+			// the two representations differ textually, and it is deliberate -- each spelling is
+			// correct in its own convention. Keep the rewrite here: applied one level up, in
+			// build_file_metadata, it would break every reader of the key-value entry (this
+			// library's own parquet_metadata_parse_logical included).
+			std::string param_value = kv.value;
+			if (kv.datatype == "boolean")
+			{
+				param_value = (kv.value == "true") ? "T" : "F";
+			}
+			xml << "<PARAM datatype=\"" << param_type << "\"";
+			if (!param_arraysize.empty())
+			{
+				xml << " arraysize=\"" << param_arraysize << "\"";
+			}
+			xml << " name=\""
 				// GCOVR_EXCL_START -- gcov attribution artifact under GCC: same chained-statement
 				// artifact as build_votable_xml's other continuation-line exclusions above; this
 				// table_metadata loop is exercised by test_metadata.f90's VOTable generation tests.
 				<< xml_escape(kv.key)
 				// GCOVR_EXCL_STOP
 				<< "\" value=\""
-				<< xml_escape(kv.value)
+				<< xml_escape(param_value)
 				<< "\"";
 			if (!kv.description.empty())
 			{
@@ -3317,6 +3380,17 @@ extern "C"
 		{
 			keys.push_back(kv.key);
 			values.push_back(kv.value);
+			// A parquet key-value pair is text-only by specification, so a typed scalar's type
+			// is recorded alongside it rather than in it -- mirroring the column.<name>.<attr>
+			// convention already used below. Emitted immediately after the key it describes
+			// (not as a trailing block) so a raw metadata dump stays readable. The empty case
+			// covers a string value and every entry the caller's own "<key>.datatype" already
+			// speaks for (see parquet_open_writer's collision guard).
+			if (!kv.datatype.empty())
+			{
+				keys.push_back(kv.key + ".datatype");
+				values.push_back(kv.datatype);
+			}
 		}
 
 		for (const auto &col : column_metadata)
@@ -10280,14 +10354,18 @@ extern "C"
 		}
 	}
 
-	// Adds one flat key-value table metadata entry to `handle`.
-	void parquet_add_table_metadata(void *handle, const char *key, const char *value, const char *description)
+	// Adds one flat key-value table metadata entry to `handle`. `datatype` is "" for a value
+	// that is a string, and a type token ("int32", "float64[]", ...) for one a typed
+	// add_metadata overload produced; see TableMetadataEntry::datatype.
+	void parquet_add_table_metadata(void *handle, const char *key, const char *value, const char *description,
+									const char *datatype)
 	{
 		auto writer_handle = as_handle(handle);
 		writer_handle->table_metadata.push_back(TableMetadataEntry{
 			std::string(key),
 			std::string(value),
-			std::string(description)});
+			std::string(description),
+			std::string(datatype)});
 	}
 
 } // extern "C"

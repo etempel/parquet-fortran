@@ -79,6 +79,18 @@ contains
             new_unittest("missing string array key with no default aborts", &
                 test_missing_string_array_no_default_aborts), &
             new_unittest("add_metadata with an empty key is a silent no-op", test_add_metadata_empty_key_noop), &
+            new_unittest("typed scalar metadata records a <KEY>.datatype companion; a string does not", &
+                test_scalar_metadata_datatype_companions), &
+            new_unittest("array metadata records a []-suffixed datatype companion", &
+                test_array_metadata_datatype_companions), &
+            new_unittest("a datatype companion sits immediately after the key it describes", &
+                test_metadata_datatype_companion_follows_its_key), &
+            new_unittest("VOTable declares the real scalar type instead of char", &
+                test_votable_declares_scalar_types), &
+            new_unittest("a typed add_metadata call appends exactly one %items entry", &
+                test_metadata_datatype_not_an_item), &
+            new_unittest("the native boolean entry keeps true/false when the VOTable says T/F", &
+                test_boolean_metadata_value_is_not_rewritten), &
             new_unittest("VOTable XML sidecar escapes &, <, "", and ' in unit/description/ucd", &
                 test_votable_xml_escapes_special_chars), &
             new_unittest("print_schema_info: header/dash/field rows are aligned to computed widths", &
@@ -1506,5 +1518,273 @@ contains
         call check(error, size(schema%metadata%items) == n_before + 1, &
             "warn=.false. should suppress the warning print but not change append behavior")
     end subroutine test_add_metadata_warn_false_still_appends
+
+    !> A parquet key-value pair is text-only, so a typed %add_metadata call records what the
+    !! value was in a companion "<KEY>.datatype" entry. The string specific records nothing --
+    !! there is no type to lose -- which is the half a reader relies on to tell a genuinely
+    !! textual keyword from a stringified number.
+    subroutine test_scalar_metadata_datatype_companions(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: dt, val
+        character(len=*), parameter :: out_file = "test_run/metadata_datatype_scalar.parquet"
+
+        call schema%init(table="datatype_scalar_table")
+        call schema%add_field("id0", "int32")
+        call parquet_parse_maml(schema)
+        call schema%add_metadata("m_i32", 1024_int32)
+        call schema%add_metadata("m_i64", 9000000000_int64)
+        call schema%add_metadata("m_f32", 0.5_real32)
+        call schema%add_metadata("m_f64", 0.25_real64)
+        call schema%add_metadata("m_bool", .true.)
+        call schema%add_metadata("m_str", "HEALPIX")
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_metadata(reader, "m_i32.datatype", dt)
+        call check(error, dt == "int32", "m_i32.datatype should be int32, got '" // dt // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "m_i64.datatype", dt)
+        call check(error, dt == "int64", "m_i64.datatype should be int64, got '" // dt // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "m_f32.datatype", dt)
+        call check(error, dt == "float32", "m_f32.datatype should be float32, got '" // dt // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "m_f64.datatype", dt)
+        call check(error, dt == "float64", "m_f64.datatype should be float64, got '" // dt // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "m_bool.datatype", dt)
+        call check(error, dt == "boolean", "m_bool.datatype should be boolean, got '" // dt // "'")
+        if (allocated(error)) return
+
+        ! The string specific emits no companion at all -- absent, not blank.
+        call parquet_get_metadata(reader, "m_str.datatype", dt, default="<none>", warn=.false.)
+        call check(error, dt == "<none>", "a string keyword must get no .datatype companion, got '" // dt // "'")
+        if (allocated(error)) return
+
+        ! The value entries themselves are untouched by any of this.
+        call parquet_get_metadata(reader, "m_i32", val)
+        call check(error, val == "1024", "the m_i32 value entry should still read 1024, got '" // val // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "m_str", val)
+        call check(error, val == "HEALPIX", "the m_str value entry should still read HEALPIX, got '" // val // "'")
+        call parquet_close_reader(reader)
+    end subroutine test_scalar_metadata_datatype_companions
+
+    !> An array overload's stored value is a bracketed list, so its token carries a "[]" suffix:
+    !! a bare "int32" would make a reader coerce "[1, 2, 3]" with int() and raise, where today it
+    !! gets a harmless string. The value text itself must stay exactly as it was.
+    subroutine test_array_metadata_datatype_companions(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: dt, val
+        character(len=*), parameter :: out_file = "test_run/metadata_datatype_array.parquet"
+
+        call schema%init(table="datatype_array_table")
+        call schema%add_field("id0", "int32")
+        call parquet_parse_maml(schema)
+        call schema%add_metadata("a_i32", [1_int32, 2_int32])
+        call schema%add_metadata("a_i64", [1_int64, 2_int64])
+        call schema%add_metadata("a_f32", [1.0_real32, 2.0_real32])
+        call schema%add_metadata("a_f64", [1.0_real64, 2.0_real64])
+        call schema%add_metadata("a_bool", [.true., .false.])
+        call schema%add_metadata("a_str", ["aa", "bb"])
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_metadata(reader, "a_i32.datatype", dt)
+        call check(error, dt == "int32[]", "a_i32.datatype should be int32[], got '" // dt // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "a_i64.datatype", dt)
+        call check(error, dt == "int64[]", "a_i64.datatype should be int64[], got '" // dt // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "a_f32.datatype", dt)
+        call check(error, dt == "float32[]", "a_f32.datatype should be float32[], got '" // dt // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "a_f64.datatype", dt)
+        call check(error, dt == "float64[]", "a_f64.datatype should be float64[], got '" // dt // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "a_bool.datatype", dt)
+        call check(error, dt == "boolean[]", "a_bool.datatype should be boolean[], got '" // dt // "'")
+        if (allocated(error)) return
+        ! Unlike a scalar string, a string ARRAY does get one: it says the value is a list of
+        ! strings rather than the literal text "[aa, bb]".
+        call parquet_get_metadata(reader, "a_str.datatype", dt)
+        call check(error, dt == "string[]", "a_str.datatype should be string[], got '" // dt // "'")
+        if (allocated(error)) return
+
+        call parquet_get_metadata(reader, "a_i32", val)
+        call check(error, val == "[1, 2]", "the a_i32 value entry should still read [1, 2], got '" // val // "'")
+        call parquet_close_reader(reader)
+    end subroutine test_array_metadata_datatype_companions
+
+    !> The companion is written immediately after the key it describes, not in a trailing block.
+    !! Irrelevant to a dict-based reader; it is what keeps a raw metadata dump readable, so it is
+    !! pinned here rather than left to drift.
+    subroutine test_metadata_datatype_companion_follows_its_key(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: keys(:), values(:)
+        integer :: i, at
+        character(len=*), parameter :: out_file = "test_run/metadata_datatype_order.parquet"
+
+        call schema%init(table="datatype_order_table")
+        call schema%add_field("id0", "int32")
+        call parquet_parse_maml(schema)
+        call schema%add_metadata("NSIDE", 1024_int32)
+        call schema%add_metadata("PIXTYPE", "HEALPIX")
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_metadata_items(reader, keys, values)
+        call parquet_close_reader(reader)
+
+        at = 0
+        do i = 1, size(keys)
+            if (trim(keys(i)) == "NSIDE") at = i
+        end do
+        call check(error, at > 0 .and. at < size(keys), "the NSIDE entry itself should be present")
+        if (allocated(error)) return
+        call check(error, trim(keys(at+1)) == "NSIDE.datatype", &
+            "NSIDE.datatype should sit at the index right after NSIDE, found '" // trim(keys(at+1)) // "'")
+        if (allocated(error)) return
+        call check(error, trim(values(at+1)) == "int32", &
+            "the interleaved companion should carry the token, found '" // trim(values(at+1)) // "'")
+    end subroutine test_metadata_datatype_companion_follows_its_key
+
+    !> The VOTable sidecar declares the value's real type rather than char for every scalar it
+    !! can, so a VO-aware tool reading the sidecar agrees with a reader using the .datatype
+    !! entries. arraysize is meaningful only for char and must be dropped for the rest; an
+    !! array-valued keyword stays char, since "[1, 2]" is not a VOTable array serialisation.
+    subroutine test_votable_declares_scalar_types(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: xml
+        character(len=*), parameter :: out_file = "test_run/metadata_datatype_votable.parquet"
+
+        call schema%init(table="datatype_votable_table")
+        call schema%add_field("id0", "int32")
+        call parquet_parse_maml(schema)
+        call schema%add_metadata("V_I32", 7_int32)
+        call schema%add_metadata("V_I64", 8_int64)
+        call schema%add_metadata("V_F32", 1.5_real32)
+        call schema%add_metadata("V_F64", 2.5_real64)
+        call schema%add_metadata("V_BOOL", .true.)
+        call schema%add_metadata("V_STR", "TEXT")
+        call schema%add_metadata("V_ARR", [1_int32, 2_int32])
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_metadata(reader, "IVOA.VOTable-Parquet.content", xml)
+        call parquet_close_reader(reader)
+
+        call check(error, index(xml, "<PARAM datatype=""int"" name=""V_I32"" value=""7""") > 0, &
+            "the int32 PARAM should declare datatype=""int"" with no arraysize")
+        if (allocated(error)) return
+        call check(error, index(xml, "<PARAM datatype=""long"" name=""V_I64""") > 0, &
+            "the int64 PARAM should declare datatype=""long"" with no arraysize")
+        if (allocated(error)) return
+        call check(error, index(xml, "<PARAM datatype=""float"" name=""V_F32""") > 0, &
+            "the float32 PARAM should declare datatype=""float"" with no arraysize")
+        if (allocated(error)) return
+        call check(error, index(xml, "<PARAM datatype=""double"" name=""V_F64""") > 0, &
+            "the float64 PARAM should declare datatype=""double"" with no arraysize")
+        if (allocated(error)) return
+        ! VOTable 1.4 serialises a boolean as T/F -- the sidecar's own convention, not the
+        ! key-value entry's (see test_boolean_metadata_value_is_not_rewritten).
+        call check(error, index(xml, "<PARAM datatype=""boolean"" name=""V_BOOL"" value=""T""") > 0, &
+            "the logical PARAM should declare datatype=""boolean"" and carry value=""T""")
+        if (allocated(error)) return
+        call check(error, index(xml, "<PARAM datatype=""char"" arraysize=""*"" name=""V_STR""") > 0, &
+            "a string PARAM should still be char/arraysize=""*""")
+        if (allocated(error)) return
+        call check(error, index(xml, "<PARAM datatype=""char"" arraysize=""*"" name=""V_ARR""") > 0, &
+            "an array-valued PARAM should still be char/arraysize=""*""")
+    end subroutine test_votable_declares_scalar_types
+
+    !> The companion exists only in the written file: a typed %add_metadata call appends exactly
+    !! ONE entry to %items, as it always did. The regression test for synthesizing the companion
+    !! at add time instead, which would leak it into the write_maml=.true. sidecar, into the
+    !! VOTable as a PARAM of its own, and into every %items-based count.
+    subroutine test_metadata_datatype_not_an_item(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: n_before
+
+        call schema%init(table="datatype_item_count_table")
+        call schema%add_field("x", "int32")
+        call parquet_parse_maml(schema)
+        n_before = size(schema%metadata%items)
+
+        call schema%add_metadata("NSIDE", 1024_int32)
+
+        call check(error, size(schema%metadata%items) == n_before + 1, &
+            "a typed add_metadata call must append exactly one %items entry, not two")
+        if (allocated(error)) return
+        call check(error, trim(schema%metadata%items(n_before+1)%key) == "NSIDE", &
+            "the one appended item should be the key itself, not its companion")
+    end subroutine test_metadata_datatype_not_an_item
+
+    !> The negative half of the VOTable boolean rewrite: T/F is correct in the sidecar and WRONG
+    !! in the key-value entry, where this library's own parquet_metadata_parse_logical and every
+    !! external reader expect true/false. Without this, a rewrite applied one level too high
+    !! (in build_file_metadata rather than the PARAM loop) would change every existing file's
+    !! spelling with no other test noticing.
+    subroutine test_boolean_metadata_value_is_not_rewritten(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: val
+        logical :: flag
+        character(len=*), parameter :: out_file = "test_run/metadata_datatype_bool_value.parquet"
+
+        call schema%init(table="datatype_bool_value_table")
+        call schema%add_field("id0", "int32")
+        call parquet_parse_maml(schema)
+        call schema%add_metadata("B_TRUE", .true.)
+        call schema%add_metadata("B_FALSE", .false.)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id0", id0)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_metadata(reader, "B_TRUE", val)
+        call check(error, val == "true", "the native entry must still spell it 'true', got '" // val // "'")
+        if (allocated(error)) return
+        call parquet_get_metadata(reader, "B_FALSE", val)
+        call check(error, val == "false", "the native entry must still spell it 'false', got '" // val // "'")
+        if (allocated(error)) return
+        ! And it still parses as a logical, which is what a T/F rewrite one level too high breaks.
+        call parquet_get_metadata(reader, "B_TRUE", flag)
+        call check(error, flag, "B_TRUE should read back as .true. through the logical specific")
+        call parquet_close_reader(reader)
+    end subroutine test_boolean_metadata_value_is_not_rewritten
 
 end module test_metadata

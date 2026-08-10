@@ -213,6 +213,8 @@ contains
                 test_unit_from_maml), &
             new_unittest("parquet_write_table carries the source file's metadata on request", &
                 test_write_table_copy_metadata), &
+            new_unittest("copy_metadata carries a <KEY>.datatype companion exactly once", &
+                test_copy_metadata_carries_datatype_once), &
             new_unittest("resident_only, has_nulls, get_valid_mask, set_null(mask), generation", &
                 test_introspection_additions), &
             new_unittest("clone_structure works on a table that has read nothing", &
@@ -4136,6 +4138,90 @@ contains
         call plain%get_file_metadata("instrument", val, found=ok)
         call check(error, .not. ok, "metadata_keys= should carry no key it does not name")
     end subroutine test_write_table_copy_metadata
+    !
+    !> A typed keyword's "<KEY>.datatype" companion must survive a copy_metadata= round trip
+    !! exactly once, and carry the right token.
+    !!
+    !! The second half is the sharp one. A source file carries BOTH `NSIDE` and its companion as
+    !! ordinary entries, so when the output schema declares `NSIDE` itself, the carried `NSIDE` is
+    !! dropped (the schema wins) while the carried companion would otherwise sail through -- and
+    !! the schema's own typed entry synthesizes a companion of its own, leaving two same-named
+    !! entries free to disagree. The source here declares int64 and the output schema int32, so
+    !! "exactly one" is not enough to pass: the surviving token has to be the SCHEMA's, which is
+    !! the only assertion that distinguishes carrying the stale one from dropping it.
+    subroutine test_copy_metadata_carries_datatype_once(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: w
+        type(parquet_reader) :: rd
+        type(parquet_table) :: t
+        type(parquet_schema) :: s, out_s, typed_s
+        real(real64) :: v(NROW)
+        character(len=:), allocatable :: keys(:), vals(:), token
+        integer :: i, n
+        character(len=*), parameter :: f = "test_run/table_dtcopy_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_dtcopy_out.parquet"
+        character(len=*), parameter :: fd = "test_run/table_dtcopy_declared.parquet"
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+        end do
+        call s%init("dtcopy_source")
+        call s%add_field("v", "float64")
+        call parquet_parse_maml(s)
+        call s%add_metadata("NSIDE", 1024_int64)     ! int64 on the SOURCE side, deliberately
+        call parquet_open_writer(w, f, s)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        !
+        ! (a) The output schema does not declare NSIDE: both entries are carried verbatim as
+        !     strings, so the companion arrives exactly once with the source's own token.
+        call out_s%init("dtcopy_dest")
+        call out_s%add_field("v", "float64")
+        call parquet_parse_maml(out_s)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call parquet_write_table(t, fo, out_s, copy_metadata=.true.)
+        !
+        call parquet_open_reader(rd, fo)
+        call parquet_get_metadata_items(rd, keys, vals)
+        call parquet_close_reader(rd)
+        n = 0
+        token = ""
+        do i = 1, size(keys)
+            if (trim(keys(i)) /= "NSIDE.datatype") cycle
+            n = n + 1
+            token = trim(vals(i))
+        end do
+        call check(error, n == 1, "a carried datatype companion should appear exactly once")
+        if (allocated(error)) return
+        call check(error, token == "int64", "the carried companion should keep the source's token, got '" // &
+            token // "'")
+        if (allocated(error)) return
+        !
+        ! (b) The output schema declares NSIDE itself, typed differently. The carried pair must be
+        !     dropped WHOLE -- companion included -- so the schema's own synthesized one is the
+        !     single survivor.
+        call typed_s%init("dtcopy_dest_typed")
+        call typed_s%add_field("v", "float64")
+        call parquet_parse_maml(typed_s)
+        call typed_s%add_metadata("NSIDE", 512_int32)
+        call parquet_write_table(t, fd, typed_s, copy_metadata=.true.)
+        !
+        call parquet_open_reader(rd, fd)
+        call parquet_get_metadata_items(rd, keys, vals)
+        call parquet_close_reader(rd)
+        n = 0
+        token = ""
+        do i = 1, size(keys)
+            if (trim(keys(i)) /= "NSIDE.datatype") cycle
+            n = n + 1
+            token = trim(vals(i))
+        end do
+        call check(error, n == 1, "a declared key's companion should not be doubled by the carried one")
+        if (allocated(error)) return
+        call check(error, token == "int32", &
+            "the schema's own token must win, not the carried stale one, got '" // token // "'")
+    end subroutine test_copy_metadata_carries_datatype_once
     !
     !> A read-in MAML's `fields:`' `unit:` key gives a file-backed column its unit.
     !!

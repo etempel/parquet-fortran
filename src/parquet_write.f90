@@ -157,6 +157,49 @@ contains
         suffix = ""
         if (len(parts) > 0) suffix = " (" // parts // ")"
     end subroutine writer_context_suffix
+    !> The type token `items(idx)` should be written to the file with, which is its own
+    !> %datatype unless the caller has ALSO added a literal "<key>.datatype" entry of their own.
+    !>
+    !> A typed entry makes the writer synthesize a companion "<key>.datatype" key (see
+    !> build_file_metadata, parquet_wrapper.cpp); a caller's explicit entry of that name would
+    !> then be the second writer of it, and the file would carry two same-named entries free to
+    !> disagree -- exactly the wrong-answer-with-no-abort failure a reader trusting the companion
+    !> would inherit. So the explicit entry wins and the synthesized one is dropped, with a
+    !> warning: refusing the whole write over a metadata naming clash would be disproportionate
+    !> when the file is otherwise valid.
+    !>
+    !> Two consequences of resolving this here rather than in %add_metadata, both deliberate.
+    !> The warning names the file/schema (per the error-context convention), which %add_metadata
+    !> cannot -- but it therefore fires once per parquet_open_writer call, so a schema reused for
+    !> several files warns once per file, and it is not silenced by that call's warn=.false.
+    !> (which suppresses the duplicate-key warning at add time, a different check). And the key
+    !> loses its VOTable type too, falling back to char/arraysize="*": the caller has taken over
+    !> that key's type declaration, so the library declines to guess a second one.
+    subroutine resolve_metadata_datatype(writer, items, idx, datatype)
+        type(parquet_writer), intent(in) :: writer !! writer whose file/maml names the warning reports.
+        type(parquet_metadata_entry), intent(in) :: items(:) !! every table metadata entry, scanned for a collision.
+        integer, intent(in) :: idx !! 1-based index of the entry being written.
+        character(len=:), allocatable, intent(out) :: datatype !! token to write, or "" for none.
+        character(len=:), allocatable :: ctx
+        integer :: j
+
+        datatype = ""
+        if (.not. allocated(items(idx)%datatype)) return
+        if (len_trim(items(idx)%datatype) == 0) return
+        datatype = trim(items(idx)%datatype)
+
+        ! O(n^2) over table metadata entries, which is tens of entries at the sizes this is
+        ! written for -- not worth a hash, and this runs once per file open.
+        do j = 1, size(items)
+            if (trim(items(j)%key) /= trim(items(idx)%key) // ".datatype") cycle
+            call writer_context_suffix(writer, ctx)
+            call parquet_emit_warning("parquet_open_writer: metadata key '" // trim(items(idx)%key) // &
+                ".datatype' was added explicitly, so the type recorded for '" // trim(items(idx)%key) // &
+                "' (" // datatype // ") is not written -- the explicit entry wins" // ctx)
+            datatype = ""
+            return
+        end do
+    end subroutine resolve_metadata_datatype
     module procedure parquet_assert_column_type
         integer :: idx
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
@@ -455,6 +498,7 @@ contains
     module procedure parquet_open_writer
         integer :: i, k, n_enabled, jc
         character(len=:), allocatable :: compression_name, col_out_name
+        character(len=:), allocatable :: dt !! resolve_metadata_datatype scratch.
         integer :: level_value, chunk_size_value
         logical :: comp_ok
         logical :: use_threads_value
@@ -556,10 +600,12 @@ contains
 
             if (allocated(schema%metadata%items)) then
                 do i = 1, size(schema%metadata%items)
+                    call resolve_metadata_datatype(writer, schema%metadata%items, i, dt)
                     call parquet_add_table_metadata(writer%handle, &
                         trim(schema%metadata%items(i)%key)//char(0), &
                         trim(schema%metadata%items(i)%value)//char(0), &
-                        trim(schema%metadata%items(i)%description)//char(0))
+                        trim(schema%metadata%items(i)%description)//char(0), &
+                        trim(dt)//char(0))
                 end do
             end if
         end if

@@ -508,6 +508,8 @@ scenarios=(
     "sorting_rank_bad_method:1"
     "sorting_minmax_all_null:1"
     "sorting_merge_unsorted:1"
+    "metadata_datatype_key_collision:0"
+    "metadata_datatype_no_collision_control:0"
     "sort_unknown_column:1"
     "sort_vector_column:1"
     "sort_empty_key:1"

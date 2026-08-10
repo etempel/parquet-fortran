@@ -33,6 +33,26 @@ The file form, `parquet_parse_maml(filename, schema)`, has the same "not already
 
 In every case, the call still appends the new entry exactly as it would with `warn=.false.` — `warn` only controls whether the collision gets printed, it never blocks or changes what gets written. Pass `warn=.false.` to suppress the diagnostic for a call you know is an intentional duplicate.
 
+### A typed value records its own type
+
+A parquet key-value pair can only hold text — the format has no typed value — so `add_metadata(key, 1024_int32)` stores the string `1024`, and a reader in a language without Fortran's declared types has nothing to tell it apart from a keyword whose value genuinely *is* the text `1024`. The writer therefore records the type alongside the value, as a companion entry named `<KEY>.datatype`, mirroring the `column.<name>.<attribute>` convention:
+
+| Entry in the written file | Value |
+|---|---|
+| `NSIDE` | `1024` |
+| `NSIDE.datatype` | `int32` |
+| `PIXTYPE` | `HEALPIX` |
+
+Five things to know about it:
+
+- **Only the typed overloads record one.** The *string* overload emits no companion, so a genuinely textual keyword such as `PIXTYPE` above stays a plain string with no extra entry — which is what lets a reader tell the two cases apart at all.
+- **The tokens are the same ones columns use** — `int32`, `int64`, `float32`, `float64`, `boolean` — so a reader needs one mapping table for both. An *array* overload adds a `[]` suffix (`int32[]`, …, and `string[]` for the string-array overload), because the stored value is a bracketed list such as `[1, 2, 3]`: a reader that coerced that with the scalar token would raise rather than get a usable value.
+- **It is not an entry of `schema%metadata%items`.** A typed `add_metadata` call appends exactly one item, as it always did; the companion exists only in the written file. So it does not appear in a `write_maml=.true.` sidecar, does not become a VOTable `PARAM` of its own, and does not affect `%clear_metadata`.
+- **A MAML-declared key never gets one.** Every table-level value declared in a `.maml` file is a string by design — see [How table-level keys become metadata entries](maml-format.html#how-table-level-keys-become-metadata-entries).
+- **If you write a `<KEY>.datatype` entry yourself, yours wins.** `parquet_open_writer` warns and drops the one it would have synthesized, so the file never carries two entries of that name free to disagree. That key's VOTable `PARAM` then falls back to `datatype="char"` too: you have taken over declaring that key's type, so the library does not guess a second answer. Note the warning is emitted at *open* time, so a schema reused for several files warns once per file, and `add_metadata`'s own `warn=.false.` does not suppress it — that argument controls the duplicate-key check described above, which is a different one.
+
+The VOTable sidecar declares the same types (`int`, `long`, `float`, `double`, `boolean`, and `char` for everything else) instead of calling every scalar a `char` — see [The VOTable sidecar](../io/reading.html#reading-table-metadata-with-parquet_get_metadata).
+
 **`schema%add_metadata` must be called *after* `parquet_parse_maml`, never before** — calling it right after `%init`/`%add_field` but before the schema has been parsed fails with `error stop`, since `parquet_parse_maml` would otherwise silently discard that entry when it (re)builds `%metadata%items` from `%maml%lines`.
 
 See the [combined example](combined-example.html#maml-schema-vector-columns-and-metadata) for `add_metadata` used in a complete, worked write.

@@ -572,6 +572,10 @@ program error_scenarios
         call scenario_qc_maml_unknown_subkey()
     case ("maml_line_too_long")
         call scenario_maml_line_too_long()
+    case ("metadata_datatype_key_collision")
+        call scenario_metadata_datatype_key_collision()
+    case ("metadata_datatype_no_collision_control")
+        call scenario_metadata_datatype_no_collision_control()
     case ("write_row_count_mismatch")
         call scenario_write_row_count_mismatch()
     case ("read_row_count_mismatch")
@@ -12387,5 +12391,64 @@ contains
         call pf_merge(a, b, m)   ! -> aborts (b is not sorted)
         print '(a,i0)', "unexpectedly merged an unsorted input, size=", size(m)
     end subroutine scenario_sorting_merge_unsorted
+
+    !> A typed keyword makes the writer synthesize a "<KEY>.datatype" entry, so a caller's own
+    !! entry of that name would be a second writer of the same key and the file would carry two,
+    !! free to disagree. The explicit one wins, with a warning, and the write still succeeds --
+    !! aborting over a metadata naming clash would be disproportionate for an otherwise valid file.
+    subroutine scenario_metadata_datatype_key_collision()
+        call metadata_datatype_collision_case(.true., "test_run/es_meta_dt_collide.parquet")
+    end subroutine scenario_metadata_datatype_key_collision
+
+    !> The negative control for the scenario above: the same program without the colliding key
+    !! must NOT warn. A guard that fires unconditionally passes every test written for the
+    !! collision itself, so the absence of the warning is what has teeth here.
+    subroutine scenario_metadata_datatype_no_collision_control()
+        call metadata_datatype_collision_case(.false., "test_run/es_meta_dt_control.parquet")
+    end subroutine scenario_metadata_datatype_no_collision_control
+
+    !> Writes a file with a typed NSIDE, optionally alongside a caller-supplied NSIDE.datatype,
+    !! and aborts unless the result carries exactly ONE companion with the expected value. Both
+    !! scenarios above go through here, each with its own output path -- they run concurrently
+    !! under xargs -P, so a shared fixture path would truncate under its sibling.
+    subroutine metadata_datatype_collision_case(collide, out_file)
+        logical, intent(in) :: collide            !! add the caller's own NSIDE.datatype entry too.
+        character(len=*), intent(in) :: out_file  !! this scenario's own output file.
+        type(parquet_schema) :: s
+        type(parquet_writer) :: w
+        type(parquet_reader) :: rd
+        integer(int32) :: id0(1) = [1_int32]
+        character(len=:), allocatable :: keys(:), vals(:), token
+        integer :: i, n
+
+        call s%init(table="dt_collision_table")
+        call s%add_field("id0", "int32")
+        call parquet_parse_maml(s)
+        call s%add_metadata("NSIDE", 1024_int32)
+        if (collide) call s%add_metadata("NSIDE.datatype", "user_supplied")
+
+        call parquet_open_writer(w, out_file, s)
+        call parquet_write_column(w, "id0", id0)
+        call parquet_close_writer(w)
+
+        call parquet_open_reader(rd, out_file)
+        call parquet_get_metadata_items(rd, keys, vals)
+        call parquet_close_reader(rd)
+
+        n = 0
+        token = ""
+        do i = 1, size(keys)
+            if (trim(keys(i)) /= "NSIDE.datatype") cycle
+            n = n + 1
+            token = trim(vals(i))
+        end do
+        if (n /= 1) error stop "expected exactly one NSIDE.datatype entry in the written file"
+        if (collide) then
+            if (token /= "user_supplied") error stop "the caller's explicit NSIDE.datatype should have won"
+        else
+            if (token /= "int32") error stop "the synthesized NSIDE.datatype should carry int32"
+        end if
+        print '(a,a)', "NSIDE.datatype=", token
+    end subroutine metadata_datatype_collision_case
 
 end program error_scenarios

@@ -65,12 +65,22 @@ submodule (parquet_core) parquet_metadata
         !> parquet_metadata_warn_duplicate, unless warn=.false.) if `key` collides with a
         !> writer-reserved key or an already-present key, then appends one
         !> already-stringified key/value/description to `metadata%items` regardless.
-        module subroutine parquet_metadata_append_entry(metadata, key, value, description, warn)
+        !>
+        !> `datatype` records what the caller's value actually was, since a parquet key-value
+        !> pair can only ever store text. An absent or blank `datatype` means "no companion
+        !> entry" -- the value is then indistinguishable from a string on read, which is exactly
+        !> right for the string specific and for a MAML-declared key. It never becomes an entry
+        !> of `metadata%items` in its own right, and it is deliberately NOT forwarded to
+        !> parquet_append_keyarray_line: a MAML-declared value is a string by design, so the
+        !> write_maml=.true. sidecar stays untyped.
+        module subroutine parquet_metadata_append_entry(metadata, key, value, description, warn, datatype)
             class(parquet_table_metadata), intent(inout) :: metadata !! table metadata gaining one entry.
             character(len=*), intent(in) :: key !! metadata key.
             character(len=*), intent(in) :: value !! metadata value, already converted to text.
             character(len=*), intent(in), optional :: description !! optional free-text description.
             logical, intent(in), optional :: warn !! .false. suppresses the duplicate-key warning (default .true.).
+            character(len=*), intent(in), optional :: datatype !! type token for `value` ("int32", "boolean[]",
+            !! ...); absent/blank means the value is a string and gets no companion entry.
         end subroutine parquet_metadata_append_entry
 
         !> Grows `columns` by one empty (default-initialized) entry and

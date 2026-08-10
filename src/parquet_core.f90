@@ -154,6 +154,13 @@ module parquet_core
         character(len=:), allocatable :: key !! Metadata key.
         character(len=:), allocatable :: value !! Value, always stored as plain text (see add_metadata).
         character(len=:), allocatable :: description !! Optional free-text description; never populated on read.
+        !> Type token the typed %add_metadata overload recorded for %value ("int32", "float64[]",
+        !! ...); unallocated/blank for the string overload, for a MAML-declared keyarray: item (a
+        !! MAML-declared value is a string by design) and for every entry built on the read side.
+        !! Written to the file as a companion "<key>.datatype" key-value entry by
+        !! build_file_metadata (parquet_wrapper.cpp) -- never as an entry of %items itself, so
+        !! %add_metadata still appends exactly one item per call.
+        character(len=:), allocatable :: datatype
     end type parquet_metadata_entry
 
     !> Flat key-value table metadata: one array of parquet_metadata_entry plus

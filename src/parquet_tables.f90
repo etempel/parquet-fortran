@@ -83,6 +83,7 @@ module parquet_tables
     !
     public :: parquet_table
     public :: parquet_table_row
+    public :: parquet_table_col
     public :: parquet_slice
     public :: parquet_slice_range
     public :: parquet_slice_list
@@ -420,6 +421,12 @@ module parquet_tables
         procedure :: column_names => table_column_names !! Copy out every column name, in order.
         procedure :: column_index => table_column_index !! A column's 1-based position, 0 when absent.
         procedure :: column_name => table_column_name !! Copy out the name at a 1-based position.
+        procedure, private :: column_by_name !! %column specific taking a column name.
+        procedure, private :: column_by_index !! %column specific taking a 1-based position.
+        !> A resolved handle on one column, by name or by 1-based position. Resolves once -- the
+        !! lookup, the lazy first touch and the kind -- so a per-element loop over that column
+        !! stops paying for a name lookup on every access. See `parquet_table_col`.
+        generic :: column => column_by_name, column_by_index
         procedure, private :: has_nulls_name => table_has_nulls !! %has_nulls specific, by name.
         procedure, private :: has_nulls_at => table_has_nulls_at !! %has_nulls specific, by position.
         !> Whether a column holds (or may hold) nulls -- named, or by 1-based position.
@@ -919,6 +926,46 @@ module parquet_tables
         final :: row_finalize               !! Drops the pointer; owns nothing, frees nothing.
     end type parquet_table_row
     !
+    !> A resolved handle on ONE column of a `parquet_table`: the slot, its kind and the table's row
+    !! scope, captured once so a per-element loop stops resolving a name on every access.
+    !!
+    !! Made with `t%column(name)` or `t%column(j)` and used as `call c%get(i, value)`. It is a
+    !! VIEW, not a copy -- writes through it change the table -- and it points at the table's
+    !! column store, never at the table itself, so the table needs no `target` attribute.
+    !!
+    !! **A handle does not survive a structural change**, and says so rather than reading the wrong
+    !! column: it stamps the table's `%generation()` when it is made and refuses once they differ.
+    !! `%is_valid()` is the non-aborting way to ask. Re-fetching costs one lookup.
+    !!
+    !! **No finalizer, deliberately** -- unlike `parquet_table_row`. The handle owns nothing and
+    !! frees nothing, and a finalizer could not catch the case that matters (a cache freed with its
+    !! table leaves `associated()` answering `.true.`, not `.false.`). It is not free either:
+    !! intrinsic assignment to or from a finalizable type runs the finalizer twice, which
+    !! `c = t%column(name)` would pay on every handle it makes.
+    !!
+    !! **No allocatable components, mandatory.** A per-thread handle declared in a `block` inside a
+    !! parallel region is an obvious thing to write, and this project has recorded both an ifx
+    !! segfault and a gfortran uninitialised-`private()` bug for types in that position that carry
+    !! one. See CLAUDE.md's "New `parquet_table` state goes on the CACHE".
+    type :: parquet_table_col
+        private
+        type(parquet_table_cache), pointer :: cache => null() !! the table's column store.
+        integer :: slot = 0                        !! 1-based index into cache%cols.
+        integer :: colkind = PK_NONE               !! the kind resolved when the handle was made.
+        integer(int64) :: gen = -1_int64           !! cache%generation when this handle was made.
+        type(table_scope) :: scope                 !! the table's row scope, by value.
+    contains
+        procedure, private :: col_get_f64_i32 !! %get specific, float64 value, int32 row index.
+        procedure, private :: col_get_f64_i64 !! %get specific, float64 value, int64 row index.
+        !> Copies one row's value into the caller's variable, widening exactly as the table's own
+        !! `%get_element` does. No name, no lookup -- the handle already knows the slot.
+        generic :: get => col_get_f64_i32, col_get_f64_i64
+        procedure :: is_valid => col_is_valid !! Whether the handle is attached AND still current.
+        procedure :: index => col_index       !! This column's 1-based position in the table.
+        procedure :: kind => col_kind         !! This column's PK_* kind.
+        ! NO `final` -- see the type's own doc-comment. This is a decision, not an omission.
+    end type parquet_table_col
+    !
     ! ---- Lifecycle (parquet_tables_lifecycle) ----
     interface
         !> Opens `filename` and reads every supported column into `table`, freeing each column's
@@ -1398,6 +1445,91 @@ module parquet_tables
             integer, intent(out) :: idx              !! slot index, or 0 on a reported miss.
             logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
         end subroutine table_lookup_or_fail
+        !> A resolved handle on the named column. Honours `found=` exactly as every other
+        !! name-taking query does; on a reported miss the handle comes back detached, so
+        !! `%is_valid()` is `.false.` and using it aborts.
+        module subroutine column_by_name(self, name, c, found)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: name              !! column name.
+            type(parquet_table_col), intent(out) :: c         !! the resolved handle.
+            logical, intent(out), optional :: found           !! present: report a miss instead of aborting.
+        end subroutine column_by_name
+        !> A resolved handle on the column at 1-based position `j`.
+        module subroutine column_by_index(self, j, c, found)
+            class(parquet_table), intent(in) :: self          !! the table.
+            integer, intent(in) :: j                          !! 1-based column position.
+            type(parquet_table_col), intent(out) :: c         !! the resolved handle.
+            logical, intent(out), optional :: found           !! present: report an out-of-range j instead of aborting.
+        end subroutine column_by_index
+        !> Resolves `name` straight into a handle, carrying the CALLER's procedure name so the
+        !! messages a delegating `%get_element` produces are the ones it always produced. This is
+        !! the entry `%column` itself uses, with `proc` = "column".
+        module subroutine table_resolve_to_handle(self, name, proc, c, found)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: name              !! column name.
+            character(len=*), intent(in) :: proc              !! calling procedure, for the message.
+            type(parquet_table_col), intent(out) :: c         !! the resolved handle.
+            logical, intent(out), optional :: found           !! present: report a miss instead of aborting.
+        end subroutine table_resolve_to_handle
+        !> Whether the handle is attached to a table AND still current -- one predicate, because
+        !! a caller can do nothing useful with a handle that is one and not the other.
+        module function col_is_valid(self) result(ok)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            logical :: ok                                !! .true. when it can still be used.
+        end function col_is_valid
+        !> This column's 1-based position in the table.
+        module function col_index(self) result(j)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer :: j                                 !! 1-based position.
+        end function col_index
+        !> This column's PK_* kind, as resolved when the handle was made.
+        module function col_kind(self) result(k)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer :: k                                 !! the PK_* constant.
+        end function col_kind
+        !> Aborts unless the handle is attached and current, naming the remedy -- the cause of a
+        !! stale handle is usually several statements away from where it is noticed.
+        module subroutine col_resolve(self, proc)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            character(len=*), intent(in) :: proc         !! calling procedure, for the message.
+        end subroutine col_resolve
+        !> Aborts unless `i` is a valid 1-based row index for the handle's own row scope.
+        module subroutine col_require_row(self, i, proc)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! the row index to check.
+            character(len=*), intent(in) :: proc         !! calling procedure, for the message.
+        end subroutine col_require_row
+        !> Reports that this column's kind cannot serve the caller's variable.
+        module subroutine col_kind_error(self, want, proc)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer, intent(in) :: want                  !! the PK_* the caller asked for.
+            character(len=*), intent(in) :: proc         !! calling procedure, for the message.
+        end subroutine col_kind_error
+        !> The SHARED BODY behind both float64 `%get` forms: the widening set, the kind error and
+        !! the null rule, once. Takes the resolved PIECES rather than a handle, because a handle
+        !! the caller does not otherwise need costs more to build than the body costs to run --
+        !! measured at +16.3% on `%get_element` when the name form built one to delegate through.
+        !! `proc` is the CALLER's name, so each form keeps the messages it always produced.
+        module subroutine col_fetch_f64(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            real(real64), intent(out) :: value             !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_f64
+        !> One row's float64 value through a handle (int32 row index).
+        module subroutine col_get_f64_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            real(real64), intent(out) :: value           !! receives the value.
+        end subroutine col_get_f64_i32
+        !> One row's float64 value through a handle (int64 row index), widening float32.
+        module subroutine col_get_f64_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            real(real64), intent(out) :: value           !! receives the value.
+        end subroutine col_get_f64_i64
         !> The TAIL of `table_resolve`, on a slot that is already known good: the unsupported-type
         !! refusal, the lazy first touch, and the shared-write rule. Split out so that a caller
         !! holding a slot index -- `table_resolve` after its name lookup, and anything reaching a

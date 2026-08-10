@@ -1856,25 +1856,13 @@ contains
     !
     module procedure get_element_f64_i64
         integer :: idx
-        real(real32) :: v_f32
         !
+        value = 0.0_real64
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            value = 0.0_real64
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_FLOAT64)
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case (PK_FLOAT32)
-            call self%cache%cols(idx)%values%get_at(i, v_f32)
-            value = v_f32
-        case default
-            call table_require_kind(self, idx, PK_FLOAT64, "get_element")
-        end select
+        call col_fetch_f64(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_f64_i64
-    !
     module procedure get_element_bool_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_bool_i32

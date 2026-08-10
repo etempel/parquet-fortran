@@ -719,6 +719,12 @@ contains
                 test_table_not_opened_aborts), &
             new_unittest("a by-position parquet_table query past the last column aborts", &
                 test_table_column_position_out_of_range_aborts), &
+            new_unittest("%get_element past the last row aborts, naming get_element", &
+                test_table_get_element_row_out_of_range_aborts), &
+            new_unittest("%get_element on a mismatched kind aborts through the shared body", &
+                test_table_get_element_kind_mismatch_aborts), &
+            new_unittest("%get_element on a missing column aborts", &
+                test_table_get_element_missing_column_aborts), &
             new_unittest("parquet_table %col with a mismatched pointer kind aborts", &
                 test_table_pointer_kind_mismatch_aborts), &
             new_unittest("parquet_table %col mismatch aborts on every remaining col_ptr_* kind", &
@@ -1198,6 +1204,33 @@ contains
             failure_message="a by-position query past the last column was expected to abort", &
             required_stderr="parquet_table: kind: column position 2 is outside this table's 1..1 columns")
     end subroutine test_table_column_position_out_of_range_aborts
+
+    subroutine test_table_get_element_row_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The message must name `get_element`, not whatever internal body served it. A refactor
+        ! that routes this accessor through a column handle changes it to "column handle: get:"
+        ! -- which happened once and no test noticed, which is why this one exists.
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_row_out_of_range", &
+            expect_abort=.true., &
+            failure_message="%get_element past the last row was expected to abort", &
+            required_stderr="parquet_table: get_element: row index 3 is outside this table's 1..2 rows")
+    end subroutine test_table_get_element_row_out_of_range_aborts
+
+    subroutine test_table_get_element_kind_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch", &
+            expect_abort=.true., &
+            failure_message="%get_element on a mismatched kind was expected to abort", &
+            required_stderr="parquet_table: get_element: this column holds")
+    end subroutine test_table_get_element_kind_mismatch_aborts
+
+    subroutine test_table_get_element_missing_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_missing_column", &
+            expect_abort=.true., &
+            failure_message="%get_element on a missing column was expected to abort", &
+            required_stderr="parquet_table: get_element: no column of this name")
+    end subroutine test_table_get_element_missing_column_aborts
 
     subroutine test_table_pointer_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

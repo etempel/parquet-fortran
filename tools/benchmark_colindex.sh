@@ -25,6 +25,11 @@
 #   GUARDS=shipped  Which get_at guard variant to build: shipped | inline | none.
 #                    `inline` and `none` REQUIRE the source to have been regenerated with
 #                    tools/generate_parquet_columns.py --bench-guards first -- see below.
+#   LADDER=          Stage-0b rung: one PF_BENCH_NO_* macro naming a `table_resolve` phase to
+#                    compile out. REQUIRES tools/bench_resolve_ladder.py --apply first; run
+#                    `tools/bench_resolve_ladder.py --list` for the rungs. Empty = the full path.
+#   LTO=0            Set to 1 when you have appended LTO flags, so the build tree is named apart
+#                    from its non-LTO twin.
 #
 # GUARDS is the one setting that can silently measure the wrong thing, so it does not degrade:
 # asking for `inline` or `none` against a tree whose generated source carries no cpp scaffolding
@@ -98,6 +103,45 @@ EOF
     exit 1
 fi
 
+# --- select the stage-0b ladder rung ------------------------------------------------------------
+#
+# Same refusal rule as GUARDS, and for the same reason: a macro against unscaffolded source is a
+# no-op, so the run would build the full path and file it under a rung name. The program prints the
+# rung it was actually compiled with, as an independent second check.
+LADDER="${LADDER:-}"
+LADDER_FLAG=""
+LADDER_TAG=""
+if [[ -n "$LADDER" ]]; then
+    if [[ "$LADDER" != PF_BENCH_NO_* ]]; then
+        echo "benchmark_colindex.sh: LADDER must name a PF_BENCH_NO_* macro (got '$LADDER')." >&2
+        echo "  tools/bench_resolve_ladder.py --list" >&2
+        exit 2
+    fi
+    if ! grep -q "PF_BENCH_NO_APPEND_CHECK" src/parquet_tables_query.f90; then
+        cat >&2 <<'EOF'
+benchmark_colindex.sh: LADDER was asked for, but src/parquet_tables_query.f90 carries no ladder
+scaffolding, so the macro would have no effect and this run would measure the full path under a
+rung's name.
+
+Apply it first, ON A MEASUREMENT BRANCH ONLY:
+
+    tools/bench_resolve_ladder.py --apply
+
+and restore afterwards with:
+
+    git checkout src/parquet_tables_query.f90
+EOF
+        exit 1
+    fi
+    if ! grep -q -- "$LADDER" src/parquet_tables_query.f90; then
+        echo "benchmark_colindex.sh: '$LADDER' is not a rung this scaffolding defines." >&2
+        echo "  tools/bench_resolve_ladder.py --list" >&2
+        exit 2
+    fi
+    LADDER_FLAG="-D$LADDER"
+    LADDER_TAG="-${LADDER#PF_BENCH_NO_}"
+fi
+
 # --- one build tree per (variant, compiler) -----------------------------------------------------
 #
 # The compiler goes in the name, not just the variant. tools/benchmark_stage7.sh names its trees
@@ -106,18 +150,29 @@ fi
 # runs two toolchains in this campaign, so that trap is live here.
 FC_TAG="$(basename "${FPM_FC:-gfortran}")"
 FC_TAG="${FC_TAG//[^A-Za-z0-9._-]/_}"
-export FPM_BUILD_DIR="test_run/colindex-${GUARDS}-${FC_TAG}"
+# The LTO axis is part of the name too. Naming a tree for (guards, compiler) alone let an LTO
+# build land in its non-LTO twin's directory -- machines A and B both hit it and worked around it
+# by hand. Set LTO=1 when you have appended LTO flags, or set FPM_BUILD_DIR yourself; a pre-set
+# value is respected rather than overwritten, which is the general escape hatch.
+LTO_TAG=""
+[[ "${LTO:-0}" != "0" ]] && LTO_TAG="-lto"
+if [[ -z "${FPM_BUILD_DIR:-}" ]]; then
+    export FPM_BUILD_DIR="test_run/colindex-${GUARDS}${LADDER_TAG}-${FC_TAG}${LTO_TAG}"
+else
+    echo "benchmark_colindex.sh: using the FPM_BUILD_DIR you set: $FPM_BUILD_DIR" >&2
+fi
 
 # Appended, never assigned: on every machine this project is developed on, FPM_FFLAGS already
 # carries Arrow-adjacent include paths, and replacing it produces a missing-header error that
 # reads like a missing dependency rather than a flag mistake.
-if [[ -n "$GUARD_FLAG" ]]; then
-    export FPM_FFLAGS="${FPM_FFLAGS:-} $GUARD_FLAG"
+if [[ -n "$GUARD_FLAG$LADDER_FLAG" ]]; then
+    export FPM_FFLAGS="${FPM_FFLAGS:-} $GUARD_FLAG $LADDER_FLAG"
 fi
 
 echo "=============================================================================="
 echo "benchmark_colindex.sh"
 echo "  guards      : $GUARDS${GUARD_FLAG:+  ($GUARD_FLAG)}"
+echo "  ladder rung : ${LADDER:-(none -- full path)}"
 echo "  build tree  : $FPM_BUILD_DIR"
 echo "  fortran     : ${FPM_FC:-gfortran (fpm default)}"
 echo "  nrows=$NROWS ncols=$NCOLS rounds=$ROUNDS access=$ACCESS width=$WIDTH"
@@ -128,6 +183,38 @@ echo
 # --profile release is not optional: fpm applies NO optimisation flags at all without a profile,
 # and every figure from an -O0 build is meaningless (measured 5.7x on one item in an earlier
 # campaign, enough to invert a comparison, and it did).
+#
+# And asking for it is NOT the same as getting it. fpm 0.13.0 alpha has no release profile for
+# flang: `--profile release` emits `-cpp` and the -I paths and nothing else, so the whole run is
+# an -O0 run that looks exactly like a valid one. Machine A found this the hard way -- a plain
+# Fortran array read at 5.43 ns instead of 0.95, and %get_element 3.7x too slow, from a flag the
+# wrapper believed it had set. So verify, the same way GUARDS is verified above: this script
+# refuses to measure a build it cannot confirm is optimised.
+FLAGS_LINE="$(fpm build --profile release --show-model 2>/dev/null \
+              | grep -o 'fortran_compile_flags="[^"]*"' | head -n 1 || true)"
+if [[ -z "$FLAGS_LINE" ]]; then
+    echo "benchmark_colindex.sh: could not read fortran_compile_flags from 'fpm build --show-model'." >&2
+    echo "  Cannot confirm the build is optimised; refusing to produce numbers. Set" >&2
+    echo "  SKIP_OPT_CHECK=1 to override, and SAY SO IN THE REPORT." >&2
+    [[ "${SKIP_OPT_CHECK:-0}" == "0" ]] && exit 1
+elif [[ "$FLAGS_LINE" != *" -O"* ]]; then
+    cat >&2 <<EOF
+benchmark_colindex.sh: '--profile release' produced NO optimisation flag for this compiler.
+
+  $FLAGS_LINE
+
+fpm has no release profile for some compilers (flang, as of fpm 0.13.0 alpha), so this would be an
+-O0 run reported as a release one -- measured 3.7x wrong on the headline figure when it happened.
+
+Fix by appending the flag yourself (append, never assign -- FPM_FFLAGS carries Arrow's paths):
+
+    FPM_FFLAGS="\${FPM_FFLAGS:-} -O3" tools/benchmark_colindex.sh ...
+
+and record in the report that you did. SKIP_OPT_CHECK=1 overrides this check.
+EOF
+    [[ "${SKIP_OPT_CHECK:-0}" == "0" ]] && exit 1
+fi
+
 fpm build --profile release >/dev/null
 
 for m in "${MODES[@]}"; do

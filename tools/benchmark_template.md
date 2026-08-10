@@ -45,6 +45,25 @@ say so explicitly in §1 when you do.)
 - [ ] **Say what size of effect the campaign is looking for**, so the runner can tell from Step 3b's
       noise floor whether their machine can answer it at all. A campaign chasing 5% on a machine with
       a 12% floor is not a run worth taking.
+- [ ] **If you quote an ANCHOR the run must reproduce, name its exact configuration** — the size, the
+      width, the column, the mode. One sheet gave a figure as "~24 ns at ncols=40" when it had been
+      measured at ncols=4, where the real ncols=40 value is 37; two machines caught it, and a third
+      following the sheet literally would have halted on a false negative. An anchor is a stop
+      condition, so an under-specified one stops the wrong runs.
+- [ ] **State each pass criterion in the shape the mechanism actually produces.** One sheet said a
+      figure should be "flat across widths" when the mechanism is a bisection, whose signature is
+      *logarithmic* — a 32x rise in input buying a 1.5x rise in time read as a failure when it was
+      the thing working correctly. Ask what the right answer looks like before writing the test for
+      it.
+- [ ] **Name every axis the build tree must be keyed on** — configuration, compiler, and any flag
+      the campaign toggles (LTO, a cpp variant). A tree named for fewer axes than the campaign varies
+      lets one arm's objects land in another's; this has now happened twice in this repository, along
+      a different axis each time.
+- [ ] **Say what a runner should do if Step 1's commit or branch does not exist.** The step says
+      "stop", and three machines in one campaign instead proceeded on `main` because everything they
+      needed was there — which was the right call, and left three reports filed against a commit the
+      sheet does not name. Either point at something real or say explicitly that proceeding is
+      permitted and what to record.
 - [ ] Delete this section, and delete any §5 report skeleton fields that do not apply.
 - [ ] Make one copy per machine, suffixed with the machine's name
       (`feature_<campaign>_A.md`, `feature_<campaign>_B.md`, …), and carry each to its machine
@@ -128,6 +147,21 @@ Read the output before continuing, and check three things:
 > environment variables it exported beforehand are set, so the shell looks correctly configured. The
 > version check above is what catches this. It is not a formality; it has already caught it once.
 
+**Then check that `--profile release` actually delivered optimisation, which is NOT the same as
+asking for it.** fpm has no release profile for every compiler — under `flang` (fpm 0.13.0 alpha) it
+emits `-cpp` and the `-I` paths and nothing else, so the run is an `-O0` run that looks exactly like
+a valid one:
+
+```bash
+fpm build --profile release --show-model | grep -o 'fortran_compile_flags="[^"]*"'
+```
+
+**If there is no `-O` in that line, stop.** The cost of not noticing, measured: a plain array read at
+5.43 ns instead of 0.951, and a campaign's headline figure 3.7x too slow. Recover by appending the
+flag — `FPM_FFLAGS="${FPM_FFLAGS:-} -O3"`, appended and never assigned — and **record in the report
+that you did**, because it is a deviation. A wrapper that does not make this check itself cannot
+tell the difference either, so do not rely on it having done so.
+
 **Optional but recommended if the campaign involves link-time optimisation:**
 
 ```bash
@@ -188,6 +222,31 @@ alone would have recorded a large effect that does not exist.
 If the campaign's whole question sits below the floor, that is itself the finding: say so, and say
 what kind of machine would be needed to answer it.
 
+### Step 3c — if the arms differ by a BUILD FLAG, measure a CROSS-BUILD floor too
+
+**Skip this only if every arm comes from one binary.** The moment two arms are produced by
+*rebuilding* — a cpp variant, a compiler flag, LTO, a mutation — Step 3b's floor is the wrong
+instrument, and it is wrong by an order of magnitude in the direction that manufactures findings.
+
+Two machines discovered this independently in one campaign. Re-running one binary reproduced to
+**0.19%–2.5%**. Rebuilding the *same source* with a cpp flag moved arms the flag does not touch by
+**11–16%**: one figure went 6.030 → 6.956 ns between two builds that generate identical code for it,
+and a control arm moved **+16.2% in a direction that is impossible**. That is code layout and
+alignment shifting as the object grows, not cost. Reading it against a 2% floor would have licensed
+reporting a 1.2 ns difference as real.
+
+So:
+
+1. **Include an untouched CONTROL arm** — something the flag provably cannot affect, measured in
+   every build. If the control moves, that movement is your floor, whatever Step 3b said.
+2. **Build each variant at least twice** where the campaign's answer is close to the line, and
+   report the spread.
+3. **Quote both floors** in the report, and say which one applies to which comparison.
+
+A control that stays flat across builds is also what proves the flag did what it claimed — one
+campaign's control being flat under one compiler and jumping 16% under another is what identified
+the second machine's numbers as layout rather than measurement.
+
 ### Step 4 — write the report into this file
 
 Fill in the skeleton in §5 and **write it into this same file** — the copy you were given, under the
@@ -234,6 +293,16 @@ was believed for a while.
   many-core/NUMA machine is a *poor* instrument for small differences — this project has recorded
   5.6x run-to-run variation at one size on such a machine — so it is best used for scaling
   questions, with small deltas taken on a quiet workstation.
+- **But "loaded" is not "noisy" — do not disqualify a machine without measuring.** One report ran
+  with load1 between 5.7 and 24 on 8 cores, an unrelated process at 122% CPU throughout, and still
+  measured a **1.5%** floor, because its arms were single-threaded and every figure best-of-5. Say
+  what the load was, measure the floor, and let the floor decide. A machine talked out of running is
+  a data point nobody gets.
+- **A noise floor measured on a PROXY is evidence about the proxy.** One machine carried forward a
+  5% floor taken on a different tool — whose arms were ~30 ms bandwidth-bound array loops — and
+  concluded it could not resolve a 5% threshold. The campaign's own arms reproduced to **0.19%**:
+  wrong by 25x, in the direction that disqualifies a good machine. Measure the floor with the
+  harness the campaign actually runs.
 - **Quote a measured noise floor, never an assumed one** (Step 3b). "Best of N rounds" is not a
   substitute: it removes upward spikes within a run, not the drift between runs, and it does nothing
   at all about an *ordered* bias where one arm ran after something heavy. A report whose deltas are
@@ -332,6 +401,12 @@ there were none.
 the *identical* build, the figure it was taken on, and the resulting rule for reading everything
 below, e.g. *"12% on S7-1; treat any difference under that as indistinguishable from zero."* If the
 campaign's own deltas fall below it, say so explicitly rather than reporting them as small effects.
+
+**Cross-build noise floor** *(Step 3c — required whenever any two arms come from different builds;
+otherwise "n/a, single binary")* — how far an **untouched control arm** moved between rebuilds, and
+therefore which of this report's comparisons are resolvable and which are not. This is routinely an
+order of magnitude larger than the figure above, and it is the one that governs any
+flag-selected or variant-selected result.
 
 **Results** — paste the tool's own output verbatim in a fenced block, then add a short paragraph
 saying what it shows. Verbatim first: a summary can be re-derived from raw output, but raw output

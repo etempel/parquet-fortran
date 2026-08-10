@@ -90,6 +90,7 @@ REMOVE_PATHS=(
     docs.md
     test/fixtures
     tools/benchmark_colindex.sh
+    tools/bench_resolve_ladder.py
     tools/benchmark_stage7.sh
     tools/benchmark_template.md
     tools/benchmark_strings.sh

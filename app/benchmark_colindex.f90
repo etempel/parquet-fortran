@@ -43,6 +43,14 @@
 !! so nothing is optimised away; and the wrapper passes `--profile release`, without which fpm
 !! applies no optimisation at all and every number here is meaningless.
 !!
+!! **The row index wraps with a counter, NEVER with `mod(k - 1, nrows)`.** `nrows` is a runtime
+!! value, so `mod` compiles to a 64-bit integer division — and on x86-64 that division cost
+!! ~6 ns, which was *the whole of* the reported pointer-read "floor" and larger than several of
+!! the quantities this harness exists to resolve. Machine C caught it by counting `idivq` in the
+!! object (126 here against 0 in an identical standalone loop). Differences survived it; ratios
+!! against the floor did not. If a new arm needs to walk rows, copy the
+!! `i = i + 1; if (i > nrows) i = 1` shape rather than reaching for `mod`.
+!!
 !! Maintainer tool, never run by `fpm test`. Drive it with tools/benchmark_colindex.sh.
 program benchmark_colindex
     use parquet
@@ -61,6 +69,7 @@ program benchmark_colindex
     write(output_unit, '(a)') "=================================================================="
     write(output_unit, '(a)') "benchmark_colindex -- F1 screening (see feature_benchmark_colindex.md)"
     write(output_unit, '(a,a)') "guard variant compiled in: ", guard_variant()
+    write(output_unit, '(a,a)') "stage-0b ladder rung:      ", ladder_rung()
     write(output_unit, '(a)') "=================================================================="
     write(output_unit, '(a)') ""
 
@@ -164,6 +173,38 @@ contains
             error stop 1
         end if
     end subroutine parse_arguments
+
+    !> Which stage-0b ladder rung this binary was built as, or "full-path" for the shipped code.
+    !!
+    !! Printed in every run's header for the same reason `guard_variant` is: rungs differ only by a
+    !! compile flag, so they are otherwise indistinguishable in a log and a figure can be filed
+    !! against the wrong binary with nothing to catch it. This is the harness half of the check;
+    !! the wrapper's refusal to accept `LADDER=` against unscaffolded source is the other half.
+    !!
+    !! **Two rungs change ANSWERS, not just timings.** `NO_LOOKUP` resolves a slot by hashing one
+    !! byte of the name, so it reads the wrong column by construction, and `NO_ROWINDEX_CMP` drops
+    !! the automatic row-index column. The checksum is therefore NOT comparable across rungs --
+    !! only the timings are, which is exactly what the ladder is for.
+    function ladder_rung() result(s)
+        character(len=24) :: s !! the rung name, or "full-path".
+#if defined(PF_BENCH_NO_LOOKUP)
+        s = "NO_LOOKUP"
+#elif defined(PF_BENCH_NO_LENTRIM)
+        s = "NO_LENTRIM"
+#elif defined(PF_BENCH_NO_ROWINDEX_CMP)
+        s = "NO_ROWINDEX_CMP"
+#elif defined(PF_BENCH_NO_APPEND_CHECK)
+        s = "NO_APPEND_CHECK"
+#elif defined(PF_BENCH_NO_OPEN_CHECK)
+        s = "NO_OPEN_CHECK"
+#elif defined(PF_BENCH_NO_RESIDENCY)
+        s = "NO_RESIDENCY"
+#elif defined(PF_BENCH_NO_REQUIRE_ROW)
+        s = "NO_REQUIRE_ROW"
+#else
+        s = "full-path"
+#endif
+    end function ladder_rung
 
     !> Which of the three `get_at` guard variants this binary was built with.
     !!
@@ -313,7 +354,8 @@ contains
                 acc = 0.0_real64
                 t0 = now()
                 do k = 1_int64, naccess
-                    i = 1_int64 + mod(k - 1_int64, nrows)
+                    i = i + 1_int64
+                if (i > nrows) i = 1_int64
                     acc = acc + p(i)
                 end do
                 dt = now() - t0
@@ -326,7 +368,8 @@ contains
                 acc = 0.0_real64
                 t0 = now()
                 do k = 1_int64, naccess
-                    i = 1_int64 + mod(k - 1_int64, nrows)
+                    i = i + 1_int64
+                if (i > nrows) i = 1_int64
                     call t%get_element(names(1), i, v)
                     acc = acc + v
                 end do
@@ -340,7 +383,8 @@ contains
                 acc = 0.0_real64
                 t0 = now()
                 do k = 1_int64, naccess
-                    i = 1_int64 + mod(k - 1_int64, nrows)
+                    i = i + 1_int64
+                if (i > nrows) i = 1_int64
                     call t%get_element(names(nc), i, v)
                     acc = acc + v
                 end do
@@ -354,7 +398,8 @@ contains
                 acc = 0.0_real64
                 t0 = now()
                 do k = 1_int64, naccess
-                    i = 1_int64 + mod(k - 1_int64, nrows)
+                    i = i + 1_int64
+                if (i > nrows) i = 1_int64
                     kk = 1 + int(mod(k - 1_int64, 4_int64))
                     call t%get_element(names(pos(kk)), i, v)
                     acc = acc + v
@@ -398,6 +443,7 @@ contains
         write(output_unit, '(a)') "MODE decompose -- where %get_element's time goes"
         write(output_unit, '(a,i0,a,i0,a)') "  (ncols = ", ncols, ", ", nrows, " rows per column)"
         write(output_unit, '(a,a)') "  get_at guard variant: ", guard_variant()
+        write(output_unit, '(a,a)') "  ladder rung:          ", ladder_rung()
         write(output_unit, '(a)') ""
 
         call make_names(ncols, names)
@@ -432,9 +478,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 acc = acc + raw(i)
             end do
             dt = now() - t0
@@ -446,9 +495,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 acc = acc + p(i)
             end do
             dt = now() - t0
@@ -460,9 +512,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 call sc%get_at(i, v)
                 acc = acc + v
             end do
@@ -475,9 +530,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 kk = 1 + int(mod(k - 1_int64, 4_int64))
                 call t%get_element(names(pos(kk)), i, v)
                 acc = acc + v
@@ -542,9 +600,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 call sc%get_at(i, v)
                 acc = acc + v
             end do
@@ -555,9 +616,11 @@ contains
 
         best = huge(1.0_real64)
         do r = 1, rounds
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 call sc%set_at(i, 1.5_real64)
             end do
             dt = now() - t0
@@ -568,9 +631,11 @@ contains
         acc = 0.0_real64
         best = huge(1.0_real64)
         do r = 1, rounds
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 isn = sc%is_null(i)
                 if (isn) acc = acc + 1.0_real64
             end do
@@ -636,9 +701,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 acc = acc + p2(1, i)
             end do
             dt = now() - t0
@@ -649,9 +717,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 call sc%get_at(i, buf)
                 acc = acc + buf(1)
             end do
@@ -663,9 +734,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 call t%get_element("vec00000", i, got)
                 acc = acc + got(1)
             end do
@@ -685,9 +759,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 allocate(tmp(width))
                 call sc%get_at(i, tmp)
                 acc = acc + tmp(1)
@@ -861,9 +938,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 call t%get_element(names(1), i, v)
                 acc = acc + v
             end do
@@ -876,9 +956,12 @@ contains
         best = huge(1.0_real64)
         do r = 1, rounds
             acc = 0.0_real64
+            i = 0_int64
+            i = 0_int64
             t0 = now()
             do k = 1_int64, naccess
-                i = 1_int64 + mod(k - 1_int64, nrows)
+                i = i + 1_int64
+                if (i > nrows) i = 1_int64
                 rh = t%row(i)
                 call rh%get(names(1), v)
                 acc = acc + v

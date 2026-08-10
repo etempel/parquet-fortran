@@ -1742,6 +1742,18 @@ same-family toolchain, and "we set the archiver, so LTO was working" is not a co
 alone supports. Check what the *objects* contain (`file`, `otool -l | grep sectname`) before claiming
 either way.
 
+**But "mixed-family" blocks CROSS-LANGUAGE LTO only — the Fortran half can still be optimised
+against itself, and on this project that is where the LTO-shaped wins actually live.** The paragraph
+above is easy to read as "LTO on macOS does nothing", and machine A disproved that within one
+campaign: `parquet_column%get_at` calls `check_kind`/`check_index` in a *sibling submodule*, both
+pure Fortran, both GIMPLE — and under `-flto` on machine A the call cost **2.449 ns against 2.829
+shipped**, landing within noise of a hand-inlined variant (2.481). The linker inlined two
+cross-program-unit Fortran calls on the machine whose LTO "settles nothing". So: a null LTO result
+on a mixed-family build settles nothing about anything **crossing the language boundary**, and says
+plenty about Fortran-internal call overhead. Say which of the two a measurement was about before
+quoting it either way, and note that this is the class `feature_optimise.md` §2.3's "LTO buys
+nothing outside S7-4" verdict was never tested against.
+
 ### Writing benchmarking instructions for another machine
 
 Measurements regularly have to be taken somewhere other than the machine the work is being done on —
@@ -1775,6 +1787,29 @@ listed above.
   and record the answer; without it, figures get filed against a build they were not taken on. The template's §5 skeleton says what a report must contain — provenance from
   `tools/machine_report.sh`, whether it built and passed *before* any timing, deviations, verbatim
   output, and what the run does not settle.
+
+**Three things a multi-machine campaign reliably teaches, all confirmed by three reports coming back
+at once:**
+
+- **Verdicts can agree everywhere while MAGNITUDES span 3–6x, and a sub-conclusion can INVERT.** In
+  one campaign every machine passed every gate, and yet the headline quantity was **2.8x** worse
+  under ifx than gfortran on the same machine and **3.1–6.3x** worse under flang — while the two
+  control arms were *cheaper* under ifx, so it was not a code-quality gap but one specific path. In
+  the same campaign one sub-conclusion reversed outright on an allocator axis (25–30% under glibc,
+  52–63% under macOS malloc), which was the difference between "fix the accessor" and "fix the
+  allocation". **So "the verdicts agreed, one machine would have done" is wrong twice over**: the
+  size of a win is what sizing work needs, and the inverted item was invisible to any single
+  machine.
+- **A NOISE FLOOR measured on a proxy is evidence about the proxy.** One machine's earlier entry
+  reported a 5% floor and concluded it could not settle a 5% threshold; the figure had been taken on
+  a different tool whose arms are ~30 ms bandwidth-bound array loops, while the campaign's own arms
+  are small-working-set scalar loops that reproduced to **0.19%** — wrong by 25x, in the direction
+  that disqualifies a perfectly good machine. Measure the floor with the harness the campaign
+  actually runs.
+- **"Loaded" is not "noisy", and a busy machine should not be disqualified without a number.** One
+  report ran with load1 between 5.7 and 24 on 8 cores, with an unrelated process at 122% CPU
+  throughout, and still measured a **1.5%** floor — because the arms are single-threaded and every
+  figure is best-of-N. Say what the load was, measure the floor, and let the floor decide.
 
 `tools/machine_report.sh` is the companion: a read-only toolchain report (CPU, SIMD, memory, every
 compiler on `PATH`, **what fpm will actually use**, Arrow, the already-exported `FPM_*` variables,
@@ -2588,6 +2623,45 @@ before being noticed:**
   alone between the two, which is enough to invert a comparison and did: an early run of the sort
   benchmark showed bit-packing *losing* below 2M rows, an artifact that vanished under `-O3`. The
   `tools/*.sh` wrappers already pass `--profile release`; match them.
+- **And asking for `--profile release` is NOT the same as getting optimisation — VERIFY it, because
+  a wrapper cannot feel the difference.** fpm 0.13.0 alpha has **no release profile for flang**:
+  `--profile release` under `FPM_FC=flang-mp-22` emits `-cpp` and the `-I` paths and nothing else,
+  so the whole run is an `-O0` run that looks exactly like a valid one. Measured cost of not
+  noticing: a plain Fortran array read at **5.43 ns instead of 0.951**, and the campaign's headline
+  figure **3.7x** too slow — from a flag the wrapper believed it had set. The tell is one command,
+  `fpm build --profile release --show-model | grep -o 'fortran_compile_flags="[^"]*"'`, and a
+  benchmark wrapper should **assert `-O` appears there and refuse otherwise**, exactly as it would
+  refuse any other configuration it cannot engage. `tools/benchmark_colindex.sh` does; the older
+  wrappers do not. Recovery is to append the flag (`FPM_FFLAGS="${FPM_FFLAGS:-} -O3"`, appended
+  never assigned) and say so in the report.
+- **A build-flag-selected benchmark must PRINT which variant it is, and carry an arm the flag cannot
+  touch.** Two arms that differ only by a compile flag are indistinguishable in a log, so a figure
+  can be filed against the wrong binary with nothing to catch it — the same failure the "negative
+  control" rule guards against in tests, one level down. Two cheap defences, and one campaign used
+  both: the program prints the variant it was compiled with (`guard_variant()` in
+  `app/benchmark_colindex.f90`), and the run includes an arm the flag provably cannot affect. The
+  second doubles as the cross-build floor above, and in one report it was what proved a macro had
+  done what it claimed — the control stayed flat under one compiler and moved 16% under another,
+  identifying the second as layout rather than measurement.
+- **A benchmark's own index arithmetic is CODE, and `mod` with a runtime divisor is an integer
+  division.** `i = 1 + mod(k - 1, nrows)` is the obvious way to walk rows in a timed loop, and on
+  x86-64 it compiles to `idivq` — **~6 ns per iteration**, which in one campaign was the *entire*
+  reported "pointer read floor" and larger than several of the quantities being measured. It was
+  caught by counting the instruction in the object (`objdump -d` → 126 `idivq` in the harness, 0 in
+  an identical standalone loop at the same flags), not by reading the source. arm64 absorbed it, so
+  the same harness looked fine on one machine and was wrong on another. Use a wrapping counter
+  (`i = i + 1; if (i > n) i = 1`). **Differences between arms survive a defect like this; ratios
+  against a floor do not** — which is the general rule, since a benchmark's floor row is exactly
+  where its own overhead hides.
+- **A REBUILD noise floor is a different, much larger quantity than a RE-RUN noise floor, and a
+  flag-selected comparison needs the former.** Two machines found this independently in one
+  campaign. Re-running one binary reproduced to **0.19%–2.5%**; rebuilding the *same source* with a
+  cpp flag moved untouched arms by **11–16%** — `%set_at` 6.030 → 6.956 ns between two builds that
+  generate identical code for it, and a `%is_null` control moving **+16.2% in a direction that is
+  impossible**. That is code layout and alignment, not cost. Anything measured by comparing two
+  builds — a cpp variant, a compiler flag, LTO, a mutation — must therefore quote a floor taken
+  **across rebuilds with an untouched control arm**, or it will report layout as a finding. The
+  re-run floor would have licensed calling a 1.2 ns gap real.
 - **A benchmark that REPLICATES library code is untested code — validate it against the real number
   before believing any of it.** Taking a loop apart sometimes needs a copy of it in the benchmark,
   because the library has no entry point that runs one half. That copy can be subtly wrong in a way

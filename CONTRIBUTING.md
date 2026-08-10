@@ -280,6 +280,8 @@ By default it runs every check even after one fails and lists the failures toget
 
 `tools/generate_parquet_columns.py` regenerates the per-kind blocks of the `parquet_columns` foundation module: `src/parquet_columns.f90` (the module spec), `src/parquet_columns_access.f90` and `src/parquet_columns_mutate.f90`. Its output is **committed**, exactly like `tools/generate_parquet_maml.sh`'s, so nothing is generated at build time and the fpm build stays dependency-free. Re-run it after editing the kind table at the top of the script — for example when a new column kind is added — and commit the regenerated files; `tools/generate_parquet_columns.py --check` re-derives the output and fails if the committed files have drifted, which is the cheap way to catch a forgotten regeneration. The other four `parquet_columns_*.f90` files (`util`, `validity`, `structural`, `string`) are hand-written and the script never touches them. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
 
+It also takes **`--bench-guards`**, which is for measurement branches only and never for `main`: it wraps `get_at`/`set_at`'s two guard calls in cpp `#ifdef`s so one source tree can be built three ways — as shipped, with the comparisons inlined (`-DPF_BENCH_INLINE_GUARDS`, every check still performed, only the two cross-submodule calls gone), or with the guards removed (`-DPF_BENCH_NO_GUARDS`). It exists because that measurement **cannot be replicated inside a benchmark program**: the question is what a call across a program-unit boundary costs, and a local copy in one file would be inlined, measuring the opposite. Without the flag the generator emits byte-identical output to what is committed, so `--check` and CI are unaffected; restore with `git checkout src/parquet_columns_access.f90`. `tools/benchmark_colindex.sh` refuses to run its non-default `GUARDS` values against an unscaffolded tree rather than silently building the shipped binary under another name.
+
 `tools/count_lines.py` reports code/comment/blank line counts, a convenience for repository metrics. With no arguments it prints four independent summaries — `src/` (the library), `test/` (the test suite), `app/` (the manual programs) and `tools/` (this tooling) — each totalled on its own so no group inflates another, followed by a cross-group table repeating the four totals and adding the repository-wide one (the single number the independent summaries deliberately withhold). Pass explicit files or directories for a single summary over just those, with no cross-group table. It understands Fortran, C++ and Python/shell comment syntax, with one deliberate simplification: only `#` marks a comment in a script, so a Python docstring counts as code (treating triple-quoted strings as comments would misreport the generators here, whose emitted Fortran lives in exactly such strings).
 
 `tools/count_tests.sh` counts test-drive unit tests per suite directly from source (no build or run required): it reads `test/run_tester.f90`'s `new_testsuite(...)` registrations, locates each suite's `collect_tests_parquet_*` subroutine, and counts the `new_unittest(...)` entries inside it — cross-checked against an actual `fpm test run_tester` run's PASSED/FAILED line count. Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
@@ -333,6 +335,18 @@ tools/benchmark_colindex.sh                       # every mode
 tools/benchmark_colindex.sh --mode=decompose      # just the central one
 NROWS=200000 NCOLS=128 ROUNDS=7 tools/benchmark_colindex.sh --mode=baseline
 ```
+
+`LADDER=<PF_BENCH_NO_*>` selects a stage-0b **compile-out ladder** rung — one phase of
+`table_resolve` removed, so `%get_element` can be timed with it gone and the difference attributed
+to that phase. It needs `tools/bench_resolve_ladder.py --apply` first (measurement branches only;
+`--list` prints the rungs, `--check` reports whether a tree is scaffolded, and there is no
+`--revert` because `git checkout src/parquet_tables_query.f90` already does it exactly). The wrapper
+refuses `LADDER=` against an unscaffolded tree, and the program prints the rung it was compiled as.
+**Two rungs deliberately change answers** — `NO_LOOKUP` resolves a slot by hashing one byte of the
+name and `NO_ROWINDEX_CMP` drops the automatic row-index column — so checksums are not comparable
+across rungs, only timings are, and nothing from a scaffolded tree is ever committed. The ladder
+exists because phase timers cannot be used on a per-element path: the whole call is ~37 ns and a
+`steady_clock::now()` pair costs 20–25 ns.
 
 `GUARDS=shipped|inline|none` selects which variant of `parquet_column%get_at`'s guards is compiled
 in, which is how the **call** is measured apart from the **check**. The two non-default values

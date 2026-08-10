@@ -64,6 +64,51 @@ LINK_RE = re.compile(r"\]\(([^)#\s]*)#([^)\s]+)\)")
 FILE_LINK_RE = re.compile(r"\]\(([^)#\s]+)\)")  # anchor-less: no '#' anywhere in the target
 MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 
+# A fenced code block opener/closer: three or more backticks or tildes, at the
+# start of a line (indentation allowed).
+CODE_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+# An inline code span: a run of N backticks, the shortest run of non-newline
+# characters not containing that same run, then N backticks again. Restricted to
+# one line on purpose -- CommonMark allows a span to wrap, but masking across
+# lines risks swallowing real links if a stray backtick is ever unbalanced.
+INLINE_CODE_RE = re.compile(r"(`+)(?:(?!\1)[^\n])+?\1")
+
+
+def mask_code(text):
+    """Blanks out fenced code blocks and inline code spans, preserving length.
+
+    Link scanning must not look inside code. Two things go wrong otherwise, and
+    the second is what prompted this: a fenced block *showing* Markdown gets its
+    example links validated as if they were real, and ordinary prose containing
+    something like `CASTS['int32'](value)` in backticks matches the `](target)`
+    link pattern and is reported as a link to a file named `value`.
+
+    Every masked character becomes a space and every newline is kept, so offsets
+    and line structure are unchanged -- which matters because the caller reports
+    `match.group(0)` and because nothing else about the text may shift.
+
+    **Only link scanning is masked, never heading extraction.** This repository's
+    headings are full of backticks (`### The `parquet_strings` module`), so
+    slugging masked text would produce the wrong anchors for most of them. Safe
+    here because `heading_slugs` always re-reads the target file itself.
+    """
+    lines = text.split("\n")
+    fence = None
+    for i, line in enumerate(lines):
+        m = CODE_FENCE_RE.match(line)
+        if fence is None:
+            if m:
+                fence = m.group(1)[0]
+                lines[i] = " " * len(line)
+        else:
+            # A closing fence is the same character, at least as long. Anything
+            # else inside the block is blanked and does not end it.
+            lines[i] = " " * len(line)
+            if m and m.group(1)[0] == fence:
+                fence = None
+    masked = "\n".join(lines)
+    return INLINE_CODE_RE.sub(lambda mm: " " * len(mm.group(0)), masked)
+
 PAGES_ROOT = (Path(__file__).resolve().parent.parent / "doc" / "pages").resolve()
 
 # Sentinel: the link resolved to something structurally valid that has no
@@ -166,7 +211,9 @@ def resolve_link_target(path, target_file):
 
 
 def check_file(path, cache):
-    text = path.read_text()
+    # Masked for LINK scanning only -- see mask_code. Heading slugs come from a
+    # fresh read of the target file, so they are unaffected.
+    text = mask_code(path.read_text())
     problems = []
     for match in LINK_RE.finditer(text):
         target_file, anchor = match.group(1), match.group(2)

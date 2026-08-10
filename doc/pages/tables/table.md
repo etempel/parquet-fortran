@@ -467,9 +467,9 @@ end do
 
 **The point is what it removes.** `%get_element(name, i, v)` looks the column up by name on every
 call, and that lookup is **52–77% of what the call costs** — measured on four toolchains across
-three machines. A handle resolves it once. How much the loop gains depends on the compiler: a
-resolve-once loop measured between **1.5x and 4x** the name form's throughput on those same four
-toolchains.
+three machines. A handle resolves it once. How much the loop gains depends on the compiler: on the
+shipped code, a per-cell loop measured **3.26x** (gfortran) and **1.97x** (ifx) the name form's
+throughput, and a realistic four-column loop with arithmetic in the body **3.54x** and **1.97x**.
 
 `t%column(j, c)` takes a 1-based position instead of a name, which is what makes a
 `do j = 1, t%ncols()` loop work. Both forms take `[found]`, and report a missing name or an
@@ -491,7 +491,8 @@ What a column handle can do — brackets mark optional arguments:
 
 **`c%get(i, e, value)` is new capability, not a faster spelling.** There has never been a way to
 read one element of a vector row without materialising the whole row — `%get_element` on a vector
-column allocates a width-long array on every call. This reads the one element.
+column allocates a width-long array on every call. This reads the one element, and measured
+**1.9x** (gfortran) / **1.5x** (ifx) cheaper than reading the row it avoids building.
 
 A handle is a **view**: `%set` through it changes the table, and the change is visible through the
 name form immediately. `%ref` hands back exactly the pointer `%col` does, with exactly the same
@@ -513,10 +514,12 @@ the stamp exists for.
 
 Two traps, both of which only appear at scale:
 
-- **Hoist the handle out of the loop; never re-fetch it inside one.** Making a handle costs about
-  what one `c%get` costs, so re-fetching per cell doubles the loop and gives back everything the
-  handle won. If the loop *changes* the table's structure, do not use a handle at all — use the
-  name form, which resolves afresh each time.
+- **Hoist the handle out of the loop; never re-fetch it inside one.** Making a handle costs *more*
+  than using one, so re-fetching per cell does not merely give back what the handle won — it leaves
+  you **worse off than the name form you replaced**. Measured on one machine, two toolchains:
+  re-fetching cost **+37.6 ns per cell** (gfortran) and **+55.5 ns** (ifx) over a hoisted handle,
+  putting it above `%get_element` on both. If the loop *changes* the table's structure, do not use a
+  handle at all — use the name form, which resolves afresh each time.
 - **`t%column(j, c)` READS column `j`.** Making a handle resolves the column, which triggers the
   same lazy first touch any value access does. A `do j = 1, t%ncols()` loop that builds a handle
   just to print `%name()` and `%kind()` therefore reads the whole file. For a metadata sweep use

@@ -164,10 +164,10 @@ contains
     ! ---- the null trio ------------------------------------------------------------------------
     !
     ! These are the one part of the handle's surface that is NOT per-kind: they take no value
-    ! argument, so one body serves every column type, including the ten kinds stage 3a has not
-    ! given %get/%set yet. That is deliberate -- a handle whose %is_null answered only for scalars
-    ! would be a runtime surprise decided by the file's schema, which is exactly what the
-    ! compile-time-only gap in %get/%set is not. See feature_colindex.md's stage 3.
+    ! argument, so one body serves every column type. That is what let them cover all 18 kinds from
+    ! the start, while %get/%set were still being added a few kinds at a time -- a handle whose
+    ! %is_null answered only for some kinds would be a runtime surprise decided by the file's
+    ! schema, where a missing %get is a compile-time error the caller cannot ship past.
     !
     module procedure col_is_null_i32
         isnull = self%is_null(int(i, int64))

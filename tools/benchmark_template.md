@@ -80,6 +80,11 @@ say so explicitly in §1 when you do.)
       of the two was wrong. In the campaign above it was marked optional, the runner ran it anyway on
       both toolchains, and it was the single most informative result in the report. Concretely: after
       a fix, **re-run the diagnostic that found the problem**, not only the end-to-end measurement.
+- [ ] **If the campaign uses more than one toolchain, ask for provenance PER TOOLCHAIN, from inside
+      each activated shell.** One block taken before activation describes an environment none of the
+      figures came from, and a runner who reports it faithfully will appear to have found something
+      about the machine — a wrong compiler, a wrong library version — that is really a property of
+      the shell the tool ran in. Two such false findings came out of one report.
 - [ ] Delete this section, and delete any §5 report skeleton fields that do not apply.
 - [ ] Make one copy per machine, suffixed with the machine's name
       (`feature_<campaign>_A.md`, `feature_<campaign>_B.md`, …), and carry each to its machine
@@ -156,8 +161,21 @@ from what you write, and an environment that "was already set up" is unreproduci
 **Then verify it actually took effect.** Do not assume:
 
 ```bash
-tools/machine_report.sh
+tools/machine_report.sh          # AFTER activation, and once per toolchain
 ```
+
+**Run it INSIDE the activated shell, once for each toolchain the campaign uses — not before.** It
+describes *the environment it is invoked from*, so run first (the natural order, since this section
+asks for provenance) it faithfully reports a **default environment nothing is measured in**, and
+those lines then read as findings about the machine. This has misled twice in one report:
+`fc : gfortran` resolving to a **system compiler below this project's version floor** beside figures
+taken with a much newer one, and an **Arrow version from `/usr/lib64`** written up as "the machine
+table is stale" when both activated toolchains built against a different prefix entirely.
+
+The tell is inside the tool's own output: **if its `fc`/`cc`/Arrow lines disagree with the `FPM_*`
+flags printed beside them, you are looking at two different environments, and the flags are the ones
+that built the binary.** If for any reason you must report an un-activated run, label it "the
+default environment" and never quote it as a property of the machine.
 
 Read the output before continuing, and check three things:
 
@@ -483,8 +501,8 @@ per figure, as the program reports.
 <commands, or "none needed">
 ```
 
-**Provenance** *(from `tools/machine_report.sh`; abbreviate but keep every line that identifies the
-toolchain)*:
+**Provenance** *(from `tools/machine_report.sh`, **run inside each activated shell** — see Step 2;
+abbreviate but keep every line that identifies the toolchain)*:
 
 | | |
 |---|---|

@@ -5971,10 +5971,9 @@ module parquet_tables
         !! column at this row's index -- a wrong answer rather than an error, since both tables
         !! are perfectly valid objects.
         !!
-        !! It then checks the row index against `c`'s scope, which is current because `c` is. So
-        !! `r%get(c, v)` catches a row handle left over from before a shrink, where `r%get(name, v)`
-        !! still cannot -- the row handle has no generation stamp of its own yet (feature_colindex.md
-        !! Q7).
+        !! It then checks the row index against `c`'s scope. Both handles are current by that point,
+        !! so the two scopes agree; taking `c`'s keeps the bounds check reading from the handle
+        !! validated most recently.
         module subroutine row_require_col(self, c, proc)
             class(parquet_table_row), intent(in) :: self !! the row handle.
             type(parquet_table_col), intent(in) :: c     !! the column handle to validate.

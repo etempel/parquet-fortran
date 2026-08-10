@@ -89,9 +89,10 @@ contains
                 "table than this row handle; a handle carries its own table and cannot be reused " // &
                 "across two"
         end if
-        ! Against `c`'s scope, not the row handle's own: the row handle keeps a by-value scope that
-        ! goes silently stale, and `c` has just been proved current. This is the one place a row
-        ! handle left over from before a shrink is caught -- see feature_colindex.md Q7.
+        ! Against `c`'s scope rather than the row handle's own. Both are current by this point --
+        ! `row_check_current` above has already proved the row handle's generation matches -- so the
+        ! two agree; using `c`'s keeps the bounds check reading from the handle that was validated
+        ! most recently, and costs nothing.
         call col_require_row(c, self%irow, proc)
     end procedure row_require_col
     !

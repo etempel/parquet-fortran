@@ -11,7 +11,13 @@
 #
 # Run it AFTER activating whatever environment the machine needs (module load,
 # an activation script, a conda env), so it reports what a build would really
-# see rather than what a bare login shell has.
+# see rather than what a bare login shell has -- and once PER TOOLCHAIN when a
+# campaign uses more than one. It describes the shell it is invoked from, so an
+# un-activated run reports a default environment nothing is measured in, and a
+# runner quoting it faithfully appears to have found something about the machine
+# that is really a property of their shell. That has happened twice in one
+# report: a system gfortran below this project's version floor, and an Arrow
+# version from /usr/lib64 that neither activated toolchain links against.
 #
 # --lto-probe compiles and links a two-file mixed Fortran/C++ program with
 # link-time optimisation, mirroring how this library is built (Fortran calling
@@ -34,6 +40,14 @@ done
 
 echo "=================================================================="
 echo " machine and toolchain report"
+echo "=================================================================="
+echo "THIS DESCRIBES THE SHELL IT RAN IN, NOT THE MACHINE."
+echo "Activate your environment FIRST, and run this once per toolchain."
+echo "Un-activated, the compiler and library lines below are a DEFAULT"
+echo "environment nothing is measured in -- quoting them as facts about"
+echo "the machine has produced two false findings in one report."
+echo "Cross-check: if the fc/cc/Arrow lines disagree with the FPM_* flags"
+echo "printed further down, the FLAGS are what built the binary."
 echo "=================================================================="
 echo "date        : $(date -u '+%Y-%m-%d %H:%M UTC')"
 echo "host        : $(hostname 2>/dev/null || echo '?')"

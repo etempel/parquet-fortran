@@ -3251,6 +3251,25 @@ environment probe:
 **A tool's silence is evidence about the tool, never about the machine.** Before reporting that
 something is not installed, run it by name.
 
+**And its CONFIDENT OUTPUT is evidence about the shell it ran in, never about the machine either.**
+`tools/machine_report.sh` describes *the environment it is invoked from*. Run before an activation
+script — which is the natural order, since a run sheet asks for provenance first — it faithfully
+reports a **default environment nothing is measured in**, and those lines then read as findings
+about the machine. This has now misled twice in one report, in two different sections:
+
+- `fc : gfortran` resolving to the **system 11.5.0**, the compiler this project's version floor
+  exists to exclude, beside figures actually taken with 14.2.1;
+- `arrow 23.0.1` from `/usr/lib64/pkgconfig`, written up as "the machine table is stale" when both
+  activated toolchains build against **24.0.0** from a prefix the activations prepend to
+  `PKG_CONFIG_PATH`. The contradiction was already visible in the same report's own provenance
+  block — `FPM_LDFLAGS=-L/home/elmo/usr/local/lib64`, i.e. neither toolchain looks at `/usr/lib64`
+  at all — and the tool's line was believed over the flags printed beside it.
+
+So: **run it once inside each activated shell** (it is read-only and takes seconds), or label its
+output "the default environment" and never quote it as a property of the machine. A provenance
+block that disagrees with the `FPM_*` flags printed next to it is reporting two different
+environments, and the flags are the ones that built the binary.
+
 ### Measuring test coverage
 
 Run `tools/coverage.sh` for per-file and total `src/` line coverage plus the uncovered line

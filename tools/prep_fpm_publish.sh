@@ -89,6 +89,7 @@ REMOVE_PATHS=(
     .github
     docs.md
     test/fixtures
+    tools/benchmark_colindex.sh
     tools/benchmark_stage7.sh
     tools/benchmark_template.md
     tools/benchmark_strings.sh

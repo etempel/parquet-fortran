@@ -74,6 +74,42 @@ KINDS = [
 # they delegate to parquet_string_column rather than owning a Fortran array (DD1).
 ARRAY_KINDS = [k for k in KINDS if k[5] != "str"]
 
+# Set by --bench-guards. MEASUREMENT BRANCHES ONLY -- see cell_guards() below.
+BENCH_GUARDS = False
+
+
+def cell_guards(pk, proc, indent=8):
+    """The kind and index guards for one per-element accessor (`get_at`/`set_at`).
+
+    Normally two plain calls into `parquet_columns_util`, which is exactly what ships. Under
+    `--bench-guards` the same two guards are emitted three ways behind cpp `#ifdef`s, so one
+    source tree can be built as three binaries and the CALL can be measured apart from the CHECK:
+
+      (default)                  two calls -- as shipped
+      -DPF_BENCH_INLINE_GUARDS   the comparisons inline, the call kept only for the failing path
+      -DPF_BENCH_NO_GUARDS       neither
+
+    The middle arm is the interesting one: every check still happens, so it is free of any safety
+    cost, and the gap to the default is purely what the two cross-submodule calls cost. See
+    `feature_colindex.md` Q9 and the run sheet `feature_benchmark_colindex.md`.
+
+    This exists because that measurement CANNOT be replicated inside a benchmark program: the
+    question is what a call across a program-unit boundary costs, and a local copy in one file
+    would be inlined, measuring the opposite. It must be the real source.
+    """
+    sp = " " * indent
+    plain = (f'{sp}call check_kind(self, {pk}, "{proc}")\n'
+             f'{sp}call check_index(self, i, "{proc}")')
+    if not BENCH_GUARDS:
+        return plain
+    return (f'#if defined(PF_BENCH_NO_GUARDS)\n'
+            f'#elif defined(PF_BENCH_INLINE_GUARDS)\n'
+            f'{sp}if (self%kind /= {pk}) call check_kind(self, {pk}, "{proc}")\n'
+            f'{sp}if (i < 1_int64 .or. i > self%nrows) call check_index(self, i, "{proc}")\n'
+            f'#else\n'
+            f'{plain}\n'
+            f'#endif')
+
 PK_VALUES = [
     ("PK_NONE", 0, "no kind assigned yet (a default-initialized column)"),
     ("PK_INT32", 1, "32-bit integer scalar column"),
@@ -1091,8 +1127,7 @@ contains""")
         if rank == 1:
             w(f"""    !
     module procedure get_at_{tag}
-        call check_kind(self, {pk}, "get_at")
-        call check_index(self, i, "get_at")
+{cell_guards(pk, "get_at")}
         value = self%{comp}(i)
     end procedure get_at_{tag}
     !
@@ -1100,8 +1135,7 @@ contains""")
         logical :: mod_nulls
         mod_nulls = .true.
         if (present(modify_nulls)) mod_nulls = modify_nulls
-        call check_kind(self, {pk}, "set_at")
-        call check_index(self, i, "set_at")
+{cell_guards(pk, "set_at")}
         if (.not. mod_nulls) then
             if (self%is_null(i)) return
         end if
@@ -1162,8 +1196,7 @@ contains""")
         else:
             w(f"""    !
     module procedure get_at_{tag}
-        call check_kind(self, {pk}, "get_at")
-        call check_index(self, i, "get_at")
+{cell_guards(pk, "get_at")}
         call check_width(self, size(value, kind=int64), "get_at")
         value = self%{comp}(:, i)
     end procedure get_at_{tag}
@@ -1525,11 +1558,22 @@ end submodule parquet_columns_mutate ! GCOVR_EXCL_LINE""")
 
 
 def main():
+    global BENCH_GUARDS
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--check", action="store_true",
                     help="compare with the committed files instead of writing; exit 1 on drift")
+    ap.add_argument("--bench-guards", action="store_true",
+                    help="MEASUREMENT BRANCH ONLY: emit get_at/set_at's guards inside cpp "
+                         "#ifdefs so a build can select shipped / PF_BENCH_INLINE_GUARDS / "
+                         "PF_BENCH_NO_GUARDS. Never commit this to main -- see "
+                         "feature_benchmark_colindex.md")
     args = ap.parse_args()
+    BENCH_GUARDS = args.bench_guards
+    if BENCH_GUARDS and args.check:
+        print("generate_parquet_columns.py: --check and --bench-guards together compare the "
+              "committed files against the BENCHMARK variant, which is only meaningful on a "
+              "measurement branch.", file=sys.stderr)
 
     root = pathlib.Path(__file__).resolve().parent.parent
     outputs = {

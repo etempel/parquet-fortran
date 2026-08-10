@@ -68,14 +68,17 @@ To generate the executables:
 
     fpm install --prefix my_path
 
-`fpm.toml` sets `auto-executables = true`, so **eight** executables are built from `app/*.f90` and placed in `my_path/bin`:
+`fpm.toml` sets `auto-executables = true`, so **eleven** executables are built from `app/*.f90` and placed in `my_path/bin`:
 
 | Executable | Source | Purpose |
 |---|---|---|
-| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the eight that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other seven are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
+| `run_parquet_fortran` | `app/program.f90` | Prints the parquet-fortran library version number — a quick sanity check that a build/install actually picked up the version you expect. The only one of the eleven that ships in the fpm-published package (see `tools/prep_fpm_publish.sh`) — the other ten are maintainer/CI-only dev tools kept in this repository but stripped from what a consumer installs. |
 | `benchmark_threads` | `app/benchmark_threads.f90` | Driven by `tools/benchmark_threads.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_table` | `app/benchmark_table.f90` | Driven by `tools/benchmark_table.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `benchmark_colindex` | `app/benchmark_colindex.f90` | Driven by `tools/benchmark_colindex.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_stage7` | `app/benchmark_stage7.f90` | Driven by `tools/benchmark_stage7.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `benchmark_strings` | `app/benchmark_strings.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `benchmark_string_threads` | `app/benchmark_string_threads.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `test_large_scale` | `app/test_large_scale.f90` | Driven by `tools/test_large_scale.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `check_arrow_release` | `app/check_arrow_release.f90` | Driven by `tools/check_arrow_release.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `playground` | `app/playground.f90` | Maintainer scratch file for trying out Fortran code; no fixed purpose. |
@@ -302,6 +305,44 @@ NMULT=20 TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 # Keep the synthetic file at a path of your own choosing instead of a temp dir that gets deleted:
 TEST_FILE=/tmp/benchmark.parquet TARGET_FILE_SIZE_GB=4.0 tools/benchmark_threads.sh
 ```
+
+`tools/benchmark_colindex.sh` answers one question: where does `parquet_table%get_element`'s
+per-cell cost actually go, and is an index- or handle-based accessor worth building? It drives
+`app/benchmark_colindex.f90` over six modes (`baseline`, `decompose`, `getat`, `vector`, `loop`,
+`rowfinal`) and is the screening half of the campaign described in `feature_benchmark_colindex.md`.
+
+**Its central trick is that it needs no change to the library**, which is what makes it runnable
+before anything is prototyped. It builds a **standalone `parquet_column`** and times
+`col%get_at(i, v)` on it — the real library procedure across the real module boundary, not a
+replica — then reads the two differences that matter: `%get_element` minus `%get_at` is everything
+the table layer adds, and so an **upper bound** on what any index or handle could ever remove;
+`%get_at` minus a `%col` pointer read is the whole cost of the two guard calls inside the column
+layer. A small first difference kills the feature before a line of it is written.
+
+Two things it does that are worth copying into any future accessor benchmark. It **reproduces two
+independently measured anchors** (a `%col` pointer read at ~0.93 ns and `%get_element` at ~24 ns
+on a 4-column table) before any other row is quoted, because a benchmark that replicates library
+call shapes is untested code until one of its rows matches a figure measured elsewhere. And its
+vector mode isolates the per-call `allocate` by running the **same** `%get_at` twice, once into a
+reused buffer and once into a freshly allocated one — the first version of that arm wrapped
+`allocate`/`deallocate` around a couple of local stores, which gfortran elided outright, and it
+reported exactly the pointer-read figure while appearing to measure something.
+
+```sh
+tools/benchmark_colindex.sh                       # every mode
+tools/benchmark_colindex.sh --mode=decompose      # just the central one
+NROWS=200000 NCOLS=128 ROUNDS=7 tools/benchmark_colindex.sh --mode=baseline
+```
+
+`GUARDS=shipped|inline|none` selects which variant of `parquet_column%get_at`'s guards is compiled
+in, which is how the **call** is measured apart from the **check**. The two non-default values
+require the source to have been regenerated with `tools/generate_parquet_columns.py --bench-guards`
+first — a measurement-branch-only step that wraps those guards in cpp `#ifdef`s — and the script
+**fails rather than degrading** when that scaffolding is absent, since building the shipped binary
+under another name would report a null result that looks like a finding. Build trees go to
+`test_run/colindex-<guards>-<compiler>/`, with the compiler in the name deliberately: naming a tree
+for the configuration alone lets a second toolchain's binary land in the first one's directory.
+Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
 
 `tools/benchmark_stage7.sh` runs a set of targeted micro-measurements over paths this library's
 optimisation work needs numbers for, and — this is why it exists rather than being a throwaway

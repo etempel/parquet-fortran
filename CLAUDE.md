@@ -1603,6 +1603,28 @@ the shell look correctly configured; without the second line `gfortran` stays at
 the miscompilation hazard below. Both were confirmed on machine B by a run that checked
 `gfortran --version` before building — which is the only thing that catches either.
 
+**A third hazard, and it is the one a benchmarking driver walks straight into: a sourced script
+inherits the CALLER'S POSITIONAL PARAMETERS.** A driver invoked as `./run.sh ifx` that then sources
+an activation script hands that script `$1="ifx"`, and a script which inspects `$@` takes a
+different path. Demonstrated on machine B against `activate_qmost_env.sh`:
+
+```bash
+bash -c 'source activate_qmost_env.sh; echo $FPM_FC'          # -> ifx
+bash -c 'source activate_qmost_env.sh; echo $FPM_FC' _ ifx    # -> (empty)
+```
+
+With `FPM_FC` unset, fpm fell back to the **system gfortran 11.5.0** — the compiler this project's
+floor exists to exclude. **That run failed safe only by luck of a second mechanism**: the same
+inactive environment left `FPM_CXXFLAGS` unset, Arrow's headers were not found, and the C++ half
+would not compile. **Had Arrow been on the default search path it would have produced a complete set
+of plausible numbers from a miscompiling compiler**, with nothing in the output saying so — the
+benchmark wrapper's own banner reads `fortran : gfortran (fpm default)`, which is easy to read past.
+
+The fix is one line — `set --` before sourcing anything — plus a hard assertion that `FPM_FC` is the
+toolchain that was asked for and that `FPM_CXXFLAGS` is non-empty. **Assert, do not merely print**:
+all three of these hazards are invisible in a log that a human skims and fatal to every number below
+them.
+
 **`ld.lld` is NOT on the `PATH` the ifx activation sets, and `-ipo` cannot link this library without
 it.** `activate_qmost_env.sh` adds `/opt/intel/oneapi/compiler/2026.1/bin`; the linker lives one
 directory further down, at `/opt/intel/oneapi/compiler/2026.1/bin/compiler/ld.lld`. Without it an
@@ -2737,6 +2759,24 @@ before being noticed:**
   builds — a cpp variant, a compiler flag, LTO, a mutation — must therefore quote a floor taken
   **across rebuilds with an untouched control arm**, or it will report layout as a finding. The
   re-run floor would have licensed calling a 1.2 ns gap real.
+
+  **But that floor is a property of the PAIR OF BUILDS, not of the machine — measure it per campaign
+  and never carry one forward.** The same machine, the same control arm, the same compiler gave
+  **0.491 ns** across an eight-macro ladder and **0.003 ns** across a two-commit A/B differing by
+  nine lines of Fortran: a **150x** spread, in the direction that would have disqualified a perfectly
+  resolvable comparison. The rule of thumb that follows is worth having — **the more the two builds
+  differ, the noisier the comparison**, so a two-commit A/B is a far quieter instrument than a macro
+  ladder and should be preferred whenever the question can be posed that way.
+- **After a fix, re-run the DIAGNOSTIC that found the problem, not only the end-to-end measurement.**
+  An end-to-end delta says the number moved; it cannot say *why*, and when a prediction misses there
+  is no way to tell a mis-derived prediction from a fix that underperformed. Re-running the ladder
+  rung is what separated them here: it collapsed **33.90 → 0.45 ns** under ifx and held at
+  **4.26 → 5.31 ns** under gfortran, proving gfortran's block never contained the redundant work and
+  that its measured null was the correct answer rather than a failure. Without it, a correct fix
+  would have been written up as an unexplained miss and the next move would have been to go looking
+  for a fault in it. **A prediction chained from removal-based estimates is especially fragile** —
+  removal over-reports by construction, so chaining two of them (`block − lookup_proper`) carried a
+  2 ns error here and a 4.26 ns misattribution on the other toolchain.
 - **A benchmark that REPLICATES library code is untested code — validate it against the real number
   before believing any of it.** Taking a loop apart sometimes needs a copy of it in the benchmark,
   because the library has no entry point that runs one half. That copy can be subtly wrong in a way

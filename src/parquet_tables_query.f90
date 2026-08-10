@@ -560,22 +560,34 @@ contains
         ! Done here, in the one lookup every value accessor goes through, so every one of them
         ! reaches it without knowing it exists.
         !
-        ! NESTED, not `.and.`-ed, and it must stay that way: Fortran does not short-circuit, so as
-        ! one combined condition a compiler is free to evaluate `table_find` on every accessor
-        ! call -- and ifx does, at the price of a SECOND complete name lookup per call (measured at
-        ! 33.9 ns against gfortran's 4.3, ~27% of a per-cell read). Nesting makes it unreachable
-        ! unless the name really is the reserved one.
-        if (name == PARQUET_ROW_INDEX) then
-            ! `meta_keys` is allocated for every table that was opened from a file and stays so
-            ! after a detach, which is exactly the question here: a table that HAD a file gets the
-            ! row index (or, once detached, the message explaining why it can no longer have it),
-            ! while one built in memory never had a file row to name and falls through to the
-            ! ordinary "no column of this name".
-            if (table_find(self, name) == 0) then
-                if (allocated(self%cache%meta_keys)) call table_make_row_index(self)
+        ! LOOK UP FIRST, COMPARE ONLY ON A MISS -- and it must stay that way. `name ==
+        ! PARQUET_ROW_INDEX` is a CHARACTER comparison, which gfortran compiles to a call to
+        ! `__gfortran_compare_string` (confirmed by disassembly, not inferred): ~5.3 ns, ~12% of a
+        ! per-cell read, paid by every value accessor for a column that almost no caller is asking
+        ! for. Only a lookup MISS can be the reserved name in its not-yet-materialized state, so
+        ! testing after the lookup takes the comparison off the hot path entirely rather than
+        ! merely making it cheaper -- and unlike a length or first-character pre-filter it does
+        ! not depend on what the caller's column names happen to look like.
+        !
+        ! Equivalent to the pre-lookup form in all four cases: the name is the reserved one and is
+        ! already materialized (both find it), is the reserved one and is not (both materialize,
+        ! both re-find, both call `table_find` exactly twice), is the reserved one on a table that
+        ! never had a file (both fall through to the ordinary miss), or is an ordinary name (both
+        ! resolve it, and only the old form paid for the comparison).
+        idx = table_find(self, name)
+        if (idx == 0) then
+            if (name == PARQUET_ROW_INDEX) then
+                ! `meta_keys` is allocated for every table that was opened from a file and stays
+                ! so after a detach, which is exactly the question here: a table that HAD a file
+                ! gets the row index (or, once detached, the message explaining why it can no
+                ! longer have it), while one built in memory never had a file row to name and
+                ! falls through to the ordinary "no column of this name".
+                if (allocated(self%cache%meta_keys)) then
+                    call table_make_row_index(self)
+                    idx = table_find(self, name)
+                end if
             end if
         end if
-        idx = table_find(self, name)
         if (idx == 0) then
             if (present(found)) then
                 found = .false.

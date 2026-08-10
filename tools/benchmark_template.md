@@ -68,6 +68,18 @@ say so explicitly in §1 when you do.)
       needed was there — which was the right call, and left three reports filed against a commit the
       sheet does not name. Either point at something real or say explicitly that proceeding is
       permitted and what to record.
+- [ ] **Show HOW each prediction was derived, not just its value.** A runner who can see the
+      derivation can tell a mis-derived prediction from a fix that underperformed; one who cannot has
+      to report an unexplained miss. One sheet predicted −9.7% on a second toolchain by subtracting a
+      diagnostic figure that did not mean what the sheet assumed — the fix was working exactly as
+      intended, and only the runner's own extra step showed it. **A prediction chained from
+      removal-based estimates is especially fragile**, because removal over-reports by construction.
+- [ ] **If a step confirms the MECHANISM rather than the size of the effect, make it REQUIRED.** The
+      instinct is to mark it optional because the headline comparison answers the campaign's
+      question — but when a prediction misses, the mechanism step is the only thing that says which
+      of the two was wrong. In the campaign above it was marked optional, the runner ran it anyway on
+      both toolchains, and it was the single most informative result in the report. Concretely: after
+      a fix, **re-run the diagnostic that found the problem**, not only the end-to-end measurement.
 - [ ] Delete this section, and delete any §5 report skeleton fields that do not apply.
 - [ ] Make one copy per machine, suffixed with the machine's name
       (`feature_<campaign>_A.md`, `feature_<campaign>_B.md`, …), and carry each to its machine
@@ -168,6 +180,16 @@ worth having one at all on a machine with more than one compiler installed.
 > exits immediately, and everything after it silently runs under the *system* toolchain — while the
 > environment variables it exported beforehand are set, so the shell looks correctly configured. The
 > version check above is what catches this. It is not a formality; it has already caught it once.
+
+> **If you drive the campaign from a script that takes the toolchain as an argument, `set --` before
+> sourcing anything.** A sourced script inherits the **caller's positional parameters**, so
+> `./run.sh ifx` hands the activation script `$1="ifx"` and a script that inspects `$@` takes a
+> different path. On one machine this left `FPM_FC` unset and fpm fell back to a *system* compiler
+> below this project's minimum — the version that miscompiles it. It failed safe only because the
+> same unset environment also hid Arrow's headers, so the C++ half would not compile; **on a machine
+> with Arrow on the default search path it would have produced a full set of plausible numbers from a
+> miscompiling compiler.** Assert afterwards — `FPM_FC` is the toolchain you asked for, `FPM_CXXFLAGS`
+> is non-empty — rather than printing them and reading past it.
 
 **Then check that `--profile release` actually delivered optimisation, which is NOT the same as
 asking for it.** fpm has no release profile for every compiler — under `flang` (fpm 0.13.0 alpha) it
@@ -290,12 +312,23 @@ So:
    the percentage rule and say so.
 4. **Build each variant at least twice** where the answer is close to the line, and **quote both
    floors**, saying which applies to which comparison.
+5. **Measure it for THIS campaign; never carry one forward from another.** The cross-build floor is a
+   property of **how far apart the two builds are**, not of the machine. The same machine, the same
+   control arm, the same compiler gave **0.491 ns** across an eight-macro ladder and **0.003 ns**
+   across a two-commit A/B differing by nine lines of Fortran — a **150x** spread, and carrying the
+   larger figure forward would have disqualified a comparison that was in fact decisive. A useful
+   corollary when *designing* a campaign: the fewer the differences between the two builds, the
+   quieter the comparison, so pose the question as a two-commit A/B rather than a flag ladder
+   wherever both are available.
 
 A control that stays flat is still worth carrying: it proves the flag did what it claimed, and its
 *relative* movement is comparable across arms even when its absolute movement is not. One campaign's
 control was flat under one compiler and moved 9.7% under another **on the same machine measuring the
 same untouched function** — a 32x difference in layout sensitivity between two toolchains, which is
-the sharpest possible statement of why this step exists.
+the sharpest possible statement of why this step exists. And when the controls come back *very*
+quiet — one campaign's largest control movement was 3 picoseconds — the floor that actually limits
+the report is the **run-to-run spread of the arm under study itself**; say which of the two is
+governing, rather than quoting the smaller one because it is the one the step asked for.
 
 ### Step 4 — write the report into this file
 

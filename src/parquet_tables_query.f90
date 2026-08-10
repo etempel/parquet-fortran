@@ -732,6 +732,12 @@ contains
             call table_context_suffix(self%cache, name, sfx)
             error stop EP // trim(proc) // ": no column of this name" // sfx
         end if
+        call table_resolve_slot(self, idx, proc, found, writing)
+    end procedure table_resolve
+    !
+    module procedure table_resolve_slot
+        character(len=:), allocatable :: sfx
+        !
         ! A column whose physical type this library cannot read got a slot at open time so it
         ! would still show up in %column_names -- but there is nothing to hand back, so any
         ! attempt to reach its values stops here rather than returning an empty column.
@@ -741,7 +747,9 @@ contains
                 idx = 0
                 return
             end if
-            call table_context_suffix(self%cache, name, sfx)
+            ! The slot's OWN name, which is what the caller asked for under any entry point --
+            ! by name it is the name they passed, by position it is the one they meant.
+            call table_context_suffix(self%cache, self%cache%cols(idx)%name, sfx)
             error stop EP // trim(proc) // ": this column's type is not supported by " // &
                 "parquet_table, so its values were never read" // sfx
         end if
@@ -769,7 +777,7 @@ contains
             if (writing) call table_check_shared_write(self, idx, proc, nulling=.false.)
         end if
         if (present(found)) found = .true.
-    end procedure table_resolve
+    end procedure table_resolve_slot
     !
     module procedure table_check_not_detached
         character(len=:), allocatable :: sfx

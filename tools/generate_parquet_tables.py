@@ -1412,6 +1412,23 @@ def gen_spec_interfaces():
             integer, intent(out) :: idx              !! slot index, or 0 on a reported miss.
             logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
         end subroutine table_lookup_or_fail
+        !> The TAIL of `table_resolve`, on a slot that is already known good: the unsupported-type
+        !! refusal, the lazy first touch, and the shared-write rule. Split out so that a caller
+        !! holding a slot index -- `table_resolve` after its name lookup, and anything reaching a
+        !! column by position -- runs exactly the same checks in exactly the same order, without a
+        !! second copy of them existing to drift.
+        !!
+        !! **Assumes `table_check_open` and `table_check_no_append` have already run** and that
+        !! `idx` is in 1..ncols. Those live in the callers because `table_resolve` must do them
+        !! before its lookup, and repeating them here would put a redundant test on the per-cell
+        !! path this split exists not to slow down.
+        module subroutine table_resolve_slot(self, idx, proc, found, writing)
+            class(parquet_table), intent(in) :: self  !! the table.
+            integer, intent(inout) :: idx             !! validated slot index in; 0 out on a reported refusal.
+            character(len=*), intent(in) :: proc      !! calling procedure, for the message.
+            logical, intent(out), optional :: found   !! present: report a refusal instead of aborting.
+            logical, intent(in), optional :: writing  !! .true. when the caller is about to write.
+        end subroutine table_resolve_slot
         !> The by-POSITION twin of `table_lookup_or_fail`: validates that `j` is a 1-based column
         !! position this table has, honouring `found=` and otherwise aborting. Shared by every
         !! index-form introspection query so they all bounds-check and report the same way.

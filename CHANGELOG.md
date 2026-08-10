@@ -140,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   million rows and 4.4x at twenty million on an 8-core laptop; the remaining gap to the thread
   count is memory latency, since every comparison chases a scattered key. Note that a threaded
   sort's peak memory is about twice a serial one's. See
-  [Sorting arrays and columns](doc/pages/sorting.md).
+  [Sorting arrays and columns](doc/pages/utilities/sorting.md).
 - **Generated table types.** `tools/generate_user_table_code.py` turns a MAML schema into a named
   `parquet_table` extension with one accessor per declared column, so a program that always reads
   the same columns can write `t%ra()` instead of naming strings everywhere. Each accessor comes in
@@ -162,7 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type extending `parquet_table`. A worked example of the generator's output ships as
   `src/parquet_table_example.f90` — nothing else in the library uses it and `use parquet` does not
   re-export it, so it is an example rather than part of the API. See
-  [Generated table types](doc/pages/generated-tables.md).
+  [Generated table types](doc/pages/utilities/generated-tables.md).
 - Row filters are now boolean **expressions** over the file's columns, not just AND-combined
   clauses: `filt%add("(ra > 180 and dec <= 0) or id is_null")`, with `and`/`or`/`not` (any
   casing), parentheses and `not` > `and` > `or` precedence. Several `%add` calls are still
@@ -198,8 +198,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   column-name vocabulary and apply it in another; the substitution works on the parsed expression,
   so a quoted literal that happens to spell a column name is never touched, and all the renames in
   one call happen at once. See
-  [Row filtering](doc/pages/reading.md#row-filtering-with-parquet_filter) and
-  [Renaming the columns a filter or sort refers to](doc/pages/reading.md#renaming-the-columns-a-filter-or-sort-refers-to).
+  [Row filtering](doc/pages/io/filter-sort-sample.md#row-filtering-with-parquet_filter) and
+  [Renaming the columns a filter or sort refers to](doc/pages/io/filter-sort-sample.md#renaming-the-columns-a-filter-or-sort-refers-to).
 - Read-time sorting: `parquet_open_reader(..., sort_by=srt)` returns a file's rows ordered by one
   or more columns, and every column read afterwards comes back in that order. Keys are added one
   per `srt%add("ra asc")`/`%add("-dec")` call to a `parquet_sortkey` and applied in order, with
@@ -211,7 +211,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row for row. While a sort is active, row-group-scoped operations (`parquet_read_column_chunk`,
   `parquet_get_chunk_size`) are refused and row/element mode read the whole column, since a sorted
   row belongs to no single row group. See
-  [Reading rows in sorted order](doc/pages/reading.md#reading-rows-in-sorted-order-with-parquet_sortkey).
+  [Reading rows in sorted order](doc/pages/io/filter-sort-sample.md#reading-rows-in-sorted-order-with-parquet_sortkey).
 - Streaming/chunked reads now work on a filtered or sampled reader, which previously refused them
   outright: `parquet_read_column_chunk` hands back that row group's surviving rows, and
   `parquet_get_chunk_size` reports that same count, so a chunked loop's sizes still sum to
@@ -220,7 +220,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_reader_set_filter(reader, filter, row_group_lo, row_group_hi)` additionally scopes the
   filter to a row-group range and evaluates it one row group at a time, so peak memory is one row
   group's worth of the filter columns instead of the whole file — enough to filter a file larger
-  than memory. See [Streaming/chunked reads](doc/pages/reading.md#streamingchunked-reads).
+  than memory. See [Streaming/chunked reads](doc/pages/io/reading.md#streamingchunked-reads).
 - Added `parquet_tables` (`parquet_table`): presents a whole parquet file as one in-memory table
   (`parquet_open_table`), hands columns back as ordinary Fortran arrays through a widening copy
   (`%get`) or a zero-copy typed pointer (`%col`), builds a table from scratch in memory
@@ -347,7 +347,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aborting inside the column store. `%drop_column` no longer copies the remaining columns' data
   when it closes the gap. Note qc is enforced when a column is actually read, so
   on a lazy table it lands on first touch rather than at open. See
-  [the guide](doc/pages/table.md) for the current limitations, the detach rule and the OpenMP
+  [the guide](doc/pages/tables/table.md) for the current limitations, the detach rule and the OpenMP
   first-touch rule.
 - Added `parquet_read_qc` and `parquet_compose_read_qc`: read-time quality control declared in
   code and held **unresolved** until it can be composed against whatever a file's own qc-MAML
@@ -360,7 +360,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fields:` entry carries a `qc:` key at all — including an empty one, which already means "no
   Nulls here" — keeps the MAML's declaration in full and drops the code's entirely, while a column
   the MAML never mentions (or merely names, without a `qc:` key) takes the code's. See
-  [Deferring qc declarations](doc/pages/quality-control.md#deferring-qc-declarations-with-parquet_read_qc).
+  [Deferring qc declarations](doc/pages/schema/quality-control.md#deferring-qc-declarations-with-parquet_read_qc).
 - Added `parquet_columns` (`parquet_column`): type-erased, whole-column value storage with sparse
   null tracking, covering 18 scalar/vector kinds plus reserved slots for the future
   list/map/struct column types, with the full value and structural instruction set — including
@@ -423,7 +423,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lock, no atomic, any number of threads. Three cases remain undetectable and are documented as
   such: a pointer you already hold, threading the library cannot identify (pthreads, coarrays), and
   the exact instant a violation begins. See
-  [Thread safety](doc/pages/thread-safety.md) for the full per-operation table.
+  [Thread safety](doc/pages/operating/thread-safety.md) for the full per-operation table.
 
 - **Process-global settings, in a new `parquet_settings` module** re-exported by `use parquet`, for
   the parameters that apply to the whole library rather than to one reader, writer or table.
@@ -471,9 +471,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user or configuration input can check a length before tripping an `error stop`. A setting may
   change how fast, how large or how loud the library runs — never what it answers, which is why
   there is deliberately no global default for null ordering or quality-control enforcement. See
-  [Settings](doc/pages/settings.md).
+  [Settings](doc/pages/operating/settings.md).
 
 ### Changed
+
+- **The user guide is reorganised into a two-layer structure**, six groups of pages instead of one
+  flat list, so every published page URL changed from `page/<name>.html` to
+  `page/<group>/<name>.html` (e.g. `page/io/reading.html`). Two oversized pages were split in the
+  same reorganisation: `reading.md`'s filter/sort/sample block is now its own page
+  (`io/filter-sort-sample.md`), and the `parquet_table` guide is now four pages under `tables/`
+  (basics, opening, writing, mutating). No content was removed; old bookmarks into the previous
+  flat URLs will 404.
 
 - **`pf_permute` no longer copies a permutation that is already the right kind.** Every specific
   widened `perm` into a fresh `integer(int64)` array before using it — including the eleven
@@ -803,7 +811,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the write path is the last statement of the entry point — so two threads first raced through the
   writer's own Fortran bookkeeping, above all the reallocation that tracks which columns have been
   written, and corrupted the heap before either reached the guard. The crash then usually landed far
-  from the cause, and the message promised by [Thread safety](doc/pages/thread-safety.md) survived to
+  from the cause, and the message promised by [Thread safety](doc/pages/operating/thread-safety.md) survived to
   stderr only some of the time. The guard is now claimed at the first statement of every write,
   row-group and row-mask entry point, and released automatically on every exit path. Measured on a
   384-core machine, the shared-writer case went from crashing on every single run to matching the
@@ -856,7 +864,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the first time it compares or serializes a type — racing either could corrupt memory that only
   surfaced later, in unrelated code. `parquet_open_reader`/`parquet_open_writer` now force both
   into existence once, from a single thread, before any concurrent caller can reach Arrow. See
-  [Thread safety](doc/pages/thread-safety.md#a-note-on-arrows-own-type-singleton-construction).
+  [Thread safety](doc/pages/operating/thread-safety.md#a-note-on-arrows-own-type-singleton-construction).
 - Fixed `parquet_close_writer` referencing an unallocated array on every writer that never set a
   row mask with `parquet_write_row_mask`: the mask-consumed check was one combined condition, and
   Fortran does not guarantee short-circuit evaluation, so the unused mask's size was queried

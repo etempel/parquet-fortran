@@ -205,7 +205,7 @@ module parquet_columns
         procedure :: paste                             !! Overwrite an existing row range from another column.
         procedure :: delete_by_mask                    !! Keep only rows whose mask entry is .true.
         procedure :: reindex                           !! Reorder rows by a permutation.
-        !> INTERNAL: reindex without the duplicate/range scan, for a permutation the caller has
+        !> INTERNAL -- reindex without the duplicate/range scan, for a permutation the caller has
         !! already established is one. Public only because Fortran offers no narrower visibility;
         !! see the interface below.
         procedure :: reindex_trusted

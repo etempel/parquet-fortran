@@ -297,7 +297,7 @@ observable from Fortran at all.
 A file written by a tool that recorded bounds not matching its data will give a wrong answer, and
 nothing can defend against it: the screen has no way to check the footer against data it deliberately
 does not read. This is the same trust `parquet_column_has_nulls` already places in the recorded null
-count. It is documented in `doc/pages/reading.md` and is a caveat, not a bug to fix.
+count. It is documented in `doc/pages/io/reading.md` and is a caveat, not a bug to fix.
 
 **Test.** Deliberately none, and adding one would be a mistake worth naming.
 
@@ -308,7 +308,7 @@ would assert that the library returns wrong rows, freezing as a contract somethi
 about the input rather than a behaviour of the library.
 
 **How to think about it instead.** This is the same trust `parquet_column_has_nulls` already places
-in the recorded null count, and it is documented in `doc/pages/reading.md`. A user who suspects a
+in the recorded null count, and it is documented in `doc/pages/io/reading.md`. A user who suspects a
 producer can disable the screen entirely with
 `parquet_debug_set_disable_statistics_prescreen(1)` and compare — which is exactly what the A/B tests
 in Risk-26 do, and is the right diagnostic to point someone at. If a real producer is ever found to
@@ -365,7 +365,7 @@ table layer cannot tell a legitimate in-place edit from a reorder).
 **What still forbids something.** The mitigation is documentation, in the two places a reader
 actually is when they are about to make this mistake, and both must be kept:
 `%col`'s own doc-comment in `tools/generate_parquet_tables.py`'s template (**not** the generated
-`src/parquet_tables.f90`, which is overwritten), and the callout in `doc/pages/sorting.md`'s
+`src/parquet_tables.f90`, which is overwritten), and the callout in `doc/pages/utilities/sorting.md`'s
 "Sorting a table" section. `parquet_table%sort_by` is the supported way to reorder a table, and it
 reorders every column together.
 
@@ -479,7 +479,7 @@ budget knob**: that was decided deliberately, in favour of documenting the cost.
 
 What makes the cost statable is that `colwork_threads` never returns more than the number of columns
 being rewritten. So the transient copies come to at most one extra copy of the table, and the claim
-in `doc/pages/settings.md`, `doc/pages/thread-safety.md` and `CHANGELOG.md` — *a whole-column rewrite
+in `doc/pages/operating/settings.md`, `doc/pages/operating/thread-safety.md` and `CHANGELOG.md` — *a whole-column rewrite
 can double the table's peak memory for the duration of the call* — is exactly true rather than
 approximately.
 
@@ -966,7 +966,7 @@ more than the fix.
   `print_stat` scenario asserts only an exit status, and `tools/run_error_scenarios.sh` discards the
   output entirely. There was no scattered fragility to consolidate — the real exposure was the
   opposite one: the format was **essentially untested**, so a regression would be caught by nothing.
-- **And it had already drifted.** `doc/pages/reading.md` documented a `prefetc` column the code
+- **And it had already drifted.** `doc/pages/io/reading.md` documented a `prefetc` column the code
   calls `fetched`, and omitted `qcmin`, `qcmax`, `qcmiss` and `filter` entirely. The documentation
   is the format's only contract, so this was the whole guard being wrong.
 - **Covered:** the documentation was corrected against the code (including what `qcmin`/`qcmax`
@@ -1718,7 +1718,7 @@ file, so a row range would no longer name the rows the caller chose. The slice f
 
 ### Risk-31 — An extending type's own state is silently lost by `%clone`
 
-`parquet_table` is designed to be extended — a [generated table type](generated-tables.md) does
+`parquet_table` is designed to be extended — a [generated table type](doc/pages/utilities/generated-tables.md) does
 exactly that, and so may hand-written code. `table_clone` knows only `parquet_table`'s own
 components, so **a component the extension added arrives default-initialized in the clone, with
 nothing to report it**: the clone succeeds, every column is right, and only the table parameter is
@@ -2807,7 +2807,7 @@ fails the test.
 into the value's kind: the operator makes that a different question for each of `>=`, `>`, `<=`, `<`,
 and getting it wrong turns a silently-loose check into a silently-tight one, which is worse. The
 honest options are to leave it (and document it, which
-[quality-control.md](doc/pages/quality-control.md) now does) or to carry the bound's original text
+[quality-control.md](doc/pages/schema/quality-control.md) now does) or to carry the bound's original text
 down to the comparison so an exact integer bound can be parsed as one — which would touch
 `parquet_qc_numeric_bound`'s two schema-validation callers as well, and is a change to make
 deliberately rather than in passing.

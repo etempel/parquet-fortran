@@ -14,7 +14,7 @@ type is also wired directly into `parquet_read_column`/`parquet_write_column`/`p
 [Reading and writing compact string columns](#reading-and-writing-compact-string-columns) below.
 
 To use it, add parquet-fortran as an FPM dependency (see
-[Minimal setup to depend on this library](../index.html#minimal-setup-to-depend-on-this-library) in
+[Minimal setup to depend on this library](../../index.html#minimal-setup-to-depend-on-this-library) in
 the README for the `fpm.toml` snippet) and `use parquet` — the compact read/write entry points and
 both types (`parquet_string_column` and `parquet_string`) are re-exported from the main module, so
 every feature below (`find`/`contains`, the interop hooks, everything) is reachable through the
@@ -256,7 +256,7 @@ are given, `strip` wins.
 Here you hand over one string at a time and its length is exactly what you wrote, so there is
 nothing to guess. Those two take whole `character(len=*)` **arrays**, whose elements share one
 declared length and are blank-padded by Fortran — so they trim, because the padding cannot have
-been meant. See [table.md](table.html#string-columns-in-a-table).
+been meant. See [table.md](../tables/table.html#string-columns-in-a-table).
 
 **The two bulk forms follow the array rule, not the scalar one**, for exactly that reason:
 
@@ -475,7 +475,7 @@ longer than any of its sources.
 `%reindex` and `%reindex_trusted` split their work across threads when the column is large enough to
 be worth it. Nothing needs to be asked for — `parquet_string_threads()` reports what an operation
 would use here, and `parquet_set_string_threads(n)` caps it (see
-[Settings](settings.html#threads-inside-one-string-column)).
+[Settings](../operating/settings.html#threads-inside-one-string-column)).
 
 Four things decide how many threads an operation uses, and the first three all decline toward serial:
 
@@ -568,7 +568,7 @@ synchronized, and a handle must not be used across a mutation on any thread.
 This is the only thread-safety rule specific to this type. A separate, library-wide compiler
 caveat around functions returning `character(len=:), allocatable` — found and root-caused via this
 same type's accessors, but not specific to it — is covered in the main
-[Thread safety](thread-safety.html#a-note-on-functions-returning-characterlen-allocatable) guide.
+[Thread safety](../operating/thread-safety.html#a-note-on-functions-returning-characterlen-allocatable) guide.
 
 ## Complexity at a glance
 
@@ -595,7 +595,7 @@ same type's accessors, but not specific to it — is covered in the main
 `parquet_write_column`/`parquet_read_column` and their chunked counterparts
 (`parquet_write_column_chunk`/`parquet_read_column_chunk`) accept a `parquet_string_column`
 directly, as an alternative to a padded `character(len=...)` array — see
-[Reading a column](reading.html)/[Writing a column](writing.html) for the general read/write API;
+[Reading a column](../io/reading.html)/[Writing a column](../io/writing.html) for the general read/write API;
 this section only covers what's different for the compact path.
 
 ```fortran
@@ -629,7 +629,7 @@ Differences from the padded `character(len=...)` path:
   through.
 - **No pre-sizing.** On read, `values` is cleared and grown to fit — unlike a padded array, you
   never need to know the row count (or the longest string's length —
-  [`parquet_get_string_length`](reading.html#column-shape-and-size-queries) has no role here) ahead of time.
+  [`parquet_get_string_length`](../io/reading.html#column-shape-and-size-queries) has no role here) ahead of time.
 - **Scalar (1-D) columns only.** There is no vector/matrix `parquet_string_column` specific — a
   vector-of-strings column still needs the padded `character(len=...), dimension(:,:)` path.
 - **File format is identical either way.** Parquet's `BYTE_ARRAY` physical type is always

@@ -44,14 +44,14 @@ That is what makes them worth a static check rather than a test:
      calls to travel together makes "did we guard all ~19 of them?" mechanical, and self-extending.
 
   6. print_stat's columns match its documentation (feature_risks.md Risk-5).
-     `doc/pages/reading.md` documents the reader's stats table column by column, and that table is
+     `doc/pages/io/reading.md` documents the reader's stats table column by column, and that table is
      the only contract the format has -- exactly one assertion in the whole suite touches the output
      text, so a renamed or added column breaks no test. The two had already drifted when this check
      was written (the docs named a `prefetc` column the code calls `fetched`, and omitted four
      others), which is the failure it exists to stop repeating.
 
   7. print_settings matches its documentation (feature_risks.md Risk-41).
-     Every row parquet_print_settings emits must be named in doc/pages/settings.md. Matched by the
+     Every row parquet_print_settings emits must be named in doc/pages/operating/settings.md. Matched by the
      SHAPE of a row call rather than by a list of helper names, because the list went blind twice --
      see check_print_settings_documented.
 
@@ -95,6 +95,15 @@ That is what makes them worth a static check rather than a test:
      speed: a setter with a caught-failure `return` that leaves `self` unassigned must KEEP
      `intent(out)`, because that is precisely what makes a failed `%parse` (or a null-propagating
      `%set`) yield a null element instead of a stale one.
+
+ 14. The doc/pages index files agree with the page tree.
+     The user guide is nested (group directories with their own index.md), and FORD renders a page
+     only if the `ordered_subpage:` chain reaches it -- a group directory with no index.md is
+     skipped SILENTLY: warning on stderr, exit 0, every page in the group absent from the
+     published site (verified against FORD 7.0.13). Each index also mirrors its frontmatter order
+     in a hand-written bullet list, and the top-level index carries a flat every-page list on top
+     of that -- eight hand-synced pairs in all, none visible to any compiler or test. Both sides
+     of every comparison are derived from the filesystem, never from a hardcoded page list.
 
 The numbered notes above are the ones whose rationale needs more than a line; they are NOT the
 complete list, and deliberately carry no count, because a hardcoded one drifts silently every time a
@@ -385,7 +394,7 @@ def check_print_stat_columns_documented():
     """feature_risks.md Risk-5 -- print_stat's column set and its documentation must agree.
 
     `parquet_reader_print_stat`'s output is documented column by column in
-    `doc/pages/reading.md`, and that table is the only contract it has: the format is otherwise
+    `doc/pages/io/reading.md`, and that table is the only contract it has: the format is otherwise
     asserted in exactly one place in the whole suite (a `sample:` substring), so a renamed or added
     column breaks no test at all. It had already drifted when this check was written -- the docs
     named a `prefetc` column that the code calls `fetched`, and omitted `qcmin`, `qcmax`, `qcmiss`
@@ -397,7 +406,7 @@ def check_print_stat_columns_documented():
     """
     problems = []
     cpp = SRC / "parquet_wrapper.cpp"
-    doc = REPO_ROOT / "doc" / "pages" / "reading.md"
+    doc = REPO_ROOT / "doc" / "pages" / "io" / "reading.md"
     text = cpp.read_text()
     match = re.search(r"std::vector<std::string>\s+headers\s*=\s*\{(.*?)\}\s*;", text, re.S)
     if not match:
@@ -415,17 +424,17 @@ def check_print_stat_columns_documented():
     extra = sorted(documented - set(code_columns))
     for column in missing:
         problems.append(
-            "doc/pages/reading.md: print_stat prints a `%s` column that the documentation does not "
+            "doc/pages/io/reading.md: print_stat prints a `%s` column that the documentation does not "
             "describe -- add a row for it (feature_risks.md Risk-5)" % column)
     for column in extra:
         problems.append(
-            "doc/pages/reading.md: the documentation describes a `%s` column that print_stat does "
+            "doc/pages/io/reading.md: the documentation describes a `%s` column that print_stat does "
             "not print -- it was renamed or removed (feature_risks.md Risk-5)" % column)
     return problems
 
 
 def check_print_settings_documented():
-    """`parquet_print_settings`'s output and `doc/pages/settings.md` must name the same things.
+    """`parquet_print_settings`'s output and `doc/pages/operating/settings.md` must name the same things.
 
     Same failure mode as `check_print_stat_columns_documented` above, one module over: the dump is
     a user's quickest way to see what the library will do, and the guide page is the only contract
@@ -441,7 +450,7 @@ def check_print_settings_documented():
     """
     problems = []
     src = SRC / "parquet_settings.f90"
-    doc = REPO_ROOT / "doc" / "pages" / "settings.md"
+    doc = REPO_ROOT / "doc" / "pages" / "operating" / "settings.md"
     # Matched by SHAPE (`call print_<anything>(u, "name"`), not against a list of helper names. An
     # earlier version named them, and silently went blind twice: once when print_text arrived for
     # the non-integer rows, and again when print_big arrived for the int64 ones -- on that occasion
@@ -456,14 +465,14 @@ def check_print_settings_documented():
     for name in printed:
         if name not in doc_text:
             problems.append(
-                "doc/pages/settings.md: parquet_print_settings prints `%s` but the guide page never "
+                "doc/pages/operating/settings.md: parquet_print_settings prints `%s` but the guide page never "
                 "names it -- add it to the sample dump or the limits table" % name)
     # The reverse direction: a name the page presents as printable that the dump does not print.
     # Only the fenced sample dump is checked here, since the prose legitimately names procedures
     # and concepts that are not rows of the output.
     fenced = re.search(r"```\nparquet-fortran settings\n(.*?)```", doc_text, re.S)
     if not fenced:
-        return problems + ["doc/pages/settings.md: could not find the sample parquet_print_settings "
+        return problems + ["doc/pages/operating/settings.md: could not find the sample parquet_print_settings "
                            "output block -- this check needs updating"]
     for line in fenced.group(1).split("\n"):
         # A row is indented and carries a name plus a value; a section header ("limits
@@ -473,7 +482,7 @@ def check_print_settings_documented():
         cell = line.split()
         if len(cell) == 2 and cell[0] not in printed:
             problems.append(
-                "doc/pages/settings.md: the sample output shows a `%s` row that "
+                "doc/pages/operating/settings.md: the sample output shows a `%s` row that "
                 "parquet_print_settings does not print -- it was renamed or removed" % cell[0])
     return problems
 
@@ -1011,6 +1020,167 @@ def check_temporal_setters_assign_all():
     return problems
 
 
+def _page_index_bullet_targets(body):
+    """First-link targets of every bullet line in an index.md body, in order, anchors stripped."""
+    targets = []
+    for line in body.split("\n"):
+        if not re.match(r"^\s*[-*]\s", line):
+            continue
+        found = re.search(r"\]\(([^)#\s]+)(?:#[^)]*)?\)", line)
+        if found:
+            targets.append(found.group(1))
+    return targets
+
+
+def _parse_page_index(path):
+    """Split one doc/pages index.md into its `ordered_subpage:` entries and its body text.
+
+    Returns (entries, body, problem) -- problem is a string when the file's frontmatter shape
+    could not be parsed at all, in which case entries/body are unusable. FORD's frontmatter is
+    not strict YAML (`ordered_subpage:` repeats), so this parses line by line between the two
+    `---` fences.
+    """
+    lines = path.read_text().split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None, None, "no frontmatter fence on line 1"
+    entries = []
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return entries, "\n".join(lines[i + 1:]), None
+        found = re.match(r"^ordered_subpage:\s*(\S+)\s*$", lines[i])
+        if found:
+            entries.append(found.group(1))
+    return None, None, "frontmatter fence never closes"
+
+
+def check_doc_page_index_consistency():
+    """The doc/pages index files, their bullet lists, and the directory contents must all agree.
+
+    Under FORD's nested-subpage mechanism a page exists on the generated site only if the chain of
+    `ordered_subpage:` entries reaches it, and a group directory whose index.md is missing is
+    SKIPPED SILENTLY -- warning on stderr, exit 0, the whole group absent from the site (verified
+    against FORD 7.0.13; see feature_doc.md's "FORD nesting" experiments). Every index.md also
+    duplicates its frontmatter order in a hand-written bullet list, and the top-level index carries
+    a third hand-written list (every content page at a glance). None of that is visible to any
+    compiler, test, or FORD itself. Everything here is derived from the filesystem, never from a
+    hardcoded page list, and an empty parse fails rather than passes -- see CLAUDE.md, "A static
+    check that enumerates names goes stale silently".
+    """
+    problems = []
+    pages = REPO_ROOT / "doc" / "pages"
+    top = pages / "index.md"
+    if not top.is_file():
+        return ["doc/pages/index.md: missing -- FORD has no user-guide landing page at all"]
+
+    group_dirs = sorted(
+        d for d in pages.iterdir() if d.is_dir() and not d.name.startswith(".")
+    )
+    # Rule 4 first (a group with no index.md vanishes from the site with exit status 0).
+    index_files = [top]
+    for d in group_dirs:
+        if (d / "index.md").is_file():
+            index_files.append(d / "index.md")
+        else:
+            problems.append(
+                "doc/pages/%s/: no index.md -- FORD silently skips the whole group (every page "
+                "in it disappears from the generated site while the build still reports success)"
+                % d.name
+            )
+
+    entries_of = {}
+    for index in index_files:
+        rel = index.relative_to(REPO_ROOT)
+        entries, body, problem = _parse_page_index(index)
+        if problem:
+            problems.append("%s: %s -- cannot verify this index at all" % (rel, problem))
+            continue
+        if not entries:
+            # The empty parse fails deliberately: no entries almost certainly means the
+            # frontmatter format moved, not that the guide really has no pages.
+            problems.append("%s: no ordered_subpage: entries found" % rel)
+            continue
+        entries_of[index] = entries
+
+        here = index.parent
+        siblings = sorted(
+            [p.name for p in here.iterdir() if p.suffix == ".md" and p.name != "index.md"]
+            + [p.name for p in here.iterdir() if p.is_dir() and not p.name.startswith(".")]
+        )
+        # Rule 1: every sibling page/directory appears exactly once...
+        for name in siblings:
+            n = entries.count(name)
+            if n == 0:
+                problems.append(
+                    "%s: %s exists on disk but is not in ordered_subpage: -- FORD will not "
+                    "render it" % (rel, name)
+                )
+            elif n > 1:
+                problems.append("%s: %s appears %d times in ordered_subpage:" % (rel, name, n))
+        # Rule 2: ...and every entry exists on disk.
+        for entry in entries:
+            if entry not in siblings:
+                problems.append(
+                    "%s: ordered_subpage: names %s, which does not exist in %s/"
+                    % (rel, entry, here.relative_to(REPO_ROOT))
+                )
+
+        # Rule 3: the body bullet list mirrors ordered_subpage, same pages, same order. A bullet
+        # target `name.html` is the sibling page name.md; `grp/index.html` is the child group grp.
+        # Any other target shape (the top index's flat all-pages list uses `grp/name.html`) is not
+        # part of this list.
+        tokens = []
+        for target in _page_index_bullet_targets(body):
+            found = re.fullmatch(r"([A-Za-z0-9_.-]+)\.html", target)
+            if found:
+                tokens.append(found.group(1) + ".md")
+                continue
+            found = re.fullmatch(r"([A-Za-z0-9_.-]+)/index\.html", target)
+            if found:
+                tokens.append(found.group(1))
+        if not tokens:
+            problems.append(
+                "%s: found no bullet list mirroring ordered_subpage: -- the body format moved "
+                "and this check has gone blind on it" % rel
+            )
+        elif tokens != entries:
+            problems.append(
+                "%s: body bullet list disagrees with ordered_subpage: -- frontmatter order is "
+                "[%s], bullet order is [%s]" % (rel, ", ".join(entries), ", ".join(tokens))
+            )
+
+    # Rule 5, top-level index only: the flat every-page-at-a-glance list holds each group's
+    # content pages exactly once, in depth-first ordered_subpage order, and nothing else.
+    if top in entries_of and not any(p.startswith("doc/pages/index.md:") for p in problems):
+        dir_entries = [e for e in entries_of[top] if (pages / e).is_dir()]
+        if dir_entries:
+            expected = []
+            for grp in dir_entries:
+                grp_index = pages / grp / "index.md"
+                for entry in entries_of.get(grp_index, []):
+                    if entry.endswith(".md"):
+                        expected.append("%s/%s.html" % (grp, entry[: -len(".md")]))
+            _, body, _ = _parse_page_index(top)
+            actual = [
+                t
+                for t in _page_index_bullet_targets(body)
+                if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.html", t)
+                and not t.endswith("/index.html")
+            ]
+            if not actual:
+                problems.append(
+                    "doc/pages/index.md: has group subpages but no flat every-page-at-a-glance "
+                    "list (targets of the form grp/name.html) -- the third hand-written list is "
+                    "missing or its format moved"
+                )
+            elif actual != expected:
+                problems.append(
+                    "doc/pages/index.md: the flat every-page-at-a-glance list disagrees with a "
+                    "depth-first walk of the groups -- expected [%s], found [%s]"
+                    % (", ".join(expected), ", ".join(actual))
+                )
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -1028,6 +1198,7 @@ CHECKS = (
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
+    ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
 )
 
 

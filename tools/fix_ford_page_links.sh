@@ -4,7 +4,7 @@
 # output.
 #
 # README.md links to the user guide using its source-relative path (e.g.
-# `doc/pages/reading.md`, sometimes with a `#anchor`) -- correct when
+# `doc/pages/io/reading.md`, sometimes with a `#anchor`) -- correct when
 # README.md is browsed directly on GitLab/GitHub, since that's the actual
 # file. FORD's front page (docs.md is `{!README.md!}`, embedding README.md's
 # raw markdown verbatim) does not resolve these into its own page/<name>.html
@@ -45,7 +45,11 @@ import sys
 import pathlib
 
 root = pathlib.Path(sys.argv[1])
-page_pattern = re.compile(r'href="doc/pages/([A-Za-z0-9_-]+)\.md(#[A-Za-z0-9_-]+)?"')
+# The character class includes '/' so nested pages (doc/pages/<group>/<name>.md)
+# are rewritten too -- without it, every README link to a nested page is passed
+# through untouched and 404s on the published site, with no error from this
+# script (the failure mode is a rewrite count of 0, which looks like success).
+page_pattern = re.compile(r'href="doc/pages/([A-Za-z0-9_/-]+)\.md(#[A-Za-z0-9_-]+)?"')
 media_pattern = re.compile(r'(src|href)="doc/media/([^"]+)"')
 
 count = 0

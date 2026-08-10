@@ -205,7 +205,7 @@ module parquet_strings
         generic :: reindex => reindex_i32, reindex_i64 !! Reorder every element by a permutation.
         procedure, private :: reindex_trusted_i32      !! int32 specific of reindex_trusted.
         procedure, private :: reindex_trusted_i64      !! int64 specific of reindex_trusted.
-        !> INTERNAL: reindex without the duplicate/range scan. Public only because Fortran offers
+        !> INTERNAL -- reindex without the duplicate/range scan. Public only because Fortran offers
         !! no narrower visibility -- see reindex_trusted_i64.
         generic :: reindex_trusted => reindex_trusted_i32, reindex_trusted_i64
         procedure :: delete_by_mask                    !! Keep only the elements whose mask entry is .true.

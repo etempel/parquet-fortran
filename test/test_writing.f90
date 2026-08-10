@@ -3461,7 +3461,7 @@ contains
     end subroutine test_compact_string_roundtrip
 
     !> A file is fully interchangeable between the two Fortran-side string representations --
-    !> both are just Parquet BYTE_ARRAY on disk (see doc/pages/string-columns.md's "Reading and
+    !> both are just Parquet BYTE_ARRAY on disk (see doc/pages/types/string-columns.md's "Reading and
     !> writing compact string columns"): a compact write must read back correctly via the padded
     !> character(len=...) path, and a padded write must read back correctly via the compact path.
     subroutine test_compact_string_cross_path_compat(error)
@@ -3916,7 +3916,7 @@ contains
     !
     ! ==================================================================================
     ! Row-filtering ("mask") tests -- parquet_write_row_mask/parquet_write_chunk_row_mask.
-    ! See feature_write_mask.md for the full design; doc/pages/writing.md for the user guide.
+    ! See feature_write_mask.md for the full design; doc/pages/io/writing.md for the user guide.
     ! ==================================================================================
 
     !> parquet_write_row_mask applied to two whole-column writes: dropped rows leave no trace

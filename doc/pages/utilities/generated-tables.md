@@ -16,9 +16,61 @@ ra => t%ra()                       ! zero-copy pointer into the live storage
 print *, sum(ra) / t%nrows()       ! and every inherited parquet_table operation still applies
 ```
 
-`tools/generate_user_table_code.py` writes that module from a MAML file. The generated type **extends [`parquet_table`](table.html)**, so nothing is given up: `%nrows`, `%get`, `%filter_rows`, `%clone`, `%append`, `%row`, `parquet_write_table` and the rest all work exactly as they do on a plain table.
+`tools/generate_user_table_code.py` writes that module from a MAML file. The generated type **extends [`parquet_table`](../tables/table.html)**, so nothing is given up: `%nrows`, `%get`, `%filter_rows`, `%clone`, `%append`, `%row`, `parquet_write_table` and the rest all work exactly as they do on a plain table.
 
 Like [`tools/generate_parquet_maml.sh`](embedding-maml-schemas.html), this script is meant to be **copied into your own project**: you keep your schemas, you run the generator, you commit its output, and your build needs no code-generation step.
+
+## Extending `parquet_table` with your own type
+
+`parquet_table` is designed to be extended, and two public entry points exist for that. Most
+programs meet them through a generated table type — the subject of the rest of this page, and
+the intended way in — but both are ordinary API and work just as well on a type you write by hand.
+
+**`clone_extra` is the hook `%clone` calls for an extension's own components.** `%clone` and
+`%clone_structure` copy everything `parquet_table` itself holds, and cannot know about components
+an extending type added; overriding this hook is how those come across. Both call it as their last
+action, dispatching on the source's dynamic type, so an override runs wherever either is used:
+
+```fortran
+type, extends(parquet_table) :: my_table
+    real(real64) :: zeropoint = 0.0_real64
+contains
+    procedure :: clone_extra => my_clone_extra
+end type my_table
+...
+subroutine my_clone_extra(self, out, structure_only)
+    class(my_table), intent(in) :: self
+    class(parquet_table), intent(inout) :: out
+    logical, intent(in) :: structure_only   ! .true. when called from %clone_structure
+    select type (out)
+    class is (my_table)                     ! `class is`, so a further extension still gets this
+        out%zeropoint = self%zeropoint
+    end select
+end subroutine my_clone_extra
+```
+
+`%clone` has already checked that source and destination have the same dynamic type, so the
+guarded branch always matches. **Without an override, an added component arrives
+default-initialized and nothing reports it** — which is why the generator writes these assignments
+for you.
+
+A concrete-typed override of `%clone` itself is not possible: an overriding procedure has to keep
+every dummy argument's characteristics, so `out` cannot be narrowed from `class(parquet_table)`.
+This hook is the supported substitute, and it keeps one name for one operation.
+
+**`%bind_predefined` is what a generated type's `%init` calls.** It takes a column's declared name,
+kind, width and whether it comes from the file, then checks each one against the file, converts it
+to the declared kind, reads them all in one pass, and marks the slot *predefined* — which is what
+makes `%drop_column` refuse it without `force=.true.`. It is public because a generated module is
+a different module and `parquet_table`'s components are private; hand-written code that opened a
+table with `parquet_open_table` already reaches every column by name and rarely needs it. The rest
+of this page is the full contract.
+
+**Opening an extension** goes through the parent component:
+`call parquet_open_table(t%parquet_table, filename)`. `parquet_open_table`'s dummy is
+non-polymorphic on purpose, so an extension that needs a binding step cannot be opened without it.
+`parquet_write_table`, by contrast, takes `class(parquet_table)` and accepts an extending type
+directly.
 
 ## The schema
 
@@ -53,7 +105,7 @@ fields:
 - **If you publish your package, the module name must satisfy your own module-naming rule.** fpm's registry enforces a package prefix, so a module called `example` inside a published `src/` is rejected while `parquet_table_example` is fine. `fpm build` reports this immediately, so it is not a silent trap — but it is worth knowing before choosing `dataset:`.
 - **`author:`** becomes the generated file's `! Author:` header line. Without it the header says the file was generated and names no author.
 - **`source:`** is `file` (the default) or `computed`. A computed column gets its accessor and a slot of all-null rows, but is never looked for in the file — so a column your program calculates is a *declared intent* rather than an error.
-- Everything else is ordinary MAML (see [The MAML metadata format](maml-format.html)), and the same file still works as a **write schema** — which is convenient, since a program that reads a catalogue usually writes one with the same columns.
+- Everything else is ordinary MAML (see [The MAML metadata format](../schema/maml-format.html)), and the same file still works as a **write schema** — which is convenient, since a program that reads a catalogue usually writes one with the same columns.
 - `col_size: auto` / `array_size: auto` are **rejected** here: an accessor's kind and rank have to be known when the code is generated, and `auto` is resolved at write time.
 
 ## Running the generator
@@ -85,7 +137,7 @@ Three things to know:
 
 A **string** column gets a second accessor, `%<name>_chr(arr)`, a subroutine that copies the column out as a `character` array sized to the longest value present. A string *vector* column gets **only** that form, because `%col` has no pointer specific for `PK_STRING_VEC` to alias.
 
-Every accessor pointer is **invalidated by a row-structural mutation** (`%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`) — Fortran cannot detect this, so take the pointer again afterwards. See [Tables](table.html) for the full rule.
+Every accessor pointer is **invalidated by a row-structural mutation** (`%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`) — Fortran cannot detect this, so take the pointer again afterwards. See [Tables](../tables/table.html) for the full rule.
 
 ## Opening one: `%init`, `%init_slice`, `%init_empty`
 
@@ -95,7 +147,7 @@ Every accessor pointer is **invalidated by a row-structural mutation** (`%filter
 | `%init_slice(filename, row_lo, row_hi, ...)` | one contiguous row range; **no `sort` argument** |
 | `%init_empty([nrows])` | nothing — an in-memory table with the same columns |
 
-Optional arguments are shown in square brackets. Every one of `%init`'s is forwarded to [`parquet_open_table`](table.html) unchanged, except `exact`, which belongs to the kind conversion below.
+Optional arguments are shown in square brackets. Every one of `%init`'s is forwarded to [`parquet_open_table`](../tables/table.html) unchanged, except `exact`, which belongs to the kind conversion below.
 
 **A plain `parquet_open_table(t, file)` will not compile for a generated type**, deliberately — it would skip the binding step and leave every accessor failing later, far from the cause.
 
@@ -161,7 +213,7 @@ set_element  set_null  sort_by  truncate  unit  width   ... and the rest of parq
 
 plus `init`, `init_slice`, `init_empty`, `init_extra`, `clone_extra` and `bind_predefined`, which the generator itself adds. Two field names differing only in case are refused for the same reason (Fortran identifiers are case-insensitive), as is any name that is not a valid Fortran identifier.
 
-If you cannot rename the column in the file, rename it *for the table* with a read-in MAML's `extra: remap:` (see [Renaming columns for reading](maml-format.html#renaming-columns-for-reading-with-extra-remap)) and declare the table-facing name in your schema.
+If you cannot rename the column in the file, rename it *for the table* with a read-in MAML's `extra: remap:` (see [Renaming columns for reading](../schema/maml-format.html#renaming-columns-for-reading-with-extra-remap)) and declare the table-facing name in your schema.
 
 ## A schema with no fields
 
@@ -169,7 +221,7 @@ An empty (or absent) `fields:` is valid, and generates a **bare `parquet_table` 
 
 ## What the library side does
 
-The generated code is deliberately thin — a data table and one delegation per accessor. Every rule lives in the library, in [`%bind_predefined`](table.html), so a downstream project gets a fixed rule by upgrading rather than by regenerating. The same is true of `clone_extra`, which is an ordinary overridable binding on `parquet_table`: you can extend `parquet_table` by hand and use both without the generator at all.
+The generated code is deliberately thin — a data table and one delegation per accessor. Every rule lives in the library, in [`%bind_predefined`](../tables/table.html), so a downstream project gets a fixed rule by upgrading rather than by regenerating. The same is true of `clone_extra`, which is an ordinary overridable binding on `parquet_table`: you can extend `parquet_table` by hand and use both without the generator at all.
 
 ## This library's own example
 

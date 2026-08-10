@@ -9,7 +9,7 @@ source file) -- this, not the flat "column.<name>.*" keys, is what VO-aware tool
 TOPCAT/STILTS actually read for per-column name/unit/ucd/description.
 
 Only int32/int64/float32/float64/boolean/string are ever written -- the same six types
-parquet-fortran's own writer supports (see doc/pages/supported-data-types.md). FITS types that
+parquet-fortran's own writer supports (see doc/pages/types/supported-data-types.md). FITS types that
 don't map onto one of those cleanly are handled on a best-effort basis:
 
   - unsigned 8/16-bit integers (B/I, or J/K widened via the TZERO convention) -> int32/int64
@@ -71,7 +71,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_OUTPUT_EXISTS = 2
 
-# Maps this library's own --compression tokens (doc/pages/supported-data-types.md's
+# Maps this library's own --compression tokens (doc/pages/types/supported-data-types.md's
 # "Compression and row group size") onto the codec names pyarrow's write_table expects.
 COMPRESSION_MAP = {
     "uncompressed": "NONE",

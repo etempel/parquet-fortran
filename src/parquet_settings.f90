@@ -29,7 +29,7 @@
 !> rather than settings because loosening them would convert a guard against runaway input into a
 !> way to overflow the parser's own stack.
 !>
-!> User guide: `doc/pages/settings.md`.
+!> User guide: `doc/pages/operating/settings.md`.
 module parquet_settings
     use iso_fortran_env, only: output_unit, error_unit, int32, int64
     use iso_c_binding, only: c_int, c_int64_t
@@ -132,7 +132,7 @@ module parquet_settings
     !
     !> Where the library's own messages go. `message_stream` accepts exactly these two, because a
     !! Fortran unit number means nothing on the C++ side of the bind(C) boundary, where three of the
-    !! library's warnings and one of its reports are printed -- see doc/pages/settings.md.
+    !! library's warnings and one of its reports are printed -- see doc/pages/operating/settings.md.
     integer, parameter :: stream_stdout = 0
     integer, parameter :: stream_stderr = 1
     !
@@ -875,7 +875,7 @@ contains
     !> as `parquet_print_settings` prints it (`PARQUET_FORTRAN_SORT_THREADS`,
     !> `PARQUET_FORTRAN_VERBOSITY`, ...). The one name worth knowing in advance is
     !> `PARQUET_FORTRAN_ARROW_THREADS`, whose setter is called `parquet_set_arrow_threads` -- the
-    !> variable follows the printed name, not the setter. See `doc/pages/settings.md` for the full
+    !> variable follows the printed name, not the setter. See `doc/pages/operating/settings.md` for the full
     !> table.
     !>
     !> **It applies over what is already set; it does not reset.** A variable that is absent leaves

@@ -234,7 +234,7 @@ That is the price of one engine entry point serving three operations instead of 
 `pf_sort_keys` holds no C handle — its keys are ordinary allocatable Fortran arrays, and the C++
 side is created, used and freed entirely inside `pf_argsort`. That keeps the type free of a
 finalizer, which in turn makes it usable per-thread in the obvious way (a finalizable type must
-never be given to OpenMP's `private()` — see [Thread safety](thread-safety.html)).
+never be given to OpenMP's `private()` — see [Thread safety](../operating/thread-safety.html)).
 
 ## Validating a permutation
 
@@ -277,12 +277,12 @@ key values. A key column that has not been read yet is read for you.
 The table has three read-only counterparts that answer the same questions without moving anything —
 `%argsort_by`, `%is_sorted_by` and `%argsort_partial`. Because they do not reorder, they do not
 detach the table from its file, which `%sort_by` does. See
-[Ordering rows without reordering them](table.html#ordering-rows-without-reordering-them).
+[Ordering rows without reordering them](../tables/table-mutate.html#ordering-rows-without-reordering-them).
 
 `%top_n` is the mutating counterpart of `%argsort_partial`, and stands in the same relation to
 `%sort_by` as `pf_partial_argsort` does to `pf_argsort`: it keeps only the `n` rows the keys put
 first, selecting rather than ordering everything. See
-[Keeping only the best rows](table.html#keeping-only-the-best-rows).
+[Keeping only the best rows](../tables/table-mutate.html#keeping-only-the-best-rows).
 
 > **Do not `pf_permute` a pointer obtained from `%col`.** `%col` hands back a *writable pointer
 > into a table's live storage*, so permuting through it reorders that one column and leaves every
@@ -316,7 +316,7 @@ call pf_partial_sort(flux, brightest, n=10, descending=.true.)
 ```
 
 On a whole table the same operation is `parquet_table%top_n`, which keeps the `n` best rows of every
-column together — see [Keeping only the best rows](table.html#keeping-only-the-best-rows).
+column together — see [Keeping only the best rows](../tables/table-mutate.html#keeping-only-the-best-rows).
 
 **The complexity claim, with its caveat.** `pf_partial_sort` is `O(n log k)` for `k` results and
 `pf_nth_element` is `O(n)`, against `O(n log n)` for a full sort — but `pf_partial_sort` stops

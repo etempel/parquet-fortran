@@ -464,7 +464,7 @@ Some limits the library enforces are **not** published here — notably Arrow's 
 ceilings on a vector column's `col_size` and on a file's column count. Those are enforced in the C++
 layer, which reports them clearly when they are hit, and mirroring them into Fortran would create a
 second copy of a number that has exactly one correct value. See
-[Limitations](../index.html) in the README for what those ceilings are.
+[Limitations](../../index.html) in the README for what those ceilings are.
 
 ## A note on `parquet_core`
 

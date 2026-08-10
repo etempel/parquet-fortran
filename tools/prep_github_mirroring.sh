@@ -65,7 +65,12 @@ while IFS= read -r file; do
     content="$(<"$file")"
     printf '%s\n' "${content//$FROM_PREFIX/$TO_PREFIX}" > "$file"
     count=$((count + 1))
-done < <(grep -lF -- "$FROM_PREFIX" README.md doc/pages/*.md)
+# find rather than a doc/pages/*.md glob: the page tree is nested
+# (doc/pages/<group>/<name>.md), and a flat glob would silently skip every
+# nested page that carries an absolute blob URL. find handles the recursion
+# portably (BSD and GNU alike), and README.md as a path operand matches
+# -name '*.md' itself.
+done < <(find README.md doc/pages -name '*.md' -exec grep -lF -- "$FROM_PREFIX" {} +)
 
 echo "tools/prep_github_mirroring.sh: rewrote $count file(s) ($FROM_PREFIX -> $TO_PREFIX)"
 

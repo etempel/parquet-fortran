@@ -355,7 +355,7 @@ static bool generate_no_stats_fixture()
 // test/fixtures/extended_types.parquet: exercises the read-time widening
 // support for Arrow physical types this library's own writer never
 // produces (see CONTRIBUTING.md's "Additional scalar types" note and
-// doc/pages/supported-data-types.md) -- INT8/16, UINT8/16/32/64,
+// doc/pages/types/supported-data-types.md) -- INT8/16, UINT8/16/32/64,
 // HALF_FLOAT, and DECIMAL32/64/128/256. 3 rows throughout (uniform column
 // length is required within one Arrow Table); per CLAUDE.md's "sized/typed
 // from the first element" convention, every column's most extreme/telling

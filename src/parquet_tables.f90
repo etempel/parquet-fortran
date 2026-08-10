@@ -42,7 +42,7 @@
 !!   instead: a lazy first touch, any structural change, nulling a column whose validity storage
 !!   does not exist yet, and any write to a string column (whose rows share one packed store). A
 !!   table a thread opened ITSELF inside the region is thread-private and exempt from all of them.
-!!   See parquet_tables_parallel.f90 and doc/pages/thread-safety.md.
+!!   See parquet_tables_parallel.f90 and doc/pages/operating/thread-safety.md.
 !!
 !! Depends on `parquet_columns` (the value store) and `parquet_core` (the reader/writer it drives).
 module parquet_tables
@@ -220,9 +220,10 @@ module parquet_tables
     type :: parquet_table_cache
         type(parquet_table_column), allocatable :: cols(:) !! descriptor slots; `ncols` are live.
         integer :: ncols = 0                               !! live slot count (cols may be longer).
-        !> `cols(1:ncols)`'s slot indices, ordered by column NAME, so `cache_find` can bisect
-        !! instead of scanning. Every value accessor resolves a name through `cache_find`, so on a
-        !! wide table that scan is most of the cost of a `%get_element` call.
+        !> The live slots' indices ordered by column NAME, so `cache_find` can bisect instead of
+        !! scanning; the ordering covers `cols(1:ncols)`. Every value accessor resolves a name
+        !! through `cache_find`, so on a wide table that scan is most of the cost of a
+        !! `%get_element` call.
         !!
         !! **Maintained EAGERLY, by the mutations that change the column set** -- never rebuilt
         !! lazily inside a lookup. `cache_find` takes the cache `intent(in)` precisely so that
@@ -787,8 +788,8 @@ module parquet_tables
         ! --- copying ---
         procedure :: clone => table_clone                     !! Independent deep copy of this table.
         procedure :: clone_structure => table_clone_structure !! Empty table with the same columns.
-        procedure :: clone_extra => table_clone_extra !! Hook: copies an EXTENDING type's own components.
-        ! --- generated table types (see doc/pages/generated-tables.md) ---
+        procedure :: clone_extra => table_clone_extra !! Hook -- copies an EXTENDING type's own components.
+        ! --- generated table types (see doc/pages/utilities/generated-tables.md) ---
         procedure :: bind_predefined => table_bind_predefined !! Binds a generated type's predefined columns.
         ! --- lifecycle ---
         !> Blocks intrinsic assignment: the store lives behind a pointer, so a default `b = a`
@@ -1692,7 +1693,7 @@ module parquet_tables
         module subroutine table_unlock(cache)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
         end subroutine table_unlock
-        !> TEST-ONLY: forces this table's "an append is in flight"/"a read is in flight" counters,
+        !> TEST-ONLY -- forces this table's "an append is in flight"/"a read is in flight" counters,
         !! so the two concurrency aborts can be provoked from ONE thread, deterministically.
         !!
         !! **This is a debug hook, not API.** It exists because the guards it drives
@@ -3757,7 +3758,7 @@ module parquet_tables
         !> Copies the components an EXTENDING type added, which `%clone` cannot know about.
         !!
         !! `parquet_table` is designed to be extended -- a generated table type
-        !! (`doc/pages/generated-tables.md`) does exactly that, and so may hand-written code. But
+        !! (`doc/pages/utilities/generated-tables.md`) does exactly that, and so may hand-written code. But
         !! `table_clone` only knows `parquet_table`'s own components, so anything the extension
         !! declared would arrive default-initialized and nothing would report it. Overriding this
         !! hook is how an extension copies its own state; `%clone` and `%clone_structure` each call
@@ -3788,7 +3789,7 @@ module parquet_tables
         !! it to the kind the schema declared, reads it, and marks the slot `predefined`.
         !!
         !! This is the one library call a generated type's `%init` makes
-        !! (`doc/pages/generated-tables.md`); it is public only because a generated module is a
+        !! (`doc/pages/utilities/generated-tables.md`); it is public only because a generated module is a
         !! DIFFERENT module and `parquet_table`'s components are private, so there is no other way
         !! in. Hand-written code rarely needs it -- a table opened with `parquet_open_table` already
         !! reaches every column by name.

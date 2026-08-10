@@ -253,8 +253,8 @@ with finer precision than the target unit `error stop`s (a nanosecond-precision 
 value written into a microsecond column, say) rather than silently truncating.
 
 To declare a specific unit, use a MAML `data_type` token — see
-[Building a schema in code](building-schema-in-code.html#building-a-schema-with-init-and-add_field) or
-[The MAML metadata format](maml-format.html#the-fields-section):
+[Building a schema in code](../schema/building-schema-in-code.html#building-a-schema-with-init-and-add_field) or
+[The MAML metadata format](../schema/maml-format.html#the-fields-section):
 
 ```yaml
 fields:
@@ -302,7 +302,7 @@ if (unit == parquet_unit_nanos .and. tz == "UTC") ...
 ```
 
 Aborts if `name` is not a `time`/`timestamp` column. This is distinct from
-[`parquet_get_metadata`](reading.html#reading-table-metadata-with-parquet_get_metadata), which
+[`parquet_get_metadata`](../io/reading.html#reading-table-metadata-with-parquet_get_metadata), which
 serves user-defined key/value metadata rather than this schema-level property.
 
 ## Reading files written by other tools
@@ -332,11 +332,11 @@ Every access pattern the other supported types have works identically for `parqu
   [Supported data types](supported-data-types.html).
 - **Streaming/chunked writes and reads**: `parquet_new_row_group`/`parquet_write_column_chunk`/
   `parquet_finish_row_group` and `parquet_read_column_chunk` — see
-  [Streaming/chunked writes](writing.html#streamingchunked-writes) /
-  [Streaming/chunked reads](reading.html#streamingchunked-reads). As with every other type,
+  [Streaming/chunked writes](../io/writing.html#streamingchunked-writes) /
+  [Streaming/chunked reads](../io/reading.html#streamingchunked-reads). As with every other type,
   `parquet_write_column_chunk` requires an exact `data_type` match (no cross-type conversion).
 - **Row mode / element mode**: `parquet_read_array_row_mode`/`parquet_read_array_element_mode` —
-  see [Reading only touches the columns you ask for](reading.html#reading-only-touches-the-columns-you-ask-for).
+  see [Reading only touches the columns you ask for](../io/reading.html#reading-only-touches-the-columns-you-ask-for).
 
 None of these take an `is_valid=`/`null_value=` argument, for the same reason the whole-column
 calls don't — see [Null values are part of the element](#null-values-are-part-of-the-element-not-a-separate-mask)

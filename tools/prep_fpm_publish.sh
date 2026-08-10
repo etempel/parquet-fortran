@@ -21,7 +21,7 @@
 #      see REMOVE_PATHS below. `tools/generate_parquet_maml.sh`, `tools/generate_user_table_code.py`,
 #      `tools/convert_fits_to_parquet.py`,
 #      and `tools/parquet_metadata_to_md.py` are deliberately kept: they're consumer-facing (see
-#      doc/pages/embedding-maml-schemas.md and each script's own docstring, respectively). This
+#      doc/pages/utilities/embedding-maml-schemas.md and each script's own docstring, respectively). This
 #      list must stay in sync by hand -- see CLAUDE.md's "Keeping tools/prep_fpm_publish.sh in
 #      sync" for the rule.
 #   4. `app/` is an *allow-list*, not a strip-list: only `app/program.f90` (the `run_parquet_fortran`

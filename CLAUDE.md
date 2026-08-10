@@ -402,12 +402,20 @@ User- and contributor-facing docs are split across three layers — keep new con
   license/contributing pointers. Keep it short — do **not** let it grow back into a manual;
   deep-dive/how-to content goes in `doc/pages/`, and the per-procedure reference is generated
   by FORD, not hand-written here.
-- **`doc/pages/*.md`** — the full *user guide*, one file per topic (reading, writing, building a
-  schema in code, the MAML metadata format, a combined example, error handling, thread safety,
-  supported data types, performance, troubleshooting, embedding your own MAML schemas), rendered
-  as FORD narrative pages (`doc/pages/index.md` is the landing page for this guide, with an
-  `ordered_subpage:` frontmatter entry + body bullet per page). Never a hand-maintained
-  per-procedure API table here either — link to the generated reference instead.
+- **`doc/pages/<group>/*.md`** — the full *user guide*, organised **two layers deep**: six group
+  directories (`io/`, `types/`, `schema/`, `tables/`, `utilities/`, `operating/`), each holding
+  one file per topic plus its own `index.md` (an orientation paragraph and a described bullet
+  per page), rendered as FORD nested narrative pages. `doc/pages/index.md` is the guide's
+  landing page — orientation prose, one described bullet per group, and a flat
+  every-page-at-a-glance list. Every `index.md` carries one `ordered_subpage:` frontmatter entry
+  per child (a page filename, or a bare group-directory name), mirrored by its body bullets;
+  `check_doc_page_index_consistency` (`tools/check_source_conventions.py`, run in CI's lint
+  stage) enforces all of those pairings, including that every group directory has an `index.md`
+  — FORD **silently skips** a group without one (exit 0, whole group absent from the site).
+  Cross-group links between pages use `../<group>/<name>.html#anchor`; `../../index.html` is the
+  README front page while `../index.html` is the guide's own landing page — one level apart,
+  entirely different pages. Never a hand-maintained per-procedure API table here either — link
+  to the generated reference instead.
 - **FORD-generated API reference** — every public procedure/type/module gets its own `!>`
   (leading) doc-comment plus a trailing `!!` tag on every dummy argument/function result (see
   the "FORD doc-comment conventions" section below); FORD turns these into the browsable
@@ -433,11 +441,11 @@ Working rules:
   applies to *descriptions* of a call, never to a runnable code example inside a ```fortran fence,
   where brackets would not compile. Adopted after the fact rather than in one sweep: apply it to
   any signature you write or edit, and retrofit a whole page the next time that page is touched
-  for another reason (`doc/pages/table.md` is retrofitted; the others are not yet). The first
+  for another reason (`doc/pages/tables/table.md` is retrofitted; the others are not yet). The first
   bracketed signature on a page should carry a one-line note saying what the brackets mean.
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
-  everywhere) — see the MAML→header flow in `doc/pages/maml-format.md`'s "The MAML metadata format".
+  everywhere) — see the MAML→header flow in `doc/pages/schema/maml-format.md`'s "The MAML metadata format".
 - **Badges:** README.md carries three dynamic `gitlab.4most.eu` badges (CI pipeline, test
   coverage, API documentation) alongside the static license/language/fpm ones. These are
   GitLab-specific — `tools/prep_github_mirroring.sh` swaps them for a single GitHub Pages
@@ -761,7 +769,7 @@ follow, and all four are easy to violate by reflex:
   `parquet_maml_base` is imported with an `only:` list rather than in full, because its other
   public names are this library's own embedded MAML fixtures, not user API.
 - **`parquet_core` is internal and documented as such** (README's API-stability bullet,
-  `doc/pages/table.md`, and the module's own doc-comment). Only `use parquet` carries the
+  `doc/pages/tables/table.md`, and the module's own doc-comment). Only `use parquet` carries the
   semantic-versioning promise. Sibling modules must `use parquet_core`, never `use parquet` —
   the facade uses *them*, so the reverse is a circular dependency and will not compile.
 
@@ -1006,7 +1014,7 @@ split without being forced into it.
 `.maml` example/fixture files live in `schemas/`. `tools/generate_parquet_maml.sh` accepts
 `--dir=<name>`/`--dir <name>` (default `schemas`) so downstream projects embedding their own
 MAML schemas aren't forced to match this project's convention — see
-`doc/pages/embedding-maml-schemas.md` for the user-facing how-to.
+`doc/pages/utilities/embedding-maml-schemas.md` for the user-facing how-to.
 
 ### Reading MAML source files: shared helper, line-length limit, CRLF handling
 
@@ -1445,7 +1453,7 @@ unparsed from-scratch schema this guard exists to catch.
 `src/parquet_strings.f90` is a **near**-independent module (`use parquet_strings`) providing
 `parquet_string_column` (Arrow-LargeUtf8-style
 offsets+data+bit-packed-validity string storage) and `parquet_string` (a non-owning handle to
-one element). User guide: `doc/pages/string-columns.md`.
+one element). User guide: `doc/pages/types/string-columns.md`.
 
 - **"Independent" is a direction, not a fact, and the exceptions are enumerated.** It depends on
   `iso_fortran_env`/`iso_c_binding`, and on exactly two things beyond them: `parquet_settings` (for
@@ -1509,7 +1517,7 @@ one element). User guide: `doc/pages/string-columns.md`.
 `src/parquet_temporal.f90` provides `parquet_date`/`parquet_time`/`parquet_timestamp` — one
 element each (unlike `parquet_string_column` above, which owns a whole column) — fully wired
 into `parquet_read_column`/`parquet_write_column` and every chunked/row-mode/element-mode
-counterpart. User guide: `doc/pages/date-time.md`.
+counterpart. User guide: `doc/pages/types/date-time.md`.
 
 - **Domain-grouped module naming, not one-module-per-type — `parquet_temporal` is the precedent
   for future sibling modules.** The name groups `parquet_date`/`parquet_time`/`parquet_timestamp`
@@ -1523,7 +1531,7 @@ counterpart. User guide: `doc/pages/date-time.md`.
   anywhere on their read/write path, unlike every other supported type.** A default-initialized
   element is null; write gathers validity from the elements themselves; a null-containing column
   reads without the error-on-Null the numeric/string readers apply by default. This is a
-  deliberate, documented deviation (see `doc/pages/date-time.md`'s "Null values are part of the
+  deliberate, documented deviation (see `doc/pages/types/date-time.md`'s "Null values are part of the
   element" section and `supported-data-types.md`'s callout in its own "Null values" section) —
   not an oversight to bring in line with the rest of the library. A future `parquet_map`/
   `parquet_list` module should make its own considered choice here rather than assuming either
@@ -2402,7 +2410,7 @@ same warm-up function rather than treating it as a one-off; if a third instance 
 reconsider a broader warm-up strategy (e.g. a full dummy write+close round-trip exercising every
 supported type, single-threaded, in the same `std::call_once` block) instead of continuing to
 enumerate individual private caches by name. See
-[Thread safety](doc/pages/thread-safety.md#a-note-on-arrows-own-type-singleton-construction) for
+[Thread safety](doc/pages/operating/thread-safety.md#a-note-on-arrows-own-type-singleton-construction) for
 the user-facing writeup.
 
 ### gcovr <7.1 cannot parse gcov output for a 10,000+ line file
@@ -2589,7 +2597,7 @@ maintainer/CI-only files (`REMOVE_PATHS`) and edits `fpm.toml` (comments out `te
 change that invalidates it — watch for these triggers:
 
 - **A new file lands under `tools/`.** Decide whether it's consumer-facing (like
-  `tools/generate_parquet_maml.sh`, documented in `doc/pages/embedding-maml-schemas.md`) or
+  `tools/generate_parquet_maml.sh`, documented in `doc/pages/utilities/embedding-maml-schemas.md`) or
   maintainer/CI-only. If the latter, add it to `REMOVE_PATHS`. (A missing/renamed entry fails
   loudly — the script pre-validates every path exists — so this is at least self-enforcing for
   *existing* entries; it won't catch a *new* file that should have been added but wasn't.)

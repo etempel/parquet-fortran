@@ -201,7 +201,7 @@ contains
     end subroutine test_limits
     !
     !> Asserts on the CONTENT of the dump (which names appear), never on its layout: the name set
-    !> is what doc/pages/settings.md documents and what tools/check_source_conventions.py pins, so
+    !> is what doc/pages/operating/settings.md documents and what tools/check_source_conventions.py pins, so
     !> a golden-layout assertion here would only break on cosmetic changes without adding cover.
     subroutine test_print_settings(error)
         type(error_type), allocatable, intent(out) :: error

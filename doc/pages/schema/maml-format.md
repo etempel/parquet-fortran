@@ -62,13 +62,13 @@ fields:
 
 Notes on the `fields:` entries:
 
-- `name` and `data_type` are required for every field; `data_type` must be one of the [supported types](supported-data-types.html)' MAML names — including `date`/`time[unit]`/`timestamp[unit,utc]` (e.g. `timestamp[ns,utc]`); see [Date, time and timestamp columns](date-time.html#units-and-schema-declared-columns) for the full unit/timezone token syntax.
+- `name` and `data_type` are required for every field; `data_type` must be one of the [supported types](../types/supported-data-types.html)' MAML names — including `date`/`time[unit]`/`timestamp[unit,utc]` (e.g. `timestamp[ns,utc]`); see [Date, time and timestamp columns](../types/date-time.html#units-and-schema-declared-columns) for the full unit/timezone token syntax.
 - `col_size` (default `1`) makes the column a fixed-length vector column, read/written as a 2D array of shape `(col_size, nrows)`.
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
   > Don't confuse `col_size` with `array_size` — despite the similar-sounding names, they're unrelated: `col_size` is how many elements a vector column's row holds, `array_size` is how many characters a `string` column's values can hold.
 - Either can be declared `auto` instead of a number (`col_size: auto` / `array_size: auto`) when the value is only known to the calling Fortran code, not in advance in the MAML file itself — see [Deferring col_size/array_size until write time with `auto`](#deferring-col_sizearray_size-until-write-time-with-auto) below.
 - `unit`, `info` and `ucd` are optional and are carried through into the parquet file's VOTable-style header for that column.
-- `source` is read only by [`tools/generate_user_table_code.py`](generated-tables.html), which turns a MAML into a generated `parquet_table` extension type: `source: file` (the default) means the column is read from the parquet file, `source: computed` that the program fills it in and no file column is looked for. It is accepted and ignored everywhere else, so a table-type schema stays usable as an ordinary write schema.
+- `source` is read only by [`tools/generate_user_table_code.py`](../utilities/generated-tables.html), which turns a MAML into a generated `parquet_table` extension type: `source: file` (the default) means the column is read from the parquet file, `source: computed` that the program fills it in and no file column is looked for. It is accepted and ignored everywhere else, so a table-type schema stays usable as an ordinary write schema.
 - Run `parquet_validate_maml` on a MAML file to catch structural mistakes (duplicate names, missing `data_type`, missing `table`, unknown top-level sections or sub-keys, etc.) before using it to open a writer. It accepts either a `parquet_maml_file` (e.g. from `parquet_load_maml_file`, or built in memory) or a filename directly (`call parquet_validate_maml("schemas/maml_example2.maml")`, loading it from disk internally).
 
 A second MAML file may be validated against a "base" MAML with `parquet_validate_user_maml`, to check it only reuses column names that already exist in the base schema — useful when different pipeline stages should write a subset of a shared schema.
@@ -104,7 +104,7 @@ fields:
 - The renamed field's `fields:` entry (`my_id` above) is validated exactly like any other field entry (`data_type` required, etc.) — nothing is inherited from the base column's own attributes.
 - After `parquet_parse_maml`, the resulting `parquet_column_type` always uses the internal name (`id0`) for `schema%cinfo%col(:)%name` — the same name every other API (`parquet_write_column`, `set_column_available`, `get_column_index`, ...) already expects — with the rename available separately as `schema%cinfo%col(:)%output_name` (`my_id`), which is what actually gets written to the `.parquet` file's schema/VOTable header and to a `write_maml=.true.` sidecar's `fields:` section.
 - `user_maml%col_map` (populated by `parquet_validate_user_maml`) exposes the parsed entries for inspection.
-- Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its own (nor does `protected_cols:`, `extra:`'s other specifically-parsed key — see [Null values](supported-data-types.html#null-values)); anything else nested inside `extra:` is accepted unvalidated and otherwise unused.
+- Since it lives inside `extra:`, `col_map:` does not produce any table-level metadata entry of its own (nor does `protected_cols:`, `extra:`'s other specifically-parsed key — see [Null values](../types/supported-data-types.html#null-values)); anything else nested inside `extra:` is accepted unvalidated and otherwise unused.
 
 ## Renaming columns for reading with `extra: remap:`
 
@@ -122,7 +122,7 @@ extra:
 - The internal name is what every table API uses (`%get`, `%col`, `%kind`, `%rename_column`, ...). The file column keeps being what is actually read, so `%reload` goes back to the same place, and `%rename_column` changes the lookup name only — remap and rename compose freely.
 - **An internal name is allowed to equal one of the file's own column names**, and does not then mean "itself": in `- ra: dec`, internal `ra` reads the file's `dec`. The file's own `ra` column simply becomes unreachable unless some other entry points at it. That shadow is deliberate, not an error — a file often carries columns a program does not want, and one of them sharing a name must not make that name unusable.
 - **Two internal names may read the same file column.** They become two ordinary, independent table columns: identical when first read, and free to diverge afterwards, since each holds its own copy.
-- See [Tables](table.html#renaming-a-files-columns-with-a-read-in-maml) for the table-side view.
+- See [Tables](../tables/table-open.html#renaming-a-files-columns-with-a-read-in-maml) for the table-side view.
 
 ## Filtering and sorting on read with `extra: filter:` and `extra: sort:`
 
@@ -139,10 +139,10 @@ extra:
   - "quality desc nulls_first"
 ```
 
-- Each `filter:` entry is one rule in the existing [`parquet_filter` grammar](reading.html#the-rule-grammar), unchanged. Entries are AND-combined with each other, exactly as several `filt%add` calls are, and then with any `filter=` the caller passed.
-- Each `sort:` entry is one key in the existing [`parquet_sortkey` grammar](reading.html#sort-keys) — `"<column> [asc|desc]"`, or a leading `-` for descending — plus **one MAML-only extension: an optional trailing `nulls_first` or `nulls_last`** (case-insensitive; omitted means `nulls_last`, matching `%add`'s own default). It spells out in text what the Fortran API expresses as `%add(key, nulls_first=.true.)`, since a plain string list has nowhere else to carry a per-key flag.
+- Each `filter:` entry is one rule in the existing [`parquet_filter` grammar](../io/filter-sort-sample.html#the-rule-grammar), unchanged. Entries are AND-combined with each other, exactly as several `filt%add` calls are, and then with any `filter=` the caller passed.
+- Each `sort:` entry is one key in the existing [`parquet_sortkey` grammar](../io/filter-sort-sample.html#sort-keys) — `"<column> [asc|desc]"`, or a leading `-` for descending — plus **one MAML-only extension: an optional trailing `nulls_first` or `nulls_last`** (case-insensitive; omitted means `nulls_last`, matching `%add`'s own default). It spells out in text what the Fortran API expresses as `%add(key, nulls_first=.true.)`, since a plain string list has nowhere else to carry a per-key flag.
 - Keys apply in list order, and the MAML's keys come **before** any the caller passed in `sort=`, so the MAML's are the primary ones and the caller's break its ties.
-- See [Tables](table.html#filtering-sorting-and-checking-rows-as-the-file-is-opened) for the table-side view and the composition rules.
+- See [Tables](../tables/table-open.html#filtering-sorting-and-checking-rows-as-the-file-is-opened) for the table-side view and the composition rules.
 
 ## How table-level keys become metadata entries
 
@@ -157,10 +157,10 @@ Table-level keys become parquet metadata entries, with these special mappings:
 | `keywords:` | A plain-string list, combined into a single `keywords` entry with its items joined by `;`. |
 | any other allowed section, given as a plain-string list (e.g. `survey:`, `author:`, `license:`, ...) | Several entries that all share that key's name (e.g. multiple `list_key` entries with the same name). |
 | any other allowed section, given as a list of *maps* | **Not** specially handled: only its first sub-key ends up captured as a raw, unparsed string, and the rest of that entry's sub-keys are silently dropped. Use `keyarray:` for arbitrary structured metadata instead. |
-| `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:`, `protected_cols:` and (for a read-in table MAML) `remap:`, `filter:` and `sort:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) [Null values](supported-data-types.html#null-values) [Renaming columns for reading with `extra: remap:`](#renaming-columns-for-reading-with-extra-remap) and [Filtering and sorting on read](#filtering-and-sorting-on-read-with-extra-filter-and-extra-sort). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
+| `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:`, `protected_cols:` and (for a read-in table MAML) `remap:`, `filter:` and `sort:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) [Null values](../types/supported-data-types.html#null-values) [Renaming columns for reading with `extra: remap:`](#renaming-columns-for-reading-with-extra-remap) and [Filtering and sorting on read](#filtering-and-sorting-on-read-with-extra-filter-and-extra-sort). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
 
 Every entry in this table is read back on the read side with `parquet_get_metadata` (see
-[Reading table metadata with `parquet_get_metadata`](reading.html#reading-table-metadata-with-parquet_get_metadata)),
+[Reading table metadata with `parquet_get_metadata`](../io/reading.html#reading-table-metadata-with-parquet_get_metadata)),
 and a schema can add further entries at runtime that were never in the MAML file at all — see
 [Runtime table metadata](building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata).
 

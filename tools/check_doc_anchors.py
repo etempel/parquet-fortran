@@ -18,22 +18,39 @@ which is all this repository's headings currently use. Non-ASCII headings
 fall back to stripping punctuation via unicodedata, which is a reasonable
 approximation but not a byte-for-byte match to GitHub's Unicode ranges.
 
-Also scans `doc/pages/*.md`. Those files link to each other (and to the
-README-derived FORD front page) using FORD's own rendered `page/*.html`
-form rather than raw `.md` paths -- e.g. `reading.html#some-heading` for a
-sibling page, `../index.html#some-heading` for README.md -- since that is
+Also scans `doc/pages/**/*.md` (the page tree is nested one level deep:
+group directories, each with its own index.md). Those files link to each
+other (and to the README-derived FORD front page) using FORD's own
+rendered `page/*.html` form rather than raw `.md` paths -- e.g.
+`sibling.html#a` for a page in the same group, `../<group>/name.html#a`
+for a page in another group, `../index.html#a` for the guide's own
+top-level index, and `../../index.html#a` for README.md -- since that is
 the correct form for FORD's generated output (see CLAUDE.md's "FORD does
 not resolve doc/pages/*.md links written in README.md's body text" note
-for why README.md itself keeps the raw `doc/pages/<name>.md` form
-instead). Both forms are resolved back to the real source file below so
-their anchors can be checked the same way as ordinary `.md` links.
+for why README.md itself keeps the raw `doc/pages/<group>/<name>.md` form
+instead). Rendered-form links are resolved by modelling the generated
+site: each doc/pages/<rel>.md renders at <site>/page/<rel>.html, README.md
+at <site>/index.html, and the generated listings under <site>/lists/ --
+so a link is resolved lexically against its own page's rendered location
+and mapped back to the Markdown source on disk. `<site>/lists/*` targets
+are structurally valid but generated, so they are accepted without anchor
+validation.
+
+Anchor-LESS relative links (`[text](other.md)`, `[text](sibling.html)`)
+are validated too, for target-file existence only -- a broken anchor-less
+link is otherwise completely silent, which matters most for the rendered
+`.html` form where nothing else ever checks the path. Links to git-ignored
+`feature_*.md` scratch documents are exempt from the existence check
+(they legitimately come and go, and never exist in CI at all);
+`feature_risks.md` is tracked and is NOT exempt.
 
 Usage:
     tools/check_doc_anchors.py
 
-Scans every *.md file in the repository root plus every *.md file in
-doc/pages/. Exits nonzero and prints one line per unresolved link if any
-anchor doesn't match a heading in its target file.
+Scans every *.md file in the repository root plus every *.md file under
+doc/pages/ (recursively). Exits nonzero and prints one line per
+unresolved link if any anchor doesn't match a heading in its target file,
+or any relative link's target file does not exist.
 """
 import re
 import sys
@@ -44,7 +61,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$", re.MULTILINE)
 LINK_RE = re.compile(r"\]\(([^)#\s]*)#([^)\s]+)\)")
+FILE_LINK_RE = re.compile(r"\]\(([^)#\s]+)\)")  # anchor-less: no '#' anywhere in the target
 MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+PAGES_ROOT = (Path(__file__).resolve().parent.parent / "doc" / "pages").resolve()
+
+# Sentinel: the link resolved to something structurally valid that has no
+# Markdown source to validate against (FORD's generated lists/ pages).
+SKIP_TARGET = object()
 
 # GitHub's slugger (see regex.js in the github-slugger package) strips these
 # ASCII ranges outright (control chars, then punctuation), but deliberately
@@ -96,17 +120,48 @@ def resolve_link_target(path, target_file):
 
     Handles three forms: a same-file `#anchor` (empty target_file), an
     ordinary relative `.md` path, and the FORD-rendered `.html` form used
-    between doc/pages/*.md files -- a bare `name.html` is a sibling page
-    (doc/pages/name.md) and `../index.html` is the FORD front page, which
-    is README.md embedded verbatim (see docs.md).
+    between doc/pages/**/*.md files. The rendered form is resolved by
+    modelling the generated site (doc/pages/<rel>.md renders at
+    <site>/page/<rel>.html; README.md at <site>/index.html; the generated
+    listings under <site>/lists/): the link is normalised lexically
+    against the linking page's own rendered directory and mapped back to
+    source. This is what distinguishes `../index.html` (the guide's
+    top-level index, one level up from a nested page) from
+    `../../index.html` (the README front page, at the site root) -- one
+    character apart, entirely different pages.
+
+    Returns a Path, or SKIP_TARGET for a structurally valid target with no
+    Markdown source (lists/), or None for a target that cannot be resolved
+    at all (a rendered-form link outside doc/pages/, or one that escapes
+    the site root).
     """
     if not target_file:
         return path
     if target_file.endswith(".html"):
-        name = Path(target_file).name
-        if name == "index.html":
+        resolved = path.resolve()
+        try:
+            rel_dir = resolved.parent.relative_to(PAGES_ROOT)
+        except ValueError:
+            return None  # rendered-form link in a file FORD never renders
+        rendered_dir = ("page",) + rel_dir.parts
+        stack = list(rendered_dir)
+        for part in Path(target_file).parts:
+            if part == "..":
+                if not stack:
+                    return None  # escapes the rendered site root
+                stack.pop()
+            elif part != ".":
+                stack.append(part)
+        if not stack:
+            return None
+        if tuple(stack) == ("index.html",):
             return (REPO_ROOT / "README.md").resolve()
-        return (REPO_ROOT / "doc" / "pages" / f"{name[:-len('.html')]}.md").resolve()
+        if stack[0] == "lists":
+            return SKIP_TARGET
+        if stack[0] == "page":
+            rel = Path(*stack[1:])
+            return (PAGES_ROOT / rel).with_suffix(".md").resolve()
+        return None
     return (path.parent / target_file).resolve()
 
 
@@ -125,6 +180,11 @@ def check_file(path, cache):
         if re.fullmatch(r"L\d+(-L\d+)?", anchor):
             continue
         target_path = resolve_link_target(path, target_file)
+        if target_path is SKIP_TARGET:
+            continue
+        if target_path is None:
+            problems.append((match.group(0), f"cannot resolve rendered-form target: {target_file}"))
+            continue
         if target_path not in cache:
             if not target_path.is_file():
                 problems.append((match.group(0), f"target file not found: {target_file}"))
@@ -133,11 +193,33 @@ def check_file(path, cache):
         if anchor not in cache[target_path]:
             where = target_file if target_file else "(this file)"
             problems.append((match.group(0), f"no heading in {where} slugs to '#{anchor}'"))
+
+    # Anchor-less relative links: validate that the target file exists at all.
+    # Without this, a mistyped path in a `[text](sibling.html)` or
+    # `[text](doc/pages/<group>/name.md)` link is completely silent.
+    for match in FILE_LINK_RE.finditer(text):
+        target_file = match.group(1)
+        if re.match(r"^[a-z][a-z0-9+.-]*:", target_file):
+            continue  # external URL / mailto: -- not ours to validate
+        target_path = resolve_link_target(path, target_file)
+        if target_path is SKIP_TARGET:
+            continue
+        if target_path is None:
+            problems.append((match.group(0), f"cannot resolve rendered-form target: {target_file}"))
+            continue
+        if target_path.exists():
+            continue
+        # Git-ignored scratch documents come and go by design (and never
+        # exist in CI); a dangling link to one is not an error. The tracked
+        # feature_risks.md always exists, so it never reaches this exemption.
+        if target_path.name.startswith("feature_"):
+            continue
+        problems.append((match.group(0), f"target file not found: {target_file}"))
     return problems
 
 
 def main():
-    md_files = sorted(REPO_ROOT.glob("*.md")) + sorted((REPO_ROOT / "doc" / "pages").glob("*.md"))
+    md_files = sorted(REPO_ROOT.glob("*.md")) + sorted((REPO_ROOT / "doc" / "pages").rglob("*.md"))
     cache = {}
     total_problems = 0
 

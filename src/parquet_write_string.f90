@@ -106,7 +106,7 @@ contains
     !> trimmed values, since a padded array's trailing blanks may just be padding), values here
     !> are compared verbatim: parquet_string_column stores content exactly as given, so a
     !> trailing space is always real data, never padding -- see "Trimming on append" in
-    !> doc/pages/string-columns.md.
+    !> doc/pages/types/string-columns.md.
     subroutine parquet_check_qc_string_compact(writer, name, values)
         type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
         character(len=*), intent(in) :: name !! string column name.

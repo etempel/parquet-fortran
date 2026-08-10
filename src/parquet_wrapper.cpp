@@ -5019,7 +5019,7 @@ extern "C"
 	// "sample_seed <= 0 means draw a fresh seed" convention as "no seed", breaking that promise.
 	// Uses a local (stack-scoped) engine -- no shared/global RNG state -- so this stays safe under
 	// this library's documented "many threads, each opening its own reader" concurrency pattern
-	// (see doc/pages/thread-safety.md); gfortran's own RANDOM_NUMBER/RANDOM_SEED state has no such
+	// (see doc/pages/operating/thread-safety.md); gfortran's own RANDOM_NUMBER/RANDOM_SEED state has no such
 	// guarantee, which is why this draw is done here rather than on the Fortran side.
 	static int32_t resolve_sample_seed(int32_t seed, bool has_seed)
 	{

@@ -121,7 +121,7 @@ contains
     end subroutine write_one_file
 
     !> Validates the specific "parallel compute, serial write" pattern this project recommends
-    !> for the streaming row-group API (see doc/pages/thread-safety.md): OpenMP threads only
+    !> for the streaming row-group API (see doc/pages/operating/thread-safety.md): OpenMP threads only
     !> ever compute chunk data into private slots of a shared buffer, never touch the shared
     !> parquet_writer itself -- the actual parquet_new_row_group/parquet_write_column_chunk/
     !> parquet_finish_row_group calls stay on a single thread, in row-group order, exactly as

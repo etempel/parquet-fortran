@@ -29,14 +29,14 @@ contains
         testsuite = [ &
             new_unittest("README minimal writer/reader example", test_readme_minimal_example), &
             new_unittest("README MAML-schema writer example", test_readme_maml_schema_writer_example), &
-            new_unittest("doc/pages/combined-example.md example", test_readme_combined_example), &
+            new_unittest("doc/pages/schema/combined-example.md example", test_readme_combined_example), &
             new_unittest("maml_example2 writer produces a matching sidecar .maml", &
                 test_maml_example2_sidecar_keyarray), &
-            new_unittest("doc/pages/date-time.md datetime_quickstart example", test_datetime_quickstart_example), &
-            new_unittest("doc/pages/performance.md write_parquet_qc_example", test_performance_qc_example), &
-            new_unittest("doc/pages/string-columns.md strings_quickstart example", &
+            new_unittest("doc/pages/types/date-time.md datetime_quickstart example", test_datetime_quickstart_example), &
+            new_unittest("doc/pages/operating/performance.md write_parquet_qc_example", test_performance_qc_example), &
+            new_unittest("doc/pages/types/string-columns.md strings_quickstart example", &
                 test_strings_quickstart_example), &
-            new_unittest("doc/pages/string-columns.md token_column example", test_token_column_example), &
+            new_unittest("doc/pages/types/string-columns.md token_column example", test_token_column_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -276,7 +276,7 @@ contains
             "README combined example did not round-trip the 'id0'/'idarr' columns correctly")
     end subroutine test_readme_combined_example
     !
-    !> doc/pages/date-time.md's "datetime_quickstart" example: writes a
+    !> doc/pages/types/date-time.md's "datetime_quickstart" example: writes a
     !> parquet_date column (with one null) and a parquet_timestamp column (set
     !> from civil fields, an ISO-8601 string, and set_unix), reads them back,
     !> and checks the round-tripped values/null state/to_string output.
@@ -335,7 +335,7 @@ contains
             "datetime_quickstart example: 'taken_at' row 3 (set_unix) did not round-trip correctly")
     end subroutine test_datetime_quickstart_example
     !
-    !> doc/pages/performance.md's "write_parquet_qc_example": builds a qc-maml
+    !> doc/pages/operating/performance.md's "write_parquet_qc_example": builds a qc-maml
     !> directly via schema%maml%name/schema%maml%lines (rather than a file or
     !> add_col_qc), writes an out-of-range column with is_valid (one Null) and
     !> qc=.true./compression="zstd", then reads it back and checks the
@@ -377,7 +377,7 @@ contains
 
         ! Row 3 was written as a genuine Null (is_valid(3)=.false.); with no null_value=
         ! passed on read, that slot comes back as the safe default (0), not the original
-        ! ra(3) -- see doc/pages/supported-data-types.md's "Null values" section.
+        ! ra(3) -- see doc/pages/types/supported-data-types.md's "Null values" section.
         call check(error, all(is_valid_read .eqv. is_valid), &
             "performance.md qc example did not round-trip the 'ra' column's is_valid mask correctly")
         if (allocated(error)) return
@@ -386,7 +386,7 @@ contains
             "performance.md qc example did not round-trip the 'ra' column values correctly")
     end subroutine test_performance_qc_example
     !
-    !> doc/pages/string-columns.md's "strings_quickstart" example: appends two
+    !> doc/pages/types/string-columns.md's "strings_quickstart" example: appends two
     !> strings, a null, and an empty string to a parquet_string_column, then
     !> checks size/character_size/null_count and per-row is_null/get.
     subroutine test_strings_quickstart_example(error)
@@ -424,7 +424,7 @@ contains
         call check(error, s == "", "strings_quickstart example: row 4 get() should be an empty string")
     end subroutine test_strings_quickstart_example
     !
-    !> doc/pages/string-columns.md's "token_column" example: reserves capacity,
+    !> doc/pages/types/string-columns.md's "token_column" example: reserves capacity,
     !> appends tokens (one stripped on append), and checks find/reverse-find
     !> and the empty-token count.
     subroutine test_token_column_example(error)

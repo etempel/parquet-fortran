@@ -60,7 +60,7 @@ capped at that same number. This is a hard limit of Arrow's `FixedSizeListType` 
 [Large string columns](#large-string-columns) above), there is no "large" fixed-size-list variant
 to fall back to. Writing a vector column whose `col_size` would exceed this aborts the process (a
 C++-level abort with a diagnostic on stderr, the same class of failure as the physical-type-mismatch
-case in [Limitations](../index.html#limitations)) rather than silently truncating `col_size` and
+case in [Limitations](../../index.html#limitations)) rather than silently truncating `col_size` and
 corrupting the written column.
 
 ## Vector-column per-row-group element count limit
@@ -68,7 +68,7 @@ corrupting the written column.
 Parquet's own repetition/definition-level generation for list-typed columns walks every flattened
 element *of a single row group* with a plain `int32_t` counter, so a row group's own
 `row_group_rows * col_size` is capped at 2,147,483,647 — but this is scoped to one row group, not
-the whole file. `parquet_close_writer`'s row-group auto-sizing (see [Writer options](writing.html#writer-options))
+the whole file. `parquet_close_writer`'s row-group auto-sizing (see [Writer options](../io/writing.html#writer-options))
 already knows each column's `col_size` and silently picks a
 smaller row-group size whenever a wide vector column needs it, so a column's *total*
 `nrows * col_size` can exceed 2,147,483,647 — a real, hittable case (e.g. 2.5 billion rows at
@@ -115,7 +115,7 @@ A `float32`/`float64`/`half_float`/`decimal` value read into an `integer(int32)`
 > without the error-on-Null described below — see
 > [Null values are part of the element](date-time.html#null-values-are-part-of-the-element-not-a-separate-mask).
 
-Fortran has no per-element representation for a missing/Null value. On the **read** side, if a column contains any genuine Parquet Null (e.g. a file produced by another tool), the default behavior of `parquet_read_column`, `parquet_read_array_row_mode`, and `parquet_read_array_element_mode` is to abort the process immediately, rather than silently returning undefined data. This is a C++-level abort with a diagnostic printed to stderr (e.g. `parquet-fortran: parquet_read_int32_column: column contains Null value(s), which is not supported: <column>`), not a Fortran `error stop` — the same class of failure as the physical-type-mismatch case in [Limitations](../index.html#limitations).
+Fortran has no per-element representation for a missing/Null value. On the **read** side, if a column contains any genuine Parquet Null (e.g. a file produced by another tool), the default behavior of `parquet_read_column`, `parquet_read_array_row_mode`, and `parquet_read_array_element_mode` is to abort the process immediately, rather than silently returning undefined data. This is a C++-level abort with a diagnostic printed to stderr (e.g. `parquet-fortran: parquet_read_int32_column: column contains Null value(s), which is not supported: <column>`), not a Fortran `error stop` — the same class of failure as the physical-type-mismatch case in [Limitations](../../index.html#limitations).
 
 To read a Null-containing column instead of erroring, pass one or both of these optional keyword arguments (supported by all three of the read families above, for every data type):
 
@@ -187,7 +187,7 @@ columns already use, from one level of list-nesting to arbitrary levels of struc
 top-level column — a MAML field's `name:` can be a dotted path, and a `parquet_filter%add` rule's
 column can be one too.
 
-**`parquet_close_reader(..., print_stat=.true.)`** ([above](reading.html#printing-reader-statistics-with-parquet_close_reader-print_stattrue))
+**`parquet_close_reader(..., print_stat=.true.)`** ([above](../io/reading.html#printing-reader-statistics-with-parquet_close_reader-print_stattrue))
 shows one row per top-level *physical* struct column touched by any of its leaves being read, not
 one row per leaf — its `nulls`/`min`/`max` reflect the whole struct's own top-level figures (which
 degrade to blank/`-` for a struct, since those statistics aren't well-defined for a nested type),

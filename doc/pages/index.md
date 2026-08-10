@@ -1,23 +1,11 @@
 ---
 title: User guide
-ordered_subpage: reading.md
-ordered_subpage: writing.md
-ordered_subpage: supported-data-types.md
-ordered_subpage: maml-format.md
-ordered_subpage: building-schema-in-code.md
-ordered_subpage: quality-control.md
-ordered_subpage: string-columns.md
-ordered_subpage: table.md
-ordered_subpage: generated-tables.md
-ordered_subpage: date-time.md
-ordered_subpage: sorting.md
-ordered_subpage: combined-example.md
-ordered_subpage: error-handling.md
-ordered_subpage: thread-safety.md
-ordered_subpage: performance.md
-ordered_subpage: settings.md
-ordered_subpage: troubleshooting.md
-ordered_subpage: embedding-maml-schemas.md
+ordered_subpage: io
+ordered_subpage: types
+ordered_subpage: schema
+ordered_subpage: tables
+ordered_subpage: utilities
+ordered_subpage: operating
 ---
 
 The complete usage guide for **parquet-fortran**, beyond the quick-start overview on the
@@ -35,25 +23,66 @@ stability promise covers. Because `parquet` re-exports rather than defines, the 
 [procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the reliable
 place to look a name up, rather than the `parquet` module's own page.
 
-Ordered roughly by what a new user needs first; reference/advanced material is last. This list and
-the `ordered_subpage:` frontmatter above are kept in the same order by hand — there is no automatic
-check that they stay in sync, so update both together if you reorder either one.
+The guide is organised into six groups, ordered roughly by what a new user needs first;
+reference/advanced material is last. If you only want a file's columns as arrays with the least
+ceremony, skip straight to [Whole tables in memory](tables/index.html) — it is the easiest entry
+point in the library.
 
-- [Reading parquet files from your Fortran code](reading.html)
-- [Writing parquet files from your Fortran code](writing.html)
-- [Supported data types](supported-data-types.html)
-- [The MAML metadata format](maml-format.html)
-- [Building a schema in code with `schema%init`/`schema%add_field`](building-schema-in-code.html)
-- [Quality control](quality-control.html)
-- [Compact string columns with `parquet_string_column`](string-columns.html)
-- [Whole tables in memory with `parquet_table`](table.html)
-- [Generated table types: named accessors from a MAML schema](generated-tables.html)
-- [Date, time and timestamp columns](date-time.html)
-- [Sorting arrays and columns with `pf_sort`/`pf_argsort`](sorting.html)
-- [Combined example: MAML schema, vector columns and metadata](combined-example.html)
-- [Error handling](error-handling.html)
-- [Thread safety](thread-safety.html)
-- [Performance and memory](performance.html)
-- [Settings](settings.html)
-- [Troubleshooting](troubleshooting.html)
-- [Embedding your own MAML schemas in your own project](embedding-maml-schemas.html)
+- [Reading and writing files](io/index.html) — read columns into arrays, write arrays out, and
+  restrict a read by filter, sort order or random sample.
+- [Data types](types/index.html) — what a column can hold: the supported types, date/time/
+  timestamp elements, and compact string columns.
+- [Schemas, metadata and quality control](schema/index.html) — declare a file's contents in MAML
+  or in code, with qc bounds, ending on a worked example combining all of it.
+- [Whole tables in memory](tables/index.html) — the high-level `parquet_table` layer: a whole
+  file as one object, columns by name, read only when touched.
+- [Utilities and code generation](utilities/index.html) — sorting for plain arrays, generated
+  table types, and embedding your own MAML schemas.
+- [Operating the library](operating/index.html) — errors, troubleshooting, thread safety,
+  performance and settings.
+
+### Every page at a glance
+
+All 22 pages, in reading order. (This list, each group's own page list and the
+`ordered_subpage:` frontmatter are kept consistent by
+`tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
+
+**Reading and writing files**
+
+- [Reading parquet files from your Fortran code](io/reading.html)
+- [Filtering, sorting and sampling rows](io/filter-sort-sample.html)
+- [Writing parquet files from your Fortran code](io/writing.html)
+
+**Data types**
+
+- [Supported data types](types/supported-data-types.html)
+- [Date, time and timestamp columns](types/date-time.html)
+- [Compact string columns with `parquet_string_column`](types/string-columns.html)
+
+**Schemas, metadata and quality control**
+
+- [The MAML metadata format](schema/maml-format.html)
+- [Building a schema in code with `schema%init`/`schema%add_field`](schema/building-schema-in-code.html)
+- [Quality control](schema/quality-control.html)
+- [Combined example: MAML schema, vector columns and metadata](schema/combined-example.html)
+
+**Whole tables in memory**
+
+- [Whole tables in memory: the basics](tables/table.html)
+- [Opening a table: slices, filters and renaming](tables/table-open.html)
+- [Building a table and writing it out](tables/table-write.html)
+- [Changing a table](tables/table-mutate.html)
+
+**Utilities and code generation**
+
+- [Sorting arrays and columns with `pf_sort`/`pf_argsort`](utilities/sorting.html)
+- [Generated table types: named accessors from a MAML schema](utilities/generated-tables.html)
+- [Embedding your own MAML schemas in your own project](utilities/embedding-maml-schemas.html)
+
+**Operating the library**
+
+- [Error handling](operating/error-handling.html)
+- [Troubleshooting](operating/troubleshooting.html)
+- [Thread safety](operating/thread-safety.html)
+- [Performance and memory](operating/performance.html)
+- [Settings](operating/settings.html)

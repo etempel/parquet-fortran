@@ -56,7 +56,7 @@ module parquet_core
     !> public constant of the same meaning in parquet_settings -- where the value and the reasoning
     !> for it now live -- rather than a second copy of the number, so the two cannot drift. The
     !> short names are kept because the parser code reads better in its own vocabulary; see
-    !> doc/pages/settings.md for what a user sees.
+    !> doc/pages/operating/settings.md for what a user sees.
     integer, parameter :: filter_max_rule_len = parquet_max_filter_rule_len
     integer, parameter :: filter_max_depth = parquet_max_filter_depth
     integer, parameter :: filter_max_nodes = parquet_max_filter_nodes
@@ -366,7 +366,7 @@ module parquet_core
         !> group must supply exactly this many rows.
         integer(c_long_long) :: current_row_group_nrows = 0
         !> Row-filtering ("mask") state -- see parquet_write_row_mask/parquet_write_chunk_row_mask
-        !> and doc/pages/writing.md's "Filtering rows with a mask". The two masking schemes are
+        !> and doc/pages/io/writing.md's "Filtering rows with a mask". The two masking schemes are
         !> mutually exclusive per writer; only the fields relevant to whichever scheme (if any) is
         !> actually used are ever populated.
         logical, allocatable :: file_mask(:) !! Whole-file mask set by parquet_write_row_mask; unallocated if unused.
@@ -482,7 +482,7 @@ module parquet_core
     !> Rules are unvalidated here -- the expression is parsed, and every clause
     !> validated (column exists, is a scalar column, value is well-formed for
     !> that column's type), once a reader actually applies the filter. See "Row
-    !> filtering with parquet_filter" in doc/pages/reading.md for the grammar.
+    !> filtering with parquet_filter" in doc/pages/io/reading.md for the grammar.
     !>
     !> %remap_column_names(from, to) rewrites the columns the rules refer to, in place, replacing
     !> from(k) with to(k) throughout every rule's expression. It exists for callers that build a
@@ -530,7 +530,7 @@ module parquet_core
     !>
     !> Keys are unvalidated here -- the column must exist and be a sortable scalar column, which
     !> is checked once a reader actually applies the sort. See "Reading rows in sorted order" in
-    !> doc/pages/reading.md.
+    !> doc/pages/io/reading.md.
     !>
     !> The type is named for what it holds (the keys), not for the operation; a sorted read is
     !> requested through parquet_open_reader/parquet_reader_set_sort.
@@ -556,7 +556,7 @@ module parquet_core
     !> Read-time quality control declared in CODE rather than in a MAML file: one column per %add
     !> call, in exactly the compact "col, min, max, miss" string parquet_schema%add_col_qc already
     !> takes, so there is one read-time-QC grammar in this library rather than two. See
-    !> "Declaring qc in code" in doc/pages/quality-control.md for the field syntax -- the
+    !> "Declaring qc in code" in doc/pages/schema/quality-control.md for the field syntax -- the
     !> operator prefixes (>, >=, <, <=) and the Null/NA/empty miss: convention are inherited from
     !> %add_col_qc verbatim.
     !>
@@ -617,7 +617,7 @@ module parquet_core
     !> protected column (see parquet_column_type%is_protected) error stops.
     !>
     !> A scalar "string" column can also be passed as a `type(parquet_string_column)` (see
-    !> module parquet_strings, doc/pages/string-columns.md) instead of a padded
+    !> module parquet_strings, doc/pages/types/string-columns.md) instead of a padded
     !> character(len=...) array -- this specific carries its own per-element null status (see
     !> `%append_null`/`%is_null`), so `is_valid` is not accepted for it; every null already in the
     !> column is written as a Parquet Null directly. Scalar (1-D) columns only -- there is no
@@ -712,7 +712,7 @@ module parquet_core
     !> `nrows`; the row group's actual written row count is `count()` of its window's mask slice
     !> (which may be anywhere from 0 to `nrows`). `mask` must be fully consumed by the writer's
     !> row groups by the time it closes (`error stop` at parquet_close_writer otherwise). See
-    !> doc/pages/writing.md's "Filtering rows with a mask" for a worked example.
+    !> doc/pages/io/writing.md's "Filtering rows with a mask" for a worked example.
     !>
     !> Mutually exclusive with parquet_write_chunk_row_mask on the same writer -- once either has
     !> been used, calling the other is an `error stop`. Callable at most once per writer -- a
@@ -762,7 +762,7 @@ module parquet_core
     !> count overflows int32 -- vanishingly unlikely in practice, but kept for consistency with
     !> parquet_get_nrows's own int32/int64 overload). Reflects the file's physical layout;
     !> unaffected by any filter= given to parquet_open_reader. See "Streaming/chunked reads" in
-    !> doc/pages/reading.md for the chunked-read loop this and parquet_get_chunk_size/
+    !> doc/pages/io/reading.md for the chunked-read loop this and parquet_get_chunk_size/
     !> parquet_read_column_chunk are meant to be used together for.
     interface parquet_get_num_row_groups
         module procedure parquet_get_num_row_groups_int64
@@ -957,7 +957,7 @@ module parquet_core
     !> to just that one row group's own data (not the whole column) -- a hard-mode
     !> (qc_soft=.false.) violation error stops naming the offending row group; a soft-mode
     !> (qc_soft=.true.) violation warns at most once per column, same throttling as every other
-    !> read path. See "Streaming/chunked reads" in doc/pages/reading.md.
+    !> read path. See "Streaming/chunked reads" in doc/pages/io/reading.md.
     !>
     !> A scalar "string" column can also be read into a `type(parquet_string_column)` holding
     !> just row group `row_group`'s rows -- `values` is cleared then filled, same no-null_value/
@@ -1040,7 +1040,7 @@ module parquet_core
     !> lazily on first request -- equivalent to calling
     !> parquet_prefetch_columns for every column immediately after opening;
     !> materializes the whole file in memory up front, see
-    !> doc/pages/performance.md.
+    !> doc/pages/operating/performance.md.
     !>
     !> nrows= is generic over integer(int32)/integer(int64)
     !> (parquet_open_reader_nrows_int32/_int64: fills `nrows` with the

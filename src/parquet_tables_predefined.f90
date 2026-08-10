@@ -4,7 +4,7 @@
 !
 !> Binding the predefined columns a GENERATED table type declares: `%bind_predefined`.
 !!
-!! A generated table type (`doc/pages/generated-tables.md`) is an extension of `parquet_table`
+!! A generated table type (`doc/pages/utilities/generated-tables.md`) is an extension of `parquet_table`
 !! carrying one accessor per column its schema declares. Those columns have to be checked against
 !! the file, converted to the declared kind and read, before any accessor is called -- and all of
 !! that lives HERE rather than in the generated text, deliberately:

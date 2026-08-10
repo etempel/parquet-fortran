@@ -2839,7 +2839,7 @@ contains
     !> error_scenarios.f90's own "extended_..." scenarios documented there --
     !> each checks the exact stderr message for one report_fatal_error call
     !> site added to convert_values_to_int32/int64 (parquet_wrapper.cpp) for
-    !> the extended read-time source types (see doc/pages/supported-data-types.md
+    !> the extended read-time source types (see doc/pages/types/supported-data-types.md
     !> and CONTRIBUTING.md's "Additional scalar types" note).
 
     subroutine test_extended_uint32_overflow_int32_aborts(error)

@@ -638,8 +638,8 @@ contains
     !> inside the process -- they go to the library's output channel, not to a counter -- so the
     !> assertion here is that a soft violation changes *nothing* about the answer on the parallel
     !> path. Which warnings duplicate was established separately, by running this shape and reading
-    !> the output; the finding is recorded in `doc/pages/quality-control.md` and
-    !> `doc/pages/thread-safety.md`. A HARD violation is deliberately not tested here: it aborts,
+    !> the output; the finding is recorded in `doc/pages/schema/quality-control.md` and
+    !> `doc/pages/operating/thread-safety.md`. A HARD violation is deliberately not tested here: it aborts,
     !> which needs an out-of-process error scenario rather than an in-process test.
     subroutine test_prefetch_qc_soft_warns_per_column(error)
         type(error_type), allocatable, intent(out) :: error

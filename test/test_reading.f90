@@ -1873,7 +1873,7 @@ contains
     !
     !> Read-time widening support for Arrow physical types this library's own
     !> writer never produces (see CONTRIBUTING.md's "Additional scalar types"
-    !> note and doc/pages/supported-data-types.md): INT8/16, UINT8/16/32/64,
+    !> note and doc/pages/types/supported-data-types.md): INT8/16, UINT8/16/32/64,
     !> HALF_FLOAT, and DECIMAL32/64/128/256, all converted via
     !> convert_values_to_int32/int64/float32/float64 in parquet_wrapper.cpp.
     !> Exercises at least one int-target and one real-target read per source

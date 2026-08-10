@@ -2855,7 +2855,7 @@ contains
     !> call site added to convert_values_to_int32/int64 (parquet_wrapper.cpp)
     !> for the extended read-time source types (INT8/16, UINT8/16/32/64,
     !> HALF_FLOAT, DECIMAL32/64/128/256 -- see CONTRIBUTING.md's "Additional
-    !> scalar types" note and doc/pages/supported-data-types.md). Each reads
+    !> scalar types" note and doc/pages/types/supported-data-types.md). Each reads
     !> one column of test/fixtures/extended_types.parquet (see its own
     !> generation comment in tools/generate_fixtures.cpp) whose row 3 was
     !> deliberately built to trigger exactly one of: an unsigned/real/decimal

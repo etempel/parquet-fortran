@@ -314,7 +314,11 @@ contains
             new_unittest("every by-position query agrees with its by-name twin", &
                 test_index_queries_match_name_forms), &
             new_unittest("an out-of-range position reports through found= and moves with the table", &
-                test_index_queries_out_of_range) &
+                test_index_queries_out_of_range), &
+            new_unittest("a column handle's %get agrees with %get_element on every scalar shape", &
+                test_col_handle_get_matches_name_form), &
+            new_unittest("a column handle refuses to be used after a structural change", &
+                test_col_handle_staleness) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -8055,5 +8059,126 @@ contains
         k = t%kind(1, found=found)
         call check(error, k /= PK_NONE .and. found, "the surviving column still answers")
     end subroutine test_index_queries_out_of_range
+    !> The handle's `%get` and the table's `%get_element` share one body per kind, so this asserts
+    !! they agree — over one kind of each of stage 3a's three SHAPES: numeric scalar (with the
+    !! widening case exercised too), `logical`, and temporal (whose elements carry their own null
+    !! state). A shape that were wired to the wrong slot or the wrong storage kind cannot pass.
+    subroutine test_col_handle_get_matches_name_form(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        real(real64) :: d(3), v_h, v_n
+        real(real32) :: f(3)
+        integer(int32) :: iv(3)
+        logical :: b(3), lb_h, lb_n
+        type(parquet_date) :: dt(3), dh, dn
+        integer(int64) :: i
+        integer :: iv_h, iv_n
+        !
+        d = [1.5_real64, 2.5_real64, 3.5_real64]
+        f = [10.5_real32, 20.5_real32, 30.5_real32]
+        iv = [7_int32, 8_int32, 9_int32]
+        b = [.true., .false., .true.]
+        call dt(1)%set(2024, 1, 31)
+        call dt(2)%set(2024, 2, 29)
+        call dt(3)%set(2025, 12, 1)
+        call parquet_new_table(t)
+        call t%add_column("f64", d)
+        call t%add_column("f32", f)
+        call t%add_column("i32", iv)
+        call t%add_column("flag", b)
+        call t%add_column("when", dt)
+        ! --- numeric scalar, exact kind ---
+        call t%column("f64", c)
+        do i = 1_int64, 3_int64
+            call c%get(i, v_h)
+            call t%get_element("f64", i, v_n)
+            call check(error, abs(v_h - v_n) < 1.0e-12_real64, "handle %get agrees on f64")
+            if (allocated(error)) return
+            call check(error, abs(v_h - d(int(i))) < 1.0e-12_real64, "handle %get returns the stored f64")
+            if (allocated(error)) return
+        end do
+        ! --- numeric scalar, WIDENING: a float32 column read into a real64 ---
+        call t%column("f32", c)
+        call c%get(2_int64, v_h)
+        call t%get_element("f32", 2_int64, v_n)
+        call check(error, abs(v_h - v_n) < 1.0e-6_real64, "handle %get agrees on a widened f32 column")
+        if (allocated(error)) return
+        call check(error, abs(v_h - real(f(2), real64)) < 1.0e-6_real64, "widening reads the stored f32 value")
+        if (allocated(error)) return
+        ! --- integer, so a wrong-slot handle cannot hide behind matching floats ---
+        call t%column("i32", c)
+        call c%get(3_int64, iv_h)
+        call t%get_element("i32", 3_int64, iv_n)
+        call check(error, iv_h == iv_n .and. iv_h == 9_int32, "handle %get agrees on i32")
+        if (allocated(error)) return
+        ! --- logical shape ---
+        call t%column("flag", c)
+        do i = 1_int64, 3_int64
+            call c%get(i, lb_h)
+            call t%get_element("flag", i, lb_n)
+            call check(error, (lb_h .eqv. lb_n) .and. (lb_h .eqv. b(int(i))), "handle %get agrees on logical")
+            if (allocated(error)) return
+        end do
+        ! --- temporal shape: the element carries its own null state, so compare the parts ---
+        call t%column("when", c)
+        do i = 1_int64, 3_int64
+            call c%get(i, dh)
+            call t%get_element("when", i, dn)
+            call check(error, dh%year() == dn%year() .and. dh%month() == dn%month() &
+                .and. dh%day() == dn%day(), "handle %get agrees on date")
+            if (allocated(error)) return
+        end do
+        call c%get(2_int64, dh)
+        call check(error, dh%year() == 2024 .and. dh%month() == 2 .and. dh%day() == 29, &
+            "handle %get returns the stored date")
+        if (allocated(error)) return
+        ! --- the handle knows which column it is ---
+        call check(error, c%index() == t%column_index("when"), "the handle reports its own position")
+        if (allocated(error)) return
+        call check(error, c%kind() == t%kind("when"), "the handle reports its own kind")
+    end subroutine test_col_handle_get_matches_name_form
+    !
+    !> A handle is stamped with the table's generation and refuses once they differ. `%is_valid()`
+    !! is the non-aborting way to ask, and it must go `.false.` for EVERY structural change --
+    !! including `%append`, which does not move existing slots and which the rule refuses anyway,
+    !! deliberately, so that one total rule replaces a list of exceptions.
+    subroutine test_col_handle_staleness(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        real(real64) :: d(3), v
+        !
+        d = [1.0_real64, 2.0_real64, 3.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("a", d)
+        call t%add_column("b", d * 2.0_real64)
+        call t%column("a", c)
+        call check(error, c%is_valid(), "a fresh handle is valid")
+        if (allocated(error)) return
+        call c%get(1_int64, v)
+        call check(error, abs(v - 1.0_real64) < 1.0e-12_real64, "a fresh handle reads its column")
+        if (allocated(error)) return
+        ! A column-set change renumbers the slots, so the handle must stop answering.
+        call t%drop_column("b")
+        call check(error, .not. c%is_valid(), "a handle is invalid after a %drop_column")
+        if (allocated(error)) return
+        ! Re-fetching costs one lookup and is the documented remedy.
+        call t%column("a", c)
+        call check(error, c%is_valid(), "a re-fetched handle is valid again")
+        if (allocated(error)) return
+        call c%get(2_int64, v)
+        call check(error, abs(v - 2.0_real64) < 1.0e-12_real64, "the re-fetched handle reads the right column")
+        if (allocated(error)) return
+        ! An %append adds rows without moving slots -- refused anyway, by design.
+        call t%append_null_rows(1_int64)
+        call check(error, .not. c%is_valid(), "a handle is invalid after a row-structural change too")
+        if (allocated(error)) return
+        ! A default-initialised handle was never attached to anything.
+        block
+            type(parquet_table_col) :: fresh
+            call check(error, .not. fresh%is_valid(), "a handle that was never made is not valid")
+        end block
+    end subroutine test_col_handle_staleness
     !
 end module test_table

@@ -127,37 +127,4 @@ contains
             trim(got) // ", which cannot be read as " // trim(wanted) // sfx
     end procedure col_kind_error
     !
-    module procedure col_get_f64_i32
-        call self%get(int(i, int64), value)
-    end procedure col_get_f64_i32
-    !
-    module procedure col_get_f64_i64
-        call col_resolve(self, "get")
-        call col_require_row(self, i, "get")
-        call col_fetch_f64(self%cache, self%slot, self%colkind, i, value, "get")
-    end procedure col_get_f64_i64
-    !
-    module procedure col_fetch_f64
-        real(real32) :: v_f32
-        character(len=:), allocatable :: sfx, got
-        !
-        ! The widening set, the kind error and the null rule live HERE, once. Both the handle's
-        ! %get and the table's own %get_element call it, so the two cannot answer differently --
-        ! which was the whole point of sharing a body. It takes the resolved pieces rather than a
-        ! handle because building one purely to pass it costs more than this body does.
-        select case (colkind)
-        case (PK_FLOAT64)
-            call cache%cols(slot)%values%get_at(i, value)
-        case (PK_FLOAT32)
-            call cache%cols(slot)%values%get_at(i, v_f32)
-            value = real(v_f32, real64)
-        case default
-            value = 0.0_real64
-            call parquet_kind_name(colkind, got)
-            call table_context_suffix(cache, cache%cols(slot)%name, sfx)
-            error stop EP // trim(proc) // ": this column holds " // trim(got) // &
-                ", which cannot be read as float64" // sfx
-        end select
-    end procedure col_fetch_f64
-    !
 end submodule parquet_tables_col ! GCOVR_EXCL_LINE

@@ -1790,45 +1790,25 @@ contains
     module procedure get_element_i32_i64
         integer :: idx
         !
+        value = 0_int32
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            value = 0_int32
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_INT32)
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_INT32, "get_element")
-        end select
+        call col_fetch_i32(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_i32_i64
-    !
     module procedure get_element_i64_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_i64_i32
     !
     module procedure get_element_i64_i64
         integer :: idx
-        integer(int32) :: v_i32
         !
+        value = 0_int64
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            value = 0_int64
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_INT64)
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case (PK_INT32)
-            call self%cache%cols(idx)%values%get_at(i, v_i32)
-            value = v_i32
-        case default
-            call table_require_kind(self, idx, PK_INT64, "get_element")
-        end select
+        call col_fetch_i64(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_i64_i64
-    !
     module procedure get_element_f32_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_f32_i32
@@ -1836,20 +1816,12 @@ contains
     module procedure get_element_f32_i64
         integer :: idx
         !
+        value = 0.0_real32
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            value = 0.0_real32
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_FLOAT32)
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_FLOAT32, "get_element")
-        end select
+        call col_fetch_f32(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_f32_i64
-    !
     module procedure get_element_f64_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_f64_i32
@@ -1870,86 +1842,54 @@ contains
     module procedure get_element_bool_i64
         integer :: idx
         !
+        value = .false.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            value = .false.
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_LOGICAL)
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_LOGICAL, "get_element")
-        end select
+        call col_fetch_bool(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_bool_i64
-    !
     module procedure get_element_date_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_date_i32
     !
     module procedure get_element_date_i64
         integer :: idx
-        !
         type(parquet_date) :: blank
+        !
+        value = blank
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            value = blank
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_DATE)
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_DATE, "get_element")
-        end select
+        call col_fetch_date(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_date_i64
-    !
     module procedure get_element_time_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_time_i32
     !
     module procedure get_element_time_i64
         integer :: idx
-        !
         type(parquet_time) :: blank
+        !
+        value = blank
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            value = blank
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_TIME)
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_TIME, "get_element")
-        end select
+        call col_fetch_time(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_time_i64
-    !
     module procedure get_element_ts_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_ts_i32
     !
     module procedure get_element_ts_i64
         integer :: idx
-        !
         type(parquet_timestamp) :: blank
+        !
+        value = blank
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) then
-            value = blank
-            return
-        end if
+        if (idx == 0) return
         call table_require_row(self, i, "get_element")
-        select case (self%cache%cols(idx)%declared_kind)
-        case (PK_TIMESTAMP)
-            call self%cache%cols(idx)%values%get_at(i, value)
-        case default
-            call table_require_kind(self, idx, PK_TIMESTAMP, "get_element")
-        end select
+        call col_fetch_ts(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_ts_i64
-    !
     module procedure get_element_i32v_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_i32v_i32

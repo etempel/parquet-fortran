@@ -725,6 +725,12 @@ contains
                 test_table_get_element_kind_mismatch_aborts), &
             new_unittest("%get_element on a missing column aborts", &
                 test_table_get_element_missing_column_aborts), &
+            new_unittest("using a column handle after a structural change aborts", &
+                test_col_handle_stale_aborts), &
+            new_unittest("a column handle's own row bounds check aborts", &
+                test_col_handle_row_out_of_range_aborts), &
+            new_unittest("a never-attached column handle aborts when used", &
+                test_col_handle_never_attached_aborts), &
             new_unittest("parquet_table %col with a mismatched pointer kind aborts", &
                 test_table_pointer_kind_mismatch_aborts), &
             new_unittest("parquet_table %col mismatch aborts on every remaining col_ptr_* kind", &
@@ -1221,7 +1227,7 @@ contains
         call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch", &
             expect_abort=.true., &
             failure_message="%get_element on a mismatched kind was expected to abort", &
-            required_stderr="parquet_table: get_element: this column holds")
+            required_stderr="parquet_table: get_element: column kind is PK_INT32, not PK_FLOAT64")
     end subroutine test_table_get_element_kind_mismatch_aborts
 
     subroutine test_table_get_element_missing_column_aborts(error)
@@ -1231,6 +1237,32 @@ contains
             failure_message="%get_element on a missing column was expected to abort", &
             required_stderr="parquet_table: get_element: no column of this name")
     end subroutine test_table_get_element_missing_column_aborts
+
+    subroutine test_col_handle_stale_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! The message must name the REMEDY, because the cause is usually several statements away
+        ! from where it is noticed.
+        call check_scenario_exit_status_and_stderr(error, "col_handle_stale_after_mutation", &
+            expect_abort=.true., &
+            failure_message="using a stale column handle was expected to abort", &
+            required_stderr="re-fetch it with %column(...)")
+    end subroutine test_col_handle_stale_aborts
+
+    subroutine test_col_handle_row_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "col_handle_row_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a column handle read past the last row was expected to abort", &
+            required_stderr="column handle: get: row index 3 is outside this table's 1..2 rows")
+    end subroutine test_col_handle_row_out_of_range_aborts
+
+    subroutine test_col_handle_never_attached_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "col_handle_never_attached", &
+            expect_abort=.true., &
+            failure_message="a never-attached column handle was expected to abort when used", &
+            required_stderr="this handle is not attached to a table")
+    end subroutine test_col_handle_never_attached_aborts
 
     subroutine test_table_pointer_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

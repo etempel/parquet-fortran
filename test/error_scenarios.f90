@@ -1172,6 +1172,12 @@ program error_scenarios
         call scenario_table_get_element_kind_mismatch()
     case ("table_get_element_missing_column")
         call scenario_table_get_element_missing_column()
+    case ("col_handle_stale_after_mutation")
+        call scenario_col_handle_stale_after_mutation()
+    case ("col_handle_row_out_of_range")
+        call scenario_col_handle_row_out_of_range()
+    case ("col_handle_never_attached")
+        call scenario_col_handle_never_attached()
     case ("table_pointer_kind_mismatch")
         call scenario_table_pointer_kind_mismatch()
     case ("table_get_array_kind_mismatch")
@@ -10194,6 +10200,49 @@ contains
         call t%get_element("nope", 1_int64, v)   ! absent, no found= -> aborts
         print '(a,f8.3)', "unexpectedly read a missing column, v=", v
     end subroutine scenario_table_get_element_missing_column
+    !
+    !> USING a stale column handle must abort. `%is_valid()` only reports; this is the guard that
+    !! stops a handle reading a slot that has been renumbered underneath it, and nothing else
+    !! exercises `col_resolve`.
+    subroutine scenario_col_handle_stale_after_mutation()
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        real(real64) :: d(2), v
+        d = [1.0_real64, 2.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("a", d)
+        call t%add_column("b", d)
+        call t%column("a", c)
+        call c%get(1_int64, v)          ! negative control: the handle works before the change
+        print '(a,f8.3)', "fresh handle read, v=", v
+        call t%drop_column("b")         ! renumbers the slots -> the handle is stale
+        call c%get(1_int64, v)          ! aborts
+        print '(a,f8.3)', "unexpectedly read through a stale handle, v=", v
+    end subroutine scenario_col_handle_stale_after_mutation
+    !
+    !> A handle's own row bounds check, which is separate from the table's.
+    subroutine scenario_col_handle_row_out_of_range()
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        real(real64) :: d(2), v
+        d = [1.0_real64, 2.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("a", d)
+        call t%column("a", c)
+        call c%get(2_int64, v)          ! negative control: the last valid row
+        print '(a,f8.3)', "in-range handle read, v=", v
+        call c%get(3_int64, v)          ! one past the end -> aborts
+        print '(a,f8.3)', "unexpectedly read past the last row through a handle, v=", v
+    end subroutine scenario_col_handle_row_out_of_range
+    !
+    !> A handle that was never produced by %column points at nothing and must say so.
+    subroutine scenario_col_handle_never_attached()
+        type(parquet_table_col) :: c
+        real(real64) :: v
+        print '(a,l1)', "is_valid on a never-attached handle: ", c%is_valid()
+        call c%get(1_int64, v)          ! never attached -> aborts
+        print '(a,f8.3)', "unexpectedly read through a never-attached handle, v=", v
+    end subroutine scenario_col_handle_never_attached
 
     !> The pointer path is exact-kind by design (it aliases raw storage), so asking for an
     !! int64 pointer into an int32 column must abort rather than silently widening.

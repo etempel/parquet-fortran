@@ -955,11 +955,29 @@ module parquet_tables
         integer(int64) :: gen = -1_int64           !! cache%generation when this handle was made.
         type(table_scope) :: scope                 !! the table's row scope, by value.
     contains
-        procedure, private :: col_get_f64_i32 !! %get specific, float64 value, int32 row index.
-        procedure, private :: col_get_f64_i64 !! %get specific, float64 value, int64 row index.
-        !> Copies one row's value into the caller's variable, widening exactly as the table's own
-        !! `%get_element` does. No name, no lookup -- the handle already knows the slot.
-        generic :: get => col_get_f64_i32, col_get_f64_i64
+
+        procedure, private :: col_get_i32_i32 !! %get specific, i32 value, int32 row index.
+        procedure, private :: col_get_i32_i64 !! %get specific, i32 value, int64 row index.
+        procedure, private :: col_get_i64_i32 !! %get specific, i64 value, int32 row index.
+        procedure, private :: col_get_i64_i64 !! %get specific, i64 value, int64 row index.
+        procedure, private :: col_get_f32_i32 !! %get specific, f32 value, int32 row index.
+        procedure, private :: col_get_f32_i64 !! %get specific, f32 value, int64 row index.
+        procedure, private :: col_get_f64_i32 !! %get specific, f64 value, int32 row index.
+        procedure, private :: col_get_f64_i64 !! %get specific, f64 value, int64 row index.
+        procedure, private :: col_get_bool_i32 !! %get specific, bool value, int32 row index.
+        procedure, private :: col_get_bool_i64 !! %get specific, bool value, int64 row index.
+        procedure, private :: col_get_date_i32 !! %get specific, date value, int32 row index.
+        procedure, private :: col_get_date_i64 !! %get specific, date value, int64 row index.
+        procedure, private :: col_get_time_i32 !! %get specific, time value, int32 row index.
+        procedure, private :: col_get_time_i64 !! %get specific, time value, int64 row index.
+        procedure, private :: col_get_ts_i32 !! %get specific, ts value, int32 row index.
+        procedure, private :: col_get_ts_i64 !! %get specific, ts value, int64 row index.
+        !> Copies one row's value into the caller's variable, widening exactly as the table's
+        !! own `%get_element` does. No name, no lookup -- the handle already knows the slot.
+        generic :: get => col_get_i32_i32, col_get_i32_i64, col_get_i64_i32, col_get_i64_i64, col_get_f32_i32, col_get_f32_i64, &
+            col_get_f64_i32, col_get_f64_i64, col_get_bool_i32, col_get_bool_i64, col_get_date_i32, col_get_date_i64, &
+            col_get_time_i32, col_get_time_i64, col_get_ts_i32, col_get_ts_i64
+
         procedure :: is_valid => col_is_valid !! Whether the handle is attached AND still current.
         procedure :: index => col_index       !! This column's 1-based position in the table.
         procedure :: kind => col_kind         !! This column's PK_* kind.
@@ -1505,11 +1523,51 @@ module parquet_tables
             integer, intent(in) :: want                  !! the PK_* the caller asked for.
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
         end subroutine col_kind_error
-        !> The SHARED BODY behind both float64 `%get` forms: the widening set, the kind error and
-        !! the null rule, once. Takes the resolved PIECES rather than a handle, because a handle
-        !! the caller does not otherwise need costs more to build than the body costs to run --
-        !! measured at +16.3% on `%get_element` when the name form built one to delegate through.
-        !! `proc` is the CALLER's name, so each form keeps the messages it always produced.
+
+        !> The shared i32 body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_i32(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            integer(int32), intent(out) :: value             !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_i32
+        !> The shared i64 body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_i64(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            integer(int64), intent(out) :: value             !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_i64
+        !> The shared f32 body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_f32(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            real(real32), intent(out) :: value             !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_f32
+        !> The shared f64 body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
         module subroutine col_fetch_f64(cache, slot, colkind, i, value, proc)
             type(parquet_table_cache), intent(in) :: cache !! the table's column store.
             integer, intent(in) :: slot                    !! validated slot index.
@@ -1518,18 +1576,157 @@ module parquet_tables
             real(real64), intent(out) :: value             !! receives the value.
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine col_fetch_f64
-        !> One row's float64 value through a handle (int32 row index).
+        !> The shared bool body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_bool(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            logical, intent(out) :: value             !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_bool
+        !> The shared date body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_date(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_date), intent(out) :: value             !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_date
+        !> The shared time body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_time(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_time), intent(out) :: value             !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_time
+        !> The shared ts body behind both `%get_element(name, i, v)` and a column
+        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,
+        !! once. Takes the resolved pieces rather than a handle -- building one purely
+        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so
+        !! each entry point keeps the messages it always produced.
+        module subroutine col_fetch_ts(cache, slot, colkind, i, value, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: slot                    !! validated slot index.
+            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
+            integer(int64), intent(in) :: i                !! validated 1-based row index.
+            type(parquet_timestamp), intent(out) :: value             !! receives the value.
+            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
+        end subroutine col_fetch_ts
+
+
+        !> One row's i32 value through a handle (i32 row index).
+        module subroutine col_get_i32_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(out) :: value           !! receives the value.
+        end subroutine col_get_i32_i32
+        !> One row's i32 value through a handle (i64 row index).
+        module subroutine col_get_i32_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int32), intent(out) :: value           !! receives the value.
+        end subroutine col_get_i32_i64
+        !> One row's i64 value through a handle (i32 row index).
+        module subroutine col_get_i64_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(out) :: value           !! receives the value.
+        end subroutine col_get_i64_i32
+        !> One row's i64 value through a handle (i64 row index).
+        module subroutine col_get_i64_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            integer(int64), intent(out) :: value           !! receives the value.
+        end subroutine col_get_i64_i64
+        !> One row's f32 value through a handle (i32 row index).
+        module subroutine col_get_f32_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            real(real32), intent(out) :: value           !! receives the value.
+        end subroutine col_get_f32_i32
+        !> One row's f32 value through a handle (i64 row index).
+        module subroutine col_get_f32_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            real(real32), intent(out) :: value           !! receives the value.
+        end subroutine col_get_f32_i64
+        !> One row's f64 value through a handle (i32 row index).
         module subroutine col_get_f64_i32(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int32), intent(in) :: i              !! 1-based row index.
             real(real64), intent(out) :: value           !! receives the value.
         end subroutine col_get_f64_i32
-        !> One row's float64 value through a handle (int64 row index), widening float32.
+        !> One row's f64 value through a handle (i64 row index).
         module subroutine col_get_f64_i64(self, i, value)
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer(int64), intent(in) :: i              !! 1-based row index.
             real(real64), intent(out) :: value           !! receives the value.
         end subroutine col_get_f64_i64
+        !> One row's bool value through a handle (i32 row index).
+        module subroutine col_get_bool_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            logical, intent(out) :: value           !! receives the value.
+        end subroutine col_get_bool_i32
+        !> One row's bool value through a handle (i64 row index).
+        module subroutine col_get_bool_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            logical, intent(out) :: value           !! receives the value.
+        end subroutine col_get_bool_i64
+        !> One row's date value through a handle (i32 row index).
+        module subroutine col_get_date_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            type(parquet_date), intent(out) :: value           !! receives the value.
+        end subroutine col_get_date_i32
+        !> One row's date value through a handle (i64 row index).
+        module subroutine col_get_date_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_date), intent(out) :: value           !! receives the value.
+        end subroutine col_get_date_i64
+        !> One row's time value through a handle (i32 row index).
+        module subroutine col_get_time_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            type(parquet_time), intent(out) :: value           !! receives the value.
+        end subroutine col_get_time_i32
+        !> One row's time value through a handle (i64 row index).
+        module subroutine col_get_time_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_time), intent(out) :: value           !! receives the value.
+        end subroutine col_get_time_i64
+        !> One row's ts value through a handle (i32 row index).
+        module subroutine col_get_ts_i32(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int32), intent(in) :: i              !! 1-based row index.
+            type(parquet_timestamp), intent(out) :: value           !! receives the value.
+        end subroutine col_get_ts_i32
+        !> One row's ts value through a handle (i64 row index).
+        module subroutine col_get_ts_i64(self, i, value)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            integer(int64), intent(in) :: i              !! 1-based row index.
+            type(parquet_timestamp), intent(out) :: value           !! receives the value.
+        end subroutine col_get_ts_i64
+
         !> The TAIL of `table_resolve`, on a slot that is already known good: the unsupported-type
         !! refusal, the lazy first touch, and the shared-write rule. Split out so that a caller
         !! holding a slot index -- `table_resolve` after its name lookup, and anything reaching a
@@ -1714,6 +1911,17 @@ module parquet_tables
             integer, intent(in) :: kind              !! required PK_* discriminator.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_require_kind
+        !> The CACHE-and-slot twin of `table_require_kind`, for callers that hold a resolved slot
+        !! rather than a table -- a column handle, and every shared `col_fetch_*`/`col_store_*`
+        !! body. `table_require_kind` delegates to it, so there is exactly one wording of this
+        !! message: a handle and a name must report a kind mismatch identically or the shared body
+        !! has not actually stopped the two forms diverging.
+        module subroutine cache_require_kind(cache, idx, kind, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: idx               !! slot index.
+            integer, intent(in) :: kind              !! required PK_* discriminator.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+        end subroutine cache_require_kind
         !> error stops unless slot `idx` holds exactly `n` rows -- a %set replaces values, never
         !! the row set, so a different length is a row-structural change and not allowed here.
         module subroutine table_require_length(self, idx, n, proc)

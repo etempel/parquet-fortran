@@ -1001,14 +1001,18 @@ contains
     end procedure table_require_slice_size
     !
     module procedure table_require_kind
+        call cache_require_kind(self%cache, idx, kind, proc)
+    end procedure table_require_kind
+    !
+    module procedure cache_require_kind
         character(len=:), allocatable :: sfx, got, want
         !
-        if (self%cache%cols(idx)%values%kindof() == kind) return
-        call table_context_suffix(self%cache, self%cache%cols(idx)%name, sfx)
-        call parquet_kind_name(self%cache%cols(idx)%values%kindof(), got)
+        if (cache%cols(idx)%values%kindof() == kind) return
+        call table_context_suffix(cache, cache%cols(idx)%name, sfx)
+        call parquet_kind_name(cache%cols(idx)%values%kindof(), got)
         call parquet_kind_name(kind, want)
         error stop EP // trim(proc) // ": column kind is " // got // ", not " // want // sfx
-    end procedure table_require_kind
+    end procedure cache_require_kind
     !
     module procedure table_require_length
         character(len=:), allocatable :: sfx

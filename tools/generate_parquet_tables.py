@@ -941,11 +941,17 @@ def gen_row_type():
         integer(int64) :: gen = -1_int64           !! cache%generation when this handle was made.
         type(table_scope) :: scope                 !! the table's row scope, by value.
     contains
-        procedure, private :: col_get_f64_i32 !! %get specific, float64 value, int32 row index.
-        procedure, private :: col_get_f64_i64 !! %get specific, float64 value, int64 row index.
-        !> Copies one row's value into the caller's variable, widening exactly as the table's own
-        !! `%get_element` does. No name, no lookup -- the handle already knows the slot.
-        generic :: get => col_get_f64_i32, col_get_f64_i64
+""")
+    for k in SCALAR_FREE_KINDS:
+        tag = k[0]
+        w(f"        procedure, private :: col_get_{tag}_i32 !! %get specific, {tag} value, int32 row index.")
+        w(f"        procedure, private :: col_get_{tag}_i64 !! %get specific, {tag} value, int64 row index.")
+    w("        !> Copies one row's value into the caller's variable, widening exactly as the table's")
+    w("        !! own `%get_element` does. No name, no lookup -- the handle already knows the slot.")
+    w("        generic :: get => " + wrap_list(
+        [f"col_get_{k[0]}_{ik}" for k in SCALAR_FREE_KINDS for ik in ("i32", "i64")], 12,
+        first_prefix=len("        generic :: get => ")))
+    w("""
         procedure :: is_valid => col_is_valid !! Whether the handle is attached AND still current.
         procedure :: index => col_index       !! This column's 1-based position in the table.
         procedure :: kind => col_kind         !! This column's PK_* kind.
@@ -958,7 +964,7 @@ def gen_row_type():
 # own body. STAGE 2 PROTOTYPE: deliberately one kind, so the cost of the delegation to the name
 # form can be measured on a real accessor before 17 more are converted. See feature_colindex.md
 # 6.3 and its criterion (3). Empty this set to revert every accessor to its own body.
-DELEGATING_KINDS = {"f64"}
+DELEGATING_KINDS = {"i32", "i64", "f32", "f64", "bool", "date", "time", "ts"}
 
 
 def wrap_list(names, indent, first_prefix=0):
@@ -1526,31 +1532,34 @@ def gen_spec_interfaces():
             integer, intent(in) :: want                  !! the PK_* the caller asked for.
             character(len=*), intent(in) :: proc         !! calling procedure, for the message.
         end subroutine col_kind_error
-        !> The SHARED BODY behind both float64 `%get` forms: the widening set, the kind error and
-        !! the null rule, once. Takes the resolved PIECES rather than a handle, because a handle
-        !! the caller does not otherwise need costs more to build than the body costs to run --
-        !! measured at +16.3% on `%get_element` when the name form built one to delegate through.
-        !! `proc` is the CALLER's name, so each form keeps the messages it always produced.
-        module subroutine col_fetch_f64(cache, slot, colkind, i, value, proc)
-            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
-            integer, intent(in) :: slot                    !! validated slot index.
-            integer, intent(in) :: colkind                 !! that slot's PK_* kind.
-            integer(int64), intent(in) :: i                !! validated 1-based row index.
-            real(real64), intent(out) :: value             !! receives the value.
-            character(len=*), intent(in) :: proc           !! calling procedure, for the message.
-        end subroutine col_fetch_f64
-        !> One row's float64 value through a handle (int32 row index).
-        module subroutine col_get_f64_i32(self, i, value)
-            class(parquet_table_col), intent(in) :: self !! the handle.
-            integer(int32), intent(in) :: i              !! 1-based row index.
-            real(real64), intent(out) :: value           !! receives the value.
-        end subroutine col_get_f64_i32
-        !> One row's float64 value through a handle (int64 row index), widening float32.
-        module subroutine col_get_f64_i64(self, i, value)
-            class(parquet_table_col), intent(in) :: self !! the handle.
-            integer(int64), intent(in) :: i              !! 1-based row index.
-            real(real64), intent(out) :: value           !! receives the value.
-        end subroutine col_get_f64_i64
+""")
+    for k in SCALAR_FREE_KINDS:
+        tag, _pk, decl, _comp, _rank, _cat = k
+        w(f"        !> The shared {tag} body behind both `%get_element(name, i, v)` and a column")
+        w("        !! handle's `%get(i, v)`: the widening set, the kind error and the null rule,")
+        w("        !! once. Takes the resolved pieces rather than a handle -- building one purely")
+        w("        !! to pass it measured +16.3% on `%get_element`. `proc` is the CALLER's name, so")
+        w("        !! each entry point keeps the messages it always produced.")
+        w(f"        module subroutine col_fetch_{tag}(cache, slot, colkind, i, value, proc)")
+        w("            type(parquet_table_cache), intent(in) :: cache !! the table's column store.")
+        w("            integer, intent(in) :: slot                    !! validated slot index.")
+        w("            integer, intent(in) :: colkind                 !! that slot's PK_* kind.")
+        w("            integer(int64), intent(in) :: i                !! validated 1-based row index.")
+        w(f"            {decl}, intent(out) :: value             !! receives the value.")
+        w("            character(len=*), intent(in) :: proc           !! calling procedure, for the message.")
+        w(f"        end subroutine col_fetch_{tag}")
+    w("""
+""")
+    for k in SCALAR_FREE_KINDS:
+        tag, _pk, decl, _comp, _rank, _cat = k
+        for ik, ikdecl in (("i32", "integer(int32)"), ("i64", "integer(int64)")):
+            w(f"        !> One row's {tag} value through a handle ({ik} row index).")
+            w(f"        module subroutine col_get_{tag}_{ik}(self, i, value)")
+            w("            class(parquet_table_col), intent(in) :: self !! the handle.")
+            w(f"            {ikdecl}, intent(in) :: i              !! 1-based row index.")
+            w(f"            {decl}, intent(out) :: value           !! receives the value.")
+            w(f"        end subroutine col_get_{tag}_{ik}")
+    w("""
         !> The TAIL of `table_resolve`, on a slot that is already known good: the unsupported-type
         !! refusal, the lazy first touch, and the shared-write rule. Split out so that a caller
         !! holding a slot index -- `table_resolve` after its name lookup, and anything reaching a
@@ -1735,6 +1744,17 @@ def gen_spec_interfaces():
             integer, intent(in) :: kind              !! required PK_* discriminator.
             character(len=*), intent(in) :: proc     !! calling procedure, for the message.
         end subroutine table_require_kind
+        !> The CACHE-and-slot twin of `table_require_kind`, for callers that hold a resolved slot
+        !! rather than a table -- a column handle, and every shared `col_fetch_*`/`col_store_*`
+        !! body. `table_require_kind` delegates to it, so there is exactly one wording of this
+        !! message: a handle and a name must report a kind mismatch identically or the shared body
+        !! has not actually stopped the two forms diverging.
+        module subroutine cache_require_kind(cache, idx, kind, proc)
+            type(parquet_table_cache), intent(in) :: cache !! the table's column store.
+            integer, intent(in) :: idx               !! slot index.
+            integer, intent(in) :: kind              !! required PK_* discriminator.
+            character(len=*), intent(in) :: proc     !! calling procedure, for the message.
+        end subroutine cache_require_kind
         !> error stops unless slot `idx` holds exactly `n` rows -- a %set replaces values, never
         !! the row set, so a different length is a row-structural change and not allowed here.
         module subroutine table_require_length(self, idx, n, proc)
@@ -4416,10 +4436,17 @@ def getelem_impl(k):
         # variant, not its handle-delegating sketch: building a `parquet_table_col` here just to
         # delegate through it measured +16.3% on this accessor, three times criterion (3)'s bar.
         # The body is shared, so the two forms still cannot diverge -- which was the point.
+        # The miss path must leave `value` defined -- it is intent(out). A numeric kind gets its
+        # type's zero; a temporal one gets a default-initialised element, which IS its null state
+        # (see the parquet_temporal note in CLAUDE.md), so there is no zero constant to use.
+        if cat == "num":
+            miss_decl, miss = "", f"        value = {ZERO[tag]}"
+        else:
+            miss_decl, miss = f"        {decl} :: blank\n", "        value = blank"
         out.append(f"""    module procedure get_element_{tag}_i64
         integer :: idx
-        !
-        value = {ZERO[tag]}
+{miss_decl}        !
+{miss}
         call table_resolve(self, name, "get_element", idx, found)
         if (idx == 0) return
         call table_require_row(self, i, "get_element")
@@ -4565,6 +4592,89 @@ def set_str_impl():
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_chrv
     !"""
+
+
+# --------------------------------------------------------------------------------------
+# src/parquet_tables_colaccess.f90 -- the column handle's per-kind accessors, and the SHARED
+# bodies the table's own %get_element calls.
+#
+# STAGE 3a covers the 8 allocation-free SCALAR kinds, which is where the measured speed case
+# lives; the 10 allocating kinds (str, strv and the eight *_VEC) follow in 3b. A missing kind is
+# a COMPILE-TIME error here, not a runtime one -- `c%get(i, value)` picks its specific from the
+# type of the caller's `value` -- so a partial kind set cannot produce a surprise that depends on
+# the file's schema. See feature_colindex.md's stage 3 for why that makes the split safe.
+# --------------------------------------------------------------------------------------
+SCALAR_FREE_KINDS = [k for k in KINDS if k[4] == 1 and k[5] != "str"]
+
+
+def col_fetch_impl(k):
+    """The SHARED body behind both `%get_element(name, i, v)` and a handle's `%get(i, v)`.
+
+    Takes the resolved pieces rather than a handle: building a `parquet_table_col` purely to
+    delegate through it measured +16.3% on `%get_element`, against criterion (3)'s 5% bar, while
+    this shape measured +2.16% (feature_colindex.md 2-ii). `proc` is the CALLER's name so each
+    entry point keeps the messages it always produced.
+    """
+    tag, pk, decl, comp, rank, cat = k
+    lines = [f"    module procedure col_fetch_{tag}"]
+    for _, src in WIDEN.get(tag, []):
+        srcdecl = next(kk[2] for kk in KINDS if kk[0] == src)
+        lines.append(f"        {srcdecl} :: v_{src}")
+    lines += ["        !",
+              "        select case (colkind)",
+              f"        case ({pk})",
+              "            call cache%cols(slot)%values%get_at(i, value)"]
+    for srcpk, src in WIDEN.get(tag, []):
+        lines += [f"        case ({srcpk})",
+                  f"            call cache%cols(slot)%values%get_at(i, v_{src})",
+                  f"            value = v_{src}"]
+    lines += ["        case default",
+              # The SAME wording a name-form accessor produces, via the same helper. Inventing a
+              # second one here is exactly the drift a shared body exists to prevent, and it is
+              # invisible until someone compares two messages side by side.
+              f'            call cache_require_kind(cache, slot, {pk}, proc)',
+              "        end select",
+              f"    end procedure col_fetch_{tag}",
+              "    !"]
+    return "\n".join(lines)
+
+
+def col_get_impl(k):
+    """The handle's own `%get`: validate the handle and the row, then the shared body."""
+    tag = k[0]
+    return f"""    module procedure col_get_{tag}_i32
+        call self%get(int(i, int64), value)
+    end procedure col_get_{tag}_i32
+    !
+    module procedure col_get_{tag}_i64
+        call col_resolve(self, "get")
+        call col_require_row(self, i, "get")
+        call col_fetch_{tag}(self%cache, self%slot, self%colkind, i, value, "get")
+    end procedure col_get_{tag}_i64
+    !"""
+
+
+def gen_colaccess():
+    o = []
+    w = o.append
+    w(BANNER)
+    w("""!> Per-kind value access for `parquet_table_col`, and the shared bodies the table's own
+!! `%get_element` calls so the two forms cannot answer differently.
+!!
+!! Every `col_fetch_<tag>` takes the resolved PIECES -- cache, slot, kind -- rather than a handle,
+!! because building a handle purely to pass it costs more than the body costs to run. The handle's
+!! own `%get` validates itself and then calls exactly the same body.
+submodule (parquet_tables) parquet_tables_colaccess
+    implicit none
+    !
+contains
+    !""")
+    for k in SCALAR_FREE_KINDS:
+        w(col_fetch_impl(k))
+    for k in SCALAR_FREE_KINDS:
+        w(col_get_impl(k))
+    w("end submodule parquet_tables_colaccess ! GCOVR_EXCL_LINE")
+    return "\n".join(o)
 
 
 # --------------------------------------------------------------------------------------
@@ -4876,6 +4986,7 @@ def main():
     outputs = {
         root / "src" / "parquet_tables.f90": gen_spec(),
         root / "src" / "parquet_tables_access.f90": gen_access(),
+        root / "src" / "parquet_tables_colaccess.f90": gen_colaccess(),
         root / "src" / "parquet_tables_addcol.f90": gen_addcol(),
         root / "src" / "parquet_tables_materialize.f90": gen_materialize(),
     }

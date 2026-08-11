@@ -727,6 +727,12 @@ contains
                 test_table_reserve_columns_shared_aborts), &
             new_unittest("table: a direction token plus descending= aborts", &
                 test_table_key_direction_conflict_aborts), &
+            new_unittest("table: a long conflicting key list is clipped in the message", &
+                test_table_key_list_long_preview_aborts), &
+            new_unittest("table: a key list naming nothing aborts", &
+                test_table_key_list_empty_aborts), &
+            new_unittest("table: an unrecognized direction word aborts", &
+                test_table_key_list_bad_direction_aborts), &
             new_unittest("table: require_columns names every missing column", &
                 test_table_require_columns_missing_aborts), &
             new_unittest("parquet_column paste of a different kind aborts", &
@@ -2124,6 +2130,37 @@ contains
             failure_message="a direction token plus descending= was expected to abort", &
             required_stderr="descending= cannot be given as well")
     end subroutine test_table_key_direction_conflict_aborts
+
+    !> The assertion is on the clip marker, not on the message text: a preview that quoted the
+    !! whole key list would still contain every other word of this message, so only the trailing
+    !! "...'" distinguishes a clipped preview from an unbounded one.
+    subroutine test_table_key_list_long_preview_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_key_list_long_preview", &
+            expect_abort=.true., &
+            failure_message="a long conflicting key list was expected to abort", &
+            required_stderr="...' already says which way to sort")
+    end subroutine test_table_key_list_long_preview_aborts
+
+    !> "no sort key was given" rather than a parser message: the list tokenized cleanly, it just
+    !! held no names, and blaming the parser would send the caller looking at the wrong thing.
+    subroutine test_table_key_list_empty_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_key_list_empty", &
+            expect_abort=.true., &
+            failure_message="a key list naming no column was expected to abort", &
+            required_stderr="sort_by: no sort key was given")
+    end subroutine test_table_key_list_empty_aborts
+
+    !> The parser's own message is passed through whole, so the OFFENDING TOKEN is named rather
+    !! than the whole list -- that is what the assertion pins.
+    subroutine test_table_key_list_bad_direction_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_key_list_bad_direction", &
+            expect_abort=.true., &
+            failure_message="an unrecognized direction word was expected to abort", &
+            required_stderr="'id sideways' has an unrecognized direction 'sideways'")
+    end subroutine test_table_key_list_bad_direction_aborts
 
     !> EVERY missing name, not just the first -- which is the whole reason this binding exists, so
     !! the second one is what the assertion is really about.

@@ -254,6 +254,8 @@ contains
                 test_require_and_missing_columns), &
             new_unittest("a string key list matches the array form, directions included", &
                 test_key_list_string_form), &
+            new_unittest("every string key-list binding matches its array form, both branches", &
+                test_key_list_string_every_binding), &
             new_unittest("compact leaves an unread column unread and attached", test_compact_keeps_lazy), &
             new_unittest("a clone is independent, stays lazy and keeps the row scope", test_clone), &
             new_unittest("extra: remap: renames a file column for reading", test_remap_basic), &
@@ -8765,6 +8767,106 @@ contains
         call check(error, t%is_sorted_by("i32") .eqv. u%is_sorted_by(["i32"]), &
             "a single-key string must take the same path as a one-element array")
     end subroutine test_key_list_string_form
+    !
+    !> The other six string key-list specifics, each on BOTH of its branches: a list carrying a
+    !! direction token (which supplies its own `descending`) and a bare list plus `descending=`.
+    !!
+    !! One shared splitter backs all seven spellings, so the risk is not the grammar -- that is
+    !! `test_key_list_string_form`'s job -- but the per-binding forwarding underneath it, where a
+    !! specific can drop `n`, hand on the wrong permutation kind, or forward the split direction
+    !! to the wrong argument. Every assertion is therefore against an independently built ARRAY
+    !! call on a second table, never against another string call.
+    subroutine test_key_list_string_every_binding(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, u
+        integer(int32), allocatable :: p32(:), q32(:), a32(:), b32(:)
+        integer(int64), allocatable :: p64(:), q64(:)
+        character(len=*), parameter :: f = "test_run/table_key_list_all.parquet"
+        character(len=3), parameter :: k2(2) = [character(len=3) :: "b", "i32"]
+        logical, parameter :: dsc(2) = [.false., .true.]
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call parquet_open_table(u, f)
+        !
+        ! %argsort_by, int32 permutation. The int64 form is covered by test_key_list_string_form,
+        ! so this is the specific that could quietly narrow a row index on a large table.
+        call t%argsort_by("b,-i32", p32)
+        call u%argsort_by(k2, q32, descending=dsc)
+        call check(error, size(p32) == NROW .and. all(p32 == q32), &
+            "argsort_by over a string key list with a token must match the int32 array form")
+        if (allocated(error)) return
+        call t%argsort_by("b,i32", p32, descending=dsc)
+        call check(error, all(p32 == q32), &
+            "argsort_by over a token-free string key list must still honour descending=")
+        if (allocated(error)) return
+        !
+        ! %argsort_partial, both permutation kinds. n is the argument a forwarding slip loses:
+        ! asking for 3 of 6 rows and getting 6 back is the failure this pins.
+        call t%argsort_partial("b,-i32", p32, 3)
+        call u%argsort_partial(k2, q32, 3, descending=dsc)
+        call check(error, size(p32) == 3 .and. all(p32 == q32), &
+            "argsort_partial (int32) over a token key list must match the array form, n included")
+        if (allocated(error)) return
+        call t%argsort_partial("b,i32", p32, 3, descending=dsc)
+        call check(error, size(p32) == 3 .and. all(p32 == q32), &
+            "argsort_partial (int32) over a token-free key list must honour descending=")
+        if (allocated(error)) return
+        call t%argsort_partial("b,-i32", p64, 3)
+        call u%argsort_partial(k2, q64, 3, descending=dsc)
+        call check(error, size(p64) == 3 .and. all(p64 == q64), &
+            "argsort_partial (int64) over a token key list must match the array form, n included")
+        if (allocated(error)) return
+        call t%argsort_partial("b,i32", p64, 3, descending=dsc)
+        call check(error, size(p64) == 3 .and. all(p64 == q64), &
+            "argsort_partial (int64) over a token-free key list must honour descending=")
+        if (allocated(error)) return
+        !
+        ! %is_sorted_by's token branch. Asserted in BOTH directions from one ordering, so a
+        ! specific that ignored the split direction and always sorted ascending would fail on the
+        ! second call rather than passing both.
+        call t%sort_by("b,-i32")
+        call u%sort_by(k2, descending=dsc)
+        call t%get("i32", a32)
+        call u%get("i32", b32)
+        call check(error, all(a32 == b32), &
+            "sort_by over a string key list with a token must reorder as the array form does")
+        if (allocated(error)) return
+        call check(error, t%is_sorted_by("b,-i32") .and. t%is_sorted_by(k2, descending=dsc), &
+            "is_sorted_by must accept the token spelling of the order the table is actually in")
+        if (allocated(error)) return
+        call check(error, .not. t%is_sorted_by("b,i32"), &
+            "is_sorted_by must read the direction token, not ignore it")
+        if (allocated(error)) return
+        !
+        ! %sort_by's token-free branch, on freshly opened tables so the previous sort cannot make
+        ! the comparison pass by itself.
+        call parquet_open_table(t, f)
+        call parquet_open_table(u, f)
+        call t%sort_by("b,i32", descending=dsc)
+        call u%sort_by(k2, descending=dsc)
+        call t%get("i32", a32)
+        call u%get("i32", b32)
+        call check(error, all(a32 == b32), &
+            "sort_by over a token-free string key list must honour descending=")
+        if (allocated(error)) return
+        !
+        ! %top_n, both branches. Same fresh-table rule, and the row count is what proves n arrived.
+        call parquet_open_table(t, f)
+        call parquet_open_table(u, f)
+        call t%top_n("b,-i32", 2)
+        call u%top_n(k2, 2, descending=dsc)
+        call t%get("i32", a32)
+        call u%get("i32", b32)
+        call check(error, size(a32) == 2 .and. all(a32 == b32), &
+            "top_n over a string key list with a token must keep the same n rows as the array form")
+        if (allocated(error)) return
+        call parquet_open_table(t, f)
+        call t%top_n("b,i32", 2, descending=dsc)
+        call t%get("i32", a32)
+        call check(error, size(a32) == 2 .and. all(a32 == b32), &
+            "top_n over a token-free string key list must honour descending=")
+    end subroutine test_key_list_string_every_binding
     !
     !> `%compact` must not read the file. A column nobody has touched has no storage to shrink,
     !! and touching it would defeat the laziness the table exists to provide.

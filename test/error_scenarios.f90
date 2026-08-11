@@ -1584,6 +1584,12 @@ program error_scenarios
         call scenario_table_reserve_columns_shared_in_parallel()
     case ("table_key_direction_conflict")
         call scenario_table_key_direction_conflict()
+    case ("table_key_list_long_preview")
+        call scenario_table_key_list_long_preview()
+    case ("table_key_list_empty")
+        call scenario_table_key_list_empty()
+    case ("table_key_list_bad_direction")
+        call scenario_table_key_list_bad_direction()
     case ("table_require_columns_missing")
         call scenario_table_require_columns_missing()
     case ("filter_bool_ordering")
@@ -12096,6 +12102,60 @@ contains
         call t%argsort_by("-id", perm, descending=[.true.])  ! token AND descending= -> aborts
         print '(a,i0)', "unexpectedly accepted both a direction token and descending=", size(perm)
     end subroutine scenario_table_key_direction_conflict
+
+    !> The same conflict, but with a key list long enough that quoting it whole would build a
+    !! multi-kilobyte abort message. ifx's ERROR STOP runtime corrupts the heap past 8192 bytes,
+    !! so the preview is clipped -- and the trailing "...'" is what proves the clip happened
+    !! rather than the message merely being short by luck.
+    !!
+    !! Negative control first: the same conflict with a SHORT key list, whose preview must come
+    !! back unclipped, so a preview that always clipped would fail here instead of passing.
+    subroutine scenario_table_key_list_long_preview()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:)
+        character(len=*), parameter :: long_keys = &
+            "id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id,id," // &
+            "id,id,id,id,id,id,id,id,-val"
+        call write_table_scenario_fixture("test_run/es_table_key_preview.parquet")
+        call parquet_open_table(t, "test_run/es_table_key_preview.parquet")
+        if (len(long_keys) <= 100) then
+            print '(a)', "the long key list is not actually long; this scenario proves nothing"
+            return
+        end if
+        call t%argsort_by("id", perm)   ! ordinary short list, no conflict: permitted
+        print '(a,i0)', "a short key list was accepted, rows=", size(perm)
+        call t%argsort_by(long_keys, perm, descending=[.true.])   ! conflict, long list -> aborts
+        print '(a,i0)', "unexpectedly accepted a long conflicting key list", size(perm)
+    end subroutine scenario_table_key_list_long_preview
+
+    !> A key string that tokenizes to nothing is a caller mistake, not an empty sort: silently
+    !! leaving the table alone would look like the sort succeeded.
+    !!
+    !! Negative control first: a list whose separators are the same but which does carry a name
+    !! must be accepted, so a splitter that rejected all punctuation would fail here.
+    subroutine scenario_table_key_list_empty()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_key_empty.parquet")
+        call parquet_open_table(t, "test_run/es_table_key_empty.parquet")
+        call t%sort_by(" id ; ")   ! same punctuation, one real name: permitted
+        print '(a,i0)', "a key list with trailing separators was accepted, rows=", t%nrows()
+        call t%sort_by(" , ; ")    ! no names at all -> aborts
+        print '(a,i0)', "unexpectedly sorted by an empty key list, rows=", t%nrows()
+    end subroutine scenario_table_key_list_empty
+
+    !> An unparseable direction word must name the offending token, not the whole list -- the
+    !! parser's own message is passed through for exactly that reason.
+    !!
+    !! Negative control first: the recognized spelling of the same shape must be accepted.
+    subroutine scenario_table_key_list_bad_direction()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_key_baddir.parquet")
+        call parquet_open_table(t, "test_run/es_table_key_baddir.parquet")
+        call t%sort_by("id desc")      ! a recognized direction word: permitted
+        print '(a,i0)', "a recognized direction word was accepted, rows=", t%nrows()
+        call t%sort_by("id sideways")  ! not a direction word -> aborts
+        print '(a,i0)', "unexpectedly sorted by an unrecognized direction, rows=", t%nrows()
+    end subroutine scenario_table_key_list_bad_direction
 
     !> %require_columns names EVERY missing column, which is the whole reason it exists -- a
     !! hand-written %has_column loop reports one per run.

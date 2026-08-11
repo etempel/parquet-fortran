@@ -537,6 +537,7 @@ scenarios=(
     "filter_too_many_nodes_across_adds:1"
     "filter_scope_out_of_range:1"
     "filter_scope_reversed:1"
+    "filter_row_range_out_of_range:1"
     "filter_row_element_mode_no_whole_column_read:0"
     "filter_scoped_reads_no_whole_column:0"
     "sorting_nth_out_of_range:1"

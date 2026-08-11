@@ -460,6 +460,8 @@ program error_scenarios
         call scenario_filter_scope_out_of_range()
     case ("filter_scope_reversed")
         call scenario_filter_scope_reversed()
+    case ("filter_row_range_out_of_range")
+        call scenario_filter_row_range_out_of_range()
     case ("filter_row_element_mode_no_whole_column_read")
         call scenario_filter_row_element_mode_no_whole_column_read()
     case ("filter_scoped_reads_no_whole_column")
@@ -6113,6 +6115,30 @@ contains
         call parquet_reader_set_filter(reader, filt, 1, 99)
         print '(a)', "unexpectedly applied a filter scoped past the file's last row group"
     end subroutine scenario_filter_scope_out_of_range
+
+    !> The row-BOUNDED form's own range check, which is a separate one from the row-group scope
+    !> above: it bounds physical ROWS, so it is validated against the file's row count rather than
+    !> its row-group count. A range running past the last row would otherwise index the mask out of
+    !> bounds while building it.
+    !>
+    !> Negative control first: a valid row range over the same reader must be accepted, so a check
+    !> that refused every row range would fail here instead of passing.
+    subroutine scenario_filter_row_range_out_of_range()
+        type(parquet_reader) :: reader, reader2
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_row_range.parquet"
+
+        call write_filter_syntax_fixture(out_file)
+        call filt%add("v > 1")
+        ! A range well inside the file: permitted. On its own reader, because a filter can only be
+        ! installed once and only before any column is read.
+        call parquet_open_reader(reader2, out_file)
+        call parquet_reader_set_filter(reader2, filt, 0_int64, 0_int64, 1_int64, 2_int64)
+        print '(a)', "a filter bounded to rows 1..2 was accepted"
+        call parquet_open_reader(reader, out_file)
+        call parquet_reader_set_filter(reader, filt, 0_int64, 0_int64, 1_int64, 999999_int64)
+        print '(a)', "unexpectedly applied a filter bounded past the file's last row"
+    end subroutine scenario_filter_row_range_out_of_range
 
     !> The same validation from the other end: a reversed range (lo > hi) names no row groups at
     !> all, which is a caller mistake rather than an empty result.

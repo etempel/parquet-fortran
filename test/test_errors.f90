@@ -557,6 +557,8 @@ contains
                 test_filter_scope_out_of_range_aborts), &
             new_unittest("filter: a reversed row-group scope aborts", &
                 test_filter_scope_reversed_aborts), &
+            new_unittest("filter: a row range past the last row aborts", &
+                test_filter_row_range_out_of_range_aborts), &
             new_unittest("sample_fraction: negative value aborts", &
                 test_sample_negative_fraction_aborts), &
             new_unittest("sample_fraction: NaN value aborts", &
@@ -4873,6 +4875,18 @@ contains
             failure_message="a reversed row-group scope was expected to abort", &
             required_stderr="filter row-group range")
     end subroutine test_filter_scope_reversed_aborts
+
+    !> "row range", not "row-group range": the two forms are validated against different counts
+    !! (the file's rows and its row groups), so the message has to say which one the caller got
+    !! wrong. Asserting the shared prefix would pass against either check firing.
+    subroutine test_filter_row_range_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_row_range_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a filter bounded past the file's last row was expected to abort", &
+            required_stderr="filter row range 1..999999 is out of range (file has 3 row(s))")
+    end subroutine test_filter_row_range_out_of_range_aborts
 
     !> parquet_open_reader's sample_fraction < 0.0 aborts immediately.
     subroutine test_sample_negative_fraction_aborts(error)

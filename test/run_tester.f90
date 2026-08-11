@@ -32,6 +32,7 @@ program tester
     use test_string_parallel, only : collect_tests_string_parallel
     use test_table_codegen, only : collect_tests_table_codegen
     use test_settings, only : collect_tests_parquet_settings
+    use test_diagnostics, only : collect_tests_diagnostics
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
@@ -83,7 +84,8 @@ program tester
         new_testsuite("table_parallel", collect_tests_table_parallel), &
         new_testsuite("string_parallel", collect_tests_string_parallel), &
         new_testsuite("table_codegen", collect_tests_table_codegen), &
-        new_testsuite("settings", collect_tests_parquet_settings) &
+        new_testsuite("settings", collect_tests_parquet_settings), &
+        new_testsuite("diagnostics", collect_tests_diagnostics) &
         ]
     !
     ! command line argument for a specific testsuite and test
@@ -184,6 +186,15 @@ contains
     !> __kmp_invoke_microtask). Run those suites' tests sequentially instead
     !> so the fork always happens with no other team threads active.
     !>
+    !> "diagnostics" is excluded because every phase timer it asserts on is a process-global C++
+    !> static that ACCUMULATES. Each test resets one, performs the operation it measures, and
+    !> asserts the counter moved -- so a sibling test running a filtered read, a padded string read
+    !> or a threaded sort in the same window would charge the very counter under assertion. That
+    !> does not fail, it PASSES, against a timer that recorded nothing itself, which is this
+    !> project's worst failure mode. Its sort test additionally forces two process-global settings
+    !> (the counting fast path off, the parallel row threshold down) for the same reason "sorting"
+    !> is excluded. The suite is three tests over small fixtures and costs nothing.
+    !>
     !> "settings" is excluded for the same reason as those two, one level up: every setting in
     !> parquet_settings is process-global by definition, and its thread-pool tests resize Arrow's
     !> single shared CPU pool. Run concurrently, one test would resize the pool out from under
@@ -224,7 +235,7 @@ contains
         character(len=*), intent(in) :: name
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sort" .or. name == "settings" &
-            .or. name == "table_parallel" .or. name == "string_parallel")
+            .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics")
     end function suite_is_safe_to_parallelize
 
     !> Whether running just this suite is worth pre-running the whole scenario set for. Purely a

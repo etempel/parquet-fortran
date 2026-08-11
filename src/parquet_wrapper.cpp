@@ -4170,7 +4170,7 @@ extern "C"
 		catch (const std::system_error &) {}  // GCOVR_EXCL_LINE -- the OS refused a thread
 		catch (const std::bad_alloc &) {}     // GCOVR_EXCL_LINE -- no room for the thread list
 		return k;
-	}
+	}  // GCOVR_EXCL_LINE -- exception-cleanup epilogue for the two handlers above, never entered
 	}
 
 	// ---- Co-ranked merge partitioning ----
@@ -6711,11 +6711,22 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		auto *src = static_cast<ParquetReaderHandle *>(source);
 
+		// The BODY below is reachable only from a genuine race: another thread must be INSIDE a
+		// call on `source` at this instant. A deterministic test would have to hold that thread
+		// mid-call, and a timing-dependent one is worse than none (it passes on a quiet machine and
+		// gets disabled on a busy one). Kept because the transform being copied out is exactly the
+		// state a concurrent call could be rebuilding.
+		//
+		// The exclusion starts INSIDE the braces, not above the `if`: the condition is evaluated on
+		// every call and is genuinely covered, so excluding its line too would report a live line
+		// as a stale-exclusion candidate for good.
 		if (src->guard_owner.load(std::memory_order_acquire) != 0)
 		{
+			// GCOVR_EXCL_START
 			std::snprintf(err_out, static_cast<size_t>(err_cap),
 				"the source reader is in use by another thread; its transform can only be adopted while it is idle");
 			return 1;
+			// GCOVR_EXCL_STOP
 		}
 		if (src->num_row_groups != reader_handle->num_row_groups || src->total_nrows != reader_handle->total_nrows)
 		{
@@ -6725,11 +6736,22 @@ extern "C"
 				static_cast<long long>(src->total_nrows), static_cast<long long>(reader_handle->total_nrows));
 			return 1;
 		}
+		// The BODY below is unreachable through the public API, and the reasoning is worth keeping
+		// because it is a chain of three facts rather than one. has_pending_sample is set only by
+		// parquet_reader_set_sample with filter_will_follow != 0; its one Fortran caller
+		// (parquet_apply_sample, parquet_read.f90) passes that flag as `filter%n > 0`; and
+		// parquet_open_reader_base then calls parquet_apply_filter unconditionally, which cannot
+		// take its own early return for a filter with clauses. So the draw is always installed
+		// before the reader is handed back, and no caller can hold one with a pending draw. Kept
+		// as a backstop: adopting a transform that is not finished yet would silently copy a mask
+		// the source has not drawn. Exclusion starts inside the braces, as above.
 		if (src->has_pending_sample)
 		{
+			// GCOVR_EXCL_START
 			std::snprintf(err_out, static_cast<size_t>(err_cap),
 				"the source reader's sample draw has not been installed yet");
 			return 1;
+			// GCOVR_EXCL_STOP
 		}
 		if (reader_handle->live_mask || reader_handle->sort_perm)
 		{
@@ -7602,8 +7624,11 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		if (n != reader_handle->nrows)
 		{
-			report_fatal_error("parquet_reader_physical_row_indices",
-				"row count does not match the reader's own");
+			// One line, deliberately: gcovr's --exclude-lines-by-pattern only matches the line a
+			// report_fatal_error call STARTS on, so a wrapped argument list leaves its own
+			// continuation counted as an ordinary -- and permanently uncovered, since the abort
+			// discards this run's counters -- line. Keep every call in this file on one line.
+			report_fatal_error("parquet_reader_physical_row_indices", "row count does not match the reader's own");
 		}
 		if (n == 0) return;
 		// Live, surviving rows in FILE order first; the sort permutation (if any) reorders this
@@ -7635,8 +7660,7 @@ extern "C"
 		}
 		if (static_cast<int64_t>(physical.size()) != n)
 		{
-			report_fatal_error("parquet_reader_physical_row_indices",
-				"surviving row count does not match the reader's own");
+			report_fatal_error("parquet_reader_physical_row_indices", "surviving row count does not match the reader's own");
 		}
 		if (!reader_has_sort_permutation(reader_handle))
 		{
@@ -7649,8 +7673,7 @@ extern "C"
 			const int64_t src = perm->Value(i);
 			if (src < 0 || src >= n)
 			{
-				report_fatal_error("parquet_reader_physical_row_indices",
-					"sort permutation entry out of range");
+				report_fatal_error("parquet_reader_physical_row_indices", "sort permutation entry out of range");
 			}
 			out[i] = physical[static_cast<size_t>(src)];
 		}

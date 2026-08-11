@@ -489,7 +489,15 @@ contains
         integer :: i
         !
         has = .false.
-        if (.not. allocated(sch%metadata%items)) return
+        ! Two separate things are true about the line below, and only the second is about coverage.
+        ! The GUARD never fires: `sch` here is either a copy of a parsed schema or one
+        ! `build_table_schema` just produced, and a parse cannot succeed without a non-empty
+        ! `table:` metadata entry -- so `items` is allocated by the time this is reachable. The
+        ! LINE, on the other hand, plainly executes: it shares a basic block with `has = .false.`
+        ! above it, which gcov credits with the whole block's count (53 against 0 here) while
+        ! reporting this one uncovered. The sibling guard in carried_companion_is_superseded is
+        ! the same test and IS reported covered, because the `return`s above it start a new block.
+        if (.not. allocated(sch%metadata%items)) return ! GCOVR_EXCL_LINE -- gcov attribution artifact
         do i = 1, size(sch%metadata%items)
             if (trim(sch%metadata%items(i)%key) == key) has = .true.
         end do

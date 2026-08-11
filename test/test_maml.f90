@@ -1846,7 +1846,11 @@ contains
         call qc%add("mass, >0, <=1000, Null")
         call qc%add("flag, , , NA")
         call qc%add("other, >mass")
-        call check(error, trim(qc%entries(1)) == "mass, >0, <=1000, Null" .and. qc%n == 3, &
+        ! A bound-less entry -- no comma anywhere, so the whole entry IS the column name. Legal
+        ! (parquet_compose_read_qc calls it "a legal no-op"), and the one entry shape whose column
+        ! name is not delimited by anything, so it is the shape a comma-driven parse gets wrong.
+        call qc%add("  mass  ")
+        call check(error, trim(qc%entries(1)) == "mass, >0, <=1000, Null" .and. qc%n == 4, &
             "parquet_read_qc%add did not store the entry verbatim")
         if (allocated(error)) return
 
@@ -1859,6 +1863,12 @@ contains
         if (allocated(error)) return
         call check(error, trim(qc%entries(3)) == "other, >mass", &
             "remap_column_names rewrote a BOUND that happened to spell the renamed column")
+        if (allocated(error)) return
+        ! The bound-less entry is a column name and nothing else, so it must be renamed -- the
+        ! exact opposite of entry 3, whose identical text is a bound and must not be. The two
+        ! together are what says the rename keys on POSITION in the entry rather than on the text.
+        call check(error, trim(qc%entries(4)) == "m_200c", &
+            "remap_column_names did not rename a bound-less entry, whose whole text is the column")
     end subroutine test_read_qc_add_and_remap
     !
     !> The headline rule: a MAML that declares any qc for a column wins for that column IN FULL --

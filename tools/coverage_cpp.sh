@@ -170,7 +170,12 @@ echo "Cleaning fpm default build tree (fpm clean --all)..." >&2
 fpm clean --skip </dev/null >/dev/null 2>&1 || true
 
 export FPM_BUILD_DIR="${FPM_BUILD_DIR:-build/gcov-cpp}"
-export FPM_CXXFLAGS="${FPM_CXXFLAGS:-} -O0 -g --coverage"
+# -fprofile-update=atomic for the same reason tools/coverage.sh sets it on the Fortran half:
+# several threads run through src/parquet_wrapper.cpp inside one process (test-drive runs a
+# suite's tests concurrently, and the library's own reads are threaded), so non-atomic counter
+# updates lose increments and a rarely-hit line is reported uncovered. Accepted by both clang++
+# and g++ here; if a future toolchain rejects it, prefer-atomic is the fallback spelling.
+export FPM_CXXFLAGS="${FPM_CXXFLAGS:-} -O0 -g --coverage -fprofile-update=atomic"
 
 # Clang's --coverage needs its profile runtime available at final link.
 if [[ "$(basename "$CXX_PATH")" == clang++* ]]; then
@@ -213,7 +218,12 @@ fpm test run_tester -- "$@"
 
 if [ "$#" -eq 0 ]; then
     echo "Running tools/run_error_scenarios.sh for additional error-path coverage..." >&2
-    "$ROOT_DIR/tools/run_error_scenarios.sh" >&2 || true
+    # Serial for the same reason tools/coverage.sh runs them serially -- see the long comment at
+    # that script's own call site. Hundreds of concurrent workers merging into one set of shared
+    # .gcda files corrupts them, and the milder form of the damage silently under-reports rather
+    # than failing. The C++ half writes into the same tree, so it has the same exposure.
+    RUN_ERROR_SCENARIOS_JOBS="${RUN_ERROR_SCENARIOS_JOBS:-1}" \
+        "$ROOT_DIR/tools/run_error_scenarios.sh" >&2 || true
 fi
 
 echo "Collecting C++ coverage data for src/parquet_wrapper.cpp..." >&2

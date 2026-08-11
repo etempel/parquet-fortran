@@ -9518,6 +9518,26 @@ contains
         end do
         call check(error, next - 1_int64 == t%nrows(), &
             "a sampled table's default bounds should tile 1..nrows() exactly")
+        if (allocated(error)) return
+        !
+        ! A plain whole-file table: no slice, no transform of any kind. This is the one case where
+        ! the two coordinate systems ARE the same rows, so the reader answers both -- and it is the
+        ! only arm above that reaches the reader for the physical form (the others take either the
+        ! captured masked-slice bounds or a footer-only reader of their own). Asserting the two
+        ! forms agree WITH EACH OTHER is weaker than it looks on its own, so it is pinned to the
+        ! pre-open planning call as well: an arm that answered from the wrong source would have to
+        ! reproduce the file's own row groups exactly to pass.
+        call parquet_open_table(t, f)
+        call t%row_group_bounds(tb)
+        call t%row_group_bounds(pb, physical=.true.)
+        call check(error, all(pb == fb), &
+            "an untransformed whole-file table should report the file's own bounds under physical=")
+        if (allocated(error)) return
+        call check(error, all(tb == pb), &
+            "an untransformed whole-file table's two coordinate systems should be the same rows")
+        if (allocated(error)) return
+        call check(error, tb(1, 1) == 1_int64 .and. tb(2, size(tb, 2)) == t%nrows(), &
+            "an untransformed whole-file table's bounds should tile 1..nrows() exactly")
     end subroutine test_row_group_bounds_physical
     !
     !> A row mutation on a SLICE, and what it costs a column the slice never read.

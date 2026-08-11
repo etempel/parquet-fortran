@@ -63,7 +63,15 @@ echo "Cleaning fpm default build tree (fpm clean --all)..." >&2
 fpm clean --skip </dev/null >/dev/null 2>&1 || true
 
 export FPM_BUILD_DIR="${FPM_BUILD_DIR:-build/gcov}"
-export FPM_FFLAGS="${FPM_FFLAGS:-} -O0 -g --coverage"
+# -fprofile-update=atomic is NOT optional here, and its absence does not look like a bug.
+# test-drive runs the tests of a suite concurrently inside ONE process (its own !$omp parallel
+# do), so without atomic updates two threads incrementing the same gcov counter lose one of the
+# increments -- and a line hit only once or twice in the whole run is then reported as
+# UNCOVERED. Measured directly on this project: adding the flag (with the serialisation below)
+# took the total from 24322/24324 to 24324/24324, and the two lines it recovered were an
+# ordinary, well-tested branch that had been chased as a real gap. The cost is a slower
+# instrumented build; the alternative is a report that invents gaps.
+export FPM_FFLAGS="${FPM_FFLAGS:-} -O0 -g --coverage -fprofile-update=atomic"
 
 # Unconditional on every invocation -- this build dir is separate from fpm's default `build/`
 # (so `fpm clean --all` never touches it) and is NOT reused/merged across runs: a manual
@@ -105,7 +113,18 @@ if [ "$#" -eq 0 ]; then
     # both this script and test_errors.f90's own subprocess checks just
     # invoke `fpm test error_scenarios -- <scenario>`, which inherits them --
     # so every scenario run here accumulates into the same .gcda files.
-    "$ROOT_DIR/tools/run_error_scenarios.sh" >&2 || true
+    #
+    # ...which is exactly why the scenarios are run SERIALLY here and nowhere else. The runner
+    # normally dispatches them across `nproc` workers, and each worker merges its counters into
+    # those same shared .gcda files as it exits -- hundreds of processes writing one file. Under
+    # coverage that reliably corrupts one: three consecutive runs on this machine died with
+    # `src_parquet_tables_rowmutate.f90.gcda: not a gcov data file`, always the same file, and a
+    # serial run has not reproduced it. Milder instances are worse, because they do not stop the
+    # run: a whole untouched source file coming back at 47%, or a handful of lines flipping
+    # between covered and uncovered, both of which read as regressions. Override with
+    # RUN_ERROR_SCENARIOS_JOBS if you want the speed back and can live with that.
+    RUN_ERROR_SCENARIOS_JOBS="${RUN_ERROR_SCENARIOS_JOBS:-1}" \
+        "$ROOT_DIR/tools/run_error_scenarios.sh" >&2 || true
 fi
 
 echo "Collecting coverage data..." >&2

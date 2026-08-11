@@ -150,6 +150,8 @@ contains
                 test_colread_split_equals_whole), &
             new_unittest("nulls land in the right rows when one column's read is split", &
                 test_colread_nulls_survive_the_split), &
+            new_unittest("a row group too short to hold a whole validity block is pasted serially", &
+                test_colread_short_row_groups), &
             new_unittest("a vector column's read splits with every element in place", &
                 test_colread_vector_column_splits), &
             new_unittest("a string column's read is not split, and is still correct", &
@@ -846,6 +848,70 @@ contains
         end do
         call check(error, nbad == 0, "the split read placed nulls in the wrong rows")
     end subroutine test_colread_nulls_survive_the_split
+    !
+    !> Row groups SHORTER than one validity block, where the split has no whole block to paste
+    !> freely and every row group goes through the critical section entire.
+    !>
+    !> `paste_row_group_safely` divides a row group's range into a middle occupying whole bitmap
+    !> blocks — pasted with no lock — and the ragged element at each end, which is shared with the
+    !> neighbouring row group and so has to be serialised. A row group short enough to contain no
+    !> whole block at all has no middle, and takes a third arm that serialises the lot.
+    !>
+    !> **The test above cannot reach it, and that is a property of the row-group SIZE rather than
+    !> of anything about nulls.** Its fixture has 25,000-row groups, so a whole block always exists;
+    !> here the row groups are 40 rows against a 64-bit block, which is the only way the arm is
+    !> reachable at all. The two are each other's control: same column shape, same null pattern,
+    !> different arm, and both must produce exactly the same answer — which is the point, since a
+    !> lock that was skipped and a lock that was taken must be indistinguishable in the result.
+    !>
+    !> The work floor is moved rather than the fixture grown for the usual reason (Risk-49): a
+    !> fixture large enough to clear the real floor with 40-row row groups would be tens of
+    !> thousands of row groups.
+    subroutine test_colread_short_row_groups(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: f = "test_run/tblpar_colread_shortrg.parquet"
+        ! 40 rows to a row group against a 64-bit validity block: no row group can contain a whole
+        ! block, whatever offset it starts at, so every one of the ten takes the serialised arm.
+        integer, parameter :: N = 400, CH = 40
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        real(real64) :: v(N)
+        logical :: valid(N)
+        logical, allocatable :: mask(:)
+        real(real64), allocatable :: got(:)
+        integer :: used, i, nbad
+        !
+        do i = 1, N
+            v(i) = 1.5_real64 * real(i, real64)
+            valid(i) = mod(i, 3) /= 0
+        end do
+        call parquet_open_writer(w, f, chunk_size=CH)
+        call parquet_write_column(w, "v", v, is_valid=valid)
+        call parquet_close_writer(w)
+        !
+        call parquet_reset_settings()
+        call parquet_debug_set_colread_min_elements(1_c_int64_t)
+        call parquet_debug_set_colread_threads_used(0_c_int64_t)
+        call parquet_open_table(t, f)
+        call t%get("v", got, mask)
+        used = int(parquet_debug_get_colread_threads_used())
+        call parquet_debug_set_colread_min_elements(0_c_int64_t)
+        call check_colread_really_parallel(error, used, "a column read in row groups shorter than a block")
+        if (allocated(error)) return
+        !
+        call check(error, size(got) == N .and. size(mask) == N, &
+            "the split read of short row groups returned the wrong number of rows")
+        if (allocated(error)) return
+        nbad = 0
+        do i = 1, N
+            if (mask(i) .neqv. valid(i)) nbad = nbad + 1
+            ! A null row's stored value is unspecified, so only the live rows are compared.
+            if (valid(i) .and. abs(got(i) - v(i)) > 1.0e-9_real64) nbad = nbad + 1
+        end do
+        call check(error, nbad == 0, &
+            "serialising a whole short row group must place the same values and nulls as the " // &
+            "whole-block path does")
+    end subroutine test_colread_short_row_groups
     !
     !> A vector column: the work floor is in ELEMENTS (`rows * width`), and `%paste` addresses rows,
     !> so a width greater than one is where a confusion between the two units would show.

@@ -816,6 +816,14 @@ a regression, because a lost update may simply not happen, so the alignment arit
 directly instead. Three mutations are caught deterministically — no trimming at all (the original
 bug), trimming only the start, and a period that ignores the column's width.
 
+`paste_row_group_safely`'s **third** arm — a row group too short to contain any whole block, which
+is therefore serialised entire — is reached by `a row group too short to hold a whole validity block
+is pasted serially` (same file), whose fixture is 40-row row groups against a 64-bit block. It is an
+end-to-end test and so carries the caveat above: what it can assert is the arm's paste offsets, not
+the absence of a lost update. It is worth having anyway because **the arm is unreachable at any
+realistic row-group size** — the 25,000-row fixture above never enters it — so without a fixture
+built for it the arm ships untested, and a mutation to it is invisible to every other test here.
+
 **What this forbids.**
 
 - **Do not reason from "the rows are disjoint" to "the writes are disjoint"** anywhere a bit-packed

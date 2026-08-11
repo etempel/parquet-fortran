@@ -2530,7 +2530,10 @@ OpenMP threads racing on GCC's `--coverage` counters, or from stale `.gcda` left
 earlier crashed run, or from the Docker reproduction's QEMU (amd64-on-arm64) emulation) — all
 three were tested and ruled out: the crash reproduces identically on a genuinely fresh build, in
 the real (non-emulated) GitLab CI pipeline itself, and adding `-fprofile-update=atomic` to every
-coverage build changed nothing.
+coverage build changed nothing. **That last clause is about THIS crash only, and must not be read
+as "the flag is unnecessary" — it is required for a different reason.** See "Measuring test
+coverage" below: without it, concurrently-updated counters are silently lost and a genuinely
+covered line reports as uncovered.
 
 **Confirmed root cause: this is [gcovr issue #882](https://github.com/gcovr/gcovr/issues/882)**
 ("UnknownLineType thrown when parsing coverage data from 10K+ line file") — for a source file at
@@ -3375,6 +3378,30 @@ Run `tools/coverage.sh` for per-file and total `src/` line coverage plus the unc
 ranges; pass one run_tester suite name to scope it (e.g. `tools/coverage.sh reading`), or no
 argument for a full run (which also runs every error scenario). It auto-selects the `gcov`
 matching the active `gfortran` — a mismatched gcov fails with "Invalid .gcno file!".
+
+**A coverage report is only trustworthy if the counters were collected safely, and two separate
+mechanisms here corrupt them. Both are now handled inside `tools/coverage.sh`; do not remove
+either without reading this.**
+
+- **In-process races lose counters, so `-fprofile-update=atomic` is required.** test-drive runs a
+  suite's tests concurrently inside one process, so two threads incrementing the same gcov counter
+  can lose an increment — and a line hit only once or twice in the whole run then reports as
+  **uncovered**. Measured on this project: the flag took a full run from 24322/24324 to
+  **24324/24324**, and the two lines it recovered were an ordinary, well-covered branch that had
+  already been chased as a real gap. (An older note elsewhere in this file records that adding this
+  flag "changed nothing" — that was about the *gcovr 10,000-line parser* bug, a different problem,
+  and says nothing about counter loss.)
+- **Concurrent inter-process merges corrupt the `.gcda` outright, so the error scenarios run
+  serially under coverage.** `tools/run_error_scenarios.sh` normally dispatches ~700 scenarios
+  across `nproc` workers, each merging into the same shared `.gcda` files as it exits. Three
+  consecutive full runs died with `src_parquet_tables_rowmutate.f90.gcda: not a gcov data file` —
+  always that file — and a serial run has not reproduced it. `RUN_ERROR_SCENARIOS_JOBS` overrides
+  it if the speed is wanted back.
+
+**Before either fix, a single run's numbers were approximate and the errors ran in the direction
+that invents work**: a whole untouched file reading 47%, individual lines flipping between runs.
+If a report still looks wrong, compare two runs before chasing a line — and remember that noise
+can only ever *lose* counts, so a line reported covered in **any** run is covered.
 
 When closing coverage gaps, sort each uncovered line by type first: an `error stop`/abort
 line can *only* be covered by an out-of-process scenario (`test/error_scenarios.f90` + a

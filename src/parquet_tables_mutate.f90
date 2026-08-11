@@ -218,29 +218,27 @@ contains
     !
     ! ---- column-structural ----------------------------------------------------------------
     !
-    module procedure table_put_column
-        integer :: idx
-        !
-        call table_check_open(self, "add_column")
-        call table_fix_nrows(self, name, col%length())
-        call table_new_slot(self, name, .false., idx)
-        call col%deep_copy(self%cache%cols(idx)%values)
-        self%cache%cols(idx)%declared_kind = col%kindof()
-        self%cache%cols(idx)%width = col%colwidth()
-        self%cache%cols(idx)%residency = RES_FULL
-        self%cache%cols(idx)%user_populated = .true.
-    end procedure table_put_column
-    !
     module procedure move_table_column
+        ! Both shift call sites (table_drop_column here, drop_shadowed_row_index in
+        ! parquet_tables_lifecycle) move LIVE slots down over a removed one, and a live slot always
+        ! has both of these -- table_new_slot and add_file_slot each assign them before the slot
+        ! counts. So the release arms below cannot fire today. They are kept because the
+        ! alternative to releasing a stale name is silently keeping another column's, and a future
+        ! caller moving a slot that is not live would need them; they are excluded rather than
+        ! deleted, and rather than chased with a fixture this repository cannot build.
         if (allocated(src%name)) then
             dst%name = src%name
+        ! GCOVR_EXCL_START -- unreachable: a live slot always carries a name (see above)
         else if (allocated(dst%name)) then
             deallocate(dst%name)
+        ! GCOVR_EXCL_STOP
         end if
         if (allocated(src%file_name)) then
             dst%file_name = src%file_name
+        ! GCOVR_EXCL_START -- unreachable: a live slot always carries a file_name (see above)
         else if (allocated(dst%file_name)) then
             deallocate(dst%file_name)
+        ! GCOVR_EXCL_STOP
         end if
         if (allocated(src%unit)) then
             dst%unit = src%unit
@@ -256,10 +254,14 @@ contains
         dst%user_populated = src%user_populated
         dst%supported = src%supported
         dst%residency = src%residency
+        ! `rg_loaded` is declared "reserved for per-row-group residency" and NOTHING in the library
+        ! allocates it yet, so neither arm can run -- the guards, not the arms, are what execute.
+        ! This carrying code exists so that whoever implements per-row-group residency inherits a
+        ! shift that already moves it; both arms become live the moment the first allocation does.
         if (allocated(src%rg_loaded)) then
-            call move_alloc(src%rg_loaded, dst%rg_loaded)
+            call move_alloc(src%rg_loaded, dst%rg_loaded) ! GCOVR_EXCL_LINE -- see above
         else if (allocated(dst%rg_loaded)) then
-            deallocate(dst%rg_loaded)
+            deallocate(dst%rg_loaded) ! GCOVR_EXCL_LINE -- see above
         end if
         call dst%values%move_from(src%values)
     end procedure move_table_column
@@ -479,13 +481,30 @@ contains
         end if
         !
         call table_touch(self%cache, table_scope_of(self), idx, "cast")
-        ! Re-check against the kind actually READ. A width_pending column only learned its kind
-        ! above, and a cast_pending one is now holding the kind an earlier deferred cast asked
-        ! for -- either can have turned this into a no-op.
+        ! Re-check against the kind actually READ, in case the touch turned this into a no-op.
+        !
+        ! It cannot today, and that was established rather than assumed: `table_materialize` always
+        ! decodes into `slot%declared_kind`, and every path that leaves a column resident without
+        ! materializing leaves the two in step -- so `%kindof()` here equals `declared_kind`, which
+        ! the guard further up has already found different from `to_kind`. Six candidate sequences
+        ! were tried against an instrumented build (a deferred cast followed by a second one, a
+        ! cast back to the file's own kind, `exact=` on an untouched column, an evict-then-cast, and
+        ! both of those on a deferred-WIDTH column) and none reached it; nor does anything in the
+        ! suite or the error scenarios.
+        !
+        ! Kept because the invariant it rests on is not local: it belongs to `table_materialize`,
+        ! one file away, and the cost of it being wrong is `cast_apply` converting a column that is
+        ! already in the target kind -- reinterpreting its values as something they are not. If a
+        ! future read path ever materializes into a kind other than the declared one, this is the
+        ! guard that keeps the cast honest, so it is excluded rather than deleted.
+        ! (The test below runs on every cast; only its BODY is unreachable, hence the markers here
+        ! rather than around the whole construct.)
         if (self%cache%cols(idx)%values%kindof() == to_kind) then
+            ! GCOVR_EXCL_START -- unreachable while table_materialize decodes into declared_kind
             self%cache%cols(idx)%declared_kind = to_kind
             self%cache%cols(idx)%cast_pending = .false.
             return
+            ! GCOVR_EXCL_STOP
         end if
         call cast_check_pair(self%cache, name, "cast", self%cache%cols(idx)%values%kindof(), to_kind)
         call cast_zero_null_rows(self%cache%cols(idx)%values)

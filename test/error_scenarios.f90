@@ -836,6 +836,8 @@ program error_scenarios
         call scenario_columns_append_kind_mismatch()
     case ("columns_append_row_of_width_mismatch")
         call scenario_columns_append_row_of_width_mismatch()
+    case ("columns_append_row_of_row_out_of_range")
+        call scenario_columns_append_row_of_row_out_of_range()
     case ("table_append_row_validates_first")
         call scenario_table_append_row_validates_first()
     case ("columns_append_width_mismatch")
@@ -1312,6 +1314,8 @@ program error_scenarios
         call scenario_table_prefetch_unsupported_column()
     case ("table_add_column_row_mismatch")
         call scenario_table_add_column_row_mismatch()
+    case ("table_add_column_kindless")
+        call scenario_table_add_column_kindless()
     case ("table_add_column_duplicate")
         call scenario_table_add_column_duplicate()
     case ("table_add_column_duplicate_force_false")
@@ -1452,6 +1456,10 @@ program error_scenarios
         call scenario_table_set_element_row_out_of_range()
     case ("table_set_element_kind_mismatch")
         call scenario_table_set_element_kind_mismatch()
+    case ("table_set_null_mask_wrong_length")
+        call scenario_table_set_null_mask_wrong_length()
+    case ("table_set_null_mask_wrong_shape")
+        call scenario_table_set_null_mask_wrong_shape()
     case ("table_set_null_row_out_of_range")
         call scenario_table_set_null_row_out_of_range()
     case ("table_rename_duplicate_name")
@@ -1476,6 +1484,14 @@ program error_scenarios
         call scenario_table_cast_fractional()
     case ("table_cast_float_overflow")
         call scenario_table_cast_float_overflow()
+    case ("table_cast_exact_i32_to_f32")
+        call scenario_table_cast_exact_i32_to_f32()
+    case ("table_cast_exact_i64_to_f32")
+        call scenario_table_cast_exact_i64_to_f32()
+    case ("table_cast_exact_i64_to_f64")
+        call scenario_table_cast_exact_i64_to_f64()
+    case ("table_cast_f32_fractional")
+        call scenario_table_cast_f32_fractional()
     case ("table_cast_exact_precision")
         call scenario_table_cast_exact_precision()
     case ("table_cast_unsupported_column")
@@ -9832,6 +9848,25 @@ contains
         print '(a,i0)', "unexpectedly appended a row of a different width, length=", a%length()
     end subroutine scenario_columns_append_row_of_width_mismatch
 
+    !> `append_row_of` names a row of the SOURCE, and that index is the one argument neither the
+    !! kind check nor the width check can vet -- both compare the two columns' metadata and say
+    !! nothing about whether row `irow` exists in `b`.
+    !!
+    !! Without the guard the read runs off the end of the source's storage: a plain `fpm test` has
+    !! no bounds checking, so it would copy whatever follows the array and the appended row would
+    !! hold garbage that still looks like a valid value of that kind. The negative control comes
+    !! first -- the in-range append must succeed, or a guard that rejected every index would pass
+    !! this scenario while breaking the operation.
+    subroutine scenario_columns_append_row_of_row_out_of_range()
+        type(parquet_column) :: a, b
+        call b%init(PK_FLOAT64, 2_int64)
+        call b%set_all([1.0_real64, 2.0_real64])
+        call a%init(PK_FLOAT64, 0_int64)
+        call a%append_row_of(b, 2_int64)   ! in range: must be accepted
+        call a%append_row_of(b, 3_int64)   ! one past the source's last row -> aborts
+        print '(a,i0)', "unexpectedly appended a row past the source's end, length=", a%length()
+    end subroutine scenario_columns_append_row_of_row_out_of_range
+
     !> A row append validates EVERY column before writing ANY of them.
     !!
     !! The abort itself is not the point -- the point is WHICH abort. `a` matches, `b` does not,
@@ -10959,6 +10994,25 @@ contains
     end subroutine scenario_table_add_column_row_mismatch
 
     !> Replacing a column silently would lose data, so it needs an explicit force=.
+    !> `%add_column` taking a whole `parquet_column` is the only form that can be handed something
+    !! with no kind: every other one takes its kind from the TYPE of the array it is given, while
+    !! this one reads it off the column. Without the guard the table gains a `PK_NONE` slot that no
+    !! accessor can read or write, and the failure surfaces at the first `%get` -- far from the
+    !! `%add_column` that caused it, and with nothing naming the column that was never filled.
+    !!
+    !! The column added first is the negative control: it proves the guard rejects a KINDLESS
+    !! column rather than every column, which a guard that simply always fired would also pass.
+    subroutine scenario_table_add_column_kindless()
+        type(parquet_table) :: t
+        type(parquet_column) :: good, empty
+        call good%init(PK_INT32, 2_int64)
+        call good%set_all([1_int32, 2_int32])
+        call parquet_new_table(t)
+        call t%add_column("a", good)     ! a real column: accepted
+        call t%add_column("b", empty)    ! never %init'd -> aborts
+        print '(a,i0)', "unexpectedly added a kindless column, ncols=", t%ncols()
+    end subroutine scenario_table_add_column_kindless
+
     subroutine scenario_table_add_column_duplicate()
         type(parquet_table) :: t
         call parquet_new_table(t)
@@ -12333,6 +12387,40 @@ contains
         print '(a,i0)', "unexpectedly nulled row 0, nrows=", t%nrows()
     end subroutine scenario_table_set_null_row_out_of_range
 
+    !> The ROW mask form of `%set_null` takes one entry per table row, and a mask of the wrong
+    !! length is the mistake a caller makes after adding or deleting rows and reusing an old mask.
+    !!
+    !! Without the check the loop is bounded by `self%row_count` rather than by the mask, so a
+    !! SHORT mask is read past its end -- unbounded on a build with no bounds checking, which a
+    !! plain `fpm test` is -- and a LONG one silently ignores its tail. Both would quietly null
+    !! the wrong rows. The in-range call first is the negative control.
+    subroutine scenario_table_set_null_mask_wrong_length()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32])
+        call t%set_null("a", [.true., .false., .true.])       ! right length: must be accepted
+        call t%set_null("a", [.true., .false.])               ! one entry short -> aborts
+        print '(a,i0)', "unexpectedly accepted a short validity mask, nrows=", t%nrows()
+    end subroutine scenario_table_set_null_mask_wrong_length
+
+    !> The ELEMENT mask form takes a `(width, rows)` mask, so it has two ways to be wrong and the
+    !! message has to say which. This one is the transposed mask -- shaped `(rows, width)` -- which
+    !! is the easy mistake to make and, on a square column, the one no shape check would catch.
+    !! The fixture is deliberately NOT square (width 2, 3 rows) so the two shapes really differ.
+    subroutine scenario_table_set_null_mask_wrong_shape()
+        type(parquet_table) :: t
+        real(real64) :: vv(2, 3)
+        logical :: ok(2, 3), swapped(3, 2)
+        vv = 1.0_real64
+        ok = .true.
+        swapped = .true.
+        call parquet_new_table(t)
+        call t%add_column("v", vv)
+        call t%set_null("v", ok)        ! correctly shaped (width, rows): must be accepted
+        call t%set_null("v", swapped)   ! transposed -> aborts
+        print '(a,i0)', "unexpectedly accepted a transposed element mask, nrows=", t%nrows()
+    end subroutine scenario_table_set_null_mask_wrong_shape
+
     subroutine scenario_table_rename_duplicate_name()
         type(parquet_table) :: t
         call parquet_new_table(t)
@@ -12442,6 +12530,69 @@ contains
     end subroutine scenario_table_cast_float_overflow
 
     !> exact=.true. additionally refuses the precision loss the default makes silently.
+    !> `exact=` on an int32 -> real32 cast. An int32 above 2**24 has more significant bits than
+    !! real32's 24-bit mantissa, so it comes back changed -- the integer direction of the same
+    !! precision loss `table_cast_exact_precision` covers for real64 -> real32.
+    !!
+    !! Column `a` carries 2**24 itself, which real32 DOES hold exactly, and is cast first under
+    !! the same `exact=.true.`: that is the negative control, and it must be a separate column
+    !! rather than a round trip through the same one -- casting `b` down and back would round the
+    !! offending value away and leave the scenario asserting nothing.
+    subroutine scenario_table_cast_exact_i32_to_f32()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 16777216_int32])
+        call t%add_column("b", [1_int32, 16777217_int32])
+        call t%cast("a", PK_FLOAT32, exact=.true.)   ! 2**24 itself survives: accepted
+        call t%cast("b", PK_FLOAT32, exact=.true.)   ! 2**24 + 1 has no exact real32 form -> aborts
+        print '(a,i0)', "unexpectedly accepted a lossy exact= int32 cast, kind=", t%kind("b")
+    end subroutine scenario_table_cast_exact_i32_to_f32
+
+    !> `exact=` on an int64 -> real32 cast: the same mantissa argument, from the wider integer.
+    !! Checked through `int64_survives_real` rather than a round trip through real64, because an
+    !! int64 large enough to matter cannot be compared by converting the real back.
+    subroutine scenario_table_cast_exact_i64_to_f32()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int64, 16777216_int64])
+        call t%add_column("b", [1_int64, 16777217_int64])
+        call t%cast("a", PK_FLOAT32, exact=.true.)   ! 2**24 itself survives: accepted
+        call t%cast("b", PK_FLOAT32, exact=.true.)   ! 2**24 + 1 -> aborts
+        print '(a,i0)', "unexpectedly accepted a lossy exact= int64 -> real32 cast, kind=", t%kind("b")
+    end subroutine scenario_table_cast_exact_i64_to_f32
+
+    !> `exact=` on an int64 -> real64 cast. real64 has 53 mantissa bits, so this needs a much
+    !! larger value than its real32 siblings -- and it is the one case where the DEFAULT rules
+    !! silently lose an integer that a user is most likely to assume is safe, real64 being the
+    !! widest kind on offer.
+    subroutine scenario_table_cast_exact_i64_to_f64()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int64, 9007199254740992_int64])   ! 2**53
+        call t%add_column("b", [1_int64, 9007199254740993_int64])   ! 2**53 + 1
+        call t%cast("a", PK_FLOAT64, exact=.true.)   ! 2**53 itself survives: accepted
+        call t%cast("b", PK_FLOAT64, exact=.true.)   ! 2**53 + 1 -> aborts
+        print '(a,i0)', "unexpectedly accepted a lossy exact= int64 -> real64 cast, kind=", t%kind("b")
+    end subroutine scenario_table_cast_exact_i64_to_f64
+
+    !> A real32 column with a fractional value cast to an integer kind. `table_cast_fractional`
+    !! covers the real64 source; this is the real32 one, which reaches a different checker --
+    !! `chk_from_f32`, whose integer-target arm is the only branch it has.
+    !!
+    !! No `exact=` here on purpose: rounding a caller's data is refused under the DEFAULT rules,
+    !! and the accepted whole-number cast first is what proves the arm is not simply refusing
+    !! every real32 -> integer conversion.
+    subroutine scenario_table_cast_f32_fractional()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [2.0_real32, 4.0_real32])
+        call t%cast("a", PK_INT32)                   ! whole numbers: accepted
+        call t%cast("a", PK_FLOAT32)
+        call t%add_column("b", [1.5_real32, 2.0_real32])
+        call t%cast("b", PK_INT64)                   ! 1.5 is not a whole number -> aborts
+        print '(a,i0)', "unexpectedly cast a fractional real32 to an integer kind, kind=", t%kind("b")
+    end subroutine scenario_table_cast_f32_fractional
+
     subroutine scenario_table_cast_exact_precision()
         type(parquet_table) :: t
         call parquet_new_table(t)

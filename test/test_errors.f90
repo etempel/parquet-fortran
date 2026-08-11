@@ -693,6 +693,8 @@ contains
                 test_columns_append_width_mismatch_aborts), &
             new_unittest("columns: append_row_of with a mismatched width aborts", &
                 test_columns_append_row_of_width_mismatch_aborts), &
+            new_unittest("parquet_column append_row_of past the source's last row aborts", &
+                test_columns_append_row_of_row_out_of_range_aborts), &
             new_unittest("table: append(row) validates every column before writing any", &
                 test_table_append_row_validates_first_aborts), &
             new_unittest("parquet_column paste of a different kind aborts", &
@@ -803,6 +805,8 @@ contains
                 test_table_unsupported_column_read_aborts), &
             new_unittest("parquet_table add_column with a mismatched row count aborts", &
                 test_table_add_column_row_mismatch_aborts), &
+            new_unittest("add_column of a parquet_column with no kind aborts", &
+                test_table_add_column_kindless_aborts), &
             new_unittest("parquet_table add_column of an existing name without force= aborts", &
                 test_table_add_column_duplicate_aborts), &
             new_unittest("parquet_table %set with a mismatched array length aborts", &
@@ -931,6 +935,10 @@ contains
                 test_table_set_element_kind_mismatch_aborts), &
             new_unittest("set_null on a row that does not exist aborts", &
                 test_table_set_null_row_out_of_range_aborts), &
+            new_unittest("set_null with a wrong-length row mask aborts", &
+                test_table_set_null_mask_wrong_length_aborts), &
+            new_unittest("set_null with a transposed element mask aborts", &
+                test_table_set_null_mask_wrong_shape_aborts), &
             new_unittest("rename_column onto an existing name aborts", &
                 test_table_rename_duplicate_name_aborts), &
             new_unittest("rename_column to a blank name aborts", &
@@ -955,6 +963,14 @@ contains
                 test_table_cast_float_overflow_aborts), &
             new_unittest("cast(exact=.true.) on a value that loses precision aborts", &
                 test_table_cast_exact_precision_aborts), &
+            new_unittest("cast(exact=) refuses an int32 real32 cannot hold exactly", &
+                test_table_cast_exact_i32_to_f32_aborts), &
+            new_unittest("cast(exact=) refuses an int64 real32 cannot hold exactly", &
+                test_table_cast_exact_i64_to_f32_aborts), &
+            new_unittest("cast(exact=) refuses an int64 real64 cannot hold exactly", &
+                test_table_cast_exact_i64_to_f64_aborts), &
+            new_unittest("cast of a fractional real32 to an integer kind aborts", &
+                test_table_cast_f32_fractional_aborts), &
             new_unittest("cast of an unsupported column aborts", &
                 test_table_cast_unsupported_column_aborts), &
             new_unittest("clone into another table type aborts", &
@@ -1492,6 +1508,15 @@ contains
             required_stderr="parquet_table: add_column: every column must have the same number of rows")
     end subroutine test_table_add_column_row_mismatch_aborts
 
+    !> The one failure mode the array forms of `%add_column` cannot have. The scenario adds a real
+    !! column first, so a guard that rejected every column would fail it rather than pass it.
+    subroutine test_table_add_column_kindless_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_add_column_kindless", expect_abort=.true., &
+            failure_message="adding a parquet_column that was never given a kind was expected to abort", &
+            required_stderr="add_column: this parquet_column has no kind yet")
+    end subroutine test_table_add_column_kindless_aborts
+
     subroutine test_table_add_column_duplicate_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_add_column_duplicate", expect_abort=.true., &
@@ -1955,6 +1980,17 @@ contains
             failure_message="appending one row of a different-width column was expected to abort", &
             required_stderr="parquet_columns: append_row_of: column widths differ")
     end subroutine test_columns_append_row_of_width_mismatch_aborts
+    !
+    !> The source row index is the one `append_row_of` argument the kind and width checks cannot
+    !! vet. The scenario appends an in-range row first, so a guard that refused every index would
+    !! fail it rather than pass it.
+    subroutine test_columns_append_row_of_row_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_append_row_of_row_out_of_range", &
+            expect_abort=.true., &
+            failure_message="appending a row past the source's last row was expected to abort", &
+            required_stderr="parquet_columns: append_row_of: source row index out of range")
+    end subroutine test_columns_append_row_of_row_out_of_range_aborts
 
     !> Asserts the ORDER of a row append, not merely that it fails.
     !>
@@ -6629,6 +6665,28 @@ contains
             required_stderr="row index 0 is outside this table's 1..2 rows")
     end subroutine test_table_set_null_row_out_of_range_aborts
 
+    !> A row mask must have exactly one entry per row. The message quotes both counts, because a
+    !! mask of the wrong length is almost always one that was right before rows were added or
+    !! deleted, and the two numbers side by side say that immediately.
+    subroutine test_table_set_null_mask_wrong_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_null_mask_wrong_length", &
+            expect_abort=.true., &
+            failure_message="a validity mask one entry short was expected to abort", &
+            required_stderr="set_null: the mask has 2 entries but the table has 3 rows")
+    end subroutine test_table_set_null_mask_wrong_length_aborts
+
+    !> An element mask is `(width, rows)`. The scenario passes a transposed one, and the message
+    !! must state both shapes -- naming only "wrong shape" would leave the caller guessing which
+    !! way round the library wants it, which is the whole difficulty with this argument.
+    subroutine test_table_set_null_mask_wrong_shape_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_null_mask_wrong_shape", &
+            expect_abort=.true., &
+            failure_message="a transposed element validity mask was expected to abort", &
+            required_stderr="set_null: the mask is shaped 3 x 2 but the column is 2 x 3 (width x rows)")
+    end subroutine test_table_set_null_mask_wrong_shape_aborts
+
     subroutine test_table_rename_duplicate_name_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_rename_duplicate_name", expect_abort=.true., &
@@ -6712,6 +6770,40 @@ contains
             failure_message="an exact= cast that loses precision was expected to abort", &
             required_stderr="cannot be represented exactly as PK_FLOAT32")
     end subroutine test_table_cast_exact_precision_aborts
+
+    !> The integer sources of the same precision rule. Each scenario performs the DEFAULT-rules
+    !! cast first, so a check that refused the conversion outright -- rather than only under
+    !! `exact=` -- would fail these rather than pass them.
+    subroutine test_table_cast_exact_i32_to_f32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_exact_i32_to_f32", expect_abort=.true., &
+            failure_message="an exact= int32 -> real32 cast that loses precision was expected to abort", &
+            required_stderr="cannot be represented exactly as PK_FLOAT32, so converting from PK_INT32")
+    end subroutine test_table_cast_exact_i32_to_f32_aborts
+
+    subroutine test_table_cast_exact_i64_to_f32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_exact_i64_to_f32", expect_abort=.true., &
+            failure_message="an exact= int64 -> real32 cast that loses precision was expected to abort", &
+            required_stderr="cannot be represented exactly as PK_FLOAT32, so converting from PK_INT64")
+    end subroutine test_table_cast_exact_i64_to_f32_aborts
+
+    subroutine test_table_cast_exact_i64_to_f64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_exact_i64_to_f64", expect_abort=.true., &
+            failure_message="an exact= int64 -> real64 cast that loses precision was expected to abort", &
+            required_stderr="cannot be represented exactly as PK_FLOAT64, so converting from PK_INT64")
+    end subroutine test_table_cast_exact_i64_to_f64_aborts
+
+    !> The real32 source of the fractional rule, which reaches `chk_from_f32` rather than the
+    !! real64 checker `table_cast_fractional` exercises. The message must name PK_FLOAT32 as the
+    !! source, or the two checkers could be confused for one.
+    subroutine test_table_cast_f32_fractional_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_cast_f32_fractional", expect_abort=.true., &
+            failure_message="casting a fractional real32 to an integer kind was expected to abort", &
+            required_stderr="cannot be represented as PK_INT64, so converting from PK_FLOAT32")
+    end subroutine test_table_cast_f32_fractional_aborts
 
     subroutine test_table_cast_unsupported_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

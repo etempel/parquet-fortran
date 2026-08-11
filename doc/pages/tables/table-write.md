@@ -31,6 +31,46 @@ call parquet_write_table(t, "out.parquet", s)   ! parses the schema itself if yo
 `%add_column` refuses a name that already exists unless you pass `force=.true.`, which replaces
 the column outright.
 
+### Adding a column you built yourself
+
+Besides a plain Fortran array (and a [`parquet_string_column`](../types/string-columns.html)),
+`%add_column` accepts a whole **`parquet_column`**, taking its kind, width and row count from the
+column rather than from the shape of an array:
+
+```fortran
+use parquet
+type(parquet_column) :: c
+
+call c%init(PK_FLOAT64, 0_int64, unit="Msun")
+do i = 1, n                          ! n need not be known before the loop
+    call c%append_values([mass(i)])
+end do
+call c%set_null(3_int64)
+
+call t%add_column("mass", c)         ! [, unit=] [, force=] as usual
+```
+
+This is the only form that covers every kind and width through one call, and the only way to hand
+over a column that could not have been a plain array in the first place. Three cases it exists for:
+
+- a column **grown a row at a time** with `%append_values`, when the final length is not known up
+  front — every other form needs a complete array;
+- a **vector column carrying per-element nulls**, which no array plus a row mask can express;
+- a column **derived from another** with `%gather`, `%delete_by_mask` or `%reindex`.
+
+Three things to know:
+
+- **The column is copied and you keep your own**, exactly as every other `%add_column` form leaves
+  its values alone — so one built column can be added to several tables. A column built with
+  `%adopt` to avoid a copy does pay for one here.
+- **`unit=` overrides the column's own unit**; leave it out and the column's own is kept.
+- **A column with no kind is refused**, rather than added as a slot nothing can read. Give it one
+  with `%init`, `%adopt` or `%append_values` first. This is the one failure mode the array forms
+  cannot have, since they take their kind from the type they are handed.
+
+`parquet_column` and everything needed to build one come from the same `use parquet`; the
+generated reference for `parquet_columns` lists every constructor and mutator.
+
 The schema is optional — see [Writing without a schema](#writing-without-a-schema) for what a
 `parquet_write_table(t, "out.parquet")` with no schema does.
 

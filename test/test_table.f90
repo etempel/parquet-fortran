@@ -25,7 +25,7 @@ module test_table
     use parquet_columns, only : PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, &
         PK_STRING, PK_DATE, PK_TIME, PK_TIMESTAMP, PK_FLOAT64_VEC, PK_INT32_VEC, PK_STRING_VEC, &
         PK_INT64_VEC, PK_FLOAT32_VEC, PK_LOGICAL_VEC, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC, &
-        PK_NONE
+        PK_NONE, parquet_column
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
     use iso_fortran_env, only : int32, int64, real32, real64
@@ -152,6 +152,8 @@ contains
                 test_from_scratch), &
             new_unittest("add_column(force=) replaces a column of the same name", &
                 test_add_column_force), &
+            new_unittest("add_column takes a whole parquet_column, of any kind or width", &
+                test_add_column_from_column), &
             new_unittest("set replaces values without changing the row set", test_set_values), &
             new_unittest("row_mask writes a row subset and leaves the table untouched", &
                 test_write_row_mask), &
@@ -203,6 +205,12 @@ contains
                 test_cast_preserves), &
             new_unittest("cast(exact=.true.) refuses a loss that the default allows", &
                 test_cast_exact_flag), &
+            new_unittest("cast converts every ordered pair of vector kinds, and an empty column", &
+                test_cast_vector_every_pair), &
+            new_unittest("dropping a column carries each survivor's own unit down with it", &
+                test_drop_column_carries_units), &
+            new_unittest("cast on a deferred-width LIST column resolves the width first", &
+                test_cast_resolves_pending_width), &
             new_unittest("filter_rows keeps the selected rows in every column and detaches", &
                 test_filter_rows), &
             new_unittest("delete_rows and truncate handle repeats and past-the-end counts", &
@@ -2097,6 +2105,107 @@ contains
         call check(error, abs(g(2) - 200.0_real64) < 1.0e-12_real64, &
             "a forced replace should leave the new values in place")
     end subroutine test_add_column_force
+    !
+    !> `%add_column` also takes an already-built `parquet_column`, reading its kind, width and row
+    !! count off the column instead of from the shape of a Fortran array. That is what makes it the
+    !! one form covering every kind and width through a single call -- and the only way to hand
+    !! over a column that could not have been a plain array in the first place.
+    !!
+    !! Three such columns are added here, each for a reason the array forms cannot serve: one grown
+    !! a row at a time when the final length was not known up front, one vector column carrying a
+    !! per-ELEMENT null, and one derived from another column with `%delete_by_mask`. The unit, the
+    !! nulls and the width all have to survive the hand-over, and the caller's own column has to be
+    !! left intact -- it is `intent(in)`, like every other `%add_column` form's values.
+    subroutine test_add_column_from_column(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_column) :: c, v, sub
+        real(real64), allocatable :: g(:)
+        integer(int32), allocatable :: gv(:,:)
+        character(len=:), allocatable :: u
+        integer(int64) :: i
+        !
+        ! Grown a row at a time: no array of the final length ever exists.
+        call c%init(PK_FLOAT64, 0_int64, unit="Msun")
+        do i = 1_int64, 5_int64
+            call c%append_values([real(i, real64)*10.0_real64])
+        end do
+        call c%set_null(3_int64)
+        !
+        call parquet_new_table(t)
+        call t%add_column("mass", c)
+        call check(error, t%nrows() == 5_int64, "the table should take its row count from the column")
+        if (allocated(error)) return
+        call check(error, t%kind("mass") == PK_FLOAT64, "the column's kind should carry over")
+        if (allocated(error)) return
+        call check(error, t%width("mass") == 1, "a scalar column should arrive with width 1")
+        if (allocated(error)) return
+        call t%unit("mass", u)
+        call check(error, u == "Msun", "the column's own unit should carry over")
+        if (allocated(error)) return
+        call t%get("mass", g)
+        call check(error, g(2) == 20.0_real64, "the values should arrive unchanged")
+        if (allocated(error)) return
+        call check(error, t%is_null("mass", 3_int64), "a null in the source column should carry over")
+        if (allocated(error)) return
+        call check(error, t%is_user_populated("mass"), &
+            "a column handed over by the caller is the caller's, not the file's")
+        if (allocated(error)) return
+        !
+        ! The caller keeps its column: intent(in), like every other %add_column form.
+        call check(error, c%length() == 5_int64, "%add_column must not disturb the caller's column")
+        if (allocated(error)) return
+        !
+        ! A VECTOR column with a per-element null -- neither the width nor that null can be
+        ! expressed by handing over a plain array plus a row mask.
+        call v%init(PK_INT32_VEC, 5_int64, width=2_int32)
+        do i = 1_int64, 5_int64
+            call v%set_at(i, [int(10*i + 1, int32), int(10*i + 2, int32)])
+        end do
+        call v%set_null(2_int64, 1_int64)
+        call t%add_column("pair", v)
+        call check(error, t%kind("pair") == PK_INT32_VEC, "the vector kind should carry over")
+        if (allocated(error)) return
+        call check(error, t%width("pair") == 2, "the column's width should carry over")
+        if (allocated(error)) return
+        call check(error, t%is_null("pair", 2_int64, 1_int64), &
+            "a per-element null should survive the hand-over")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("pair", 2_int64, 2_int64), &
+            "and must not spread to the row's other element")
+        if (allocated(error)) return
+        call t%get("pair", gv)
+        call check(error, gv(2, 4) == 42_int32, "the vector values should arrive unchanged")
+        if (allocated(error)) return
+        !
+        ! unit= overrides the column's own; force= replaces a same-named column, both exactly as
+        ! every other %add_column form. The replacement is a DIFFERENT length, which is legal only
+        ! because the table already has five rows and this column has five too.
+        call c%deep_copy(sub)
+        call sub%set_unit("kg")
+        call t%add_column("mass", sub, unit="g", force=.true.)
+        call t%unit("mass", u)
+        call check(error, u == "g", "unit= should override the column's own unit")
+        if (allocated(error)) return
+        call check(error, t%ncols() == 2, "force= should replace rather than add")
+        if (allocated(error)) return
+        !
+        ! Derived from another column: a subset built with %delete_by_mask, which no array form of
+        ! %add_column could produce without materialising the subset by hand first.
+        call c%deep_copy(sub)
+        call sub%delete_by_mask([.true., .false., .true., .false., .true.])
+        call check(error, sub%length() == 3_int64, "precondition: the subset should hold three rows")
+        if (allocated(error)) return
+        block
+            type(parquet_table) :: small
+            call parquet_new_table(small)
+            call small%add_column("kept", sub)
+            call check(error, small%nrows() == 3_int64, "a derived column sets the new table's row count")
+            if (allocated(error)) return
+            call small%get("kept", g)
+            call check(error, g(2) == 30.0_real64, "the subset should keep the rows it selected")
+        end block
+    end subroutine test_add_column_from_column
     !
     subroutine test_set_values(error)
         type(error_type), allocatable, intent(out) :: error
@@ -5859,6 +5968,24 @@ contains
         call t%clear_null("xv", 2)
         call check(error, .not. t%is_null("xv", 2), "clear_null should mark the row valid again")
         if (allocated(error)) return
+        ! The ELEMENT forms taking default-kind (int32) indices. They are one-line forwarders onto
+        ! the int64 specifics, so what this pins is the forwarding itself: a swapped argument order
+        ! there would null element 2 of row 3 instead of element 3 of row 2. Both are real
+        ! positions on this fixture (NROW is 6, NVEC is 3), which is what makes the swap visible.
+        call t%set_null("xv", 2, 3)
+        call check(error, t%is_null("xv", 2_int64, 3_int64), &
+            "the int32 element form of set_null should null the element named")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("xv", 3_int64, 2_int64), &
+            "the int32 element form of set_null must not transpose its row and element indices")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("xv", 2_int64, 1_int64), &
+            "the int32 element form of set_null should leave the row's other elements valid")
+        if (allocated(error)) return
+        call t%clear_null("xv", 2, 3)
+        call check(error, .not. t%is_null("xv", 2_int64, 3_int64), &
+            "the int32 element form of clear_null should mark that element valid again")
+        if (allocated(error)) return
         ! compact_validity drops a bitmap that no longer has anything in it; it is idempotent.
         call t%compact_validity("xv")
         call t%compact_validity("xv")
@@ -5898,6 +6025,102 @@ contains
         call t%drop_column("b")
         call check(error, t%ncols() == 4, "dropping an unread column should work too")
     end subroutine test_drop_column
+    !
+    !> A drop shifts every later slot down over the dropped one, and `move_table_column` carries
+    !! each slot's OPTIONAL metadata as it goes. `unit` is the only such component the library
+    !! populates today, and it has two cases that are easy to get backwards: the source has a unit
+    !! and the destination must take it, or the source has none and the destination's own stale
+    !! unit must be RELEASED rather than left behind. Getting the second one wrong is silent -- the
+    !! column keeps a unit belonging to a different column, and only a unit query would ever say so.
+    !!
+    !! **The unit has to come from a read-in MAML, not from `%add_column(unit=)`.** Those are two
+    !! different places: `%add_column` puts a unit on the column's VALUES, while the descriptor
+    !! field this shift moves is populated only at open time, from the MAML, and is what answers
+    !! `%unit` for a column nothing has read yet. An in-memory fixture reaches neither arm, which
+    !! is what an earlier version of this test did while still passing.
+    !!
+    !! The MAML gives `i32` and `f32` units and leaves `i64`, `f64` and `b` without, so dropping
+    !! the first column walks both arms in the same shift.
+    subroutine test_drop_column_carries_units(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=:), allocatable :: u
+        character(len=*), parameter :: f = "test_run/table_drop_units.parquet"
+        character(len=*), parameter :: m = "test_run/table_drop_units.maml"
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: dropunits", &
+            "fields:", &
+            "- name: i32", &
+            "  data_type: int32", &
+            "  unit: m", &
+            "- name: i64", &
+            "  data_type: int64", &
+            "- name: f32", &
+            "  data_type: float32", &
+            "  unit: s", &
+            "- name: f64", &
+            "  data_type: float64" ])
+        call parquet_open_table(t, f, maml=m)
+        call check(error, t%ncols() == 6, "precondition: the fixture should present six columns")
+        if (allocated(error)) return
+        call t%unit("i32", u)
+        call check(error, u == "m", "precondition: the MAML should have given i32 a unit")
+        if (allocated(error)) return
+        ! Dropping the first column shifts every later slot down one. Slot 1 held a unit and
+        ! receives none (i64); slot 2 held none and receives one (f32); slot 3 held one and
+        ! receives none (f64) -- the release arm twice and the carry arm once, from one call.
+        call t%drop_column("i32")
+        call check(error, t%ncols() == 5, "the drop should leave five columns")
+        if (allocated(error)) return
+        call t%unit("i64", u)
+        call check(error, len_trim(u) == 0, "i64 had no unit and must not inherit the dropped column's")
+        if (allocated(error)) return
+        call t%unit("f32", u)
+        call check(error, u == "s", "f32 should keep its own unit across the shift")
+        if (allocated(error)) return
+        call t%unit("f64", u)
+        call check(error, len_trim(u) == 0, "f64 had no unit and must not inherit f32's")
+    end subroutine test_drop_column_carries_units
+    !
+    !> A plain Parquet `LIST` column has no width in its schema, so `parquet_table` does not know
+    !! its KIND either until something measures it -- and the kind is exactly what decides whether
+    !! a cast is legal at all. `%cast` therefore resolves the pending width before it does anything
+    !! else, and this is the only path that reaches that resolution from a cast.
+    !!
+    !! Resolving is not reading: the column stays unmaterialized afterwards, which is what lets the
+    !! cast still take its deferred route and have the eventual read decode straight into the target
+    !! kind. Both halves are asserted, because a resolution that materialized the column would be
+    !! invisible except as a lost optimization.
+    subroutine test_cast_resolves_pending_width(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        real(real64), allocatable :: g(:,:)
+        character(len=*), parameter :: f = "test/fixtures/list_widths.parquet"
+        !
+        call parquet_open_table(t, f)
+        ! Nothing has measured this column yet, so the cast is what has to.
+        call check(error, t%residency("uniform") == RES_EMPTY, &
+            "the deferred-width column should start unread")
+        if (allocated(error)) return
+        call t%cast("uniform", PK_FLOAT64_VEC)
+        call check(error, t%kind("uniform") == PK_FLOAT64_VEC, &
+            "the cast should report the target kind once the width has been resolved")
+        if (allocated(error)) return
+        call check(error, t%width("uniform") == 3, &
+            "resolving the width for a cast should find the same width %width reports")
+        if (allocated(error)) return
+        call check(error, t%residency("uniform") == RES_EMPTY, &
+            "resolving a width for a cast must not materialize the column")
+        if (allocated(error)) return
+        ! The read then decodes straight into the cast kind, in one pass.
+        call t%get("uniform", g)
+        call check(error, size(g, 1) == 3, "the materialized column should keep the resolved width")
+        if (allocated(error)) return
+        call check(error, t%kind("uniform") == PK_FLOAT64_VEC, &
+            "the deferred cast should survive the read that carries it out")
+    end subroutine test_cast_resolves_pending_width
     !
     !> A rename changes only the name the column is looked up by; a file-backed column that has
     !! not been read yet must still read from the right physical column afterwards.
@@ -7149,6 +7372,137 @@ contains
         call check(error, t%kind("y") == PK_FLOAT32, &
             "exact=.true. should accept a conversion that loses nothing")
     end subroutine test_cast_exact_flag
+    !
+    !> `cast_apply`, `cast_zero_null_rows` and `cast_check_values` each dispatch on the SOURCE
+    !! kind and then again on the TARGET, so the vector half of `%cast` is twelve ordered pairs of
+    !! `select case` arms. `test_cast_vector` above reaches two of them; an arm that converted
+    !! through the wrong intermediate, or dropped the width, would ship unnoticed on the other ten.
+    !!
+    !! Every pair gets its OWN column, built directly in its source kind rather than cast into it,
+    !! so a failure names one conversion instead of a chain. Each carries a null row, which is what
+    !! also sweeps `cast_zero_null_rows`' four vector arms -- it zeroes a null row's values before
+    !! the conversion reads them, so an arm that missed a kind would feed uninitialized bytes into
+    !! a conversion that then has to round or range-check them.
+    !!
+    !! The fixture values are small whole numbers on purpose: every one of them survives all four
+    !! kinds exactly, so any difference the sweep sees is the conversion going wrong rather than
+    !! arithmetic the cast is entitled to perform.
+    subroutine test_cast_vector_every_pair(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        integer, parameter :: VKINDS(4) = [PK_INT32_VEC, PK_INT64_VEC, PK_FLOAT32_VEC, PK_FLOAT64_VEC]
+        integer, parameter :: NULLROW = 3
+        type(parquet_table) :: t
+        integer(int32) :: s32(NVEC, NROW)
+        integer(int64) :: s64(NVEC, NROW)
+        real(real32) :: r32(NVEC, NROW)
+        real(real64) :: r64(NVEC, NROW)
+        integer(int32) :: empty32(0)
+        character(len=8) :: nm
+        integer :: a, b, i, e, want
+        !
+        do i = 1, NROW
+            do e = 1, NVEC
+                s32(e, i) = int(10*i + e, int32)
+                s64(e, i) = int(10*i + e, int64)
+                r32(e, i) = real(10*i + e, real32)
+                r64(e, i) = real(10*i + e, real64)
+            end do
+        end do
+        call parquet_new_table(t)
+        do a = 1, size(VKINDS)
+            do b = 1, size(VKINDS)
+                if (a == b) cycle
+                write(nm, "(a,i0,i0)") "c", a, b
+                select case (VKINDS(a))
+                case (PK_INT32_VEC)
+                    call t%add_column(trim(nm), s32, unit="km")
+                case (PK_INT64_VEC)
+                    call t%add_column(trim(nm), s64, unit="km")
+                case (PK_FLOAT32_VEC)
+                    call t%add_column(trim(nm), r32, unit="km")
+                case default
+                    call t%add_column(trim(nm), r64, unit="km")
+                end select
+                call t%set_null(trim(nm), NULLROW)
+                call t%cast(trim(nm), VKINDS(b))
+                call check(error, t%kind(trim(nm)) == VKINDS(b), &
+                    trim(nm) // ": the cast should leave the column in the target kind")
+                if (allocated(error)) return
+                call check(error, t%width(trim(nm)) == NVEC, &
+                    trim(nm) // ": a vector cast should keep the column width")
+                if (allocated(error)) return
+                call check(error, t%nrows() == int(NROW, int64), &
+                    trim(nm) // ": a vector cast should keep the row count")
+                if (allocated(error)) return
+                call check(error, t%is_null(trim(nm), NULLROW), &
+                    trim(nm) // ": a vector cast should carry the null row across")
+                if (allocated(error)) return
+                ! A row on either side of the null one, and both ends of the element range, so a
+                ! conversion that shifted rows or elements cannot land on the value it replaced.
+                do i = 1, NROW
+                    if (i == NULLROW) cycle
+                    do e = 1, NVEC
+                        want = 10*i + e
+                        call expect_vector_cell(t, trim(nm), VKINDS(b), e, i, want, &
+                            trim(nm) // ": the cast should convert every element in place", error)
+                        if (allocated(error)) return
+                    end do
+                end do
+            end do
+        end do
+        ! An EMPTY column has no storage to point at, so both the value check and the conversion
+        ! take their own early-return path rather than dereferencing a null pointer. Nothing else
+        ! in the suite casts a zero-row column, and the failure would be a segfault, not a wrong
+        ! answer.
+        block
+            type(parquet_table) :: empty
+            call parquet_new_table(empty)
+            call empty%add_column("e", empty32)
+            call check(error, empty%nrows() == 0_int64, "the empty fixture should have no rows")
+            if (allocated(error)) return
+            call empty%cast("e", PK_FLOAT64)
+            call check(error, empty%kind("e") == PK_FLOAT64, &
+                "casting an empty column should still re-declare its kind")
+            if (allocated(error)) return
+            call check(error, empty%nrows() == 0_int64, "casting an empty column should add no rows")
+        end block
+    end subroutine test_cast_vector_every_pair
+    !
+    !> Reads element `e` of row `i` of a vector column whose current kind is `kind`, and checks it
+    !! against `want`. One four-way dispatch shared by every pair of the sweep above, so the
+    !! expectation is stated once rather than twelve times.
+    subroutine expect_vector_cell(t, name, kind, e, i, want, what, error)
+        type(parquet_table), intent(inout) :: t             !! the table.
+        character(len=*), intent(in) :: name                !! column name.
+        integer, intent(in) :: kind                         !! the column's current PK_* kind.
+        integer, intent(in) :: e                            !! element index within the row.
+        integer, intent(in) :: i                            !! row index.
+        integer, intent(in) :: want                         !! the value it should hold.
+        character(len=*), intent(in) :: what                !! context, for the message.
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        integer(int32), allocatable :: g32(:,:)
+        integer(int64), allocatable :: g64(:,:)
+        real(real32), allocatable :: h32(:,:)
+        real(real64), allocatable :: h64(:,:)
+        logical :: ok
+        !
+        ok = .false.
+        select case (kind)
+        case (PK_INT32_VEC)
+            call t%get(name, g32)
+            ok = g32(e, i) == int(want, int32)
+        case (PK_INT64_VEC)
+            call t%get(name, g64)
+            ok = g64(e, i) == int(want, int64)
+        case (PK_FLOAT32_VEC)
+            call t%get(name, h32)
+            ok = h32(e, i) == real(want, real32)
+        case (PK_FLOAT64_VEC)
+            call t%get(name, h64)
+            ok = h64(e, i) == real(want, real64)
+        end select
+        call check(error, ok, what)
+    end subroutine expect_vector_cell
     !
     !> Writes a fixture with an id column plus one sortable column of each interesting shape, so
     !! a sort's result can always be stated as "these ids, in this order".

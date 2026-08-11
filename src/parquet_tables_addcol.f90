@@ -282,4 +282,35 @@ contains
         self%cache%cols(idx)%user_populated = .true.
     end procedure add_column_strcol
     !
+    module procedure add_column_col
+        integer :: idx
+        character(len=:), allocatable :: sfx
+        !
+        call table_check_open(self, "add_column")
+        ! Every other %add_column form takes its kind from the TYPE of the values it is given, so
+        ! it cannot be kindless. This one reads the kind off the column, and a column that was
+        ! never given one would land in the table as a PK_NONE slot that nothing can read or write
+        ! -- failing later, at the first %get, with nothing to say where it came from. Checked
+        ! before table_fix_nrows and table_new_slot, so a refused call changes nothing.
+        if (values%kindof() == PK_NONE) then
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "add_column: this parquet_column has no kind yet, so there is " // &
+                "nothing to add; give it one with %init, %adopt or %append_values first" // sfx
+        end if
+        call table_fix_nrows(self, name, values%length())
+        call table_new_slot(self, name, force, idx)
+        ! Copied, not moved: `values` is intent(in) like every other %add_column form's, so the
+        ! caller's column is left intact and can be added to a second table.
+        call values%deep_copy(self%cache%cols(idx)%values)
+        ! The copy already carries the source column's unit, so this only has to run when the
+        ! caller asked for a different one.
+        if (present(unit)) call self%cache%cols(idx)%values%set_unit(unit)
+        ! Read off the column rather than named by the caller -- which is what lets one specific
+        ! stand in for all eighteen of the per-kind ones.
+        self%cache%cols(idx)%declared_kind = values%kindof()
+        self%cache%cols(idx)%width = values%colwidth()
+        self%cache%cols(idx)%residency = RES_FULL
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure add_column_col
+    !
 end submodule parquet_tables_addcol ! GCOVR_EXCL_LINE

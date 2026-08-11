@@ -72,8 +72,9 @@ TYPES = {
 # adding a binding to parquet_table fails the lint stage here until this list is updated.
 RESERVED = {
     "add_column", "add_column_bool", "add_column_boolv", "add_column_chr", "add_column_chrv",
-    "add_column_date", "add_column_datev", "add_column_f32", "add_column_f32v", "add_column_f64",
-    "add_column_f64v", "add_column_i32", "add_column_i32v", "add_column_i64", "add_column_i64v",
+    "add_column_col", "add_column_date", "add_column_datev", "add_column_f32", "add_column_f32v",
+    "add_column_f64", "add_column_f64v", "add_column_i32", "add_column_i32v", "add_column_i64",
+    "add_column_i64v",
     "add_column_strcol", "add_column_time", "add_column_timev", "add_column_ts", "add_column_tsv",
     "append", "append_null_rows", "argsort_by", "argsort_partial", "bind_predefined", "cast",
     "clear_null", "clear_null_e32",

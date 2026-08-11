@@ -752,9 +752,10 @@ def gen_table_type():
     w("        procedure, private :: add_column_chrv !! %add_column specific taking a character (elem, row) array.")
     w("        !> Appends a new column, taking its values (and so its kind, width and row count).")
     w("        procedure, private :: add_column_strcol !! %add_column specific taking a parquet_string_column.")
+    w("        procedure, private :: add_column_col  !! %add_column specific taking a whole parquet_column.")
     w("        generic :: add_column => " + wrap_list(
         [f"add_column_{k[0]}" for k in ARRAY_KINDS]
-        + ["add_column_chr", "add_column_chrv", "add_column_strcol"], 12,
+        + ["add_column_chr", "add_column_chrv", "add_column_strcol", "add_column_col"], 12,
         first_prefix=len("        generic :: add_column => ")))
     # set_element + validity
     w("        ! --- mutation: one cell at a time (never changes the row set) ---")
@@ -2718,6 +2719,7 @@ def gen_spec_interfaces():
         w(add_iface(k))
     w(add_str_iface())
     w(add_strcol_iface())
+    w(add_col_iface())
     w("    end interface")
     w("    !")
     w("    ! ---- Single-cell mutation (the per-kind writers in ..._access, the rest in ..._mutate) ----")
@@ -2885,14 +2887,6 @@ def gen_spec_interfaces():
             logical, intent(in), optional :: exact      !! .true. to refuse any precision loss.
             logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_cast
-        !> Appends an already-built `parquet_column` as a new column. The kind-generic
-        !! `%add_column` covers every case a user has; this is the internal path for code that
-        !! already holds a column of the right shape and only needs it slotted in.
-        module subroutine table_put_column(self, name, col)
-            class(parquet_table), intent(inout) :: self !! the table.
-            character(len=*), intent(in) :: name        !! the new column's name.
-            type(parquet_column), intent(in) :: col     !! the column to copy in.
-        end subroutine table_put_column
     end interface""")
     w("    !")
     w("""    ! ---- Row-structural mutation -- detaches whenever it changes the row set (parquet_tables_rowmutate) ----
@@ -3713,6 +3707,36 @@ def add_strcol_iface():
             character(len=*), intent(in), optional :: unit    !! unit string to store.
             logical, intent(in), optional :: force            !! .true. replaces an existing same-named column.
         end subroutine add_column_strcol"""
+
+
+def add_col_iface():
+    return """        !> Appends a new column holding a copy of an already-built `parquet_column`, taking its
+        !! kind, width and row count from the column itself.
+        !!
+        !! This is the one `%add_column` form that covers EVERY kind and width through a single
+        !! call, because it reads all three off the column rather than from the shape of a Fortran
+        !! array. What it is for is a column that could not be handed over as a plain array: one
+        !! grown a row at a time with `%append_values` when the final length was not known up
+        !! front, one carrying per-ELEMENT nulls on a vector kind, or one derived from another with
+        !! `%gather`/`%delete_by_mask`/`%reindex`.
+        !!
+        !! **The column is COPIED, and the caller keeps its own.** That matches every other
+        !! `%add_column` form, none of which disturbs what it is given -- so a single built column
+        !! can be added to several tables, and one that was built with `%adopt` to avoid a copy
+        !! does pay for one here.
+        !!
+        !! `unit=` overrides whatever unit the column carries; omitted, the column's own is kept.
+        !!
+        !! A column that has never been given a kind (no `%init`, `%adopt` or `%append_values`) is
+        !! refused rather than added as an unusable `PK_NONE` slot -- the one failure mode the
+        !! array forms cannot have, since they take their kind from the type they are handed.
+        module subroutine add_column_col(self, name, values, unit, force)
+            class(parquet_table), intent(inout) :: self    !! the table.
+            character(len=*), intent(in) :: name           !! the new column's name.
+            type(parquet_column), intent(in) :: values     !! the column to copy in.
+            character(len=*), intent(in), optional :: unit !! unit string to store, overriding the column's own.
+            logical, intent(in), optional :: force         !! .true. replaces an existing same-named column.
+        end subroutine add_column_col"""
 
 
 def getelem_iface(k):
@@ -4560,6 +4584,40 @@ def add_strcol_impl():
     !"""
 
 
+def add_col_impl():
+    return """    module procedure add_column_col
+        integer :: idx
+        character(len=:), allocatable :: sfx
+        !
+        call table_check_open(self, "add_column")
+        ! Every other %add_column form takes its kind from the TYPE of the values it is given, so
+        ! it cannot be kindless. This one reads the kind off the column, and a column that was
+        ! never given one would land in the table as a PK_NONE slot that nothing can read or write
+        ! -- failing later, at the first %get, with nothing to say where it came from. Checked
+        ! before table_fix_nrows and table_new_slot, so a refused call changes nothing.
+        if (values%kindof() == PK_NONE) then
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "add_column: this parquet_column has no kind yet, so there is " // &
+                "nothing to add; give it one with %init, %adopt or %append_values first" // sfx
+        end if
+        call table_fix_nrows(self, name, values%length())
+        call table_new_slot(self, name, force, idx)
+        ! Copied, not moved: `values` is intent(in) like every other %add_column form's, so the
+        ! caller's column is left intact and can be added to a second table.
+        call values%deep_copy(self%cache%cols(idx)%values)
+        ! The copy already carries the source column's unit, so this only has to run when the
+        ! caller asked for a different one.
+        if (present(unit)) call self%cache%cols(idx)%values%set_unit(unit)
+        ! Read off the column rather than named by the caller -- which is what lets one specific
+        ! stand in for all eighteen of the per-kind ones.
+        self%cache%cols(idx)%declared_kind = values%kindof()
+        self%cache%cols(idx)%width = values%colwidth()
+        self%cache%cols(idx)%residency = RES_FULL
+        self%cache%cols(idx)%user_populated = .true.
+    end procedure add_column_col
+    !"""
+
+
 NUMFMT = {
     "i32": "(I0)", "i64": "(I0)", "f32": "(G0.6)", "f64": "(G0.6)",
 }
@@ -5356,6 +5414,7 @@ contains
         w(add_impl(k))
     w(add_str_impl())
     w(add_strcol_impl())
+    w(add_col_impl())
     w("end submodule parquet_tables_addcol ! GCOVR_EXCL_LINE")
     return "\n".join(o) + "\n"
 

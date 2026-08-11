@@ -269,8 +269,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `parquet_tables` (`parquet_table`): presents a whole parquet file as one in-memory table
   (`parquet_open_table`), hands columns back as ordinary Fortran arrays through a widening copy
   (`%get`) or a zero-copy typed pointer (`%col`), builds a table from scratch in memory
-  (`parquet_new_table` + `%add_column`), and writes one back out through an ordinary
-  `parquet_schema` (`parquet_write_table`). Columns are read on first use rather than at open
+  (`parquet_new_table` + `%add_column`, which takes a Fortran array, a `parquet_string_column`, or
+  a whole `parquet_column` — the last reads kind, width and row count off the column, so it is the
+  one form covering every kind and width in a single call, and the only way to hand over a column
+  that could not have been a plain array: one grown a row at a time with `%append_values` when the
+  final length is not known up front, one carrying per-element nulls on a vector kind, or one
+  derived with `%gather`/`%delete_by_mask`/`%reindex`; the column is copied and the caller keeps
+  its own, `unit=` overrides the column's own unit, and a column that was never given a kind is
+  refused rather than added as a slot nothing can read), and writes one back out through an
+  ordinary `parquet_schema` (`parquet_write_table`). Columns are read on first use rather than at open
   time, so opening reads only the file's schema and a program pays only for the columns it
   touches — `%prefetch`, `%materialize_all`, `%reload` and `%evict_column` control this
   explicitly and `%residency` reports it. `%reload` and `%evict_column` **refuse a column the

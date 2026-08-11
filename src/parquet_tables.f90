@@ -664,10 +664,11 @@ module parquet_tables
         procedure, private :: add_column_chrv !! %add_column specific taking a character (elem, row) array.
         !> Appends a new column, taking its values (and so its kind, width and row count).
         procedure, private :: add_column_strcol !! %add_column specific taking a parquet_string_column.
+        procedure, private :: add_column_col  !! %add_column specific taking a whole parquet_column.
         generic :: add_column => add_column_i32, add_column_i64, add_column_f32, add_column_f64, add_column_bool, &
             add_column_date, add_column_time, add_column_ts, add_column_i32v, add_column_i64v, add_column_f32v, add_column_f64v, &
             add_column_boolv, add_column_datev, add_column_timev, add_column_tsv, add_column_chr, add_column_chrv, &
-            add_column_strcol
+            add_column_strcol, add_column_col
         ! --- mutation: one cell at a time (never changes the row set) ---
         procedure, private :: set_element_i32_i32 !! %set_element specific, i32 kind, i32 row index.
         procedure, private :: set_element_i32_i64 !! %set_element specific, i32 kind, i64 row index.
@@ -4720,6 +4721,33 @@ module parquet_tables
             character(len=*), intent(in), optional :: unit    !! unit string to store.
             logical, intent(in), optional :: force            !! .true. replaces an existing same-named column.
         end subroutine add_column_strcol
+        !> Appends a new column holding a copy of an already-built `parquet_column`, taking its
+        !! kind, width and row count from the column itself.
+        !!
+        !! This is the one `%add_column` form that covers EVERY kind and width through a single
+        !! call, because it reads all three off the column rather than from the shape of a Fortran
+        !! array. What it is for is a column that could not be handed over as a plain array: one
+        !! grown a row at a time with `%append_values` when the final length was not known up
+        !! front, one carrying per-ELEMENT nulls on a vector kind, or one derived from another with
+        !! `%gather`/`%delete_by_mask`/`%reindex`.
+        !!
+        !! **The column is COPIED, and the caller keeps its own.** That matches every other
+        !! `%add_column` form, none of which disturbs what it is given -- so a single built column
+        !! can be added to several tables, and one that was built with `%adopt` to avoid a copy
+        !! does pay for one here.
+        !!
+        !! `unit=` overrides whatever unit the column carries; omitted, the column's own is kept.
+        !!
+        !! A column that has never been given a kind (no `%init`, `%adopt` or `%append_values`) is
+        !! refused rather than added as an unusable `PK_NONE` slot -- the one failure mode the
+        !! array forms cannot have, since they take their kind from the type they are handed.
+        module subroutine add_column_col(self, name, values, unit, force)
+            class(parquet_table), intent(inout) :: self    !! the table.
+            character(len=*), intent(in) :: name           !! the new column's name.
+            type(parquet_column), intent(in) :: values     !! the column to copy in.
+            character(len=*), intent(in), optional :: unit !! unit string to store, overriding the column's own.
+            logical, intent(in), optional :: force         !! .true. replaces an existing same-named column.
+        end subroutine add_column_col
     end interface
     !
     ! ---- Single-cell mutation (the per-kind writers in ..._access, the rest in ..._mutate) ----
@@ -5465,14 +5493,6 @@ module parquet_tables
             logical, intent(in), optional :: exact      !! .true. to refuse any precision loss.
             logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_cast
-        !> Appends an already-built `parquet_column` as a new column. The kind-generic
-        !! `%add_column` covers every case a user has; this is the internal path for code that
-        !! already holds a column of the right shape and only needs it slotted in.
-        module subroutine table_put_column(self, name, col)
-            class(parquet_table), intent(inout) :: self !! the table.
-            character(len=*), intent(in) :: name        !! the new column's name.
-            type(parquet_column), intent(in) :: col     !! the column to copy in.
-        end subroutine table_put_column
     end interface
     !
     ! ---- Row-structural mutation -- detaches whenever it changes the row set (parquet_tables_rowmutate) ----

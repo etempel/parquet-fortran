@@ -28,6 +28,17 @@ module test_columns
     private
     public :: collect_tests_parquet_columns
     !
+    !> The sixteen ARRAY kinds, i.e. every `parquet_column` kind for which `parquet_columns_access`
+    !! and `parquet_columns_mutate` generate a per-kind `case` arm. The two string kinds are absent
+    !! on purpose: they keep their storage in an embedded `parquet_string_column` and so take a
+    !! different path through every operation swept below.
+    integer, parameter :: ARRAY_KINDS(16) = [ &
+        PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_DATE, PK_TIME, PK_TIMESTAMP, &
+        PK_INT32_VEC, PK_INT64_VEC, PK_FLOAT32_VEC, PK_FLOAT64_VEC, PK_LOGICAL_VEC, &
+        PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC]
+    !> Element count per row for every vector-kind fixture the sweeps build.
+    integer(int32), parameter :: FIXW = 2_int32
+    !
 contains
     !
     subroutine collect_tests_parquet_columns(testsuite)
@@ -94,7 +105,11 @@ contains
             new_unittest("bulk validity is exact at every width, across block boundaries", &
                 test_bulk_validity_widths), &
             new_unittest("get_elem/set_elem address one element on every vector kind", &
-                test_elem_access_every_vector_kind) &
+                test_elem_access_every_vector_kind), &
+            new_unittest("shrink_to_fit copies the values back on every kind", &
+                test_shrink_to_fit_every_kind), &
+            new_unittest("append_row_of copies a row and its nulls on every kind", &
+                test_append_row_of_every_kind) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -3132,5 +3147,284 @@ contains
         if (allocated(error)) return
         call check(error, .true., "every vector kind supports get_elem and set_elem")
     end subroutine test_elem_access_every_vector_kind
+    !
+    ! ==================================================================================
+    ! Per-kind sweeps over the generated `case` arms
+    !
+    ! `shrink_storage` and `append_row_of` (`src/parquet_columns_mutate.f90`) are one big
+    ! `select case (self%kind)` each, with a separate arm per kind that allocates and copies that
+    ! kind's own storage. An arm that copied the wrong slice, or nothing at all, would be caught
+    ! by no test that exercises one or two kinds -- and until these sweeps existed, exactly two
+    ! arms of sixteen were reached. The fixture below is shared so that the expected values are
+    ! written once, in `fixture_code`, rather than restated per kind per test.
+    ! ==================================================================================
+    !
+    !> The value fixture row `i`, element `e` carries, as a plain integer every kind derives its
+    !! own value from. Every cell of every fixture is distinct, so a row read from the wrong place
+    !! -- or an element read from the wrong column of a vector row -- is a failure rather than a
+    !! coincidence.
+    !!
+    !! **The multiplier is 11, not 10, and that is load-bearing for the LOGICAL kinds.** They
+    !! derive a value from this code's parity, and `10*i + e` has the parity of `e` alone: every
+    !! row of a `PK_LOGICAL` fixture would hold the same value, and a mutation that reads the
+    !! wrong row would go undetected. It did -- an odd multiplier is what made the sweep able to
+    !! see it. Any future kind deriving its value from part of this code should check the same way.
+    pure integer function fixture_code(i, e) result(k)
+        integer(int64), intent(in) :: i !! 1-based row index.
+        integer(int64), intent(in) :: e !! 1-based element index (1 for a scalar kind).
+        k = int(11_int64*i + e)
+    end function fixture_code
+    !
+    !> Initializes `c` as an empty column of `kind`, supplying `width` for the vector kinds only.
+    subroutine init_kind(c, kind, nrows)
+        type(parquet_column), intent(inout) :: c !! the column to initialize.
+        integer, intent(in) :: kind              !! PK_* kind.
+        integer(int64), intent(in) :: nrows      !! rows to allocate.
+        !
+        select case (kind)
+        case (PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_DATE, PK_TIME, PK_TIMESTAMP)
+            call c%init(kind, nrows)
+        case default
+            call c%init(kind, nrows, FIXW)
+        end select
+    end subroutine init_kind
+    !
+    !> Builds `nrows` rows of `kind` holding the `fixture_code` pattern. Every kind is written
+    !! through `%set_at`, so this also keeps the sweeps honest about the row being addressed.
+    subroutine make_fixture(c, kind, nrows)
+        type(parquet_column), intent(inout) :: c !! receives the fixture.
+        integer, intent(in) :: kind              !! PK_* kind to build.
+        integer(int64), intent(in) :: nrows      !! rows to write.
+        integer(int64) :: i
+        type(parquet_date) :: d, dv(FIXW)
+        type(parquet_time) :: t, tv(FIXW)
+        type(parquet_timestamp) :: s, sv(FIXW)
+        !
+        call init_kind(c, kind, nrows)
+        do i = 1_int64, nrows
+            select case (kind)
+            case (PK_INT32)
+                call c%set_at(i, int(fixture_code(i, 1_int64), int32))
+            case (PK_INT64)
+                call c%set_at(i, int(fixture_code(i, 1_int64), int64))
+            case (PK_FLOAT32)
+                call c%set_at(i, real(fixture_code(i, 1_int64), real32) + 0.5_real32)
+            case (PK_FLOAT64)
+                call c%set_at(i, real(fixture_code(i, 1_int64), real64) + 0.25_real64)
+            case (PK_LOGICAL)
+                call c%set_at(i, mod(fixture_code(i, 1_int64), 2) == 0)
+            case (PK_DATE)
+                call d%set(2000 + fixture_code(i, 1_int64), 1, 1)
+                call c%set_at(i, d)
+            case (PK_TIME)
+                call t%set(int(i, int32), 5, 0)
+                call c%set_at(i, t)
+            case (PK_TIMESTAMP)
+                call s%set(2000 + fixture_code(i, 1_int64), 1, 1, 0, 0, 0)
+                call c%set_at(i, s)
+            case (PK_INT32_VEC)
+                call c%set_at(i, [int(fixture_code(i, 1_int64), int32), int(fixture_code(i, 2_int64), int32)])
+            case (PK_INT64_VEC)
+                call c%set_at(i, [int(fixture_code(i, 1_int64), int64), int(fixture_code(i, 2_int64), int64)])
+            case (PK_FLOAT32_VEC)
+                call c%set_at(i, [real(fixture_code(i, 1_int64), real32) + 0.5_real32, &
+                    real(fixture_code(i, 2_int64), real32) + 0.5_real32])
+            case (PK_FLOAT64_VEC)
+                call c%set_at(i, [real(fixture_code(i, 1_int64), real64) + 0.25_real64, &
+                    real(fixture_code(i, 2_int64), real64) + 0.25_real64])
+            case (PK_LOGICAL_VEC)
+                call c%set_at(i, [mod(fixture_code(i, 1_int64), 2) == 0, mod(fixture_code(i, 2_int64), 2) == 0])
+            case (PK_DATE_VEC)
+                call dv(1)%set(2000 + fixture_code(i, 1_int64), 1, 1)
+                call dv(2)%set(2000 + fixture_code(i, 2_int64), 1, 1)
+                call c%set_at(i, dv)
+            case (PK_TIME_VEC)
+                call tv(1)%set(int(i, int32), 5, 0)
+                call tv(2)%set(int(i, int32), 10, 0)
+                call c%set_at(i, tv)
+            case (PK_TIMESTAMP_VEC)
+                call sv(1)%set(2000 + fixture_code(i, 1_int64), 1, 1, 0, 0, 0)
+                call sv(2)%set(2000 + fixture_code(i, 2_int64), 1, 1, 0, 0, 0)
+                call c%set_at(i, sv)
+            end select
+        end do
+    end subroutine make_fixture
+    !
+    !> Asserts that row `i` of `c` holds whatever `make_fixture` wrote into row `want`. Reading the
+    !! expectation back through the same `fixture_code` the builder used is what keeps a sixteen-arm
+    !! sweep from needing sixteen hand-written expectations that could drift out of step with it.
+    subroutine expect_fixture_row(c, kind, i, want, what, error)
+        type(parquet_column), intent(in) :: c               !! the column to read.
+        integer, intent(in) :: kind                         !! its PK_* kind.
+        integer(int64), intent(in) :: i                     !! row of `c` to read.
+        integer(int64), intent(in) :: want                  !! fixture row it should equal.
+        character(len=*), intent(in) :: what                !! context, for the message.
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        integer(int32) :: g32, v32(FIXW)
+        integer(int64) :: g64, v64(FIXW)
+        real(real32) :: h32, w32(FIXW)
+        real(real64) :: h64, w64(FIXW)
+        logical :: gb, vb(FIXW)
+        type(parquet_date) :: gd, ed, edv(FIXW)
+        type(parquet_time) :: gt, et, etv(FIXW)
+        type(parquet_timestamp) :: gs, es, esv(FIXW)
+        logical :: ok
+        !
+        ok = .false.
+        select case (kind)
+        case (PK_INT32)
+            call c%get_at(i, g32)
+            ok = g32 == int(fixture_code(want, 1_int64), int32)
+        case (PK_INT64)
+            call c%get_at(i, g64)
+            ok = g64 == int(fixture_code(want, 1_int64), int64)
+        case (PK_FLOAT32)
+            call c%get_at(i, h32)
+            ok = h32 == real(fixture_code(want, 1_int64), real32) + 0.5_real32
+        case (PK_FLOAT64)
+            call c%get_at(i, h64)
+            ok = h64 == real(fixture_code(want, 1_int64), real64) + 0.25_real64
+        case (PK_LOGICAL)
+            call c%get_at(i, gb)
+            ok = gb .eqv. (mod(fixture_code(want, 1_int64), 2) == 0)
+        case (PK_DATE)
+            call c%get_at(i, gd)
+            call ed%set(2000 + fixture_code(want, 1_int64), 1, 1)
+            ok = gd == ed
+        case (PK_TIME)
+            call c%get_at(i, gt)
+            call et%set(int(want, int32), 5, 0)
+            ok = gt == et
+        case (PK_TIMESTAMP)
+            call c%get_at(i, gs)
+            call es%set(2000 + fixture_code(want, 1_int64), 1, 1, 0, 0, 0)
+            ok = gs == es
+        case (PK_INT32_VEC)
+            call c%get_at(i, v32)
+            ok = all(v32 == [int(fixture_code(want, 1_int64), int32), int(fixture_code(want, 2_int64), int32)])
+        case (PK_INT64_VEC)
+            call c%get_at(i, v64)
+            ok = all(v64 == [int(fixture_code(want, 1_int64), int64), int(fixture_code(want, 2_int64), int64)])
+        case (PK_FLOAT32_VEC)
+            call c%get_at(i, w32)
+            ok = all(w32 == [real(fixture_code(want, 1_int64), real32) + 0.5_real32, &
+                real(fixture_code(want, 2_int64), real32) + 0.5_real32])
+        case (PK_FLOAT64_VEC)
+            call c%get_at(i, w64)
+            ok = all(w64 == [real(fixture_code(want, 1_int64), real64) + 0.25_real64, &
+                real(fixture_code(want, 2_int64), real64) + 0.25_real64])
+        case (PK_LOGICAL_VEC)
+            call c%get_at(i, vb)
+            ok = all(vb .eqv. [mod(fixture_code(want, 1_int64), 2) == 0, mod(fixture_code(want, 2_int64), 2) == 0])
+        case (PK_DATE_VEC)
+            call c%get_at(i, edv)
+            call gd%set(2000 + fixture_code(want, 1_int64), 1, 1)
+            call ed%set(2000 + fixture_code(want, 2_int64), 1, 1)
+            ok = edv(1) == gd .and. edv(2) == ed
+        case (PK_TIME_VEC)
+            call c%get_at(i, etv)
+            call gt%set(int(want, int32), 5, 0)
+            call et%set(int(want, int32), 10, 0)
+            ok = etv(1) == gt .and. etv(2) == et
+        case (PK_TIMESTAMP_VEC)
+            call c%get_at(i, esv)
+            call gs%set(2000 + fixture_code(want, 1_int64), 1, 1, 0, 0, 0)
+            call es%set(2000 + fixture_code(want, 2_int64), 1, 1, 0, 0, 0)
+            ok = esv(1) == gs .and. esv(2) == es
+        end select
+        call check(error, ok, what)
+    end subroutine expect_fixture_row
+    !
+    !> `shrink_storage` reallocates a column's own storage down to `nrows` and copies the live rows
+    !! across, with a separate `select case` arm per kind. Only two of the sixteen were reached
+    !! before this sweep, so an arm that allocated the new buffer and copied the wrong slice -- or
+    !! forgot the copy -- would have shipped unnoticed on the other fourteen.
+    !!
+    !! **Asserting the capacity alone is not enough**, which is why every row is read back
+    !! afterwards: `%capacity()` and `%length()` are bookkeeping the arm does not touch, so a
+    !! capacity-only test passes against an arm that reallocates and copies nothing.
+    subroutine test_shrink_to_fit_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        integer(int64), parameter :: NR = 3_int64
+        type(parquet_column) :: c
+        character(len=:), allocatable :: kn
+        integer(int64) :: i
+        integer :: ki
+        logical :: released
+        !
+        do ki = 1, size(ARRAY_KINDS)
+            call parquet_kind_name(ARRAY_KINDS(ki), kn)
+            call make_fixture(c, ARRAY_KINDS(ki), NR)
+            call c%reserve(8_int64*NR)
+            call check(error, c%capacity() > c%length(), kn // ": reserve should leave slack to release")
+            if (allocated(error)) return
+            call c%shrink_to_fit(released)
+            call check(error, released, kn // ": shrink_to_fit should report that it released slack")
+            if (allocated(error)) return
+            call check(error, c%capacity() == c%length(), kn // ": shrink_to_fit should leave an exact fit")
+            if (allocated(error)) return
+            do i = 1_int64, NR
+                call expect_fixture_row(c, ARRAY_KINDS(ki), i, i, &
+                    kn // ": shrink_to_fit should copy every row across unchanged", error)
+                if (allocated(error)) return
+            end do
+            ! Nothing left to release: the no-op branch %compact depends on, on every kind.
+            call c%shrink_to_fit(released)
+            call check(error, .not. released, kn // ": a second shrink_to_fit should release nothing")
+            if (allocated(error)) return
+        end do
+        call check(error, .true., "every array kind survives shrink_to_fit with its values intact")
+    end subroutine test_shrink_to_fit_every_kind
+    !
+    !> `append_row_of` copies ONE row of another column, again through a per-kind `select case`,
+    !! and again only two arms of sixteen were reached before this sweep.
+    !!
+    !! The rows are appended OUT of order (2, 1, 3) so that an arm reading a fixed row, or the
+    !! destination's own last row, instead of the row it was given is a failure. The source row
+    !! appended last is null, which covers the other half of the operation: a bitmap kind has to
+    !! copy the validity bits across, while a temporal kind carries its null state inside the
+    !! element and only has to invalidate the cached answer -- two paths reached from one call.
+    !!
+    !! **The two value-checked rows must be 1 and 2, not 1 and 3**, because the LOGICAL kinds have
+    !! only two possible values and `fixture_code`'s parity makes rows 1 and 3 agree. A permutation
+    !! reading them would let a wrong-row mutation through on those kinds -- as an earlier version
+    !! of this test did. Whenever a row is added or the permutation changes, re-check that the
+    !! rows being compared still differ on a two-valued kind.
+    subroutine test_append_row_of_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        integer(int64), parameter :: NR = 3_int64
+        type(parquet_column) :: src, dst
+        character(len=:), allocatable :: kn
+        integer :: ki
+        !
+        do ki = 1, size(ARRAY_KINDS)
+            call parquet_kind_name(ARRAY_KINDS(ki), kn)
+            call make_fixture(src, ARRAY_KINDS(ki), NR)
+            call src%set_null(NR)
+            call init_kind(dst, ARRAY_KINDS(ki), 0_int64)
+            call dst%append_row_of(src, 2_int64)
+            call dst%append_row_of(src, 1_int64)
+            call dst%append_row_of(src, NR)
+            call check(error, dst%length() == NR, kn // ": each append_row_of should add exactly one row")
+            if (allocated(error)) return
+            call expect_fixture_row(dst, ARRAY_KINDS(ki), 1_int64, 2_int64, &
+                kn // ": the first appended row should be the source row named", error)
+            if (allocated(error)) return
+            call expect_fixture_row(dst, ARRAY_KINDS(ki), 2_int64, 1_int64, &
+                kn // ": the second appended row should be the source row named", error)
+            if (allocated(error)) return
+            ! Row 3 came from the source's null row and is not read for a value: on a temporal kind
+            ! the element itself is null, and asking a null element for its fields aborts.
+            call check(error, .not. dst%is_null(1_int64), kn // ": a valid source row appends as valid")
+            if (allocated(error)) return
+            call check(error, .not. dst%is_null(2_int64), kn // ": the second valid source row appends as valid")
+            if (allocated(error)) return
+            call check(error, dst%is_null(3_int64), kn // ": a null source row appends as null")
+            if (allocated(error)) return
+            call check(error, src%length() == NR, kn // ": append_row_of should not change the source")
+            if (allocated(error)) return
+        end do
+        call check(error, .true., "every array kind copies one row, and its null state, through append_row_of")
+    end subroutine test_append_row_of_every_kind
 
 end module test_columns

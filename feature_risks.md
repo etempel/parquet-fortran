@@ -139,6 +139,7 @@ something a reader is expected to have.
 | [Risk-73](#risk-73--a-keydatatype-entry-that-disagrees-with-its-value-is-worse-than-no-entry) | A `<KEY>.datatype` entry that disagrees with its value is worse than no entry | 4 — covered |
 | [Risk-74](#risk-74--discarding-a-column-the-caller-wrote-into-silently-restores-the-files-values) | Discarding a column the caller wrote into silently restores the file's values | 4 — covered |
 | [Risk-75](#risk-75--the-name-indexs-linear-scan-fallback-is-a-safety-net-nothing-exercised) | The name index's linear-scan fallback is a safety net nothing exercised | 4 — covered |
+| [Risk-76](#risk-76--casts-post-touch-re-check-guards-an-invariant-that-lives-in-another-file) | `%cast`'s post-touch re-check guards an invariant that lives in another file | 3 — not testable |
 
 ---
 
@@ -146,7 +147,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-76**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-77**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -737,6 +738,37 @@ and `delete_by_mask` rows are where it would show, which is how it was found.
 compaction without checking which array the destination lives in. If a future in-place bulk operation is
 added here, it inherits this constraint; if it can afford a fresh destination buffer, prefer that
 instead, since it removes the aliasing and buys the parallelism at the same time.
+
+### Risk-76 — `%cast`'s post-touch re-check guards an invariant that lives in another file
+
+**What breaks.** `table_cast` (`src/parquet_tables_mutate.f90`) compares the column's kind against the
+target twice: once against `declared_kind` before it does anything, and once against
+`values%kindof()` after `table_touch` has read the column. If the second check is removed and the
+two ever disagree, `cast_apply` converts a column that is *already* in the target kind — it
+reinterprets a real64 buffer as int64, or the reverse. That is a silent wrong answer in the values
+themselves, with the kind, width, row count and null mask all still correct.
+
+**Why it is not testable.** The two cannot disagree today, and that was established rather than
+assumed: `table_materialize` (`src/parquet_tables_read.f90`) always decodes into
+`slot%declared_kind`, and every path that leaves a column resident without materializing leaves the
+pair in step. Six candidate sequences were run against an instrumented build — a deferred cast
+followed by a second one, a cast back to the file's own kind, `exact=` on an untouched column, an
+evict-then-cast, and both of those on a deferred-WIDTH `LIST` column — and none reached the branch;
+nor does anything in the suite or the error scenarios. There is no public API through which the
+disagreement can be arranged, and no debug hook could arrange it without writing `declared_kind`
+directly, which would be testing the hook rather than the guard.
+
+The branch body is `GCOVR_EXCL`'d with that reasoning recorded beside it.
+
+**What this forbids.**
+
+- **Do not delete the second check on the strength of a coverage report.** Its whole value is that
+  it does not depend on a promise made one file away staying true.
+- **Anything that changes what `table_materialize` decodes into must revisit this.** A read path
+  that produced the file's kind and converted afterwards — a plausible optimization — would make the
+  branch live, and the entry moves to section 2 with a test the moment that happens.
+- **Do not "simplify" the two checks into one.** They are asking different questions: the first is
+  about what the table has been told the column is, the second about what it actually holds.
 
 ## 4. Risks already covered, kept for what they still forbid
 

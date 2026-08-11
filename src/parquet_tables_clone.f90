@@ -200,7 +200,7 @@ contains
     subroutine clone_new_cache(self, out)
         class(parquet_table), intent(in) :: self    !! the source table.
         class(parquet_table), intent(inout) :: out  !! the destination table.
-        integer :: i
+        integer :: i, ncap
         !
         allocate(out%cache)
         call record_open_thread(out%cache)
@@ -212,8 +212,12 @@ contains
         ! spare room, rather than one that silently drops back to the default headroom and starts
         ! relocating on the next %add_column. Shared by %clone and %clone_structure, since both
         ! build their cache here -- so the guarantee cannot hold for one and not the other.
-        allocate(out%cache%cols(max(max(self%cache%ncols, 1) + COL_HEADROOM, &
-                                    size(self%cache%cols))))
+        !
+        ! Named local rather than the expression written inline: gfortran attributes a multi-line
+        ! `allocate` statement's code to its LAST line, leaving the first with a zero hit count
+        ! that reads as an uncovered line while the statement demonstrably runs.
+        ncap = max(max(self%cache%ncols, 1) + COL_HEADROOM, size(self%cache%cols))
+        allocate(out%cache%cols(ncap))
         out%cache%ncols = 0
         out%cache%file_backed = .false.
         if (allocated(self%cache%source_file)) out%cache%source_file = self%cache%source_file

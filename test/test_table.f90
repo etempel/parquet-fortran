@@ -246,6 +246,8 @@ contains
                 test_column_capacity), &
             new_unittest("the no-relocation guarantee excludes force=, and survives a clone", &
                 test_reserve_columns_limits), &
+            new_unittest("reserve_columns rebuilds a name index that is not there", &
+                test_reserve_columns_without_name_index), &
             new_unittest("column and row handles follow the no-relocation guarantee", &
                 test_reserve_columns_handles), &
             new_unittest("materialize is prefetch, and both take a separated name list", &
@@ -8583,7 +8585,10 @@ contains
         !
         call parquet_new_table(t)
         call t%add_column("a", [1_int32, 2_int32])
-        call t%reserve_columns(t%ncols() + 8)
+        ! Deliberately far above the default headroom a fresh cache gets. A reservation of merely
+        ! ncols + COL_HEADROOM would leave the clone arms below VACUOUS: a clone that dropped the
+        ! reservation entirely allocates ncols + COL_HEADROOM anyway, so it would pass them.
+        call t%reserve_columns(t%ncols() + 40)
         gen0 = t%generation()
         call t%add_column("a", [7_int32, 8_int32], force=.true.)
         call check(error, t%generation() > gen0, &
@@ -8593,13 +8598,90 @@ contains
         !
         cap = t%column_capacity()
         call t%clone(c)
-        call check(error, c%column_capacity() >= cap, &
-            "a clone must inherit at least the source's column capacity")
+        call check(error, c%column_capacity() == cap, &
+            "a clone must inherit the source's column capacity exactly, reservation included")
         if (allocated(error)) return
         call t%clone_structure(c)
-        call check(error, c%column_capacity() >= cap, &
+        call check(error, c%column_capacity() == cap, &
             "clone_structure must inherit the source's column capacity too")
+        if (allocated(error)) return
+        ! The inherited room is real, not just a reported number: filling it must not relocate,
+        ! so a handle taken beforehand stays valid across every one of those adds.
+        block
+            type(parquet_table_col) :: h
+            integer :: i
+            character(len=32) :: nm
+            call t%clone(c)
+            call c%column("a", h)
+            do i = 1, c%column_capacity() - c%ncols()
+                write(nm, "('k', I0)") i
+                call c%add_column(trim(nm), [1_int32, 2_int32])
+            end do
+            call check(error, h%is_valid(), &
+                "the capacity a clone inherited must absorb that many adds without relocating")
+        end block
     end subroutine test_reserve_columns_limits
+    !
+    !> `%reserve_columns` grows the name index alongside the slot array, and has to cope with that
+    !! index not being there at all.
+    !!
+    !! Reachable only through the debug hook, because a table that exists has an index: every
+    !! entry point that builds a cache rebuilds it. `cache_find`'s linear scan is the safety net
+    !! for a mutation that forgets to maintain the index, and this is the reserve path's half of
+    !! the same net -- it must rebuild rather than reserve against an index that is not there.
+    !!
+    !! The hook's `had_index` is the negative control: without it this would pass just as happily
+    !! against a hook that dropped nothing.
+    subroutine test_reserve_columns_without_name_index(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32) :: v
+        integer :: cap
+        logical :: had_index
+        !
+        call parquet_new_table(t)
+        call t%add_column("alpha", [10_int32, 20_int32])
+        call t%add_column("beta", [30_int32, 40_int32])
+        !
+        call parquet_debug_table_drop_name_index(t, had_index)
+        call check(error, had_index, "the table had a name index to drop before it was dropped")
+        if (allocated(error)) return
+        !
+        call t%reserve_columns(t%ncols() + 32)
+        cap = t%column_capacity()
+        call check(error, cap == t%ncols() + 32, &
+            "reserve_columns must reach the requested capacity with no name index to start from")
+        if (allocated(error)) return
+        !
+        ! The rebuilt index must be CORRECT, not merely present: both names still resolve to their
+        ! own column. Asserted BEFORE the hook below, while the index is the thing answering.
+        call t%get_element("alpha", 1, v)
+        call check(error, v == 10_int32, "alpha must still resolve after the index was rebuilt")
+        if (allocated(error)) return
+        call t%get_element("beta", 2, v)
+        call check(error, v == 40_int32, "beta must still resolve after the index was rebuilt")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("delta"), &
+            "a name that was never added must still report absent")
+        if (allocated(error)) return
+        !
+        ! THE discriminating assertion. Everything above is satisfied by `cache_find`'s linear-scan
+        ! fallback whether or not the index came back -- verified by mutation: a reserve that
+        ! skipped the rebuild passed every check above. Only the hook can see the index itself, so
+        ! this is what says the rebuild happened, and it is what makes the checks above assertions
+        ! about the index rather than about the scan.
+        call parquet_debug_table_drop_name_index(t, had_index)
+        call check(error, had_index, &
+            "reserve_columns must rebuild the name index it found missing, not leave the table " // &
+            "on the linear-scan fallback")
+        if (allocated(error)) return
+        !
+        ! A column added afterwards resolves too: the rebuilt index is maintained from then on,
+        ! not merely correct at the moment it was built.
+        call t%add_column("gamma", [50_int32, 60_int32])
+        call t%get_element("gamma", 1, v)
+        call check(error, v == 50_int32, "a column added afterwards must resolve through the index")
+    end subroutine test_reserve_columns_without_name_index
     !
     !> A column handle and a row handle both key on the generation counter, so the guarantee
     !! reaches them as well -- and must stop reaching them the moment the array actually grows.
@@ -10109,6 +10191,44 @@ contains
         if (allocated(error)) return
         call check(error, u%residency(PARQUET_ROW_INDEX) == RES_FULL, &
             "...and must actually materialize it")
+        if (allocated(error)) return
+        !
+        ! The reserved name asked for ALONGSIDE an ordinary one, and not first -- which is the
+        ! shape `grow_want_mask` exists for. Resolving it creates a slot mid-loop, so the mark mask
+        ! sized against the earlier name is one entry short from that point on; without the regrow
+        ! the next mark writes past its end. A plain `fpm test` runs straight through that overrun,
+        ! so this test is only as sharp as `--profile debug` makes it -- run it there too.
+        !
+        ! Both spellings, because each builds its mask on its own path: the array form marks in
+        ! `prefetch_array` itself, the string form one level down in `mark_one_name`.
+        block
+            type(parquet_table) :: a, s
+            call parquet_open_table(a, f)
+            before = a%ncols()
+            call a%prefetch([character(len=len(PARQUET_ROW_INDEX)) :: "i32", PARQUET_ROW_INDEX])
+            call check(error, a%ncols() == before + 1, &
+                "prefetching an ordinary name and then the row index must add exactly one slot")
+            if (allocated(error)) return
+            call check(error, a%residency("i32") == RES_FULL .and. &
+                a%residency(PARQUET_ROW_INDEX) == RES_FULL, &
+                "both names must be read: the mark for the earlier one must survive the regrow")
+            if (allocated(error)) return
+            !
+            call parquet_open_table(s, f)
+            before = s%ncols()
+            call s%prefetch("i32," // PARQUET_ROW_INDEX)
+            call check(error, s%ncols() == before + 1, &
+                "the string form must add exactly one slot for the same pair of names")
+            if (allocated(error)) return
+            call check(error, s%residency("i32") == RES_FULL .and. &
+                s%residency(PARQUET_ROW_INDEX) == RES_FULL, &
+                "the string form must read both names too")
+            if (allocated(error)) return
+            ! Nothing ELSE was read: a mask that came back over-marked would materialize the
+            ! whole table and pass every assertion above.
+            call check(error, s%residency("f64") == RES_EMPTY .and. a%residency("f64") == RES_EMPTY, &
+                "a column that was not asked for must stay unread on both paths")
+        end block
     end subroutine test_prefetch_row_index
     !
     !> `parquet_write_table` parses a schema the caller built but never parsed.

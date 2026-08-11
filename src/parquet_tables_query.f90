@@ -217,9 +217,19 @@ contains
             write(rest, "(I0)") size(names) - shown
             text = text // " and " // trim(rest) // " more"
         end if
-        ! Only reachable for an empty list, which %require_columns never passes (it returns early
-        ! when nothing is missing, and a zero-name request has nothing missing either).
-        if (len(text) == 0) text = "(none)"  ! GCOVR_EXCL_LINE
+        ! Only reachable for an empty list, which `require_columns_array` never passes: both of its
+        ! calls sit past the `size(absent) == 0` early return, and a request naming no columns has
+        ! nothing missing either, so each carries at least one name. Kept as a fallback for a future
+        ! caller rather than deleted -- an empty preview would otherwise render the message as
+        ! "this table does not have  (asked for )".
+        !
+        ! Written as a block rather than a one-line `if` so that gcov can attribute the two halves
+        ! separately: the condition is evaluated on every call and rightly counts as covered, while
+        ! only the body needs excluding. Sharing one line gives them one hit count, which reports a
+        ! live condition as a stale exclusion.
+        if (len(text) == 0) then
+            text = "(none)"  ! GCOVR_EXCL_LINE
+        end if
     end subroutine preview_name_list
     !
     module procedure table_find

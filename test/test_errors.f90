@@ -735,6 +735,10 @@ contains
                 test_table_key_list_bad_direction_aborts), &
             new_unittest("table: require_columns names every missing column", &
                 test_table_require_columns_missing_aborts), &
+            new_unittest("table: a long missing name is clipped in the message", &
+                test_table_require_columns_long_name_aborts), &
+            new_unittest("table: more missing names than the preview shows are counted", &
+                test_table_require_columns_many_missing_aborts), &
             new_unittest("parquet_column paste of a different kind aborts", &
                 test_columns_paste_kind_mismatch_aborts), &
             new_unittest("parquet_column paste of a different vector width aborts", &
@@ -2171,6 +2175,27 @@ contains
             failure_message="requiring a missing column was expected to abort", &
             required_stderr="'alsonope'")
     end subroutine test_table_require_columns_missing_aborts
+
+    !! The assertion carries the whole 64-character prefix plus the ellipsis, so a clip at the
+    !! wrong width fails as loudly as no clip at all -- asserting on "...'" alone would pass
+    !! against any cut-off point.
+    subroutine test_table_require_columns_long_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_require_columns_long_name", &
+            expect_abort=.true., &
+            failure_message="requiring a missing column with a long name was expected to abort", &
+            required_stderr="'a_column_name_long_enough_that_quoting_it_whole_would_bloat_the_...'")
+    end subroutine test_table_require_columns_long_name_aborts
+
+    !! "and 2 more" rather than just "more": the COUNT is what a caller needs, and an off-by-one
+    !! in it would otherwise be invisible.
+    subroutine test_table_require_columns_many_missing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_require_columns_many_missing", &
+            expect_abort=.true., &
+            failure_message="requiring twelve missing columns was expected to abort", &
+            required_stderr="'m10' and 2 more")
+    end subroutine test_table_require_columns_many_missing_aborts
 
     subroutine test_columns_paste_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

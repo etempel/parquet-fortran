@@ -212,6 +212,8 @@ scenarios=(
     "table_key_list_empty:1"
     "table_key_list_bad_direction:1"
     "table_require_columns_missing:1"
+    "table_require_columns_long_name:1"
+    "table_require_columns_many_missing:1"
     "columns_paste_kind_mismatch:1"
     "columns_paste_width_mismatch:1"
     "columns_paste_string_kind:1"

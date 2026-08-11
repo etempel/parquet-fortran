@@ -1148,8 +1148,9 @@ contains
         ! separator comes back as one token, which is the overwhelmingly common case and takes
         ! exactly the same path it always did.
         call parquet_split_name_list(names, toks)
-        allocate(want(self%cache%ncols))
-        want = .false.
+        ! `want` is left unallocated here on purpose: grow_want_mask is the mask's single owner, so
+        ! it creates it on first use rather than each caller repeating the allocate-and-blank pair
+        ! that has to agree with it.
         all_found = .true.
         do i = 1, size(toks)
             call mark_one_name(self, trim(toks(i)), present(found), want, ok)
@@ -1198,10 +1199,12 @@ contains
             else
                 call table_prefetch_resolve(self, name, "prefetch", idx)
             end if
-            if (idx == 0) then
-                ok = .false.
-                return
-            end if
+            ! No `idx == 0` check here, deliberately: the name was just found, and the resolve
+            ! looks it up again against a cache nothing has mutated in between, so it cannot come
+            ! back a miss. A guard would be unreachable AND wrong-headed -- it would turn a slot
+            ! index that somehow went bad into a quiet "not found" instead of the out-of-bounds
+            ! write `--profile debug` reports.
+            !
             ! Resolving can ADD a column: asking for parquet_row_index materializes it, which is a
             ! new slot. So the mask has to be re-sized against the column count as it is NOW, not
             ! as it was when the loop started -- otherwise the very next line writes past its end.
@@ -1231,12 +1234,17 @@ contains
         want = want .or. leaves
     end subroutine mark_one_name
     !
-    !> Grows a %prefetch mark mask to `n` entries, keeping what is already marked.
+    !> Grows a %prefetch mark mask to `n` entries, keeping what is already marked -- creating it
+    !! blank when it does not exist yet.
     !!
     !! Needed because resolving a name can create a column: `parquet_row_index` is materialized on
     !! demand, through `table_new_slot`, so a mask sized before the loop is one entry short from
     !! that point on. A plain `fpm test` runs straight past the overrun; `--profile debug` is what
     !! catches it.
+    !!
+    !! **This is the mask's only constructor.** Its callers deliberately leave `want` unallocated
+    !! and let the first call here size it: a caller that allocated its own would be a second place
+    !! the "blank, one entry per column" rule is written down, free to drift from this one.
     subroutine grow_want_mask(want, n)
         logical, allocatable, intent(inout) :: want(:) !! the mask to grow.
         integer, intent(in) :: n                       !! entries it must have.
@@ -1286,8 +1294,7 @@ contains
         logical :: got
         !
         call table_check_open(self, "prefetch")
-        allocate(want(self%cache%ncols))
-        want = .false.
+        ! Unallocated on purpose; grow_want_mask owns the mask. See prefetch_string.
         if (present(found)) found = .true.
         do i = 1, size(names)
             ! `found` has to be forwarded conditionally, not just passed along: handing the

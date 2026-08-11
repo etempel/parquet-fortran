@@ -1592,6 +1592,10 @@ program error_scenarios
         call scenario_table_key_list_bad_direction()
     case ("table_require_columns_missing")
         call scenario_table_require_columns_missing()
+    case ("table_require_columns_long_name")
+        call scenario_table_require_columns_long_name()
+    case ("table_require_columns_many_missing")
+        call scenario_table_require_columns_many_missing()
     case ("filter_bool_ordering")
         call scenario_filter_bool_ordering()
     case ("table_read_during_append")
@@ -12156,6 +12160,45 @@ contains
         call t%sort_by("id sideways")  ! not a direction word -> aborts
         print '(a,i0)', "unexpectedly sorted by an unrecognized direction, rows=", t%nrows()
     end subroutine scenario_table_key_list_bad_direction
+
+    !> One missing name long enough that quoting it whole would start bloating the message. The
+    !! preview clips each NAME at 64 characters, independently of how many names it shows.
+    !!
+    !! The unclipped control is `table_require_columns_missing`, which asserts a short name comes
+    !! through whole -- so a preview that always clipped fails there while this one passes, and one
+    !! that never clipped fails here. Neither scenario alone pins the behaviour.
+    subroutine scenario_table_require_columns_long_name()
+        type(parquet_table) :: t
+        character(len=*), parameter :: long_name = &
+            "a_column_name_long_enough_that_quoting_it_whole_would_bloat_the_message_0123456789"
+        call write_table_scenario_fixture("test_run/es_table_require_long.parquet")
+        call parquet_open_table(t, "test_run/es_table_require_long.parquet")
+        if (len(long_name) <= 64) then
+            print '(a)', "the long name is not actually long; this scenario proves nothing"
+            return
+        end if
+        call t%require_columns("id,val")    ! everything present: permitted
+        print '(a,i0)', "a request naming only present columns was accepted, ncols=", t%ncols()
+        call t%require_columns(long_name)   ! missing and long -> aborts with a clipped preview
+        print '(a)', "unexpectedly required a missing column"
+    end subroutine scenario_table_require_columns_long_name
+
+    !> More missing names than the preview shows. It lists the first ten and counts the rest, so
+    !! the message stays bounded however many columns a caller asks for.
+    !!
+    !! Negative control first: a request with FEWER missing names than the cap must not be
+    !! summarized at all -- `table_require_columns_missing` asserts that two missing names come
+    !! through as names, with no "and N more" tail.
+    subroutine scenario_table_require_columns_many_missing()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_require_many.parquet")
+        call parquet_open_table(t, "test_run/es_table_require_many.parquet")
+        call t%require_columns("id;val")   ! both present: permitted
+        print '(a,i0)', "a request naming only present columns was accepted, ncols=", t%ncols()
+        ! Twelve missing names: ten shown, two counted.
+        call t%require_columns("m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,m12")   ! -> aborts
+        print '(a)', "unexpectedly required twelve missing columns"
+    end subroutine scenario_table_require_columns_many_missing
 
     !> %require_columns names EVERY missing column, which is the whole reason it exists -- a
     !! hand-written %has_column loop reports one per run.

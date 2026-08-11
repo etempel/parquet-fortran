@@ -1202,6 +1202,22 @@ program error_scenarios
         call scenario_table_get_element_row_out_of_range()
     case ("table_get_element_kind_mismatch")
         call scenario_table_get_element_kind_mismatch()
+    case ("table_get_element_kind_mismatch_i32v")
+        call scenario_table_get_element_kind_mismatch_i32v()
+    case ("table_get_element_kind_mismatch_i64v")
+        call scenario_table_get_element_kind_mismatch_i64v()
+    case ("table_get_element_kind_mismatch_f32v")
+        call scenario_table_get_element_kind_mismatch_f32v()
+    case ("table_get_element_kind_mismatch_f64v")
+        call scenario_table_get_element_kind_mismatch_f64v()
+    case ("table_get_element_kind_mismatch_boolv")
+        call scenario_table_get_element_kind_mismatch_boolv()
+    case ("table_get_element_kind_mismatch_datev")
+        call scenario_table_get_element_kind_mismatch_datev()
+    case ("table_get_element_kind_mismatch_timev")
+        call scenario_table_get_element_kind_mismatch_timev()
+    case ("table_get_element_kind_mismatch_tsv")
+        call scenario_table_get_element_kind_mismatch_tsv()
     case ("table_get_element_missing_column")
         call scenario_table_get_element_missing_column()
     case ("col_handle_stale_after_mutation")
@@ -10223,6 +10239,183 @@ contains
     !> %get_element asking for a kind the column cannot serve. This exercises the SHARED body
     !! `col_fetch_f64`, which both the table's %get_element and a column handle's %get call --
     !! so this one scenario covers the kind-error path of both entry points.
+
+    !> `%get_element` into a VECTOR receiver whose kind is not the column's. Each vector kind has
+    !! its own shared fetch body carrying its own kind check, and the scalar mismatch scenario
+    !! above reaches none of them -- the eight below are one per body.
+    !!
+    !! Each makes a matching-kind call FIRST, as the negative control: a check that fired
+    !! unconditionally would pass the abort half while breaking every ordinary vector read.
+    subroutine scenario_table_get_element_kind_mismatch_i32v()
+        type(parquet_table) :: t
+        integer(int32) :: good(2, 2)
+        real(real64) :: other(2, 2)
+        integer(int32), allocatable :: v(:)
+        good = reshape([mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a()], [2, 2])
+        other = reshape([mismatch_f64v_a(), mismatch_f64v_a(), mismatch_f64v_a(), mismatch_f64v_a()], [2, 2])
+        call parquet_new_table(t)
+        call t%add_column("ok", good)
+        call t%add_column("other", other)
+        call t%get_element("ok", 1_int64, v)     ! negative control: the kind that does serve
+        print '(a,i0)', "matching vector kind answered, size=", size(v)
+        call t%get_element("other", 1_int64, v)  ! -> aborts (an int32 vector cannot read that column)
+        print '(a,i0)', "unexpectedly read a mismatched column as an int32 vector, size=", size(v)
+    end subroutine scenario_table_get_element_kind_mismatch_i32v
+
+    !> i64v takes the ONLY source that is neither its own kind nor the kind it widens from: an
+    !! int32 vector is legal here (that is the widening arm), so this one uses a real64 vector.
+    subroutine scenario_table_get_element_kind_mismatch_i64v()
+        type(parquet_table) :: t
+        integer(int64) :: good(2, 2)
+        real(real64) :: other(2, 2)
+        integer(int64), allocatable :: v(:)
+        good = reshape([mismatch_i64v_a(), mismatch_i64v_a(), mismatch_i64v_a(), mismatch_i64v_a()], [2, 2])
+        other = reshape([mismatch_f64v_a(), mismatch_f64v_a(), mismatch_f64v_a(), mismatch_f64v_a()], [2, 2])
+        call parquet_new_table(t)
+        call t%add_column("ok", good)
+        call t%add_column("other", other)
+        call t%get_element("ok", 1_int64, v)     ! negative control: the kind that does serve
+        print '(a,i0)', "matching vector kind answered, size=", size(v)
+        call t%get_element("other", 1_int64, v)  ! -> aborts (an int64 vector cannot read that column)
+        print '(a,i0)', "unexpectedly read a mismatched column as an int64 vector, size=", size(v)
+    end subroutine scenario_table_get_element_kind_mismatch_i64v
+
+    subroutine scenario_table_get_element_kind_mismatch_f32v()
+        type(parquet_table) :: t
+        real(real32) :: good(2, 2)
+        integer(int32) :: other(2, 2)
+        real(real32), allocatable :: v(:)
+        good = reshape([mismatch_f32v_a(), mismatch_f32v_a(), mismatch_f32v_a(), mismatch_f32v_a()], [2, 2])
+        other = reshape([mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a()], [2, 2])
+        call parquet_new_table(t)
+        call t%add_column("ok", good)
+        call t%add_column("other", other)
+        call t%get_element("ok", 1_int64, v)     ! negative control: the kind that does serve
+        print '(a,i0)', "matching vector kind answered, size=", size(v)
+        call t%get_element("other", 1_int64, v)  ! -> aborts (a real32 vector cannot read that column)
+        print '(a,i0)', "unexpectedly read a mismatched column as a real32 vector, size=", size(v)
+    end subroutine scenario_table_get_element_kind_mismatch_f32v
+
+    subroutine scenario_table_get_element_kind_mismatch_f64v()
+        type(parquet_table) :: t
+        real(real64) :: good(2, 2)
+        integer(int32) :: other(2, 2)
+        real(real64), allocatable :: v(:)
+        good = reshape([mismatch_f64v_a(), mismatch_f64v_a(), mismatch_f64v_a(), mismatch_f64v_a()], [2, 2])
+        other = reshape([mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a()], [2, 2])
+        call parquet_new_table(t)
+        call t%add_column("ok", good)
+        call t%add_column("other", other)
+        call t%get_element("ok", 1_int64, v)     ! negative control: the kind that does serve
+        print '(a,i0)', "matching vector kind answered, size=", size(v)
+        call t%get_element("other", 1_int64, v)  ! -> aborts (a real64 vector cannot read that column)
+        print '(a,i0)', "unexpectedly read a mismatched column as a real64 vector, size=", size(v)
+    end subroutine scenario_table_get_element_kind_mismatch_f64v
+
+    subroutine scenario_table_get_element_kind_mismatch_boolv()
+        type(parquet_table) :: t
+        logical :: good(2, 2)
+        integer(int32) :: other(2, 2)
+        logical, allocatable :: v(:)
+        good = reshape([mismatch_boolv_a(), mismatch_boolv_a(), mismatch_boolv_a(), mismatch_boolv_a()], [2, 2])
+        other = reshape([mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a()], [2, 2])
+        call parquet_new_table(t)
+        call t%add_column("ok", good)
+        call t%add_column("other", other)
+        call t%get_element("ok", 1_int64, v)     ! negative control: the kind that does serve
+        print '(a,i0)', "matching vector kind answered, size=", size(v)
+        call t%get_element("other", 1_int64, v)  ! -> aborts (a logical vector cannot read that column)
+        print '(a,i0)', "unexpectedly read a mismatched column as a logical vector, size=", size(v)
+    end subroutine scenario_table_get_element_kind_mismatch_boolv
+
+    subroutine scenario_table_get_element_kind_mismatch_datev()
+        type(parquet_table) :: t
+        type(parquet_date) :: good(2, 2)
+        integer(int32) :: other(2, 2)
+        type(parquet_date), allocatable :: v(:)
+        good = reshape([mismatch_datev_a(), mismatch_datev_a(), mismatch_datev_a(), mismatch_datev_a()], [2, 2])
+        other = reshape([mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a()], [2, 2])
+        call parquet_new_table(t)
+        call t%add_column("ok", good)
+        call t%add_column("other", other)
+        call t%get_element("ok", 1_int64, v)     ! negative control: the kind that does serve
+        print '(a,i0)', "matching vector kind answered, size=", size(v)
+        call t%get_element("other", 1_int64, v)  ! -> aborts (a date vector cannot read that column)
+        print '(a,i0)', "unexpectedly read a mismatched column as a date vector, size=", size(v)
+    end subroutine scenario_table_get_element_kind_mismatch_datev
+
+    subroutine scenario_table_get_element_kind_mismatch_timev()
+        type(parquet_table) :: t
+        type(parquet_time) :: good(2, 2)
+        integer(int32) :: other(2, 2)
+        type(parquet_time), allocatable :: v(:)
+        good = reshape([mismatch_timev_a(), mismatch_timev_a(), mismatch_timev_a(), mismatch_timev_a()], [2, 2])
+        other = reshape([mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a()], [2, 2])
+        call parquet_new_table(t)
+        call t%add_column("ok", good)
+        call t%add_column("other", other)
+        call t%get_element("ok", 1_int64, v)     ! negative control: the kind that does serve
+        print '(a,i0)', "matching vector kind answered, size=", size(v)
+        call t%get_element("other", 1_int64, v)  ! -> aborts (a time vector cannot read that column)
+        print '(a,i0)', "unexpectedly read a mismatched column as a time vector, size=", size(v)
+    end subroutine scenario_table_get_element_kind_mismatch_timev
+
+    subroutine scenario_table_get_element_kind_mismatch_tsv()
+        type(parquet_table) :: t
+        type(parquet_timestamp) :: good(2, 2)
+        integer(int32) :: other(2, 2)
+        type(parquet_timestamp), allocatable :: v(:)
+        good = reshape([mismatch_tsv_a(), mismatch_tsv_a(), mismatch_tsv_a(), mismatch_tsv_a()], [2, 2])
+        other = reshape([mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a(), mismatch_i32v_a()], [2, 2])
+        call parquet_new_table(t)
+        call t%add_column("ok", good)
+        call t%add_column("other", other)
+        call t%get_element("ok", 1_int64, v)     ! negative control: the kind that does serve
+        print '(a,i0)', "matching vector kind answered, size=", size(v)
+        call t%get_element("other", 1_int64, v)  ! -> aborts (a timestamp vector cannot read that column)
+        print '(a,i0)', "unexpectedly read a mismatched column as a timestamp vector, size=", size(v)
+    end subroutine scenario_table_get_element_kind_mismatch_tsv
+    !> One value of each vector kind, for the eight scenarios above. Written as functions rather
+    !! than literals so that each scenario's fixture stays a single readable line.
+    function mismatch_i32v_a() result(v)
+        integer(int32) :: v !! one representative value of this kind.
+        v = 1_int32
+    end function mismatch_i32v_a
+
+    function mismatch_i64v_a() result(v)
+        integer(int64) :: v !! one representative value of this kind.
+        v = 1_int64
+    end function mismatch_i64v_a
+
+    function mismatch_f32v_a() result(v)
+        real(real32) :: v !! one representative value of this kind.
+        v = 1.5_real32
+    end function mismatch_f32v_a
+
+    function mismatch_f64v_a() result(v)
+        real(real64) :: v !! one representative value of this kind.
+        v = 1.5_real64
+    end function mismatch_f64v_a
+
+    function mismatch_boolv_a() result(v)
+        logical :: v !! one representative value of this kind.
+        v = .true.
+    end function mismatch_boolv_a
+
+    function mismatch_datev_a() result(v)
+        type(parquet_date) :: v !! one representative value of this kind.
+        v = parquet_date(2026, 1, 1)
+    end function mismatch_datev_a
+
+    function mismatch_timev_a() result(v)
+        type(parquet_time) :: v !! one representative value of this kind.
+        v = parquet_time(1, 2, 3)
+    end function mismatch_timev_a
+
+    function mismatch_tsv_a() result(v)
+        type(parquet_timestamp) :: v !! one representative value of this kind.
+        v = parquet_timestamp(2026, 1, 1, 1, 2, 3)
+    end function mismatch_tsv_a
     subroutine scenario_table_get_element_kind_mismatch()
         type(parquet_table) :: t
         integer(int32) :: iv(2)

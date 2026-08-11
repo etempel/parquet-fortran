@@ -755,6 +755,22 @@ contains
                 test_table_get_element_row_out_of_range_aborts), &
             new_unittest("%get_element on a mismatched kind aborts through the shared body", &
                 test_table_get_element_kind_mismatch_aborts), &
+            new_unittest("table: %get_element into an int32 vector of the wrong kind aborts", &
+                test_table_get_element_kind_mismatch_i32v_aborts), &
+            new_unittest("table: %get_element into an int64 vector of the wrong kind aborts", &
+                test_table_get_element_kind_mismatch_i64v_aborts), &
+            new_unittest("table: %get_element into a real32 vector of the wrong kind aborts", &
+                test_table_get_element_kind_mismatch_f32v_aborts), &
+            new_unittest("table: %get_element into a real64 vector of the wrong kind aborts", &
+                test_table_get_element_kind_mismatch_f64v_aborts), &
+            new_unittest("table: %get_element into a logical vector of the wrong kind aborts", &
+                test_table_get_element_kind_mismatch_boolv_aborts), &
+            new_unittest("table: %get_element into a date vector of the wrong kind aborts", &
+                test_table_get_element_kind_mismatch_datev_aborts), &
+            new_unittest("table: %get_element into a time vector of the wrong kind aborts", &
+                test_table_get_element_kind_mismatch_timev_aborts), &
+            new_unittest("table: %get_element into a timestamp vector of the wrong kind aborts", &
+                test_table_get_element_kind_mismatch_tsv_aborts), &
             new_unittest("%get_element on a missing column aborts", &
                 test_table_get_element_missing_column_aborts), &
             new_unittest("using a column handle after a structural change aborts", &
@@ -1279,6 +1295,81 @@ contains
             failure_message="%get_element on a mismatched kind was expected to abort", &
             required_stderr="parquet_table: get_element: column kind is PK_INT32, not PK_FLOAT64")
     end subroutine test_table_get_element_kind_mismatch_aborts
+
+    !> %get_element abort path, once per VECTOR kind: see the
+    !> scenario_table_get_element_kind_mismatch_* group in test/error_scenarios.f90 for why the
+    !> scalar scenario above says nothing about any of the eight vector fetch bodies.
+    subroutine test_table_get_element_kind_mismatch_i32v_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch_i32v", &
+            expect_abort=.true., &
+            failure_message="reading a mismatched column as an int32 vector was expected to abort", &
+            required_stderr="column kind")
+    end subroutine test_table_get_element_kind_mismatch_i32v_aborts
+
+    subroutine test_table_get_element_kind_mismatch_i64v_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch_i64v", &
+            expect_abort=.true., &
+            failure_message="reading a mismatched column as an int64 vector was expected to abort", &
+            required_stderr="column kind")
+    end subroutine test_table_get_element_kind_mismatch_i64v_aborts
+
+    subroutine test_table_get_element_kind_mismatch_f32v_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch_f32v", &
+            expect_abort=.true., &
+            failure_message="reading a mismatched column as a real32 vector was expected to abort", &
+            required_stderr="column kind")
+    end subroutine test_table_get_element_kind_mismatch_f32v_aborts
+
+    subroutine test_table_get_element_kind_mismatch_f64v_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch_f64v", &
+            expect_abort=.true., &
+            failure_message="reading a mismatched column as a real64 vector was expected to abort", &
+            required_stderr="column kind")
+    end subroutine test_table_get_element_kind_mismatch_f64v_aborts
+
+    subroutine test_table_get_element_kind_mismatch_boolv_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch_boolv", &
+            expect_abort=.true., &
+            failure_message="reading a mismatched column as a logical vector was expected to abort", &
+            required_stderr="column kind")
+    end subroutine test_table_get_element_kind_mismatch_boolv_aborts
+
+    subroutine test_table_get_element_kind_mismatch_datev_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch_datev", &
+            expect_abort=.true., &
+            failure_message="reading a mismatched column as a date vector was expected to abort", &
+            required_stderr="column kind")
+    end subroutine test_table_get_element_kind_mismatch_datev_aborts
+
+    subroutine test_table_get_element_kind_mismatch_timev_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch_timev", &
+            expect_abort=.true., &
+            failure_message="reading a mismatched column as a time vector was expected to abort", &
+            required_stderr="column kind")
+    end subroutine test_table_get_element_kind_mismatch_timev_aborts
+
+    subroutine test_table_get_element_kind_mismatch_tsv_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "table_get_element_kind_mismatch_tsv", &
+            expect_abort=.true., &
+            failure_message="reading a mismatched column as a timestamp vector was expected to abort", &
+            required_stderr="column kind")
+    end subroutine test_table_get_element_kind_mismatch_tsv_aborts
 
     subroutine test_table_get_element_missing_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

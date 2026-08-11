@@ -164,6 +164,18 @@ contains
             new_unittest("all 18 kinds: found= reports a missing column instead of aborting", &
                 test_kind_matrix_found), &
             new_unittest("all 18 kinds: add_column builds a table from scratch", test_kind_matrix_add), &
+            new_unittest("all 18 kinds: %get_slice and %set_slice", test_slice_every_kind), &
+            new_unittest("all 18 kinds: %get_element in both row-index kinds", &
+                test_get_element_every_kind), &
+            new_unittest("all 18 kinds: the row handle by name and by column handle", &
+                test_row_handle_every_kind), &
+            new_unittest("all 18 kinds: the column handle in both index kinds", &
+                test_col_handle_every_kind), &
+            new_unittest("all 18 kinds: %get_slice(found=) on a missing column", &
+                test_slice_found_every_kind), &
+            new_unittest("widening: every narrow-to-wide route", test_widening_every_route), &
+            new_unittest("all 18 kinds: %print_stat summarizes every one", &
+                test_print_stat_every_kind), &
             new_unittest("filename and file metadata are reported back from the source file", &
                 test_filename_and_metadata), &
             new_unittest("set_element writes one cell, in both row-index kinds", test_set_element), &
@@ -3132,6 +3144,1914 @@ contains
         call check(error, total == sum(int(full, int64)), &
             "reading every row group's own slice should cover the file exactly once")
     end subroutine test_parallel_private_slices
+    !
+    !> **`%get_slice` and `%set_slice` on every one of the 18 column kinds.** Both are generated
+    !> per kind, so the slice tests above -- which use `s_i32` and one or two others -- leave most
+    !> of these bodies unreached; a body wired to the wrong column or gathering the wrong rows
+    !> would pass the entire suite.
+    !>
+    !> The selection is deliberately out of order and repeats a row (`[4, 2, 4]`), so a body that
+    !> ignored the slice and returned the leading rows, or that sorted the picks, gives a
+    !> different answer. `%get` is the reference: it is the whole-column form, covered on its own
+    !> elsewhere, and it shares no code with the slice path.
+    subroutine test_slice_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        integer, parameter :: PICK(3) = [4, 2, 4]
+        character(len=*), parameter :: f = "test_run/table_slice_every_kind.parquet"
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        s = parquet_slice_list(PICK)
+        ! Row 4 is picked TWICE, which is deliberate on both halves. On the read it proves the
+        ! body follows the selection rather than a row range; on the write it means the LAST
+        ! occurrence is what survives, so every %set_slice below puts its new value in slot 3 and
+        ! asserts that slot 1's write to the same row was overwritten rather than merged.
+
+        block
+            integer(int32), allocatable :: full(:), sl(:)
+            call t%get("s_i32", full)
+            call t%get_slice("s_i32", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+                "s_i32 %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            call t%set_slice("s_i32", s, [sl(1), sl(2), 4242_int32])
+            call t%get("s_i32", full)
+            call check(error, (full(4) == 4242_int32), "s_i32 %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: full(:), sl(:)
+            call t%get("s_i64", full)
+            call t%get_slice("s_i64", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+                "s_i64 %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            call t%set_slice("s_i64", s, [sl(1), sl(2), 4242000000000_int64])
+            call t%get("s_i64", full)
+            call check(error, (full(4) == 4242000000000_int64), "s_i64 %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: full(:), sl(:)
+            call t%get("s_f32", full)
+            call t%get_slice("s_f32", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+                "s_f32 %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            call t%set_slice("s_f32", s, [sl(1), sl(2), 12.5_real32])
+            call t%get("s_f32", full)
+            call check(error, (full(4) == 12.5_real32), "s_f32 %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: full(:), sl(:)
+            call t%get("s_f64", full)
+            call t%get_slice("s_f64", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+                "s_f64 %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            call t%set_slice("s_f64", s, [sl(1), sl(2), 12.25_real64])
+            call t%get("s_f64", full)
+            call check(error, (full(4) == 12.25_real64), "s_f64 %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: full(:), sl(:)
+            call t%get("s_bool", full)
+            call t%get_slice("s_bool", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl .eqv. full(PICK)), &
+                "s_bool %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            call t%set_slice("s_bool", s, [sl(1), sl(2), .true.])
+            call t%get("s_bool", full)
+            call check(error, (full(4) .eqv. .true.), "s_bool %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: full(:), sl(:)
+            call t%get("s_date", full)
+            call t%get_slice("s_date", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+                "s_date %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            call t%set_slice("s_date", s, [sl(1), sl(2), parquet_date(2031, 5, 6)])
+            call t%get("s_date", full)
+            call check(error, (full(4) == parquet_date(2031, 5, 6)), "s_date %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: full(:), sl(:)
+            call t%get("s_time", full)
+            call t%get_slice("s_time", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+                "s_time %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            call t%set_slice("s_time", s, [sl(1), sl(2), parquet_time(11, 12, 13)])
+            call t%get("s_time", full)
+            call check(error, (full(4) == parquet_time(11, 12, 13)), "s_time %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: full(:), sl(:)
+            call t%get("s_ts", full)
+            call t%get_slice("s_ts", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+                "s_ts %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            call t%set_slice("s_ts", s, [sl(1), sl(2), parquet_timestamp(2031, 5, 6, 7, 8, 9)])
+            call t%get("s_ts", full)
+            call check(error, (full(4) == parquet_timestamp(2031, 5, 6, 7, 8, 9)), "s_ts %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int32), allocatable :: full(:,:), sl(:,:)
+            integer(int32) :: nv(NVEC, 3)
+            call t%get("v_i32", full)
+            call t%get_slice("v_i32", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+                "v_i32 %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = [4242_int32, 4243_int32, 4244_int32]
+            call t%set_slice("v_i32", s, nv)
+            call t%get("v_i32", full)
+            call check(error, all(full(:, 4) == nv(:, 3)), &
+                "v_i32 %set_slice must write the picked row's whole vector")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: full(:,:), sl(:,:)
+            integer(int64) :: nv(NVEC, 3)
+            call t%get("v_i64", full)
+            call t%get_slice("v_i64", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+                "v_i64 %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = [4242000000000_int64, 4243000000000_int64, 4244000000000_int64]
+            call t%set_slice("v_i64", s, nv)
+            call t%get("v_i64", full)
+            call check(error, all(full(:, 4) == nv(:, 3)), &
+                "v_i64 %set_slice must write the picked row's whole vector")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: full(:,:), sl(:,:)
+            real(real32) :: nv(NVEC, 3)
+            call t%get("v_f32", full)
+            call t%get_slice("v_f32", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+                "v_f32 %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = [12.5_real32, 13.5_real32, 14.5_real32]
+            call t%set_slice("v_f32", s, nv)
+            call t%get("v_f32", full)
+            call check(error, all(full(:, 4) == nv(:, 3)), &
+                "v_f32 %set_slice must write the picked row's whole vector")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: full(:,:), sl(:,:)
+            real(real64) :: nv(NVEC, 3)
+            call t%get("v_f64", full)
+            call t%get_slice("v_f64", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+                "v_f64 %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = [12.25_real64, 13.25_real64, 14.25_real64]
+            call t%set_slice("v_f64", s, nv)
+            call t%get("v_f64", full)
+            call check(error, all(full(:, 4) == nv(:, 3)), &
+                "v_f64 %set_slice must write the picked row's whole vector")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: full(:,:), sl(:,:)
+            logical :: nv(NVEC, 3)
+            call t%get("v_bool", full)
+            call t%get_slice("v_bool", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl .eqv. full(:, PICK)), &
+                "v_bool %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = [.true., .false., .true.]
+            call t%set_slice("v_bool", s, nv)
+            call t%get("v_bool", full)
+            call check(error, all(full(:, 4) .eqv. nv(:, 3)), &
+                "v_bool %set_slice must write the picked row's whole vector")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: full(:,:), sl(:,:)
+            type(parquet_date) :: nv(NVEC, 3)
+            call t%get("v_date", full)
+            call t%get_slice("v_date", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+                "v_date %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = [parquet_date(2031, 5, 6), parquet_date(2031, 5, 7), parquet_date(2031, 5, 8)]
+            call t%set_slice("v_date", s, nv)
+            call t%get("v_date", full)
+            call check(error, all(full(:, 4) == nv(:, 3)), &
+                "v_date %set_slice must write the picked row's whole vector")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: full(:,:), sl(:,:)
+            type(parquet_time) :: nv(NVEC, 3)
+            call t%get("v_time", full)
+            call t%get_slice("v_time", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+                "v_time %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = [parquet_time(11, 12, 13), parquet_time(11, 12, 14), parquet_time(11, 12, 15)]
+            call t%set_slice("v_time", s, nv)
+            call t%get("v_time", full)
+            call check(error, all(full(:, 4) == nv(:, 3)), &
+                "v_time %set_slice must write the picked row's whole vector")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: full(:,:), sl(:,:)
+            type(parquet_timestamp) :: nv(NVEC, 3)
+            call t%get("v_ts", full)
+            call t%get_slice("v_ts", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+                "v_ts %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = [parquet_timestamp(2031, 5, 6, 7, 8, 9), parquet_timestamp(2031, 5, 6, 7, 8, 10), &
+                parquet_timestamp(2031, 5, 6, 7, 8, 11)]
+            call t%set_slice("v_ts", s, nv)
+            call t%get("v_ts", full)
+            call check(error, all(full(:, 4) == nv(:, 3)), &
+                "v_ts %set_slice must write the picked row's whole vector")
+        end block
+        if (allocated(error)) return
+        ! ---- the two string kinds, whose slice forms differ in shape from the sixteen above ----
+        block
+            character(len=:), allocatable :: full(:), sl(:)
+            type(parquet_string_column) :: sc
+            character(len=:), allocatable :: one
+            call t%get("s_str", full)
+            call t%get_slice("s_str", s, sl)
+            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+                "s_str %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            ! The parquet_string_column form of the same call -- a third specific, not a variant.
+            call t%get_slice("s_str", s, sc)
+            call sc%get(1_int64, one)
+            call check(error, sc%size() == 3_int64 .and. one == trim(full(4)), &
+                "s_str %get_slice into a parquet_string_column must select the same rows")
+            if (allocated(error)) return
+            call t%set_slice("s_str", s, [character(len=7) :: sl(1), sl(2), "zz"])
+            call t%get("s_str", full)
+            call check(error, trim(full(4)) == "zz", "s_str %set_slice must write the picked row")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=:), allocatable :: full(:,:), sl(:,:)
+            character(len=8) :: nv(NVEC, 3)
+            call t%get("v_str", full)
+            call t%get_slice("v_str", s, sl)
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+                "v_str %get_slice must pick exactly the listed rows, in the listed order")
+            if (allocated(error)) return
+            nv = sl
+            nv(:, 3) = ["zz      ", "yy      ", "xx      "]
+            call t%set_slice("v_str", s, nv)
+            call t%get("v_str", full)
+            call check(error, trim(full(1, 4)) == "zz" .and. trim(full(3, 4)) == "xx", &
+                "v_str %set_slice must write the picked row's whole vector")
+        end block
+    end subroutine test_slice_every_kind
+    !
+    !> **`%get_element` on every kind, in both row-index kinds.** The int32 and int64 forms are
+    !> separate generated bodies (one converts, the other does not), so a truncating or
+    !> off-by-one conversion in either is invisible until both are called for that kind.
+    !>
+    !> Row 5 is read throughout -- not row 1, which several plausible wrong bodies would return.
+    subroutine test_get_element_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer, parameter :: R = 5
+        character(len=*), parameter :: f = "test_run/table_getelem_every_kind.parquet"
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+
+        block
+            integer(int32), allocatable :: full(:)
+            integer(int32) :: a, b
+            call t%get("s_i32", full)
+            call t%get_element("s_i32", R, a)
+            call t%get_element("s_i32", int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_i32 %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: full(:)
+            integer(int64) :: a, b
+            call t%get("s_i64", full)
+            call t%get_element("s_i64", R, a)
+            call t%get_element("s_i64", int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_i64 %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: full(:)
+            real(real32) :: a, b
+            call t%get("s_f32", full)
+            call t%get_element("s_f32", R, a)
+            call t%get_element("s_f32", int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_f32 %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: full(:)
+            real(real64) :: a, b
+            call t%get("s_f64", full)
+            call t%get_element("s_f64", R, a)
+            call t%get_element("s_f64", int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_f64 %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: full(:)
+            logical :: a, b
+            call t%get("s_bool", full)
+            call t%get_element("s_bool", R, a)
+            call t%get_element("s_bool", int(R, int64), b)
+            call check(error, (a .eqv. full(R)) .and. (b .eqv. full(R)), &
+                "s_bool %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: full(:)
+            type(parquet_date) :: a, b
+            call t%get("s_date", full)
+            call t%get_element("s_date", R, a)
+            call t%get_element("s_date", int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_date %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: full(:)
+            type(parquet_time) :: a, b
+            call t%get("s_time", full)
+            call t%get_element("s_time", R, a)
+            call t%get_element("s_time", int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_time %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: full(:)
+            type(parquet_timestamp) :: a, b
+            call t%get("s_ts", full)
+            call t%get_element("s_ts", R, a)
+            call t%get_element("s_ts", int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_ts %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int32), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_i32", full)
+            call t%get_element("v_i32", R, a)
+            call t%get_element("v_i32", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. &
+                all(b == full(:, R)), &
+                "v_i32 %get_element must return the row's whole vector in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_i64", full)
+            call t%get_element("v_i64", R, a)
+            call t%get_element("v_i64", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. &
+                all(b == full(:, R)), &
+                "v_i64 %get_element must return the row's whole vector in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_f32", full)
+            call t%get_element("v_f32", R, a)
+            call t%get_element("v_f32", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. &
+                all(b == full(:, R)), &
+                "v_f32 %get_element must return the row's whole vector in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_f64", full)
+            call t%get_element("v_f64", R, a)
+            call t%get_element("v_f64", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. &
+                all(b == full(:, R)), &
+                "v_f64 %get_element must return the row's whole vector in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_bool", full)
+            call t%get_element("v_bool", R, a)
+            call t%get_element("v_bool", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a .eqv. full(:, R)) .and. &
+                all(b .eqv. full(:, R)), &
+                "v_bool %get_element must return the row's whole vector in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_date", full)
+            call t%get_element("v_date", R, a)
+            call t%get_element("v_date", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. &
+                all(b == full(:, R)), &
+                "v_date %get_element must return the row's whole vector in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_time", full)
+            call t%get_element("v_time", R, a)
+            call t%get_element("v_time", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. &
+                all(b == full(:, R)), &
+                "v_time %get_element must return the row's whole vector in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_ts", full)
+            call t%get_element("v_ts", R, a)
+            call t%get_element("v_ts", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. &
+                all(b == full(:, R)), &
+                "v_ts %get_element must return the row's whole vector in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=:), allocatable :: full(:), a, b
+            call t%get("s_str", full)
+            call t%get_element("s_str", R, a)
+            call t%get_element("s_str", int(R, int64), b)
+            call check(error, a == trim(full(R)) .and. b == trim(full(R)), &
+                "s_str %get_element must agree with %get in both row-index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=:), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_str", full)
+            call t%get_element("v_str", R, a)
+            call t%get_element("v_str", int(R, int64), b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_str %get_element must return the row's whole vector in both row-index kinds")
+        end block
+    end subroutine test_get_element_every_kind
+    !
+    !> **The row handle on every kind: `%get`, `%set`, `%ref`, and the `%get`/`%set` forms that
+    !> take a COLUMN HANDLE instead of a name.** Five families, each generated per kind, and the
+    !> name-taking and handle-taking forms are separate bodies that must not answer differently --
+    !> which is exactly what this test asserts, rather than checking each against a literal.
+    !>
+    !> `%ref` is the sharp one: it aliases the row's storage, so writing through the pointer must
+    !> be visible to `%get_element` afterwards. A body handing back a pointer to a copy would pass
+    !> every read-only assertion here.
+    subroutine test_row_handle_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_table_row) :: rh
+        type(parquet_table_col) :: c
+        integer, parameter :: R = 3
+        character(len=*), parameter :: f = "test_run/table_rowhandle_every_kind.parquet"
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        rh = t%row(R)
+
+        block
+            integer(int32), allocatable :: full(:)
+            integer(int32) :: a, b
+            integer(int32), pointer :: p
+            call t%get("s_i32", full)
+            call t%column("s_i32", c)
+            call rh%get("s_i32", a)
+            call rh%get(c, b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_i32 the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("s_i32", p)
+            call check(error, (p == full(R)), "s_i32 %ref must alias this row's value")
+            if (allocated(error)) return
+            p = 4242_int32
+            call t%get_element("s_i32", R, a)
+            call check(error, (a == 4242_int32), "s_i32 a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("s_i32", full(R))
+            call rh%get(c, b)
+            call check(error, (b == full(R)), "s_i32 %set by name must restore the value")
+            if (allocated(error)) return
+            call rh%set(c, 4242_int32)
+            call rh%get("s_i32", a)
+            call check(error, (a == 4242_int32), "s_i32 %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: full(:)
+            integer(int64) :: a, b
+            integer(int64), pointer :: p
+            call t%get("s_i64", full)
+            call t%column("s_i64", c)
+            call rh%get("s_i64", a)
+            call rh%get(c, b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_i64 the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("s_i64", p)
+            call check(error, (p == full(R)), "s_i64 %ref must alias this row's value")
+            if (allocated(error)) return
+            p = 4242000000000_int64
+            call t%get_element("s_i64", R, a)
+            call check(error, (a == 4242000000000_int64), "s_i64 a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("s_i64", full(R))
+            call rh%get(c, b)
+            call check(error, (b == full(R)), "s_i64 %set by name must restore the value")
+            if (allocated(error)) return
+            call rh%set(c, 4242000000000_int64)
+            call rh%get("s_i64", a)
+            call check(error, (a == 4242000000000_int64), "s_i64 %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: full(:)
+            real(real32) :: a, b
+            real(real32), pointer :: p
+            call t%get("s_f32", full)
+            call t%column("s_f32", c)
+            call rh%get("s_f32", a)
+            call rh%get(c, b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_f32 the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("s_f32", p)
+            call check(error, (p == full(R)), "s_f32 %ref must alias this row's value")
+            if (allocated(error)) return
+            p = 12.5_real32
+            call t%get_element("s_f32", R, a)
+            call check(error, (a == 12.5_real32), "s_f32 a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("s_f32", full(R))
+            call rh%get(c, b)
+            call check(error, (b == full(R)), "s_f32 %set by name must restore the value")
+            if (allocated(error)) return
+            call rh%set(c, 12.5_real32)
+            call rh%get("s_f32", a)
+            call check(error, (a == 12.5_real32), "s_f32 %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: full(:)
+            real(real64) :: a, b
+            real(real64), pointer :: p
+            call t%get("s_f64", full)
+            call t%column("s_f64", c)
+            call rh%get("s_f64", a)
+            call rh%get(c, b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_f64 the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("s_f64", p)
+            call check(error, (p == full(R)), "s_f64 %ref must alias this row's value")
+            if (allocated(error)) return
+            p = 12.25_real64
+            call t%get_element("s_f64", R, a)
+            call check(error, (a == 12.25_real64), "s_f64 a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("s_f64", full(R))
+            call rh%get(c, b)
+            call check(error, (b == full(R)), "s_f64 %set by name must restore the value")
+            if (allocated(error)) return
+            call rh%set(c, 12.25_real64)
+            call rh%get("s_f64", a)
+            call check(error, (a == 12.25_real64), "s_f64 %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: full(:)
+            logical :: a, b
+            logical, pointer :: p
+            call t%get("s_bool", full)
+            call t%column("s_bool", c)
+            call rh%get("s_bool", a)
+            call rh%get(c, b)
+            call check(error, (a .eqv. full(R)) .and. (b .eqv. full(R)), &
+                "s_bool the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("s_bool", p)
+            call check(error, (p .eqv. full(R)), "s_bool %ref must alias this row's value")
+            if (allocated(error)) return
+            p = .true.
+            call t%get_element("s_bool", R, a)
+            call check(error, (a .eqv. .true.), "s_bool a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("s_bool", full(R))
+            call rh%get(c, b)
+            call check(error, (b .eqv. full(R)), "s_bool %set by name must restore the value")
+            if (allocated(error)) return
+            call rh%set(c, .true.)
+            call rh%get("s_bool", a)
+            call check(error, (a .eqv. .true.), "s_bool %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: full(:)
+            type(parquet_date) :: a, b
+            type(parquet_date), pointer :: p
+            call t%get("s_date", full)
+            call t%column("s_date", c)
+            call rh%get("s_date", a)
+            call rh%get(c, b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_date the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("s_date", p)
+            call check(error, (p == full(R)), "s_date %ref must alias this row's value")
+            if (allocated(error)) return
+            p = parquet_date(2031, 5, 6)
+            call t%get_element("s_date", R, a)
+            call check(error, (a == parquet_date(2031, 5, 6)), "s_date a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("s_date", full(R))
+            call rh%get(c, b)
+            call check(error, (b == full(R)), "s_date %set by name must restore the value")
+            if (allocated(error)) return
+            call rh%set(c, parquet_date(2031, 5, 6))
+            call rh%get("s_date", a)
+            call check(error, (a == parquet_date(2031, 5, 6)), "s_date %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: full(:)
+            type(parquet_time) :: a, b
+            type(parquet_time), pointer :: p
+            call t%get("s_time", full)
+            call t%column("s_time", c)
+            call rh%get("s_time", a)
+            call rh%get(c, b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_time the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("s_time", p)
+            call check(error, (p == full(R)), "s_time %ref must alias this row's value")
+            if (allocated(error)) return
+            p = parquet_time(11, 12, 13)
+            call t%get_element("s_time", R, a)
+            call check(error, (a == parquet_time(11, 12, 13)), "s_time a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("s_time", full(R))
+            call rh%get(c, b)
+            call check(error, (b == full(R)), "s_time %set by name must restore the value")
+            if (allocated(error)) return
+            call rh%set(c, parquet_time(11, 12, 13))
+            call rh%get("s_time", a)
+            call check(error, (a == parquet_time(11, 12, 13)), "s_time %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: full(:)
+            type(parquet_timestamp) :: a, b
+            type(parquet_timestamp), pointer :: p
+            call t%get("s_ts", full)
+            call t%column("s_ts", c)
+            call rh%get("s_ts", a)
+            call rh%get(c, b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_ts the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("s_ts", p)
+            call check(error, (p == full(R)), "s_ts %ref must alias this row's value")
+            if (allocated(error)) return
+            p = parquet_timestamp(2031, 5, 6, 7, 8, 9)
+            call t%get_element("s_ts", R, a)
+            call check(error, (a == parquet_timestamp(2031, 5, 6, 7, 8, 9)), "s_ts a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("s_ts", full(R))
+            call rh%get(c, b)
+            call check(error, (b == full(R)), "s_ts %set by name must restore the value")
+            if (allocated(error)) return
+            call rh%set(c, parquet_timestamp(2031, 5, 6, 7, 8, 9))
+            call rh%get("s_ts", a)
+            call check(error, (a == parquet_timestamp(2031, 5, 6, 7, 8, 9)), "s_ts %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int32), allocatable :: full(:,:), a(:), b(:)
+            integer(int32), pointer :: p(:)
+            integer(int32) :: nv(NVEC)
+            nv = [4242_int32, 4243_int32, 4244_int32]
+            call t%get("v_i32", full)
+            call t%column("v_i32", c)
+            call rh%get("v_i32", a)
+            call rh%get(c, b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_i32 the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("v_i32", p)
+            call check(error, size(p) == NVEC .and. all(p == full(:, R)), &
+                "v_i32 %ref must alias this row's vector")
+            if (allocated(error)) return
+            p = nv
+            call t%get_element("v_i32", R, a)
+            call check(error, all(a == nv), "v_i32 a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("v_i32", full(:, R))
+            call rh%get(c, b)
+            call check(error, all(b == full(:, R)), "v_i32 %set by name must restore the vector")
+            if (allocated(error)) return
+            call rh%set(c, nv)
+            call rh%get("v_i32", a)
+            call check(error, all(a == nv), "v_i32 %set by column handle must write the vector")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: full(:,:), a(:), b(:)
+            integer(int64), pointer :: p(:)
+            integer(int64) :: nv(NVEC)
+            nv = [4242000000000_int64, 4243000000000_int64, 4244000000000_int64]
+            call t%get("v_i64", full)
+            call t%column("v_i64", c)
+            call rh%get("v_i64", a)
+            call rh%get(c, b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_i64 the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("v_i64", p)
+            call check(error, size(p) == NVEC .and. all(p == full(:, R)), &
+                "v_i64 %ref must alias this row's vector")
+            if (allocated(error)) return
+            p = nv
+            call t%get_element("v_i64", R, a)
+            call check(error, all(a == nv), "v_i64 a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("v_i64", full(:, R))
+            call rh%get(c, b)
+            call check(error, all(b == full(:, R)), "v_i64 %set by name must restore the vector")
+            if (allocated(error)) return
+            call rh%set(c, nv)
+            call rh%get("v_i64", a)
+            call check(error, all(a == nv), "v_i64 %set by column handle must write the vector")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: full(:,:), a(:), b(:)
+            real(real32), pointer :: p(:)
+            real(real32) :: nv(NVEC)
+            nv = [12.5_real32, 13.5_real32, 14.5_real32]
+            call t%get("v_f32", full)
+            call t%column("v_f32", c)
+            call rh%get("v_f32", a)
+            call rh%get(c, b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_f32 the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("v_f32", p)
+            call check(error, size(p) == NVEC .and. all(p == full(:, R)), &
+                "v_f32 %ref must alias this row's vector")
+            if (allocated(error)) return
+            p = nv
+            call t%get_element("v_f32", R, a)
+            call check(error, all(a == nv), "v_f32 a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("v_f32", full(:, R))
+            call rh%get(c, b)
+            call check(error, all(b == full(:, R)), "v_f32 %set by name must restore the vector")
+            if (allocated(error)) return
+            call rh%set(c, nv)
+            call rh%get("v_f32", a)
+            call check(error, all(a == nv), "v_f32 %set by column handle must write the vector")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: full(:,:), a(:), b(:)
+            real(real64), pointer :: p(:)
+            real(real64) :: nv(NVEC)
+            nv = [12.25_real64, 13.25_real64, 14.25_real64]
+            call t%get("v_f64", full)
+            call t%column("v_f64", c)
+            call rh%get("v_f64", a)
+            call rh%get(c, b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_f64 the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("v_f64", p)
+            call check(error, size(p) == NVEC .and. all(p == full(:, R)), &
+                "v_f64 %ref must alias this row's vector")
+            if (allocated(error)) return
+            p = nv
+            call t%get_element("v_f64", R, a)
+            call check(error, all(a == nv), "v_f64 a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("v_f64", full(:, R))
+            call rh%get(c, b)
+            call check(error, all(b == full(:, R)), "v_f64 %set by name must restore the vector")
+            if (allocated(error)) return
+            call rh%set(c, nv)
+            call rh%get("v_f64", a)
+            call check(error, all(a == nv), "v_f64 %set by column handle must write the vector")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: full(:,:), a(:), b(:)
+            logical, pointer :: p(:)
+            logical :: nv(NVEC)
+            nv = [.true., .false., .true.]
+            call t%get("v_bool", full)
+            call t%column("v_bool", c)
+            call rh%get("v_bool", a)
+            call rh%get(c, b)
+            call check(error, all(a .eqv. full(:, R)) .and. all(b .eqv. full(:, R)), &
+                "v_bool the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("v_bool", p)
+            call check(error, size(p) == NVEC .and. all(p .eqv. full(:, R)), &
+                "v_bool %ref must alias this row's vector")
+            if (allocated(error)) return
+            p = nv
+            call t%get_element("v_bool", R, a)
+            call check(error, all(a .eqv. nv), "v_bool a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("v_bool", full(:, R))
+            call rh%get(c, b)
+            call check(error, all(b .eqv. full(:, R)), "v_bool %set by name must restore the vector")
+            if (allocated(error)) return
+            call rh%set(c, nv)
+            call rh%get("v_bool", a)
+            call check(error, all(a .eqv. nv), "v_bool %set by column handle must write the vector")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: full(:,:), a(:), b(:)
+            type(parquet_date), pointer :: p(:)
+            type(parquet_date) :: nv(NVEC)
+            nv = [parquet_date(2031, 5, 6), parquet_date(2031, 5, 7), parquet_date(2031, 5, 8)]
+            call t%get("v_date", full)
+            call t%column("v_date", c)
+            call rh%get("v_date", a)
+            call rh%get(c, b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_date the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("v_date", p)
+            call check(error, size(p) == NVEC .and. all(p == full(:, R)), &
+                "v_date %ref must alias this row's vector")
+            if (allocated(error)) return
+            p = nv
+            call t%get_element("v_date", R, a)
+            call check(error, all(a == nv), "v_date a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("v_date", full(:, R))
+            call rh%get(c, b)
+            call check(error, all(b == full(:, R)), "v_date %set by name must restore the vector")
+            if (allocated(error)) return
+            call rh%set(c, nv)
+            call rh%get("v_date", a)
+            call check(error, all(a == nv), "v_date %set by column handle must write the vector")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: full(:,:), a(:), b(:)
+            type(parquet_time), pointer :: p(:)
+            type(parquet_time) :: nv(NVEC)
+            nv = [parquet_time(11, 12, 13), parquet_time(11, 12, 14), parquet_time(11, 12, 15)]
+            call t%get("v_time", full)
+            call t%column("v_time", c)
+            call rh%get("v_time", a)
+            call rh%get(c, b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_time the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("v_time", p)
+            call check(error, size(p) == NVEC .and. all(p == full(:, R)), &
+                "v_time %ref must alias this row's vector")
+            if (allocated(error)) return
+            p = nv
+            call t%get_element("v_time", R, a)
+            call check(error, all(a == nv), "v_time a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("v_time", full(:, R))
+            call rh%get(c, b)
+            call check(error, all(b == full(:, R)), "v_time %set by name must restore the vector")
+            if (allocated(error)) return
+            call rh%set(c, nv)
+            call rh%get("v_time", a)
+            call check(error, all(a == nv), "v_time %set by column handle must write the vector")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: full(:,:), a(:), b(:)
+            type(parquet_timestamp), pointer :: p(:)
+            type(parquet_timestamp) :: nv(NVEC)
+            nv = [parquet_timestamp(2031, 5, 6, 7, 8, 9), parquet_timestamp(2031, 5, 6, 7, 8, 10), &
+                parquet_timestamp(2031, 5, 6, 7, 8, 11)]
+            call t%get("v_ts", full)
+            call t%column("v_ts", c)
+            call rh%get("v_ts", a)
+            call rh%get(c, b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_ts the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%ref("v_ts", p)
+            call check(error, size(p) == NVEC .and. all(p == full(:, R)), &
+                "v_ts %ref must alias this row's vector")
+            if (allocated(error)) return
+            p = nv
+            call t%get_element("v_ts", R, a)
+            call check(error, all(a == nv), "v_ts a write through %ref must reach the column")
+            if (allocated(error)) return
+            call rh%set("v_ts", full(:, R))
+            call rh%get(c, b)
+            call check(error, all(b == full(:, R)), "v_ts %set by name must restore the vector")
+            if (allocated(error)) return
+            call rh%set(c, nv)
+            call rh%get("v_ts", a)
+            call check(error, all(a == nv), "v_ts %set by column handle must write the vector")
+        end block
+        if (allocated(error)) return
+        ! ---- the two string kinds, which have no %ref: a packed store has no row slot to alias ----
+        block
+            character(len=:), allocatable :: full(:), a, b
+            call t%get("s_str", full)
+            call t%column("s_str", c)
+            call rh%get("s_str", a)
+            call rh%get(c, b)
+            call check(error, a == trim(full(R)) .and. b == trim(full(R)), &
+                "s_str the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%set("s_str", "qq")
+            call rh%get(c, b)
+            call check(error, b == "qq", "s_str %set by name must write the value")
+            if (allocated(error)) return
+            call rh%set(c, "rr")
+            call rh%get("s_str", a)
+            call check(error, a == "rr", "s_str %set by column handle must write the value")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=:), allocatable :: full(:,:), a(:), b(:)
+            call t%get("v_str", full)
+            call t%column("v_str", c)
+            call rh%get("v_str", a)
+            call rh%get(c, b)
+            call check(error, size(a) == NVEC .and. all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_str the row handle's name and column-handle %get must agree with %get")
+            if (allocated(error)) return
+            call rh%set("v_str", ["qq", "rr", "ss"])
+            call rh%get(c, b)
+            call check(error, trim(b(1)) == "qq" .and. trim(b(3)) == "ss", &
+                "v_str %set by name must write the whole vector")
+            if (allocated(error)) return
+            call rh%set(c, ["tt", "uu", "vv"])
+            call rh%get("v_str", a)
+            call check(error, trim(a(1)) == "tt" .and. trim(a(3)) == "vv", &
+                "v_str %set by column handle must write the whole vector")
+        end block
+    end subroutine test_row_handle_every_kind
+    !
+    !> **The column handle on every kind: `%get`, `%set` in both row-index kinds, `%ref`, and --
+    !> for the nine vector kinds -- the (row, element) forms in both index kinds.** That is the
+    !> whole of parquet_tables_colaccess.f90, which is generated one body per kind per index kind
+    !> and is what `%get_element` itself calls, so an error here is an error in two APIs at once.
+    !>
+    !> Every read is checked against `%get`, and every write is read back through the OTHER index
+    !> kind than the one that wrote it -- so a body that wrote to the right cell but read from the
+    !> wrong one, or vice versa, cannot cancel out.
+    subroutine test_col_handle_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        integer, parameter :: R = 2, E = 3
+        character(len=*), parameter :: f = "test_run/table_colhandle_every_kind.parquet"
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+
+        block
+            integer(int32), allocatable :: full(:)
+            integer(int32) :: a, b
+            integer(int32), pointer :: p(:)
+            call t%get("s_i32", full)
+            call t%column("s_i32", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_i32 the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p) == NROW .and. all(p == full), &
+                "s_i32 %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, 4242_int32)
+            call c%get(int(R, int64), b)
+            call check(error, (b == 4242_int32), &
+                "s_i32 an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(R))
+            call c%get(R, a)
+            call check(error, (a == full(R)), &
+                "s_i32 an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: full(:)
+            integer(int64) :: a, b
+            integer(int64), pointer :: p(:)
+            call t%get("s_i64", full)
+            call t%column("s_i64", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_i64 the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p) == NROW .and. all(p == full), &
+                "s_i64 %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, 4242000000000_int64)
+            call c%get(int(R, int64), b)
+            call check(error, (b == 4242000000000_int64), &
+                "s_i64 an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(R))
+            call c%get(R, a)
+            call check(error, (a == full(R)), &
+                "s_i64 an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: full(:)
+            real(real32) :: a, b
+            real(real32), pointer :: p(:)
+            call t%get("s_f32", full)
+            call t%column("s_f32", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_f32 the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p) == NROW .and. all(p == full), &
+                "s_f32 %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, 12.5_real32)
+            call c%get(int(R, int64), b)
+            call check(error, (b == 12.5_real32), &
+                "s_f32 an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(R))
+            call c%get(R, a)
+            call check(error, (a == full(R)), &
+                "s_f32 an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: full(:)
+            real(real64) :: a, b
+            real(real64), pointer :: p(:)
+            call t%get("s_f64", full)
+            call t%column("s_f64", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_f64 the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p) == NROW .and. all(p == full), &
+                "s_f64 %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, 12.25_real64)
+            call c%get(int(R, int64), b)
+            call check(error, (b == 12.25_real64), &
+                "s_f64 an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(R))
+            call c%get(R, a)
+            call check(error, (a == full(R)), &
+                "s_f64 an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: full(:)
+            logical :: a, b
+            logical, pointer :: p(:)
+            call t%get("s_bool", full)
+            call t%column("s_bool", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, (a .eqv. full(R)) .and. (b .eqv. full(R)), &
+                "s_bool the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p) == NROW .and. all(p .eqv. full), &
+                "s_bool %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, .true.)
+            call c%get(int(R, int64), b)
+            call check(error, (b .eqv. .true.), &
+                "s_bool an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(R))
+            call c%get(R, a)
+            call check(error, (a .eqv. full(R)), &
+                "s_bool an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: full(:)
+            type(parquet_date) :: a, b
+            type(parquet_date), pointer :: p(:)
+            call t%get("s_date", full)
+            call t%column("s_date", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_date the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p) == NROW .and. all(p == full), &
+                "s_date %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, parquet_date(2031, 5, 6))
+            call c%get(int(R, int64), b)
+            call check(error, (b == parquet_date(2031, 5, 6)), &
+                "s_date an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(R))
+            call c%get(R, a)
+            call check(error, (a == full(R)), &
+                "s_date an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: full(:)
+            type(parquet_time) :: a, b
+            type(parquet_time), pointer :: p(:)
+            call t%get("s_time", full)
+            call t%column("s_time", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_time the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p) == NROW .and. all(p == full), &
+                "s_time %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, parquet_time(11, 12, 13))
+            call c%get(int(R, int64), b)
+            call check(error, (b == parquet_time(11, 12, 13)), &
+                "s_time an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(R))
+            call c%get(R, a)
+            call check(error, (a == full(R)), &
+                "s_time an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: full(:)
+            type(parquet_timestamp) :: a, b
+            type(parquet_timestamp), pointer :: p(:)
+            call t%get("s_ts", full)
+            call t%column("s_ts", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, (a == full(R)) .and. (b == full(R)), &
+                "s_ts the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p) == NROW .and. all(p == full), &
+                "s_ts %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, parquet_timestamp(2031, 5, 6, 7, 8, 9))
+            call c%get(int(R, int64), b)
+            call check(error, (b == parquet_timestamp(2031, 5, 6, 7, 8, 9)), &
+                "s_ts an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(R))
+            call c%get(R, a)
+            call check(error, (a == full(R)), &
+                "s_ts an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int32), allocatable :: full(:,:), a(:), b(:)
+            integer(int32) :: e1, e2
+            integer(int32), pointer :: p(:,:)
+            integer(int32) :: nv(NVEC)
+            nv = [4242_int32, 4243_int32, 4244_int32]
+            call t%get("v_i32", full)
+            call t%column("v_i32", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_i32 the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e1 == full(E, R)) .and. (e2 == full(E, R)), &
+                "v_i32 the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p, 1) == NVEC .and. size(p, 2) == NROW .and. all(p == full), &
+                "v_i32 %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, E, 4242_int32)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e2 == 4242_int32), &
+                "v_i32 an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), full(E, R))
+            call c%get(R, E, e1)
+            call check(error, (e1 == full(E, R)), &
+                "v_i32 an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, nv)
+            call c%get(int(R, int64), b)
+            call check(error, all(b == nv), &
+                "v_i32 an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(:, R))
+            call c%get(R, a)
+            call check(error, all(a == full(:, R)), &
+                "v_i32 an int64 whole-row %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: full(:,:), a(:), b(:)
+            integer(int64) :: e1, e2
+            integer(int64), pointer :: p(:,:)
+            integer(int64) :: nv(NVEC)
+            nv = [4242000000000_int64, 4243000000000_int64, 4244000000000_int64]
+            call t%get("v_i64", full)
+            call t%column("v_i64", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_i64 the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e1 == full(E, R)) .and. (e2 == full(E, R)), &
+                "v_i64 the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p, 1) == NVEC .and. size(p, 2) == NROW .and. all(p == full), &
+                "v_i64 %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, E, 4242000000000_int64)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e2 == 4242000000000_int64), &
+                "v_i64 an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), full(E, R))
+            call c%get(R, E, e1)
+            call check(error, (e1 == full(E, R)), &
+                "v_i64 an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, nv)
+            call c%get(int(R, int64), b)
+            call check(error, all(b == nv), &
+                "v_i64 an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(:, R))
+            call c%get(R, a)
+            call check(error, all(a == full(:, R)), &
+                "v_i64 an int64 whole-row %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: full(:,:), a(:), b(:)
+            real(real32) :: e1, e2
+            real(real32), pointer :: p(:,:)
+            real(real32) :: nv(NVEC)
+            nv = [12.5_real32, 13.5_real32, 14.5_real32]
+            call t%get("v_f32", full)
+            call t%column("v_f32", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_f32 the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e1 == full(E, R)) .and. (e2 == full(E, R)), &
+                "v_f32 the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p, 1) == NVEC .and. size(p, 2) == NROW .and. all(p == full), &
+                "v_f32 %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, E, 12.5_real32)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e2 == 12.5_real32), &
+                "v_f32 an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), full(E, R))
+            call c%get(R, E, e1)
+            call check(error, (e1 == full(E, R)), &
+                "v_f32 an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, nv)
+            call c%get(int(R, int64), b)
+            call check(error, all(b == nv), &
+                "v_f32 an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(:, R))
+            call c%get(R, a)
+            call check(error, all(a == full(:, R)), &
+                "v_f32 an int64 whole-row %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: full(:,:), a(:), b(:)
+            real(real64) :: e1, e2
+            real(real64), pointer :: p(:,:)
+            real(real64) :: nv(NVEC)
+            nv = [12.25_real64, 13.25_real64, 14.25_real64]
+            call t%get("v_f64", full)
+            call t%column("v_f64", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_f64 the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e1 == full(E, R)) .and. (e2 == full(E, R)), &
+                "v_f64 the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p, 1) == NVEC .and. size(p, 2) == NROW .and. all(p == full), &
+                "v_f64 %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, E, 12.25_real64)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e2 == 12.25_real64), &
+                "v_f64 an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), full(E, R))
+            call c%get(R, E, e1)
+            call check(error, (e1 == full(E, R)), &
+                "v_f64 an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, nv)
+            call c%get(int(R, int64), b)
+            call check(error, all(b == nv), &
+                "v_f64 an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(:, R))
+            call c%get(R, a)
+            call check(error, all(a == full(:, R)), &
+                "v_f64 an int64 whole-row %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: full(:,:), a(:), b(:)
+            logical :: e1, e2
+            logical, pointer :: p(:,:)
+            logical :: nv(NVEC)
+            nv = [.true., .false., .true.]
+            call t%get("v_bool", full)
+            call t%column("v_bool", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a .eqv. full(:, R)) .and. all(b .eqv. full(:, R)), &
+                "v_bool the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e1 .eqv. full(E, R)) .and. (e2 .eqv. full(E, R)), &
+                "v_bool the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p, 1) == NVEC .and. size(p, 2) == NROW .and. all(p .eqv. full), &
+                "v_bool %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, E, .true.)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e2 .eqv. .true.), &
+                "v_bool an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), full(E, R))
+            call c%get(R, E, e1)
+            call check(error, (e1 .eqv. full(E, R)), &
+                "v_bool an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, nv)
+            call c%get(int(R, int64), b)
+            call check(error, all(b .eqv. nv), &
+                "v_bool an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(:, R))
+            call c%get(R, a)
+            call check(error, all(a .eqv. full(:, R)), &
+                "v_bool an int64 whole-row %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: full(:,:), a(:), b(:)
+            type(parquet_date) :: e1, e2
+            type(parquet_date), pointer :: p(:,:)
+            type(parquet_date) :: nv(NVEC)
+            nv = [parquet_date(2031, 5, 6), parquet_date(2031, 5, 7), parquet_date(2031, 5, 8)]
+            call t%get("v_date", full)
+            call t%column("v_date", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_date the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e1 == full(E, R)) .and. (e2 == full(E, R)), &
+                "v_date the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p, 1) == NVEC .and. size(p, 2) == NROW .and. all(p == full), &
+                "v_date %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, E, parquet_date(2031, 5, 6))
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e2 == parquet_date(2031, 5, 6)), &
+                "v_date an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), full(E, R))
+            call c%get(R, E, e1)
+            call check(error, (e1 == full(E, R)), &
+                "v_date an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, nv)
+            call c%get(int(R, int64), b)
+            call check(error, all(b == nv), &
+                "v_date an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(:, R))
+            call c%get(R, a)
+            call check(error, all(a == full(:, R)), &
+                "v_date an int64 whole-row %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: full(:,:), a(:), b(:)
+            type(parquet_time) :: e1, e2
+            type(parquet_time), pointer :: p(:,:)
+            type(parquet_time) :: nv(NVEC)
+            nv = [parquet_time(11, 12, 13), parquet_time(11, 12, 14), parquet_time(11, 12, 15)]
+            call t%get("v_time", full)
+            call t%column("v_time", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_time the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e1 == full(E, R)) .and. (e2 == full(E, R)), &
+                "v_time the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p, 1) == NVEC .and. size(p, 2) == NROW .and. all(p == full), &
+                "v_time %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, E, parquet_time(11, 12, 13))
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e2 == parquet_time(11, 12, 13)), &
+                "v_time an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), full(E, R))
+            call c%get(R, E, e1)
+            call check(error, (e1 == full(E, R)), &
+                "v_time an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, nv)
+            call c%get(int(R, int64), b)
+            call check(error, all(b == nv), &
+                "v_time an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(:, R))
+            call c%get(R, a)
+            call check(error, all(a == full(:, R)), &
+                "v_time an int64 whole-row %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: full(:,:), a(:), b(:)
+            type(parquet_timestamp) :: e1, e2
+            type(parquet_timestamp), pointer :: p(:,:)
+            type(parquet_timestamp) :: nv(NVEC)
+            nv = [parquet_timestamp(2031, 5, 6, 7, 8, 9), parquet_timestamp(2031, 5, 6, 7, 8, 10), &
+                parquet_timestamp(2031, 5, 6, 7, 8, 11)]
+            call t%get("v_ts", full)
+            call t%column("v_ts", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_ts the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e1 == full(E, R)) .and. (e2 == full(E, R)), &
+                "v_ts the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call check(error, size(p, 1) == NVEC .and. size(p, 2) == NROW .and. all(p == full), &
+                "v_ts %ref must alias the whole live column")
+            if (allocated(error)) return
+            call c%set(R, E, parquet_timestamp(2031, 5, 6, 7, 8, 9))
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, (e2 == parquet_timestamp(2031, 5, 6, 7, 8, 9)), &
+                "v_ts an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), full(E, R))
+            call c%get(R, E, e1)
+            call check(error, (e1 == full(E, R)), &
+                "v_ts an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, nv)
+            call c%get(int(R, int64), b)
+            call check(error, all(b == nv), &
+                "v_ts an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), full(:, R))
+            call c%get(R, a)
+            call check(error, all(a == full(:, R)), &
+                "v_ts an int64 whole-row %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        ! ---- the two string kinds: %ref hands back the packed store itself, not an array ----
+        block
+            character(len=:), allocatable :: full(:), a, b
+            type(parquet_string_column), pointer :: p
+            call t%get("s_str", full)
+            call t%column("s_str", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, a == trim(full(R)) .and. b == trim(full(R)), &
+                "s_str the column handle's %get must agree with %get in both row-index kinds")
+            if (allocated(error)) return
+            call c%ref(p)
+            call p%get(int(R, int64), a)
+            call check(error, p%size() == NROW .and. a == trim(full(R)), &
+                "s_str %ref must alias the live packed store")
+            if (allocated(error)) return
+            call c%set(R, "qq")
+            call c%get(int(R, int64), b)
+            call check(error, b == "qq", "s_str an int32 %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), "rr")
+            call c%get(R, a)
+            call check(error, a == "rr", "s_str an int64 %set must be visible to the int32 %get")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=:), allocatable :: full(:,:), a(:), b(:), e1, e2
+            call t%get("v_str", full)
+            call t%column("v_str", c)
+            call c%get(R, a)
+            call c%get(int(R, int64), b)
+            call check(error, all(a == full(:, R)) .and. all(b == full(:, R)), &
+                "v_str the column handle's %get must return the row's vector in both index kinds")
+            if (allocated(error)) return
+            call c%get(R, E, e1)
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, e1 == trim(full(E, R)) .and. e2 == trim(full(E, R)), &
+                "v_str the (row, element) %get must agree with %get in both index kinds")
+            if (allocated(error)) return
+            call c%set(R, E, "qq")
+            call c%get(int(R, int64), int(E, int64), e2)
+            call check(error, e2 == "qq", &
+                "v_str an int32 element %set must be visible to the int64 element %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), int(E, int64), "rr")
+            call c%get(R, E, e1)
+            call check(error, e1 == "rr", &
+                "v_str an int64 element %set must be visible to the int32 element %get")
+            if (allocated(error)) return
+            call c%set(R, ["tt", "uu", "vv"])
+            call c%get(int(R, int64), b)
+            call check(error, trim(b(1)) == "tt" .and. trim(b(3)) == "vv", &
+                "v_str an int32 whole-row %set must be visible to the int64 %get")
+            if (allocated(error)) return
+            call c%set(int(R, int64), ["ww", "xx", "yy"])
+            call c%get(R, a)
+            call check(error, trim(a(1)) == "ww" .and. trim(a(3)) == "yy", &
+                "v_str an int64 whole-row %set must be visible to the int32 %get")
+        end block
+    end subroutine test_col_handle_every_kind
+    !
+    !> **`%get_slice(..., found=)` on every kind.** Each `%get_slice` specific opens with its own
+    !> miss branch -- allocate an empty result, report `.false.`, return -- which the sweep above
+    !> never reaches because every column it names exists. A body that forgot to allocate `arr`
+    !> on the miss path leaves the caller with an unallocated array and no error, so `size(arr)`
+    !> is asserted rather than just `found`.
+    subroutine test_slice_found_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        logical :: got
+        character(len=*), parameter :: f = "test_run/table_slice_found_every_kind.parquet"
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        s = parquet_slice_range(1, 2)
+
+        block
+            integer(int32), allocatable :: sl(:)
+            call t%get_slice("no_such_" // "s_i32", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_i32 %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: sl(:)
+            call t%get_slice("no_such_" // "s_i64", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_i64 %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: sl(:)
+            call t%get_slice("no_such_" // "s_f32", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_f32 %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: sl(:)
+            call t%get_slice("no_such_" // "s_f64", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_f64 %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: sl(:)
+            call t%get_slice("no_such_" // "s_bool", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_bool %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: sl(:)
+            call t%get_slice("no_such_" // "s_date", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_date %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: sl(:)
+            call t%get_slice("no_such_" // "s_time", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_time %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: sl(:)
+            call t%get_slice("no_such_" // "s_ts", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_ts %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int32), allocatable :: sl(:,:)
+            call t%get_slice("no_such_" // "v_i32", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_i32 %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: sl(:,:)
+            call t%get_slice("no_such_" // "v_i64", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_i64 %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: sl(:,:)
+            call t%get_slice("no_such_" // "v_f32", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_f32 %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: sl(:,:)
+            call t%get_slice("no_such_" // "v_f64", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_f64 %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: sl(:,:)
+            call t%get_slice("no_such_" // "v_bool", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_bool %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: sl(:,:)
+            call t%get_slice("no_such_" // "v_date", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_date %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: sl(:,:)
+            call t%get_slice("no_such_" // "v_time", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_time %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: sl(:,:)
+            call t%get_slice("no_such_" // "v_ts", s, sl, found=got)
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_ts %get_slice(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        ! ---- the three STRING forms, which differ from the sixteen above on this exact path ----
+        !
+        ! They return `arr` UNALLOCATED on a miss, where every typed form allocates it empty. The
+        ! assertions below pin the behaviour as it actually is rather than as the typed forms
+        ! would suggest, so that a future decision to harmonize the two shows up here as a
+        ! deliberate change instead of passing unnoticed. `allocated(sl)` is therefore part of
+        ! this API's contract for a string column and a caller must test it.
+        block
+            character(len=:), allocatable :: sl(:)
+            type(parquet_string_column) :: sc
+            call t%get_slice("no_such_s_str", s, sl, found=got)
+            call check(error, .not. got .and. .not. allocated(sl), &
+                "s_str %get_slice(found=) must report a miss and leave the result unallocated")
+            if (allocated(error)) return
+            call t%get_slice("no_such_s_str", s, sc, found=got)
+            call check(error, .not. got .and. sc%size() == 0_int64, &
+                "the parquet_string_column %get_slice(found=) must report a miss with an empty store")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=:), allocatable :: sl(:,:)
+            call t%get_slice("no_such_v_str", s, sl, found=got)
+            call check(error, .not. got .and. .not. allocated(sl), &
+                "v_str %get_slice(found=) must report a miss and leave the result unallocated")
+        end block
+    end subroutine test_slice_found_every_kind
+    !
+    !> **Widening, on every route that offers it.** Four narrow-to-wide pairs -- int32 into an
+    !> int64 receiver, real32 into a real64 one, and the two vector counterparts -- each of which
+    !> is a SECOND `case` arm inside bodies whose first arm the sweeps above already exercise.
+    !> Reading a narrow column through a wide receiver is a documented convenience, and its arm is
+    !> reached by nothing that reads each column into its own exact type.
+    !>
+    !> Every route is checked against the same value read at its own width, so a body that
+    !> widened the wrong way (or read the raw bytes as if they were already wide) fails.
+    subroutine test_widening_every_route(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_table_row) :: rh
+        type(parquet_table_col) :: c
+        type(parquet_slice) :: s
+        integer, parameter :: R = 4, E = 2
+        integer(int32), allocatable :: n_i32(:)
+        real(real32), allocatable :: n_f32(:)
+        integer(int32), allocatable :: nv_i32(:,:)
+        real(real32), allocatable :: nv_f32(:,:)
+        integer(int64), allocatable :: w_i64(:), wv_i64(:,:)
+        real(real64), allocatable :: w_f64(:), wv_f64(:,:)
+        integer(int64) :: e_i64
+        real(real64) :: e_f64
+        character(len=*), parameter :: f = "test_run/table_widening_routes.parquet"
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        call t%get("s_i32", n_i32)
+        call t%get("s_f32", n_f32)
+        call t%get("v_i32", nv_i32)
+        call t%get("v_f32", nv_f32)
+        s = parquet_slice_range(2, 5)
+        rh = t%row(R)
+        ! ---- %get_slice ----
+        call t%get_slice("s_i32", s, w_i64)
+        call check(error, all(w_i64 == int(n_i32(2:5), int64)), &
+            "%get_slice must widen an int32 column into an int64 receiver")
+        if (allocated(error)) return
+        call t%get_slice("s_f32", s, w_f64)
+        call check(error, all(w_f64 == real(n_f32(2:5), real64)), &
+            "%get_slice must widen a real32 column into a real64 receiver")
+        if (allocated(error)) return
+        call t%get_slice("v_i32", s, wv_i64)
+        call check(error, all(wv_i64 == int(nv_i32(:, 2:5), int64)), &
+            "%get_slice must widen an int32 vector column into an int64 receiver")
+        if (allocated(error)) return
+        call t%get_slice("v_f32", s, wv_f64)
+        call check(error, all(wv_f64 == real(nv_f32(:, 2:5), real64)), &
+            "%get_slice must widen a real32 vector column into a real64 receiver")
+        if (allocated(error)) return
+        ! ---- the row handle, by name ----
+        block
+            integer(int64) :: a
+            real(real64) :: b
+            integer(int64), allocatable :: av(:)
+            real(real64), allocatable :: bv(:)
+            call rh%get("s_i32", a)
+            call rh%get("s_f32", b)
+            call check(error, a == int(n_i32(R), int64) .and. b == real(n_f32(R), real64), &
+                "the row handle must widen a narrow scalar column")
+            if (allocated(error)) return
+            call rh%get("v_i32", av)
+            call rh%get("v_f32", bv)
+            call check(error, all(av == int(nv_i32(:, R), int64)) .and. &
+                all(bv == real(nv_f32(:, R), real64)), &
+                "the row handle must widen a narrow vector column")
+        end block
+        if (allocated(error)) return
+        ! ---- the column handle: the shared col_fetch_* bodies, which %get_element also uses ----
+        block
+            integer(int64) :: a
+            real(real64) :: b
+            integer(int64), allocatable :: av(:)
+            real(real64), allocatable :: bv(:)
+            call t%column("s_i32", c)
+            call c%get(R, a)
+            call check(error, a == int(n_i32(R), int64), &
+                "the column handle must widen an int32 column into an int64 receiver")
+            if (allocated(error)) return
+            call t%column("s_f32", c)
+            call c%get(R, b)
+            call check(error, b == real(n_f32(R), real64), &
+                "the column handle must widen a real32 column into a real64 receiver")
+            if (allocated(error)) return
+            call t%column("v_i32", c)
+            call c%get(R, av)
+            call c%get(R, E, e_i64)
+            call check(error, all(av == int(nv_i32(:, R), int64)) .and. &
+                e_i64 == int(nv_i32(E, R), int64), &
+                "the column handle must widen an int32 vector, whole row and single element")
+            if (allocated(error)) return
+            call t%column("v_f32", c)
+            call c%get(R, bv)
+            call c%get(R, E, e_f64)
+            call check(error, all(bv == real(nv_f32(:, R), real64)) .and. &
+                e_f64 == real(nv_f32(E, R), real64), &
+                "the column handle must widen a real32 vector, whole row and single element")
+        end block
+        if (allocated(error)) return
+        ! ---- and %get_element, which shares those same bodies through a different entry point ----
+        call t%get_element("s_i32", int(R, int64), e_i64)
+        call t%get_element("s_f32", int(R, int64), e_f64)
+        call check(error, e_i64 == int(n_i32(R), int64) .and. e_f64 == real(n_f32(R), real64), &
+            "%get_element must widen a narrow column exactly as the column handle does")
+    end subroutine test_widening_every_route
+    !
+    !> **`%print_stat` over a table holding all 18 kinds, fully materialized.** The report builds a
+    !> min/max summary per column through one generated helper per kind, and `test_print_stat`
+    !> above deliberately reads nothing -- so those eighteen helpers, and the kind switch that
+    !> reaches them, run only when a table with every kind resident is asked to report.
+    !>
+    !> There is no output to assert here: the table's own accessors are what the other tests
+    !> check, and what this one adds is that summarizing each kind does not abort or read.
+    subroutine test_print_stat_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=*), parameter :: f = "test_run/table_printstat_every_kind.parquet"
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call check(error, t%ncols() == 18, "the matrix fixture must still carry all 18 kinds")
+        if (allocated(error)) return
+        ! A null in a summarized column: every helper skips nulls, and a column that is ALL null
+        ! has no minimum at all and must report "-" rather than whatever was in the first slot.
+        call t%set_null("s_i32", 2_int64)
+        call t%print_stat()
+        call t%print_stat(all=.true.)
+        call check(error, t%is_null("s_i32", 2_int64), &
+            "%print_stat must summarize without disturbing the data it reports on")
+    end subroutine test_print_stat_every_kind
     !
     !> Builds the parsed schema that writes all 18 kinds back out.
     subroutine build_matrix_schema(sc)

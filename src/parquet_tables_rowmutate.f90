@@ -282,15 +282,22 @@ contains
         ! something that is not a set of distinct rows of this table. That is not constructible from
         ! user input -- only from a library bug -- which is exactly the class this check exists to
         ! catch rather than let through as silently duplicated rows.
+        !
+        ! Both `if` lines below therefore carry the artifact tag: the CONDITION is evaluated once
+        ! per selected row whether or not the guard fires, so gcov counts each of those two lines
+        ! as hit (1017 apiece in one full run) while every line of both guarded bodies stays at 0.
+        ! That is the guard-clause shape CLAUDE.md's "Fortran gcov attribution artifacts" note
+        ! describes, and the zero-count bodies are what distinguishes it from a live exclusion.
         do k = 1_int64, size(sel, kind=int64)
             p = sel(k)
-            if (p < 1_int64 .or. p > nrows) then ! GCOVR_EXCL_START
+            if (p < 1_int64 .or. p > nrows) then ! GCOVR_EXCL_START -- gcov attribution artifact
                 write(got, "(I0)") p
                 write(want, "(I0)") nrows
                 error stop EP // "top_n: the selection names row " // trim(got) // ", outside " // &
                     "this table's 1.." // trim(want) // " rows"
             end if ! GCOVR_EXCL_STOP
             word = (p - 1_int64)/64_int64 + 1_int64
+            ! gcov attribution artifact -- see the note above the first guard in this loop.
             if (btest(seen(word), int(mod(p - 1_int64, 64_int64)))) then ! GCOVR_EXCL_START
                 write(got, "(I0)") p
                 error stop EP // "top_n: the selection names row " // trim(got) // " twice"

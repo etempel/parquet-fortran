@@ -306,8 +306,11 @@ contains
             tok = "timestamp" // sfx
         case default
             ! Not reachable: build_table_schema skips every unsupported slot, and a resident
-            ! column always has one of the 18 kinds above.
-            tok = "" ! GCOVR_EXCL_LINE
+            ! column always has one of the 18 kinds above. gcov nonetheless credits the line with
+            ! the procedure's whole call count (37 in one full run) while the real arms account
+            ! for all 37 between them (14+2+2+6+3+3+2+2+3), so the count is the select's dispatch
+            ! rather than this arm running -- hence the artifact tag.
+            tok = "" ! GCOVR_EXCL_LINE -- gcov attribution artifact
         end select
     end subroutine schema_type_token
     !

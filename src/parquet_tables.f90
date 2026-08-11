@@ -7490,4 +7490,4 @@ module parquet_tables
         end subroutine table_materialize_chunk_kind
     end interface
     !
-end module parquet_tables ! GCOVR_EXCL_LINE
+end module parquet_tables ! GCOVR_EXCL_LINE -- gcov attribution artifact

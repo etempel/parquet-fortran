@@ -1228,4 +1228,4 @@ contains
     ! >>>>> USER SECTION (procedures) -- your own procedure bodies; preserved on regeneration
     ! >>>>> END USER SECTION (procedures)
 
-end module parquet_table_example ! GCOVR_EXCL_LINE
+end module parquet_table_example ! GCOVR_EXCL_LINE -- gcov attribution artifact

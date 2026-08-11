@@ -291,7 +291,12 @@ contains
             ! in parquet_tables_rowmutate.f90, never from user input. Kept because a new op added
             ! without a branch here would otherwise leave every column silently unrewritten --
             ! which is the row-correspondence failure this whole path is guarded against.
-            error stop EP // "colwork: unknown per-column operation" ! GCOVR_EXCL_LINE
+            !
+            ! gcov credits this line with the WHOLE select's dispatch count -- 223 in one full run,
+            ! which is exactly 83 + 115 + 25, the three real arms above. An `error stop` that had
+            ! run even once would have ended the process, so the count is attribution, not
+            ! execution. Tagged so the stale-exclusion report stops offering it.
+            error stop EP // "colwork: unknown per-column operation" ! GCOVR_EXCL_LINE -- gcov attribution artifact
         end select
     end subroutine colwork_one
     !

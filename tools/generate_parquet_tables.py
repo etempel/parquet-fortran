@@ -559,7 +559,11 @@ module parquet_tables
     w("    !")
     w(gen_spec_interfaces())
     w("    !")
-    w("end module parquet_tables ! GCOVR_EXCL_LINE")
+    # The tag is not decoration: an `end module` line carries no executable statement, yet gcov
+    # credits it with a large hit count (1690 in one full run here), so without the phrase it is
+    # reported forever as a candidate stale exclusion. See CLAUDE.md, "Fortran gcov attribution
+    # artifacts".
+    w("end module parquet_tables ! GCOVR_EXCL_LINE -- gcov attribution artifact")
     return "\n".join(o) + "\n"
 
 

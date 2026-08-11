@@ -730,7 +730,11 @@ def render(schema, windows):
                          "your own procedure bodies; preserved on regeneration",
                          windows.get("procedures", [])))
     w("")
-    w(f"end module {schema.dataset} ! GCOVR_EXCL_LINE")
+    # Tagged for the same reason the same line is tagged in tools/generate_parquet_tables.py: an
+    # `end module` line has no executable statement, but gcov gives it a positive hit count, so an
+    # untagged exclusion is reported forever as a candidate stale one. See CLAUDE.md, "Fortran
+    # gcov attribution artifacts".
+    w(f"end module {schema.dataset} ! GCOVR_EXCL_LINE -- gcov attribution artifact")
     w("")
     return "\n".join(o), skipped
 

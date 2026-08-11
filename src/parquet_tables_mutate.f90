@@ -216,6 +216,48 @@ contains
         self%cache%generation = self%cache%generation + 1_int64
     end procedure table_reserve_i64
     !
+    !> Makes room for `n` column slots (see the interface in `parquet_tables.f90` for the
+    !! guarantee this buys).
+    module procedure table_reserve_columns
+        type(parquet_table_column), allocatable :: bigger(:)
+        character(len=32) :: got
+        integer :: i, cap
+        type(parquet_table_cache), pointer :: cache
+        !
+        ! Growing the slot array relocates every descriptor, so it is refused on a shared table
+        ! for exactly the reason %add_column and %compact are.
+        call table_check_not_shared(self, "reserve_columns")
+        call table_check_open(self, "reserve_columns")
+        if (n < 0) then
+            write(got, "(I0)") n
+            error stop EP // "reserve_columns: cannot reserve " // trim(got) // " columns"
+        end if
+        ! ifx refuses MOVE_ALLOC's TO argument when it is reached through an intent(inout) dummy's
+        ! POINTER component without a local alias -- the same reason table_new_slot takes one.
+        cache => self%cache
+        cap = 0
+        if (allocated(cache%cols)) cap = size(cache%cols)
+        ! `n` is the TOTAL capacity to make room for, not an increment, so a reserve at or below
+        ! what is already allocated is a no-op rather than a shrink -- matching %reserve (rows).
+        ! Nothing shrinks the slot array at all; %compact releases row storage, not slots.
+        if (n <= cap) return
+        allocate(bigger(n))
+        ! Moved, not assigned, for the same reason table_new_slot moves: an intrinsic array
+        ! assignment here would deep-copy every column's storage and then free the original.
+        do i = 1, cache%ncols
+            call move_table_column(bigger(i), cache%cols(i))
+        end do
+        call move_alloc(bigger, cache%cols)
+        ! The name index is grown alongside so that the %add_column calls this reservation exists
+        ! to make cheap do not each reallocate it instead. It holds no column storage, so it has
+        ! no bearing on pointer validity -- this is cost, not correctness.
+        call cache_name_index_reserve(cache, n)
+        ! This call IS the relocation, so it invalidates every outstanding pointer and handle and
+        ! says so -- which is the whole reason the guarantee reads "reserve first, take pointers
+        ! second". The early return above has already covered every case in which nothing moved.
+        cache%generation = cache%generation + 1_int64
+    end procedure table_reserve_columns
+    !
     ! ---- column-structural ----------------------------------------------------------------
     !
     module procedure move_table_column

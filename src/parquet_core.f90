@@ -1132,6 +1132,14 @@ module parquet_core
 
     public :: parquet_writer
     public :: parquet_reader
+    !> Public only so the sibling parquet_tables module can reach them -- src/parquet.f90
+    !! makes both private again, so neither is part of the `use parquet` surface.
+    !! `parquet_split_name_list` is the library's one name-list tokenizer, and
+    !! `parquet_parse_sort_key` its one sort-key direction grammar; the table layer's
+    !! string key lists spell direction exactly as a read-time parquet_sortkey does
+    !! because they run the same parser rather than a second copy of it.
+    public :: parquet_split_name_list
+    public :: parquet_parse_sort_key
     public :: parquet_filter
     public :: parquet_sortkey
     public :: parquet_read_qc
@@ -2786,6 +2794,25 @@ module parquet_core
         end subroutine parquet_release_column
     end interface
 
+    ! ---- Sort key parsing (parquet_read_sort) ----
+    interface
+        !> Parses one parquet_sortkey%add key ("ra asc", "-dec", "main.inner.age") into its
+        !> column name and direction. Purely syntactic: reports a parse failure via ok/errmsg --
+        !> never aborts, so the caller can attach the reader's file context to the message -- and
+        !> leaves every schema-dependent check (column exists, type is orderable) to the C++ side.
+        !>
+        !> Declared here rather than in parquet_read.f90 (and public) because parquet_tables
+        !> parses the same grammar for its own string key lists -- t%sort_by("ra,-dec"). One
+        !> parser, so the read-time and in-memory spellings of a direction cannot drift apart.
+        module subroutine parquet_parse_sort_key(key, name, descending, ok, errmsg)
+            character(len=*), intent(in) :: key !! raw key text from one %add call.
+            character(len=:), allocatable, intent(out) :: name !! column name (possibly a dotted struct path).
+            logical, intent(out) :: descending !! .true. for a descending key.
+            logical, intent(out) :: ok !! .true. if the key parsed.
+            character(len=:), allocatable, intent(out) :: errmsg !! parse-failure message; "" when ok.
+        end subroutine parquet_parse_sort_key
+    end interface
+
     ! ---- Filter/sort column-name remapping (parquet_read_filter / parquet_read_sort) ----
     interface
         !> Rewrites every column reference in this filter's rules, replacing name `from(k)` with
@@ -3731,6 +3758,66 @@ module parquet_core
     end interface
 
 contains
+
+    !> Splits a scalar string of column names into the packed array every name-taking
+    !> array form expects. Separators are commas and semicolons, interchangeably;
+    !> each token is trimmed of surrounding blanks, and an empty token is dropped
+    !> rather than being an error (so "a,,b" is two names and "" is none).
+    !>
+    !> This is the ONE tokenizer for the whole library. parquet_prefetch_columns'
+    !> scalar form has accepted this spelling since 1.0.0 and its behaviour is what
+    !> is reproduced here exactly; parquet_tables' own name- and key-list forms call
+    !> the same procedure so that two spellings of one operation cannot disagree
+    !> about punctuation. Public because a sibling module (parquet_tables) needs it
+    !> and has no other route to it; src/parquet.f90 makes it private again, so it
+    !> is not part of the `use parquet` surface.
+    !>
+    !> A SUBROUTINE with an allocatable intent(out) result, never a function
+    !> returning character(len=:), allocatable -- see CLAUDE.md's project-wide ban
+    !> on that shape (gfortran PR113797, a thread-unsafe hidden length temporary).
+    subroutine parquet_split_name_list(text, names)
+        character(len=*), intent(in) :: text !! names separated by commas and/or semicolons.
+        character(len=:), allocatable, intent(out) :: names(:) !! one entry per non-empty token.
+        character(len=:), allocatable :: tok
+        integer :: i, start, ntok, maxlen, idx
+        logical :: at_boundary
+
+        ! Pass 1: count non-empty tokens and find the longest, so the packed array's
+        ! element length covers every name exactly.
+        ntok = 0
+        maxlen = 0
+        start = 1
+        do i = 1, len(text) + 1
+            at_boundary = (i > len(text))
+            if (.not. at_boundary) at_boundary = (text(i:i) == ',' .or. text(i:i) == ';')
+            if (at_boundary) then
+                tok = trim(adjustl(text(start:i-1)))
+                if (len(tok) > 0) then
+                    ntok = ntok + 1
+                    maxlen = max(maxlen, len(tok))
+                end if
+                start = i + 1
+            end if
+        end do
+
+        ! len=1 rather than len=0 keeps a no-token result well-formed, matching what
+        ! %column_names does for a zero-column table.
+        allocate(character(len=max(maxlen, 1)) :: names(ntok))
+        idx = 0
+        start = 1
+        do i = 1, len(text) + 1
+            at_boundary = (i > len(text))
+            if (.not. at_boundary) at_boundary = (text(i:i) == ',' .or. text(i:i) == ';')
+            if (at_boundary) then
+                tok = trim(adjustl(text(start:i-1)))
+                if (len(tok) > 0) then
+                    idx = idx + 1
+                    names(idx) = tok
+                end if
+                start = i + 1
+            end if
+        end do
+    end subroutine parquet_split_name_list
 
     !> Appends one AND-combined filter expression; see parquet_filter's own doc
     !> comment for the rule grammar. Unvalidated here -- the reader parses and

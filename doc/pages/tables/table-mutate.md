@@ -99,9 +99,9 @@ individual procedure:
 | **row** — `%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`, `%truncate`, `%append`, `%append_null_rows` | changes which rows exist | **yes, when it changes one** |
 
 ```fortran
-call t%materialize_all()                 ! read everything you want to keep, first
+call t%materialize("mass,age,zphot")     ! read what you want to keep, first
 call t%filter_rows(mass > 1.0e10_real64) ! keep the rows a mask selects
-call t%sort_by(["mass"], descending=[.true.])
+call t%sort_by("-mass")                  ! or sort_by(["mass"], descending=[.true.])
 call t%drop_column("scratch")
 ```
 
@@ -124,9 +124,10 @@ rows in memory no longer line up with the rows in the file, so any column that h
 by then can never be read at all. The table records this — `%is_detached()` reports it — and every
 later attempt to read from the file says so rather than returning misaligned data.
 
-**So read what you need before changing the row set**, with `%prefetch` or `%materialize_all`.
-Columns you deliberately do not want are simply left behind, which is what keeps a lazy table
-from having to read a whole file before it can drop a single row.
+**So read what you need before changing the row set**, with `%materialize(names)` (or its
+synonym `%prefetch(names)`) — naming the columns, not `%materialize_all()`, unless you really do
+want the whole file. Columns you deliberately do not want are simply left behind, which is what
+keeps a lazy table from having to read a whole file before it can drop a single row.
 
 Detaching does not freeze a table: it can still be read, edited and written out, and mutated
 further. What it loses is the file behind it.
@@ -178,6 +179,27 @@ To keep rows by *rank* rather than by position or by mask — the best hundred b
 call t%sort_by(["group", "mass "], descending=[.false., .true.])
 ```
 
+**Or write the keys as one string**, which is usually what you want — commas and/or semicolons
+separate them, and a key may carry its own direction in exactly the grammar a read-time
+`parquet_sortkey` key uses (`asc`/`desc`, case-insensitive, with a leading `-` as shorthand for
+descending):
+
+```fortran
+call t%sort_by("group,-mass")            ! group ascending, mass descending
+call t%sort_by("group asc; mass desc")   ! the same thing, longhand
+```
+
+The array form needs every key padded to one declared length — note the `"mass "` above — and
+guessing that length too short **silently truncates** a key name rather than failing. The string
+form has neither problem.
+
+Every key-taking binding accepts both spellings: `%sort_by`, `%top_n`, `%argsort_by`,
+`%argsort_partial` and `%is_sorted_by`. A direction token and a `descending=` argument say the
+same thing twice, so giving **both** is an error for the whole call — use one or the other.
+`nulls_first=` is unaffected and works with either spelling. A column whose own name contains a
+comma, a semicolon, a leading `-` or a trailing ` asc`/` desc` is reachable through the array form
+only.
+
 A key column that has not been read yet is read for you, by the same lazy first touch `%get` and
 `%col` use — so sorting a table you have just opened needs no `%prefetch` first. Only the key
 columns are read; the rest stay exactly as they were. Nulls and NaNs are placed absolutely and are
@@ -223,8 +245,8 @@ Like every row-changing operation it **detaches** the table (see
 call, not after:
 
 ```fortran
-call t%prefetch("name")                  ! or %materialize_all()
-call t%top_n(["flux"], 100, descending=[.true.])
+call t%materialize("name")               ! or %materialize_all()
+call t%top_n("-flux", 100)
 ```
 
 That includes [`parquet_row_index`](table-open.html#which-row-of-the-file-is-this), which is how to find out *which*
@@ -370,6 +392,45 @@ the table already holds does nothing.
 
 Appending a **zero-row** table is checked for compatibility exactly as any other append, and then
 does nothing at all — including not detaching. `%append_null_rows(0)` is the same.
+
+### Making room for columns, and the one guarantee that comes with it
+
+`%reserve_columns(n)` is the column-side counterpart of `%reserve(n)`, and unlike everything else
+on this page it exists for **safety** rather than speed:
+
+> **While spare column capacity remains, adding a column under a NEW name relocates no existing
+> column's storage, moves no existing column's slot position, and does not advance
+> `%generation()`.** A pointer taken from `%col`, a `parquet_table_col` handle and a
+> `parquet_table_row` handle all stay valid across such a call.
+
+That is what makes the commonest derived-column idiom safe rather than merely lucky:
+
+```fortran
+call t%reserve_columns(t%ncols() + 2)   ! two derived columns coming
+
+call t%col("mag_g", g)                  ! pointers taken up front...
+call t%col("mag_r", r)
+call t%add_column("g_minus_r", g - r)   ! ...and still valid here, by contract
+call t%add_column("is_blue", g - r < 0.5_real64)
+```
+
+Without the reservation, an `%add_column` that happens to fill the slot array reallocates it, and
+Fortran leaves a pointer's association status **undefined** across the `MOVE_ALLOC` that does it —
+code that usually works and is not permitted to.
+
+Three things the guarantee deliberately does not cover:
+
+- **`force=.true.`** — replacing an existing column frees that column's storage, which no amount
+  of spare capacity prevents. The guarantee is about *adding*.
+- **Row-changing operations** — unchanged; see the note at the end of this page.
+- **Growing the reservation itself.** `%reserve_columns` *is* a relocation when it actually grows,
+  so it invalidates everything and advances `%generation()`, exactly as `%reserve` (rows) does.
+  **Reserve first, take pointers second.**
+
+`n` is the total capacity to make room for, not an increment, so reserving less than is already
+allocated does nothing. `%column_capacity()` reports how many slots exist and
+`%column_capacity(free=.true.)` how many are spare — capacity only ever grows, and a reservation
+survives `%clone` and `%clone_structure`.
 
 ### Copying, and going back
 

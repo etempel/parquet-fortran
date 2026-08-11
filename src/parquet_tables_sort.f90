@@ -85,6 +85,157 @@ contains
         call pf_partial_argsort(skeys, perm, n)
     end procedure table_build_top_n_permutation
     !
+    module procedure table_split_key_list
+        character(len=:), allocatable :: toks(:), name, errmsg, sfx, preview
+        logical, allocatable :: parsed(:)
+        logical :: any_explicit, ok, desc
+        integer :: i
+        !
+        ! One tokenizer for the whole library, so a key list and a name list agree about
+        ! punctuation -- commas and semicolons alike, blanks trimmed, empty tokens dropped.
+        call parquet_split_name_list(keys, toks)
+        if (size(toks) < 1) then
+            call table_context_suffix(self%cache, "", sfx)
+            error stop EP // trim(proc) // ": no sort key was given" // sfx
+        end if
+        allocate(character(len=len(toks)) :: names(size(toks)))
+        allocate(parsed(size(toks)))
+        any_explicit = .false.
+        do i = 1, size(toks)
+            ! parquet_core's own sort-key parser, the same one a read-time parquet_sortkey key
+            ! goes through -- so "-dec" and "dec desc" mean here exactly what they mean there,
+            ! and a future grammar change lands on both at once.
+            call parquet_parse_sort_key(toks(i), name, desc, ok, errmsg)
+            if (.not. ok) then
+                call table_context_suffix(self%cache, "", sfx)
+                error stop EP // trim(proc) // ": " // trim(errmsg) // sfx
+            end if
+            names(i) = name
+            parsed(i) = desc
+            ! A token carried a direction exactly when the parser had to remove something to get
+            ! the name out. Derived rather than reported separately, so it cannot go stale if the
+            ! grammar gains another spelling.
+            if (name /= trim(toks(i))) any_explicit = .true.
+        end do
+        if (any_explicit) then
+            if (have_descending) then
+                ! Refused for the WHOLE call, not per key, and including a redundant "asc": the
+                ! two are ways of saying one thing, and a per-key rule would leave descending(1)
+                ! governing one key while a token governs another.
+                call preview_key_list(keys, preview)
+                call table_context_suffix(self%cache, "", sfx)
+                error stop EP // trim(proc) // ": the key list " // preview // " already says " // &
+                    "which way to sort, so descending= cannot be given as well; use one or the " // &
+                    "other" // sfx
+            end if
+            call move_alloc(parsed, descending)
+        end if
+        ! `descending` deliberately left UNALLOCATED when no token asked for a direction: passed
+        ! on as an optional actual it then makes that dummy absent, so the caller's own
+        ! descending= is forwarded untouched.
+    end procedure table_split_key_list
+    !
+    !> Clips a caller-supplied key string to a short quoted preview for an `error stop` message.
+    !!
+    !! Bounded because the text is the caller's: ifx's ERROR STOP runtime corrupts the heap once
+    !! the composed message reaches 8192 bytes, and a key list has no length limit. See CLAUDE.md,
+    !! "Never interpolate unbounded caller-supplied text into an `error stop` message".
+    subroutine preview_key_list(keys, text)
+        character(len=*), intent(in) :: keys               !! the raw key string.
+        character(len=:), allocatable, intent(out) :: text !! quoted, clipped preview.
+        integer, parameter :: KEYS_MAX = 100               !! characters shown of the key list.
+        !
+        if (len_trim(keys) > KEYS_MAX) then
+            text = "'" // keys(1:KEYS_MAX) // "...'"
+        else
+            text = "'" // trim(keys) // "'"
+        end if
+    end subroutine preview_key_list
+    !
+    module procedure table_sort_by_string
+        character(len=:), allocatable :: k(:)
+        logical, allocatable :: d(:)
+        !
+        call table_split_key_list(self, keys, "sort_by", present(descending), k, d)
+        if (allocated(d)) then
+            call self%sort_by(k, d, nulls_first)
+        else
+            call self%sort_by(k, descending, nulls_first)
+        end if
+    end procedure table_sort_by_string
+    !
+    module procedure table_top_n_string
+        character(len=:), allocatable :: k(:)
+        logical, allocatable :: d(:)
+        !
+        call table_split_key_list(self, keys, "top_n", present(descending), k, d)
+        if (allocated(d)) then
+            call self%top_n(k, n, d, nulls_first)
+        else
+            call self%top_n(k, n, descending, nulls_first)
+        end if
+    end procedure table_top_n_string
+    !
+    module procedure table_argsort_by_string_i32
+        character(len=:), allocatable :: k(:)
+        logical, allocatable :: d(:)
+        !
+        call table_split_key_list(self, keys, "argsort_by", present(descending), k, d)
+        if (allocated(d)) then
+            call self%argsort_by(k, perm, d, nulls_first, group_offsets, group_nkeys)
+        else
+            call self%argsort_by(k, perm, descending, nulls_first, group_offsets, group_nkeys)
+        end if
+    end procedure table_argsort_by_string_i32
+    !
+    module procedure table_argsort_by_string_i64
+        character(len=:), allocatable :: k(:)
+        logical, allocatable :: d(:)
+        !
+        call table_split_key_list(self, keys, "argsort_by", present(descending), k, d)
+        if (allocated(d)) then
+            call self%argsort_by(k, perm, d, nulls_first, group_offsets, group_nkeys)
+        else
+            call self%argsort_by(k, perm, descending, nulls_first, group_offsets, group_nkeys)
+        end if
+    end procedure table_argsort_by_string_i64
+    !
+    module procedure table_argsort_partial_string_i32
+        character(len=:), allocatable :: k(:)
+        logical, allocatable :: d(:)
+        !
+        call table_split_key_list(self, keys, "argsort_partial", present(descending), k, d)
+        if (allocated(d)) then
+            call self%argsort_partial(k, perm, n, d, nulls_first)
+        else
+            call self%argsort_partial(k, perm, n, descending, nulls_first)
+        end if
+    end procedure table_argsort_partial_string_i32
+    !
+    module procedure table_argsort_partial_string_i64
+        character(len=:), allocatable :: k(:)
+        logical, allocatable :: d(:)
+        !
+        call table_split_key_list(self, keys, "argsort_partial", present(descending), k, d)
+        if (allocated(d)) then
+            call self%argsort_partial(k, perm, n, d, nulls_first)
+        else
+            call self%argsort_partial(k, perm, n, descending, nulls_first)
+        end if
+    end procedure table_argsort_partial_string_i64
+    !
+    module procedure table_is_sorted_by_string
+        character(len=:), allocatable :: k(:)
+        logical, allocatable :: d(:)
+        !
+        call table_split_key_list(self, keys, "is_sorted_by", present(descending), k, d)
+        if (allocated(d)) then
+            answer = self%is_sorted_by(k, d, nulls_first)
+        else
+            answer = self%is_sorted_by(k, descending, nulls_first)
+        end if
+    end procedure table_is_sorted_by_string
+    !
     module procedure table_is_sorted_by
         type(pf_sort_keys) :: skeys
         !

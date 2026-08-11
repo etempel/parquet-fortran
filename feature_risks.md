@@ -143,6 +143,7 @@ something a reader is expected to have.
 | [Risk-76](#risk-76--casts-post-touch-re-check-guards-an-invariant-that-lives-in-another-file) | `%cast`'s post-touch re-check guards an invariant that lives in another file | 3 — not testable |
 | [Risk-77](#risk-77--a-masked-write-compacts-the-values-and-the-validity-mask-separately) | A masked write compacts the values and the validity mask separately | 4 — covered |
 | [Risk-78](#risk-78--a-temporal-columns-null-cache-is-invalidated-by-the-writer-not-by-the-reader) | A temporal column's null cache is invalidated by the writer, not by the reader | 4 — covered |
+| [Risk-79](#risk-79--the-no-relocation-guarantee-rests-on-one-conditional-and-nothing-else) | The no-relocation guarantee rests on one conditional and nothing else | 4 — covered |
 
 ---
 
@@ -150,7 +151,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-79**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-80**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -1116,11 +1117,19 @@ What keeps it checkable is the file split: `parquet_tables_mutate.f90` never cha
 and its doc-comment must say it detaches. See CLAUDE.md, "A `parquet_table` pointer does not survive a
 ROW-structural mutation", for the five guard sites a new read-after-mutation path must run through.
 
-**The generation counter is deliberately conservative** — every column- and row-structural entry
-point bumps it whether or not that particular call relocated anything, so a change means "re-fetch",
-not "definitely invalidated". A missing bump gives false confidence; an unnecessary one costs a
-re-fetch. `parquet_write_table` is the one bump that does not look structural: it advances the counter
-when it released at least one column, and never when it released none.
+**The generation counter is conservative, with exactly TWO computed exceptions.** Every column- and
+row-structural entry point bumps it whether or not that particular call relocated anything, so a
+change means "re-fetch", not "definitely invalidated". A missing bump gives false confidence; an
+unnecessary one costs a re-fetch. The exceptions are the calls that can be *proved* to have moved
+nothing, and each is one predicate in one place:
+
+- **`parquet_write_table`** advances the counter when it released at least one column, and never
+  when it released none. The one bump that does not look structural.
+- **`%add_column` under a NEW name, within spare column capacity** (`table_new_slot`'s `grew`
+  flag). This is `%reserve_columns`' published guarantee — nothing relocates, no slot is renumbered,
+  no row moves, so every outstanding pointer and handle is exactly as correct as it was. The
+  `force=.true.` replace branch still bumps unconditionally, because it *clears* a column's values.
+  See Risk-79 for what protects it.
 
 **Test.** Covered. The dangling read itself is undefined behaviour and cannot be asserted on — a
 test that dereferences a freed pointer may pass, crash, or return plausible garbage, and none of the
@@ -1128,13 +1137,16 @@ three means anything. What *is* mechanically testable is the **generation counte
 only signal a caller has, and both directions of its contract are now swept:
 
 - `every structural entry point advances the generation counter` (`test/test_table.f90`) loops over
-  all fourteen structural entry points — `%add_column`, `%drop_column`, `%rename_column`,
-  `%copy_column`, `%cast`, `%evict_column`, `%reload`, `%filter_rows`, `%sort_by`, `%delete_rows`,
-  `%truncate`, `%append`, `%append_null_rows` and `parquet_write_table(release=.true.)` — asserting
-  the counter strictly increased, and names the operation in its failure message. Adding a mutation
-  means adding a `case`, not a test.
-- The **no-op half** is in the same test: six calls that change no row must leave the counter alone,
-  or it starts reporting noise and callers learn to ignore it.
+  all fifteen structural entry points — `%add_column` (**filled to capacity first, so the add under
+  test genuinely grows the slot array**), `%drop_column`, `%rename_column`, `%copy_column`, `%cast`,
+  `%evict_column`, `%reload`, `%filter_rows`, `%sort_by`, `%delete_rows`, `%truncate`, `%append`,
+  `%append_null_rows`, `parquet_write_table(release=.true.)` and `%reserve_columns` past its current
+  capacity — asserting the counter strictly increased, and names the operation in its failure
+  message. Adding a mutation means adding a `case`, not a test.
+- The **no-op half** is in the same test: seven calls that relocate nothing must leave the counter
+  alone, or it starts reporting noise and callers learn to ignore it. Six change no row; the seventh
+  is `%add_column` **within reserved capacity**, which is the only mechanical statement of
+  `%reserve_columns`' guarantee the counter can make.
 
 **This sweep found a real gap on its first run**: `%cast`'s *deferred* path (a file-backed column
 nothing has read yet) rewrote `declared_kind` and returned without bumping, while the eager path
@@ -2952,6 +2964,20 @@ aborting. The rule is deliberately **conservative** — `%append` does not move 
 column handle could survive one, and it is refused anyway — because one total rule is checkable and
 a list of exceptions is what the next mutation quietly falls outside.
 
+**There is now exactly ONE exception, and it is computed rather than listed.** An `%add_column`
+under a new name that fits in already-allocated capacity relocates no storage, renumbers no slot
+and moves no row, so a handle taken beforehand is provably still correct and is *not* refused —
+that is `%reserve_columns`' published guarantee (Risk-79). It survives this entry's own argument
+because it is not an item on a list: it is `table_new_slot`'s `grew` flag, one predicate in one
+place, which a future mutation cannot silently fall outside the way a hand-maintained list of
+exempt operations could. **Do not add a second exception by analogy.** If a future operation looks
+like it "obviously" moves nothing, it still bumps unless the same single predicate says otherwise.
+
+Note the visible consequence, because a test asserting the old total rule will fail on it:
+materialising `parquet_row_index` adds a slot, so within spare capacity it now leaves outstanding
+handles valid where it used to invalidate them (`test_col_handle_file_backed` asserts the new
+behaviour, and that the surviving handle still reads its own column).
+
 **This entry exists because the comparison is the kind of line a cleanup deletes.** It is one
 `integer(int64)` test sitting next to an `associated()` test, in a procedure whose name suggests it
 is only about attachment, on a path someone will one day be profiling. "We already checked
@@ -3281,3 +3307,47 @@ first passes even with the bug, because the elements really were nulled.
 - **`any_null_view` must stay read-only.** Refreshing the cache there would hide this class of bug
   rather than fix it, and it takes the column `intent(in)` precisely so that read-only consumers can
   use the bulk API at all — see its own doc-comment for the 10x measurement that motivated it.
+
+### Risk-79 — The no-relocation guarantee rests on one conditional and nothing else
+
+**What breaks.** `%reserve_columns` publishes a contract callers are invited to *rely on*: while
+spare column capacity remains, `%add_column` under a new name relocates nothing and does not advance
+`%generation()`, so a `%col` pointer and both handle types stay valid across it. The entire
+enforcement is one flag in `table_new_slot` (`grew`) and one conditional bump. Nothing else in the
+library holds that promise up.
+
+A future change to the slot array's growth policy breaks it silently: exact-fit growth instead of
+doubling, a rebuild that re-sorts slots, a shrink on `%drop_column`, or any new path that
+reallocates `cache%cols`. **The library would still answer every query correctly and every existing
+value test would still pass.** What changes is that callers who took the guarantee at its word are
+now holding pointers into freed memory, with no diagnostic — the exact "undefined by the standard,
+usually works" state the guarantee was introduced to remove, except that now the documentation says
+it is safe.
+
+**Why it is quiet.** A relocated `%col` pointer usually keeps working on gfortran, because
+`move_alloc` preserves the payload address (see Risk-11); only the descriptor array moves. So the
+symptom is not a crash but a latent, compiler- and allocator-dependent one, and it appears in *user*
+code rather than in this repository's tests.
+
+**What forbids it.** Three things, and the second is the one that actually fires:
+
+- The bump is **one predicate in one place** — never a per-branch decision. That is what Risk-71's
+  "one total rule is checkable" argument permits at all; a scattered version would not be.
+- **The negative-control arm of the guarantee test.** `test_reserve_columns_guarantee`
+  (`test/test_table.f90`) fills the table **to capacity before reserving**, so the reservation under
+  test genuinely has to grow the array. Without that fill the test passes against a
+  `%reserve_columns` that does nothing at all — which is not hypothetical: that mutation **survived**
+  the first version of this test, because `parquet_new_table`'s eight slots of headroom already
+  covered the adds. This is CLAUDE.md's "check WHICH code path the test actually reaches" trap, in
+  its purest form.
+- The **both-directions sweep** (Risk-11): a growing add must bump, an add within capacity must not.
+
+**Test.** Covered, and mutation-verified in three directions. `test_reserve_columns_guarantee`
+asserts the counter does not move AND writes through the pointer afterwards, reading the value back
+through the table — a counter assertion alone would not prove the pointer still aliases anything.
+`test_reserve_columns_limits` covers what the guarantee excludes (`force=.true.` still invalidates)
+and what it carries (a reservation survives `%clone` and `%clone_structure`).
+`test_reserve_columns_handles` covers both handle types, in both directions. Mutations checked:
+making the bump unconditional (guarantee arm fails), never bumping (negative control and the sweep
+both fail), and making `%reserve_columns` a no-op (guarantee arm fails — **only after** the
+fill-to-capacity fix above; it survived before it).

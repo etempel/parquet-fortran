@@ -135,6 +135,93 @@ contains
         if (.not. found .and. name == PARQUET_ROW_INDEX) found = self%cache%file_backed
     end procedure table_has_column
     !
+    module procedure missing_columns_array
+        integer :: i, n, maxlen
+        !
+        call table_check_open(self, "missing_columns")
+        ! Two passes, exactly as %column_names does it: the first sizes the result to the longest
+        ! name actually being reported, so a packed array cannot truncate one. len=1 rather than
+        ! len=0 keeps an empty result well-formed.
+        n = 0
+        maxlen = 1
+        do i = 1, size(names)
+            if (self%has_column(trim(names(i)))) cycle
+            n = n + 1
+            maxlen = max(maxlen, len_trim(names(i)))
+        end do
+        allocate(character(len=maxlen) :: absent(n))
+        n = 0
+        do i = 1, size(names)
+            if (self%has_column(trim(names(i)))) cycle
+            n = n + 1
+            absent(n) = trim(names(i))
+        end do
+    end procedure missing_columns_array
+    !
+    module procedure missing_columns_string
+        character(len=:), allocatable :: toks(:)
+        !
+        call parquet_split_name_list(names, toks)
+        call self%missing_columns(toks, absent)
+    end procedure missing_columns_string
+    !
+    module procedure require_columns_array
+        character(len=:), allocatable :: absent(:), want_txt, absent_txt, sfx
+        !
+        call table_check_open(self, "require_columns")
+        call self%missing_columns(names, absent)
+        if (size(absent) == 0) return
+        ! Both lists are previews, not the whole thing: this message interpolates text the CALLER
+        ! supplied, and ifx's ERROR STOP runtime corrupts the heap once the composed message
+        ! reaches 8192 bytes -- which a "these columns are missing" message is guaranteed to
+        ! approach on exactly the input that triggers it.
+        call preview_name_list(absent, absent_txt)
+        call preview_name_list(names, want_txt)
+        call table_context_suffix(self%cache, "", sfx)
+        error stop EP // "require_columns: this table does not have " // absent_txt // &
+            " (asked for " // want_txt // ")" // sfx
+    end procedure require_columns_array
+    !
+    module procedure require_columns_string
+        character(len=:), allocatable :: toks(:)
+        !
+        call parquet_split_name_list(names, toks)
+        call self%require_columns(toks)
+    end procedure require_columns_string
+    !
+    !> Joins a name list into one short, bounded string for an `error stop` message.
+    !!
+    !! Bounded in both directions -- at most `PREVIEW_MAX` names, and each name itself clipped --
+    !! because the list comes from the caller and an unbounded `error stop` message is a heap
+    !! corruption on ifx, not merely an unreadable one. See CLAUDE.md, "Never interpolate
+    !! unbounded caller-supplied text into an `error stop` message".
+    subroutine preview_name_list(names, text)
+        character(len=*), intent(in) :: names(:)              !! the names to join.
+        character(len=:), allocatable, intent(out) :: text    !! quoted, comma-separated preview.
+        integer, parameter :: PREVIEW_MAX = 10                !! names shown before "and N more".
+        integer, parameter :: NAME_MAX = 64                   !! characters shown of one name.
+        integer :: i, shown
+        character(len=32) :: rest
+        !
+        shown = min(size(names), PREVIEW_MAX)
+        text = ""
+        do i = 1, shown
+            if (i > 1) text = text // ", "
+            if (len_trim(names(i)) > NAME_MAX) then
+                text = text // "'" // names(i)(1:NAME_MAX) // "...'"
+            else
+                text = text // "'" // trim(names(i)) // "'"
+            end if
+        end do
+        if (size(names) > shown) then
+            write(rest, "(I0)") size(names) - shown
+            text = text // " and " // trim(rest) // " more"
+        end if
+        ! Only reachable for an empty list, which %require_columns never passes (it returns early
+        ! when nothing is missing, and a zero-name request has nothing missing either).
+        if (len(text) == 0) text = "(none)"  ! GCOVR_EXCL_LINE
+    end subroutine preview_name_list
+    !
     module procedure table_find
         idx = 0
         ! Defensive only: every call site (table_has_column, table_resolve, table_lookup_or_fail,
@@ -284,6 +371,40 @@ contains
             cache%name_key(lo) = key
         end do
     end procedure cache_name_index_rebuild
+    !
+    module procedure cache_name_index_reserve
+        integer :: n
+        integer, allocatable :: bigger(:)
+        integer(int64), allocatable :: bigkey(:)
+        !
+        if (.not. allocated(cache%name_order) .or. .not. allocated(cache%name_key)) then
+            call cache_name_index_rebuild(cache)
+        end if
+        if (size(cache%name_order) >= cap .and. size(cache%name_key) >= cap) return
+        ! Only the entries actually indexed are carried over; the rest is spare room, which is the
+        ! whole point of the call.
+        n = min(cache%ncols, size(cache%name_order), size(cache%name_key))
+        allocate(bigger(cap), bigkey(cap))
+        if (n > 0) then
+            bigger(1:n) = cache%name_order(1:n)
+            bigkey(1:n) = cache%name_key(1:n)
+        end if
+        call move_alloc(bigger, cache%name_order)
+        call move_alloc(bigkey, cache%name_key)
+    end procedure cache_name_index_reserve
+    !
+    module procedure table_column_capacity
+        logical :: want_free
+        !
+        call table_check_open(self, "column_capacity")
+        want_free = .false.
+        if (present(free)) want_free = free
+        n = 0
+        if (allocated(self%cache%cols)) n = size(self%cache%cols)
+        ! The spare count is what a caller sizing a reservation actually wants; the total is what
+        ! %reserve_columns takes, since that argument is a TOTAL rather than an increment.
+        if (want_free) n = n - self%cache%ncols
+    end procedure table_column_capacity
     !
     module procedure cache_name_index_insert
         integer :: n, lo, hi, mid, k, newcap

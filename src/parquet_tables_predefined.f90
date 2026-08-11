@@ -61,7 +61,7 @@ contains
         ! column nothing has read yet only rewrites the slot's declared kind (`cast_pending`), so
         ! the read below decodes straight into the declared kind in a single pass. Casting after
         ! reading would decode once and convert again.
-        if (nread > 0) call prefetch_many(self, to_read(1:nread))
+        if (nread > 0) call prefetch_array(self, to_read(1:nread))
         !
         ! Marked last, in its own pass: creating a computed slot can reallocate `cache%cols`, so a
         ! slot index captured earlier in the loop above may no longer be the right one. The

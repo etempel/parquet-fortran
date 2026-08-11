@@ -327,12 +327,32 @@ Three calls control it explicitly:
 
 | call | does |
 |---|---|
-| `call t%prefetch(name)` / `call t%prefetch(names)` | read those columns now |
-| `call t%materialize_all()` | read every column not yet read |
+| `call t%materialize(names, [found])` / `call t%prefetch(names, [found])` | read **those** columns now |
+| `call t%materialize_all()` | read **every** column not yet read |
 | `call t%reload(name, [force], [found])` | re-read one column from the file, discarding local `%set` edits |
 | `call t%evict_column(name, [force], [found])` | release a column's values, keeping the column |
 
 (Square brackets mark optional arguments throughout this page; they are not part of the syntax.)
+
+**`%materialize` and `%prefetch` are the same call under two names** — they bind the same
+procedures, so they cannot behave differently. The pair to reach for is
+`%materialize(names)`/`%materialize_all()`: facing a mutation that detaches the table, the
+instinct is to reach for the definitive-sounding `%materialize_all()`, and if only four columns
+were wanted that reads the whole file — silently, visible only as time and memory. Name the
+columns.
+
+**`names` may be an array or one string**, with commas and/or semicolons between the names:
+
+```fortran
+call t%materialize("ra,dec,mag")                   ! one string, separators either way
+call t%materialize([character(len=3) :: "ra", "dec", "mag"])   ! or an array
+```
+
+Prefer the string. The array constructor needs every element padded to one declared length, and
+guessing that length too short does not fail — it **silently truncates** a name, which then
+surfaces as "column not found" or, worse, as a different column. Blanks around a name are
+trimmed and an empty token is ignored, so a trailing separator is harmless. A column whose own
+name contains a comma or a semicolon is reachable through the array form only.
 
 `%prefetch`'s array form is not just a loop: it reads the named columns in one pass, which
 matters for **struct leaves**. The reader decodes a struct as one array shared by all its leaves,

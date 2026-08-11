@@ -1578,6 +1578,14 @@ program error_scenarios
         call scenario_table_compact_shared_in_parallel()
     case ("table_reserve_negative")
         call scenario_table_reserve_negative()
+    case ("table_reserve_columns_negative")
+        call scenario_table_reserve_columns_negative()
+    case ("table_reserve_columns_shared_in_parallel")
+        call scenario_table_reserve_columns_shared_in_parallel()
+    case ("table_key_direction_conflict")
+        call scenario_table_key_direction_conflict()
+    case ("table_require_columns_missing")
+        call scenario_table_require_columns_missing()
     case ("filter_bool_ordering")
         call scenario_filter_bool_ordering()
     case ("table_read_during_append")
@@ -12040,6 +12048,68 @@ contains
         call t%reserve(-5)   ! not a row count -> aborts
         print '(a,i0)', "unexpectedly reserved a negative row count, nrows=", t%nrows()
     end subroutine scenario_table_reserve_negative
+
+    !> Same reasoning as %reserve's own negative guard, on the column count: a negative capacity is
+    !! a sign mistake in a computed argument, not a request to reserve nothing.
+    !!
+    !! The negative CONTROL is in the same scenario: a valid reserve first, so a guard that fired
+    !! unconditionally would not reach the abort at all and this would fail rather than pass.
+    subroutine scenario_table_reserve_columns_negative()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_reserve_cols_neg.parquet")
+        call parquet_open_table(t, "test_run/es_table_reserve_cols_neg.parquet")
+        call t%materialize_all()
+        call t%reserve_columns(t%ncols() + 4)   ! the permitted case, first
+        call t%reserve_columns(-5)              ! not a column count -> aborts
+        print '(a,i0)', "unexpectedly reserved a negative column count, ncols=", t%ncols()
+    end subroutine scenario_table_reserve_columns_negative
+
+    !> Growing the slot array relocates every descriptor under any pointer another thread holds,
+    !! which is exactly what %add_column and %compact are refused for -- so %reserve_columns is
+    !! refused on a shared table too. Guarded at the same place, for the same reason.
+    subroutine scenario_table_reserve_columns_shared_in_parallel()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_omp_reserve_cols.parquet")
+        call parquet_open_table(t, "test_run/es_table_omp_reserve_cols.parquet")
+        call t%materialize_all()
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%reserve_columns(64)   ! relocates descriptors under another thread -> aborts
+        !$omp end single
+        !$omp end parallel
+        print '(a,i0)', "unexpectedly reserved columns on a shared table, ncols=", t%ncols()
+    end subroutine scenario_table_reserve_columns_shared_in_parallel
+
+    !> A direction token in the key string and a descending= argument say the same thing twice and
+    !! can disagree, so giving both is refused for the whole call.
+    !!
+    !! The negative control is the first call: the same key string WITHOUT a token, with
+    !! descending= given, must be accepted -- otherwise a guard that refused descending= outright
+    !! would pass this scenario while breaking every ordinary call.
+    subroutine scenario_table_key_direction_conflict()
+        type(parquet_table) :: t
+        integer(int64), allocatable :: perm(:)
+        call write_table_scenario_fixture("test_run/es_table_key_conflict.parquet")
+        call parquet_open_table(t, "test_run/es_table_key_conflict.parquet")
+        call t%argsort_by("id", perm, descending=[.true.])   ! no token: permitted
+        print '(a,i0)', "descending= without a direction token was accepted, rows=", size(perm)
+        call t%argsort_by("-id", perm, descending=[.true.])  ! token AND descending= -> aborts
+        print '(a,i0)', "unexpectedly accepted both a direction token and descending=", size(perm)
+    end subroutine scenario_table_key_direction_conflict
+
+    !> %require_columns names EVERY missing column, which is the whole reason it exists -- a
+    !! hand-written %has_column loop reports one per run.
+    !!
+    !! Negative control first: a request naming only columns that exist must pass straight through.
+    subroutine scenario_table_require_columns_missing()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_require_cols.parquet")
+        call parquet_open_table(t, "test_run/es_table_require_cols.parquet")
+        call t%require_columns("id")            ! present: permitted
+        print '(a)', "require_columns accepted a column that exists"
+        call t%require_columns("id,nope,alsonope")  ! two missing -> aborts naming both
+        print '(a,i0)', "unexpectedly required missing columns, ncols=", t%ncols()
+    end subroutine scenario_table_require_columns_missing
 
     !> %add_column reallocates cols(:), so it is guarded at table_new_slot -- the choke point every
     !! per-kind specific goes through, which is why one scenario covers all 18 of them.

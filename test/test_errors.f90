@@ -721,6 +721,14 @@ contains
                 test_columns_clear_null_elem_temporal_aborts), &
             new_unittest("table: append(row) validates every column before writing any", &
                 test_table_append_row_validates_first_aborts), &
+            new_unittest("table: reserve_columns of a negative count aborts", &
+                test_table_reserve_columns_negative_aborts), &
+            new_unittest("table: reserve_columns on a shared table in a region aborts", &
+                test_table_reserve_columns_shared_aborts), &
+            new_unittest("table: a direction token plus descending= aborts", &
+                test_table_key_direction_conflict_aborts), &
+            new_unittest("table: require_columns names every missing column", &
+                test_table_require_columns_missing_aborts), &
             new_unittest("parquet_column paste of a different kind aborts", &
                 test_columns_paste_kind_mismatch_aborts), &
             new_unittest("parquet_column paste of a different vector width aborts", &
@@ -2090,6 +2098,42 @@ contains
             failure_message="appending a row with an incompatible column was expected to abort", &
             required_stderr="convert it first (%cast)")
     end subroutine test_table_append_row_validates_first_aborts
+
+    subroutine test_table_reserve_columns_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_reserve_columns_negative", &
+            expect_abort=.true., &
+            failure_message="reserving a negative column count was expected to abort", &
+            required_stderr="reserve_columns: cannot reserve -5 columns")
+    end subroutine test_table_reserve_columns_negative_aborts
+
+    subroutine test_table_reserve_columns_shared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, &
+            "table_reserve_columns_shared_in_parallel", expect_abort=.true., &
+            failure_message="reserving columns on a shared table in a region was expected to abort", &
+            required_stderr="reserve_columns")
+    end subroutine test_table_reserve_columns_shared_aborts
+
+    !> The message must name `descending=`, since that is what the caller has to remove -- an
+    !! abort saying only "conflict" leaves them guessing which half to drop.
+    subroutine test_table_key_direction_conflict_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_key_direction_conflict", &
+            expect_abort=.true., &
+            failure_message="a direction token plus descending= was expected to abort", &
+            required_stderr="descending= cannot be given as well")
+    end subroutine test_table_key_direction_conflict_aborts
+
+    !> EVERY missing name, not just the first -- which is the whole reason this binding exists, so
+    !! the second one is what the assertion is really about.
+    subroutine test_table_require_columns_missing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_require_columns_missing", &
+            expect_abort=.true., &
+            failure_message="requiring a missing column was expected to abort", &
+            required_stderr="'alsonope'")
+    end subroutine test_table_require_columns_missing_aborts
 
     subroutine test_columns_paste_kind_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

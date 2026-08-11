@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`parquet_table` gains a memory-safety guarantee for derived columns, plus several ergonomic
+  forms of calls it already had.**
+
+  **`call t%reserve_columns(n)`** makes room for `n` columns and, in doing so, publishes a
+  contract `%add_column` did not previously have: *while spare column capacity remains, adding a
+  column under a new name relocates no existing column's storage, moves no existing column's slot
+  position, and does not advance `%generation()`* — so a `%col` pointer, a `parquet_table_col`
+  handle and a `parquet_table_row` handle taken beforehand all stay valid. That makes the
+  commonest derived-column idiom (take pointers, compute, `%add_column`) safe rather than
+  undefined-but-usually-working: Fortran leaves a pointer's association status undefined across
+  the `MOVE_ALLOC` a growing slot array performs. Replacing a column (`force=.true.`) is not
+  covered, since it frees that column's storage, and neither is any row-changing mutation.
+  `%column_capacity([free])` reports the slots allocated, or the spare ones; a reservation
+  survives `%clone` and `%clone_structure`. Consequently **`%generation()` now advances only when
+  something actually moved** — an `%add_column` within reserved capacity leaves it alone.
+
+  **`call t%materialize(names)`** is a second name for `%prefetch(names)` — the same procedures,
+  so they cannot behave differently. It exists because `%materialize_all()` takes no column list:
+  facing a mutation that detaches the table, the instinct is to reach for the definitive-sounding
+  name, and if four columns were wanted that reads the whole file, silently.
+
+  **Every key- and name-list binding now accepts one string instead of an array.**
+  `t%sort_by("group,-mass")`, `t%materialize("ra,dec,mag")`, and the same for `%top_n`,
+  `%argsort_by`, `%argsort_partial`, `%is_sorted_by` and `%prefetch`. Commas and/or semicolons
+  separate the entries, blanks are trimmed and empty tokens ignored — the spelling
+  `parquet_prefetch_columns` has accepted since 1.0.0, now sharing one tokenizer with it. A *key*
+  may also carry its own direction in the grammar `parquet_sortkey%add` already publishes
+  (`asc`/`desc`, or a leading `-`), parsed by that same parser; giving both a direction token and
+  a `descending=` argument is an error for the whole call. This is not only less typing: the array
+  form needs every entry padded to one declared length, and guessing it too short **silently
+  truncates** a name rather than failing.
+
+  **`call t%require_columns(names)`** aborts unless the table has every named column, naming
+  **every** missing one and echoing what was asked for — where a hand-written `%has_column` loop
+  reports one per run. `call t%missing_columns(names, absent)` is the non-aborting form, giving a
+  zero-size array when nothing is missing. Both match exactly (never by struct-path prefix) and
+  read no column data.
+
 - **`parquet_table` columns can now be reached by 1-based position, and by a resolved column
   handle, not only by name.**
   `t%column_index(name [, found])` gives a column's position (0 when absent) and

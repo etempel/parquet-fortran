@@ -207,7 +207,13 @@ contains
         ! A lock is a HANDLE, not a value: a clone must build its own rather than copy
         ! the source's, and every cache must have one before any thread can reach it.
         call table_init_lock(out%cache)
-        allocate(out%cache%cols(max(self%cache%ncols, 1) + COL_HEADROOM))
+        ! A RESERVATION SURVIVES THE COPY, which is part of %reserve_columns' published guarantee:
+        ! a caller who reserved room for 100 columns and then clones gets a copy with the same
+        ! spare room, rather than one that silently drops back to the default headroom and starts
+        ! relocating on the next %add_column. Shared by %clone and %clone_structure, since both
+        ! build their cache here -- so the guarantee cannot hold for one and not the other.
+        allocate(out%cache%cols(max(max(self%cache%ncols, 1) + COL_HEADROOM, &
+                                    size(self%cache%cols))))
         out%cache%ncols = 0
         out%cache%file_backed = .false.
         if (allocated(self%cache%source_file)) out%cache%source_file = self%cache%source_file

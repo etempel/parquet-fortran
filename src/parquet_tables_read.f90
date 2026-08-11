@@ -1136,35 +1136,123 @@ contains
         call table_materialize_all(self%cache, table_scope_of(self))
     end procedure table_materialize_every
     !
-    module procedure prefetch_one
-        integer :: idx
+    module procedure prefetch_string
+        character(len=:), allocatable :: toks(:)
         logical, allocatable :: want(:)
-        integer :: n
+        integer :: i
+        logical :: ok, all_found
         !
         call table_check_open(self, "prefetch")
-        ! A real column of that exact name wins, always. Only when there is none does the name get
-        ! read as a struct prefix -- so a file with a column literally called "main" is reached by
-        ! its own name even if it also has "main.a" leaves.
+        ! One tokenizer for the whole library (parquet_core), so this and the reader-level
+        ! parquet_prefetch_columns cannot disagree about punctuation. A single name with no
+        ! separator comes back as one token, which is the overwhelmingly common case and takes
+        ! exactly the same path it always did.
+        call parquet_split_name_list(names, toks)
+        allocate(want(self%cache%ncols))
+        want = .false.
+        all_found = .true.
+        do i = 1, size(toks)
+            call mark_one_name(self, trim(toks(i)), present(found), want, ok)
+            ! One miss does not abandon the rest, matching the array form: the caller asked for a
+            ! set, and the ones that do exist are still worth reading. `found` reports whether ALL
+            ! of them were found.
+            if (.not. ok) all_found = .false.
+        end do
+        if (present(found)) found = all_found
+        ! materialize_marked walks every slot, so the mask has to cover the column count as it is
+        ! after resolution -- which may have grown, since asking for parquet_row_index creates it.
+        call grow_want_mask(want, self%cache%ncols)
+        ! ONE pass over the marked slots, however many names were given -- which is the whole
+        ! reason the array form exists, and the string form now shares it. A zero-token string
+        ! marks nothing and reads nothing, leaving `found` .true.
+        call materialize_marked(self%cache, table_scope_of(self), want)
+    end procedure prefetch_string
+    !
+    !> Marks the slot(s) one %prefetch name asks for: the column of that exact name, or -- when
+    !! there is none -- every leaf under `name.`.
+    !!
+    !! A real column of that exact name wins, always. Only when there is none does the name get
+    !! read as a struct prefix, so a file with a column literally called "main" is reached by its
+    !! own name even if it also has "main.a" leaves.
+    !!
+    !! `report_miss` is the caller's `present(found)`: with it, a missing name marks nothing and
+    !! reports `ok = .false.`; without it, the resolve aborts, which is what a caller who asked
+    !! for no `found=` expects. It cannot simply be an optional forwarded straight through,
+    !! because each name's result has to be folded into one answer rather than overwriting it.
+    subroutine mark_one_name(self, name, report_miss, want, ok)
+        class(parquet_table), intent(in) :: self     !! the table.
+        character(len=*), intent(in) :: name         !! one column name, already trimmed.
+        logical, intent(in) :: report_miss           !! .true.: report a miss instead of aborting.
+        logical, allocatable, intent(inout) :: want(:) !! marks accumulated across every name.
+        logical, intent(out) :: ok                   !! .false. if this name matched nothing.
+        integer :: idx, n
+        logical, allocatable :: leaves(:)
+        logical :: got
+        !
+        ok = .true.
         idx = table_find(self, name)
         if (idx > 0) then
-            call table_prefetch_resolve(self, name, "prefetch", idx, found)
-            if (idx == 0) return
-            call table_touch(self%cache, table_scope_of(self), idx, "prefetch")
+            if (report_miss) then
+                call table_prefetch_resolve(self, name, "prefetch", idx, got)
+                if (.not. got) ok = .false.
+            else
+                call table_prefetch_resolve(self, name, "prefetch", idx)
+            end if
+            if (idx == 0) then
+                ok = .false.
+                return
+            end if
+            ! Resolving can ADD a column: asking for parquet_row_index materializes it, which is a
+            ! new slot. So the mask has to be re-sized against the column count as it is NOW, not
+            ! as it was when the loop started -- otherwise the very next line writes past its end.
+            call grow_want_mask(want, self%cache%ncols)
+            want(idx) = .true.
             return
         end if
         ! Every leaf under "<name>." in ONE pass, which is the point: the reader decodes a struct
         ! as one array shared by all its leaves, so reading them separately decodes it once per
-        ! leaf. This is the array form's single-pass behaviour, without having to name the leaves.
-        call mark_struct_leaves(self%cache, name, want, n)
+        ! leaf.
+        call mark_struct_leaves(self%cache, name, leaves, n)
         if (n == 0) then
             ! Nothing of that name and no leaves under it: an ordinary missing column, reported
             ! the ordinary way. A prefix that matches nothing is a mistake, not a quiet no-op.
-            call table_prefetch_resolve(self, name, "prefetch", idx, found)
+            if (report_miss) then
+                call table_prefetch_resolve(self, name, "prefetch", idx, got)
+                ! `got`, not .false.: the reserved row-index name resolves HERE (there is no slot
+                ! to find until this call makes one), so hardcoding a miss would report .false.
+                ! for a name that was found and materialized.
+                ok = got
+            else
+                call table_prefetch_resolve(self, name, "prefetch", idx)
+            end if
             return
         end if
-        if (present(found)) found = .true.
-        call materialize_marked(self%cache, table_scope_of(self), want)
-    end procedure prefetch_one
+        call grow_want_mask(want, size(leaves))
+        want = want .or. leaves
+    end subroutine mark_one_name
+    !
+    !> Grows a %prefetch mark mask to `n` entries, keeping what is already marked.
+    !!
+    !! Needed because resolving a name can create a column: `parquet_row_index` is materialized on
+    !! demand, through `table_new_slot`, so a mask sized before the loop is one entry short from
+    !! that point on. A plain `fpm test` runs straight past the overrun; `--profile debug` is what
+    !! catches it.
+    subroutine grow_want_mask(want, n)
+        logical, allocatable, intent(inout) :: want(:) !! the mask to grow.
+        integer, intent(in) :: n                       !! entries it must have.
+        logical, allocatable :: bigger(:)
+        !
+        if (.not. allocated(want)) then
+            allocate(want(n))
+            want = .false.
+            return
+        end if
+        if (size(want) >= n) return
+        allocate(bigger(n))
+        bigger = .false.
+        bigger(1:size(want)) = want
+        call move_alloc(bigger, want)
+    end subroutine grow_want_mask
     !
     !> Marks every slot whose name begins with `prefix // "."`, reporting how many.
     !!
@@ -1192,7 +1280,7 @@ contains
         end do
     end subroutine mark_struct_leaves
     !
-    module procedure prefetch_many
+    module procedure prefetch_array
         logical, allocatable :: want(:)
         integer :: i, idx
         logical :: got
@@ -1217,10 +1305,14 @@ contains
             else
                 call table_prefetch_resolve(self, trim(names(i)), "prefetch", idx)
             end if
+            ! Resolving can ADD a column -- asking for parquet_row_index materializes it -- so the
+            ! mask is re-sized against the column count as it is now. See grow_want_mask.
+            call grow_want_mask(want, self%cache%ncols)
             want(idx) = .true.
         end do
+        call grow_want_mask(want, self%cache%ncols)
         call materialize_marked(self%cache, table_scope_of(self), want)
-    end procedure prefetch_many
+    end procedure prefetch_array
     !
     !> Resolves a name for %prefetch: a miss obeys `found=`, and an unsupported column is an
     !! error either way -- asking to read a column this library cannot read is a mistake, not a

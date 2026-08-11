@@ -597,6 +597,7 @@ contains
     !
     module procedure table_new_slot
         integer :: existing, n, i
+        logical :: grew
         type(parquet_table_column), allocatable :: bigger(:)
         character(len=:), allocatable :: sfx
         type(parquet_table_cache), pointer :: cache
@@ -635,10 +636,11 @@ contains
         end if
         !
         n = cache%ncols
-        if (n >= size(cache%cols)) then
+        grew = n >= size(cache%cols)
+        if (grew) then
             ! Growth doubles rather than adding one, so a long add_column loop is not quadratic.
-            ! This DOES relocate every descriptor, which is exactly why the documented rule is
-            ! that any column-structural mutation invalidates every outstanding pointer.
+            ! This DOES relocate every descriptor, which is why it -- and only it -- bumps the
+            ! generation below.
             allocate(bigger(max(2 * size(cache%cols), n + 1)))
             ! Moved, not assigned: an intrinsic array assignment here would deep-copy every
             ! column's storage into the new array and then free the old one, so growing the slot
@@ -651,10 +653,21 @@ contains
         n = n + 1
         cache%ncols = n
         ! Every path that adds, replaces or relocates a slot comes through here, so this is the
-        ! one place a column-structural change has to bump the generation (%generation). The
-        ! replace-in-place branch above bumps too, on its way out -- it clears a column's values,
-        ! which is exactly the kind of thing a held pointer must not survive.
-        cache%generation = cache%generation + 1_int64
+        ! one place a column-structural change decides whether to bump the generation.
+        !
+        ! CONDITIONAL, and that is %reserve_columns' whole guarantee: an add that fits in the
+        ! capacity already allocated moves no descriptor, reallocates no storage and renumbers no
+        ! slot, so every outstanding %col pointer, column handle and row handle is still exactly
+        ! as correct as it was -- and bumping would force a needless re-fetch on the commonest
+        ! derived-column idiom there is. An add that GREW the array relocated every descriptor and
+        ! must bump.
+        !
+        ! The test is deliberately one predicate in one place rather than a decision each branch
+        ! makes for itself: the counter's rule is otherwise a total, exception-free one
+        ! (feature_risks.md Risk-71), and a single computed exception is checkable where a
+        ! scattered one is not. The replace-in-place branch above bumps on its way out for a
+        ! different reason -- it CLEARS a column's values, which no held pointer can survive.
+        if (grew) cache%generation = cache%generation + 1_int64
         cache%cols(n)%name = trim(name)
         cache%cols(n)%file_name = trim(name)
         cache%cols(n)%file_source = .false.

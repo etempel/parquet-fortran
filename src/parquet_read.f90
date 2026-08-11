@@ -40,17 +40,6 @@ submodule (parquet_core) parquet_read
 
     ! ---- Sort key parsing (parquet_read_sort) ----
     interface
-        !> Parses one parquet_sortkey%add key ("ra asc", "-dec", "main.inner.age") into its
-        !> column name and direction. Purely syntactic: reports a parse failure via ok/errmsg --
-        !> never aborts, so the caller can attach the reader's file context to the message -- and
-        !> leaves every schema-dependent check (column exists, type is orderable) to the C++ side.
-        module subroutine parquet_parse_sort_key(key, name, descending, ok, errmsg)
-            character(len=*), intent(in) :: key !! raw key text from one %add call.
-            character(len=:), allocatable, intent(out) :: name !! column name (possibly a dotted struct path).
-            logical, intent(out) :: descending !! .true. for a descending key.
-            logical, intent(out) :: ok !! .true. if the key parsed.
-            character(len=:), allocatable, intent(out) :: errmsg !! parse-failure message; "" when ok.
-        end subroutine parquet_parse_sort_key
         !> Re-renders the whole parsed key list in canonical form ("ra asc, dec desc"), for
         !> parquet_reader_print_stat's own "sort:" line. Never parsed again by anything.
         module subroutine parquet_render_sort_keys(key_name, descending, nulls_first, nkeys, text)
@@ -953,46 +942,15 @@ contains
     !> array can.
     module procedure parquet_prefetch_columns_string
         character(len=:), allocatable :: name_arr(:)
-        character(len=:), allocatable :: tok
-        integer :: i, start, ntok, maxlen, idx
-        logical :: at_boundary
 
-        ! Pass 1: count non-empty tokens and find the longest, so the packed
-        ! array's element length covers every name exactly.
-        ntok = 0
-        maxlen = 0
-        start = 1
-        do i = 1, len(names) + 1
-            at_boundary = (i > len(names))
-            if (.not. at_boundary) at_boundary = (names(i:i) == ',' .or. names(i:i) == ';')
-            if (at_boundary) then
-                tok = trim(adjustl(names(start:i-1)))
-                if (len(tok) > 0) then
-                    ntok = ntok + 1
-                    maxlen = max(maxlen, len(tok))
-                end if
-                start = i + 1
-            end if
-        end do
-
-        ! Pass 2: fill the array and hand off to the array form (which also
-        ! does the reader-open and column-existence checks, even for ntok == 0).
-        allocate(character(len=max(maxlen, 1)) :: name_arr(ntok))
-        idx = 0
-        start = 1
-        do i = 1, len(names) + 1
-            at_boundary = (i > len(names))
-            if (.not. at_boundary) at_boundary = (names(i:i) == ',' .or. names(i:i) == ';')
-            if (at_boundary) then
-                tok = trim(adjustl(names(start:i-1)))
-                if (len(tok) > 0) then
-                    idx = idx + 1
-                    name_arr(idx) = tok
-                end if
-                start = i + 1
-            end if
-        end do
-
+        ! The tokenizer lives in parquet_core (parquet_split_name_list) rather than here,
+        ! because parquet_tables' own name- and key-list forms split identically and two
+        ! copies of one punctuation convention is exactly the drift that would let
+        ! t%prefetch("a,,b") and parquet_prefetch_columns(rdr, "a,,b") disagree.
+        !
+        ! The array form still runs even for zero tokens: it does the reader-open and
+        ! column-existence checks, which an empty list must not skip.
+        call parquet_split_name_list(names, name_arr)
         call parquet_prefetch_columns_array(reader, name_arr)
     end procedure parquet_prefetch_columns_string
     !> Safety net for a reader whose handle is still open when it goes out of

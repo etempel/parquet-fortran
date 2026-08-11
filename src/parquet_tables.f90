@@ -67,7 +67,8 @@ module parquet_tables
         parquet_compose_read_qc, parquet_reader_set_filter, parquet_parse_maml, &
         parquet_get_metadata_items, parquet_get_qc_columns, parquet_get_physical_row_indices, &
         parquet_get_column_time_info, parquet_size_auto, parquet_reader_adopt_transform, &
-        parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos
+        parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, &
+        parquet_split_name_list, parquet_parse_sort_key
     ! The table layer's two solicited printers (%print_stat) and its own warnings go through the
     ! library's output channels rather than printing directly, so verbosity/message_stream apply
     ! here as everywhere -- see tools/check_source_conventions.py's `no direct printing` check.
@@ -440,6 +441,16 @@ module parquet_tables
         generic :: get_valid_mask => table_get_valid_mask, table_get_valid_mask_elem
         procedure :: generation => table_generation  !! Counter bumped by every structural change.
         procedure :: has_column => table_has_column  !! Whether a column of this name exists.
+        procedure, private :: missing_columns_string !! %missing_columns specific, separated string.
+        procedure, private :: missing_columns_array  !! %missing_columns specific, array of names.
+        !> Which of these columns the table does NOT have, as a packed array (zero-size when it
+        !! has them all). The non-aborting half of %require_columns.
+        generic :: missing_columns => missing_columns_string, missing_columns_array
+        procedure, private :: require_columns_string !! %require_columns specific, separated string.
+        procedure, private :: require_columns_array  !! %require_columns specific, array of names.
+        !> Aborts unless the table has every one of these columns, naming EVERY missing one --
+        !! not just the first, which is what a hand-written loop reports.
+        generic :: require_columns => require_columns_string, require_columns_array
         procedure, private :: kind_name => table_column_kind !! %kind specific, by name.
         procedure, private :: kind_at => table_column_kind_at !! %kind specific, by position.
         !> A column's PK_* kind discriminator -- named, or by 1-based position.
@@ -479,11 +490,15 @@ module parquet_tables
         procedure :: filename => table_filename      !! Copy out the file this table came from.
         procedure :: get_file_metadata => table_get_file_metadata !! One key from the file's metadata.
         ! --- residency control ---
-        procedure, private :: prefetch_one  !! %prefetch specific taking one column name.
-        procedure, private :: prefetch_many !! %prefetch specific taking an array of names.
+        procedure, private :: prefetch_string !! %prefetch specific taking a separated name string.
+        procedure, private :: prefetch_array  !! %prefetch specific taking an array of names.
         !> Reads the named column(s) now, instead of on first touch. Required before a parallel
         !! region: a first touch inside one is a hard error, since it would mutate shared state.
-        generic :: prefetch => prefetch_one, prefetch_many
+        generic :: prefetch => prefetch_string, prefetch_array
+        !> The same call as %prefetch, under the name that pairs with %materialize_all. Reaching
+        !! for the definitive-sounding %materialize_all when only a few columns are wanted reads
+        !! the whole file, silently; %materialize(names) is the one to find first.
+        generic :: materialize => prefetch_string, prefetch_array
         procedure :: materialize_all => table_materialize_every !! Read every column not yet read.
         procedure :: reload => table_reload           !! Re-read one column; force= to discard local edits.
         procedure :: evict_column => table_evict_column !! Drop a column's VALUES; force= if it holds local edits.
@@ -795,19 +810,34 @@ module parquet_tables
         procedure :: cast => table_cast                   !! Convert a column to another kind, in place.
         ! --- mutation: the row set itself -- every one of these DETACHES the table ---
         procedure :: filter_rows => table_filter_rows !! Keep only the rows a mask selects.
-        procedure :: sort_by => table_sort_by         !! Reorder rows by one or more key columns.
-        procedure :: top_n => table_top_n             !! Keep only the n best rows, in key order.
+        procedure, private :: table_sort_by           !! %sort_by specific, array of key names.
+        procedure, private :: table_sort_by_string    !! %sort_by specific, separated key string.
+        !> Reorders rows by one or more key columns. Detaching.
+        generic :: sort_by => table_sort_by, table_sort_by_string
+        procedure, private :: table_top_n             !! %top_n specific, array of key names.
+        procedure, private :: table_top_n_string      !! %top_n specific, separated key string.
+        !> Keeps only the n best rows, in key order. Detaching.
+        generic :: top_n => table_top_n, table_top_n_string
         ! --- the ORDER, without applying it: read-only, and they do NOT detach ---
         procedure, private :: table_argsort_by_i32    !! %argsort_by specific, int32 permutation.
         procedure, private :: table_argsort_by_i64    !! %argsort_by specific, int64 permutation.
+        procedure, private :: table_argsort_by_string_i32 !! %argsort_by specific, key string, int32.
+        procedure, private :: table_argsort_by_string_i64 !! %argsort_by specific, key string, int64.
         !> The row order the keys imply, without reordering anything. Unlike %sort_by the table
         !! stays attached, so this is how to read rows in an order while keeping the file.
-        generic :: argsort_by => table_argsort_by_i32, table_argsort_by_i64
+        generic :: argsort_by => table_argsort_by_i32, table_argsort_by_i64, &
+                                 table_argsort_by_string_i32, table_argsort_by_string_i64
         procedure, private :: table_argsort_partial_i32 !! %argsort_partial specific, int32 perm.
         procedure, private :: table_argsort_partial_i64 !! %argsort_partial specific, int64 perm.
+        procedure, private :: table_argsort_partial_string_i32 !! %argsort_partial, key string, int32.
+        procedure, private :: table_argsort_partial_string_i64 !! %argsort_partial, key string, int64.
         !> The `n` best rows in order, by selection rather than a full sort. Also non-mutating.
-        generic :: argsort_partial => table_argsort_partial_i32, table_argsort_partial_i64
-        procedure :: is_sorted_by => table_is_sorted_by !! Whether the rows are already in that order.
+        generic :: argsort_partial => table_argsort_partial_i32, table_argsort_partial_i64, &
+                                      table_argsort_partial_string_i32, table_argsort_partial_string_i64
+        procedure, private :: table_is_sorted_by        !! %is_sorted_by specific, array of key names.
+        procedure, private :: table_is_sorted_by_string !! %is_sorted_by specific, key string.
+        !> Whether the rows are already in that order.
+        generic :: is_sorted_by => table_is_sorted_by, table_is_sorted_by_string
         procedure, private :: table_delete_rows_i32   !! %delete_rows specific, int32 indices.
         procedure, private :: table_delete_rows_i64   !! %delete_rows specific, int64 indices.
         !> Removes the listed rows. A thin convenience over %filter_rows, and like it, detaching.
@@ -832,6 +862,10 @@ module parquet_tables
         !> Makes room for n rows in every resident column, so the appends that follow do not
         !! reallocate. %compact's counterpart; neither changes the row set, so neither detaches.
         generic :: reserve => table_reserve_i32, table_reserve_i64
+        !> Makes room for n COLUMNS, so that the %add_column calls that follow relocate nothing
+        !! and leave an outstanding %col pointer valid. See its own doc-comment for the guarantee.
+        procedure :: reserve_columns => table_reserve_columns
+        procedure :: column_capacity => table_column_capacity !! Column slots allocated, or spare.
         ! --- copying ---
         procedure :: clone => table_clone                     !! Independent deep copy of this table.
         procedure :: clone_structure => table_clone_structure !! Empty table with the same columns.
@@ -1558,6 +1592,49 @@ module parquet_tables
             character(len=*), intent(in) :: name     !! column name.
             logical :: found                         !! .true. if the table has it.
         end function table_has_column
+        !> Which of `names` the table does not have, as a packed array sized to the longest one
+        !! reported -- zero-size, `len=1`, when nothing is missing, so `size(absent) == 0` is the
+        !! test. Reads nothing: this is a metadata query, and a column's existence is a property
+        !! of the descriptor.
+        !!
+        !! Matching is EXACT, as `%has_column`'s is, never by struct-path prefix the way
+        !! `%prefetch` accepts one -- a required column is a specific column. Name a struct leaf
+        !! in full, or give it an internal name with a MAML `col_map:` remap.
+        !!
+        !! `parquet_row_index` counts as present on a file-backed table even before anything has
+        !! asked for it, exactly as `%has_column` reports it: the question is "can I use this
+        !! name?", and the answer is yes until the table detaches.
+        module subroutine missing_columns_array(self, names, absent)
+            class(parquet_table), intent(in) :: self               !! the table.
+            character(len=*), intent(in) :: names(:)               !! column names to look for.
+            character(len=:), allocatable, intent(out) :: absent(:) !! the ones that are not there.
+        end subroutine missing_columns_array
+        !> %missing_columns over one string of names separated by commas and/or semicolons
+        !! ("ra;dec, mag"), split by the same tokenizer %prefetch and parquet_prefetch_columns use.
+        module subroutine missing_columns_string(self, names, absent)
+            class(parquet_table), intent(in) :: self               !! the table.
+            character(len=*), intent(in) :: names                  !! names, comma/semicolon separated.
+            character(len=:), allocatable, intent(out) :: absent(:) !! the ones that are not there.
+        end subroutine missing_columns_string
+        !> Aborts unless the table has every one of `names`, naming **every** missing column
+        !! rather than only the first -- which is the whole point, since a hand-written
+        !! `%has_column` loop reports one name per run and a caller then fixes them one at a time.
+        !!
+        !! The message also echoes what was ASKED for, which is how it carries context without
+        !! taking a caller-supplied message string; both lists are truncated to a preview, because
+        !! interpolating unbounded caller text into an `error stop` corrupts the heap on ifx.
+        !!
+        !! Same exact matching and same `parquet_row_index` rule as `%missing_columns`, which does
+        !! the work.
+        module subroutine require_columns_array(self, names)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names(:) !! column names that must all exist.
+        end subroutine require_columns_array
+        !> %require_columns over one string of names separated by commas and/or semicolons.
+        module subroutine require_columns_string(self, names)
+            class(parquet_table), intent(in) :: self !! the table.
+            character(len=*), intent(in) :: names    !! names, comma/semicolon separated.
+        end subroutine require_columns_string
         !> A column's 1-based position among the table's columns, or 0 when there is no such
         !! column. The inverse of `%column_name`, and the cheap way to hoist a lookup out of a
         !! loop that then queries the same column by position.
@@ -3688,27 +3765,37 @@ module parquet_tables
             integer, intent(in) :: idx                        !! slot to make resident.
             character(len=*), intent(in) :: proc              !! calling procedure, for messages.
         end subroutine table_touch
-        !> Reads one named column now rather than on first touch. A column already resident is
+        !> Reads the named columns now rather than on first touch. A column already resident is
         !! left alone; an unsupported one is an error, since asking to read something unreadable
         !! is a mistake worth hearing about.
         !!
-        !! `name` may also be a STRUCT's own name, with no dot: every leaf under `name.` is then
-        !! read in ONE pass, which is what makes it worth having -- the reader decodes a struct as
-        !! one array shared by all its leaves, so reading them one at a time decodes it once per
-        !! leaf. A real column of that exact name always wins over the prefix reading, and a name
-        !! matching neither is a missing column reported the usual way.
-        module subroutine prefetch_one(self, name, found)
+        !! `names` may list SEVERAL columns separated by commas and/or semicolons
+        !! ("ra;dec, mag"), which is the same spelling parquet_prefetch_columns has taken since
+        !! 1.0.0 and goes through the same tokenizer. Blanks around a name are trimmed and an
+        !! empty token is ignored, so a trailing or repeated separator is harmless. Prefer this
+        !! over a fixed-length array constructor: a too-short declared length there silently
+        !! TRUNCATES a name rather than failing.
+        !!
+        !! Each token may also be a STRUCT's own name, with no dot: every leaf under `name.` is
+        !! then read in ONE pass, which is what makes it worth having -- the reader decodes a
+        !! struct as one array shared by all its leaves, so reading them one at a time decodes it
+        !! once per leaf. A real column of that exact name always wins over the prefix reading,
+        !! and a name matching neither is a missing column reported the usual way.
+        !!
+        !! A column whose own name contains a comma or a semicolon is reachable through the array
+        !! form only.
+        module subroutine prefetch_string(self, names, found)
             class(parquet_table), intent(in) :: self !! the table (fills through %cache).
-            character(len=*), intent(in) :: name     !! column to read.
-            logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
-        end subroutine prefetch_one
+            character(len=*), intent(in) :: names    !! column(s) to read, comma/semicolon separated.
+            logical, intent(out), optional :: found  !! present: .false. if ANY name was missing.
+        end subroutine prefetch_string
         !> Reads several named columns now, in one pass, so that a struct whose leaves are all
         !! named is decoded once rather than once per leaf.
-        module subroutine prefetch_many(self, names, found)
+        module subroutine prefetch_array(self, names, found)
             class(parquet_table), intent(in) :: self !! the table (fills through %cache).
             character(len=*), intent(in) :: names(:) !! columns to read.
             logical, intent(out), optional :: found  !! present: .false. if ANY name was missing.
-        end subroutine prefetch_many
+        end subroutine prefetch_array
         !> Reads every supported, file-backed column that is not resident yet -- the one-call way
         !! to make a whole table safe to use from a parallel region.
         module subroutine table_materialize_every(self)
@@ -5658,6 +5745,117 @@ module parquet_tables
             logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
             logical :: answer                                 !! .true. when already in that order.
         end function table_is_sorted_by
+        ! ---- Key lists written as ONE string ("ra,-dec") -------------------------------------
+        !
+        !> Every key-taking binding above also accepts its keys as a single string instead of an
+        !! array, which is what removes the `[character(len=9) :: "object_id", "filter", "mjd"]`
+        !! constructor from the commonest call in this whole layer. That constructor is not just
+        !! verbose: guessing its declared length too short SILENTLY TRUNCATES a name.
+        !!
+        !! **Separators** are commas and/or semicolons, interchangeably, with blanks around a key
+        !! trimmed and empty tokens ignored -- the same tokenizer, and so the same rules, as
+        !! `%prefetch` and `parquet_prefetch_columns`.
+        !!
+        !! **A key may carry its own direction**, in exactly the grammar a read-time
+        !! `parquet_sortkey%add` key uses (one parser backs both): `"<column> [asc|desc]"`,
+        !! case-insensitive, with a leading `-` as shorthand for descending. So
+        !! `t%sort_by("ra,-dec")` orders `ra` ascending and `dec` descending, and
+        !! `"ra asc, dec desc"` says the same thing longhand.
+        !!
+        !! **A direction token and `descending=` together are an error**, for the whole call --
+        !! including a redundant `asc`. The two are ways of saying one thing and can disagree; a
+        !! per-key rule would leave `descending(1)` governing one key and a token governing
+        !! another, which no reader can follow. Without any token, `descending=` works exactly as
+        !! it does on the array form.
+        !!
+        !! `nulls_first=` is orthogonal and always accepted: the grammar has no null-placement
+        !! token, matching `parquet_sortkey`.
+        !!
+        !! A column whose own name contains a comma, a semicolon, a leading `-` or a trailing
+        !! " asc"/" desc" is reachable through the array form only.
+        module subroutine table_sort_by_string(self, keys, descending, nulls_first)
+            class(parquet_table), intent(inout) :: self       !! the table.
+            character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+        end subroutine table_sort_by_string
+        !> %top_n over a string key list; see `table_sort_by_string` for the grammar.
+        module subroutine table_top_n_string(self, keys, n, descending, nulls_first)
+            class(parquet_table), intent(inout) :: self       !! the table.
+            character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
+            integer, intent(in) :: n                          !! rows to keep; clamped to %nrows().
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+        end subroutine table_top_n_string
+        !> %argsort_by over a string key list, int32 permutation; see `table_sort_by_string`.
+        module subroutine table_argsort_by_string_i32(self, keys, perm, descending, nulls_first, &
+                                                      group_offsets, group_nkeys)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
+            integer(int32), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+            integer(int32), allocatable, intent(out), optional :: group_offsets(:)
+                !! run boundaries: group g is perm(group_offsets(g) : group_offsets(g+1) - 1).
+            integer, intent(in), optional :: group_nkeys      !! leading keys a group is defined by.
+        end subroutine table_argsort_by_string_i32
+        !> %argsort_by over a string key list, int64 permutation; see `table_sort_by_string`.
+        module subroutine table_argsort_by_string_i64(self, keys, perm, descending, nulls_first, &
+                                                      group_offsets, group_nkeys)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the 1-based row order.
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+            integer(int64), allocatable, intent(out), optional :: group_offsets(:)
+                !! run boundaries: group g is perm(group_offsets(g) : group_offsets(g+1) - 1).
+            integer, intent(in), optional :: group_nkeys      !! leading keys a group is defined by.
+        end subroutine table_argsort_by_string_i64
+        !> %argsort_partial over a string key list, int32 permutation; see `table_sort_by_string`.
+        module subroutine table_argsort_partial_string_i32(self, keys, perm, n, descending, nulls_first)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
+            integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based row indices.
+            integer, intent(in) :: n                          !! rows to order; clamped to %nrows().
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+        end subroutine table_argsort_partial_string_i32
+        !> %argsort_partial over a string key list, int64 permutation; see `table_sort_by_string`.
+        module subroutine table_argsort_partial_string_i64(self, keys, perm, n, descending, nulls_first)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
+            integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based row indices.
+            integer, intent(in) :: n                          !! rows to order; clamped to %nrows().
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+        end subroutine table_argsort_partial_string_i64
+        !> %is_sorted_by over a string key list; see `table_sort_by_string` for the grammar.
+        module function table_is_sorted_by_string(self, keys, descending, nulls_first) result(answer)
+            class(parquet_table), intent(in) :: self          !! the table.
+            character(len=*), intent(in) :: keys              !! key columns, separated; primary first.
+            logical, intent(in), optional :: descending(:)    !! per key: .true. for descending.
+            logical, intent(in), optional :: nulls_first(:)   !! per key: .true. to put nulls first.
+            logical :: answer                                 !! .true. when already in that order.
+        end function table_is_sorted_by_string
+        !> Splits a string key list into key NAMES plus the per-key direction its tokens asked
+        !! for, refusing the token-plus-`descending=` conflict. Shared by all seven string
+        !! specifics so that one grammar, one conflict rule and one set of messages back every
+        !! spelling. `proc` names the caller in every message.
+        !!
+        !! `descending` comes back **unallocated when no token carried a direction**, which is how
+        !! each specific decides what to forward: an unallocated allocatable passed on as an
+        !! optional actual makes that dummy absent (F2018 15.5.2.12), so the caller's own
+        !! `descending=` is forwarded untouched in that case and the parsed one otherwise. The two
+        !! can never both apply -- that is the conflict this refuses.
+        module subroutine table_split_key_list(self, keys, proc, have_descending, names, descending)
+            class(parquet_table), intent(in) :: self             !! the table, for error context.
+            character(len=*), intent(in) :: keys                 !! the raw key string.
+            character(len=*), intent(in) :: proc                 !! calling binding, for messages.
+            logical, intent(in) :: have_descending               !! caller's present(descending).
+            character(len=:), allocatable, intent(out) :: names(:) !! one key name per token.
+            logical, allocatable, intent(out) :: descending(:)
+                !! parsed direction per name; unallocated when no token asked for one.
+        end subroutine table_split_key_list
         !> Removes the listed rows (int32 indices). Repeats are harmless -- a row named twice is
         !! removed once. Row-structural, so it DETACHES; an empty index list removes nothing and
         !! does not.
@@ -5728,6 +5926,57 @@ module parquet_tables
             class(parquet_table), intent(inout) :: self !! the table.
             integer(int64), intent(in) :: n             !! total rows to make room for.
         end subroutine table_reserve_i64
+        !> Makes room for `n` COLUMNS, and in doing so gives `%add_column` a guarantee it does not
+        !! otherwise have:
+        !!
+        !! **While spare column capacity remains, adding a column under a NEW name relocates no
+        !! existing column's storage, moves no existing column's slot position, and does not
+        !! advance `%generation()`.** A pointer taken from `%col`, a `parquet_table_col` handle
+        !! and a `parquet_table_row` handle all stay valid across such a call. A reservation
+        !! survives `%clone` and `%clone_structure`, so a copy starts with the same spare
+        !! capacity. Replacing an existing column (`force=.true.`) is **not** covered -- it frees
+        !! that column's storage -- and neither is any row-structural mutation.
+        !!
+        !! That is what makes the commonest derived-column idiom safe rather than merely
+        !! lucky. Without a reservation, an `%add_column` that happens to fill the slot array
+        !! reallocates it, and Fortran leaves a pointer's association status UNDEFINED across the
+        !! `MOVE_ALLOC` that does it -- code that usually works and is not permitted to:
+        !!
+        !!```fortran
+        !! call t%reserve_columns(t%ncols() + 2)   ! two derived columns coming
+        !! call t%col("mag_g", g)                  ! pointers taken up front...
+        !! call t%col("mag_r", r)
+        !! call t%add_column("g_minus_r", g - r)   ! ...and still valid here, by contract
+        !!```
+        !!
+        !! **Reserve first, take pointers second** -- the same rule `%reserve` (rows) follows.
+        !! Growing the capacity is itself a relocation, so this call invalidates every outstanding
+        !! pointer and advances `%generation()` when it actually grows; below the current capacity
+        !! it is a no-op, exactly as `%reserve` below the current row count is.
+        !!
+        !! `n` is the TOTAL capacity to make room for, not an increment. Deliberately a plain
+        !! default `integer` and not also an int64 form: a column count cannot exceed int32 -- Arrow's
+        !! own `Schema::num_fields()` is an `int32_t` and the writer already guards that ceiling --
+        !! so the dual-kind rule in CLAUDE.md does not apply. Refused on a shared table, like every
+        !! other structural change; does not detach.
+        module subroutine table_reserve_columns(self, n)
+            class(parquet_table), intent(inout) :: self !! the table.
+            integer, intent(in) :: n                    !! total column slots to make room for.
+        end subroutine table_reserve_columns
+        !> How many column slots are allocated (`%ncols()` of them in use), or -- with
+        !! `free=.true.` -- how many are spare.
+        !!
+        !! This is what `%reserve_columns` acts on, and the two are inverses: after
+        !! `call t%reserve_columns(n)` with `n` above the current capacity, `%column_capacity()`
+        !! is `n`. Capacity only ever grows: `%compact` releases row storage rather than slots,
+        !! and `%drop_column` keeps the slot it vacated.
+        !!
+        !! A metadata query -- it reads no column data.
+        module function table_column_capacity(self, free) result(n)
+            class(parquet_table), intent(in) :: self !! the table.
+            logical, intent(in), optional :: free    !! .true.: report the SPARE slots instead.
+            integer :: n                             !! slots allocated, or spare.
+        end function table_column_capacity
         !> Appends every row of another table. `other`'s columns must be a SUBSET of this
         !! table's, with matching kinds, widths and units; a column this table has and `other`
         !! does not is filled with nulls. A column `other` has and this table does not is an
@@ -6034,6 +6283,14 @@ module parquet_tables
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
             integer, intent(in) :: slot                       !! the newly added slot index.
         end subroutine cache_name_index_insert
+        !> Grows `cache%name_order`/`name_key` to hold at least `cap` entries, keeping whatever is
+        !! already indexed. Called by `%reserve_columns` so that the appends a reservation exists
+        !! to make cheap do not each reallocate the index instead. Cost only: the index holds no
+        !! column storage, so it has no bearing on a `%col` pointer's validity.
+        module subroutine cache_name_index_reserve(cache, cap)
+            type(parquet_table_cache), intent(inout) :: cache !! the column store.
+            integer, intent(in) :: cap                        !! entries to make room for.
+        end subroutine cache_name_index_reserve
         !> Resolves `name` to its 1-based slot index in `cache`, or 0 when absent. The one place
         !! a name becomes an index, shared by the table and by a row handle.
         module function cache_find(cache, name) result(idx)

@@ -58,6 +58,14 @@ module parquet
     private :: c_int
     private :: parquet_get_arrow_version, parquet_get_parquet_version
     private :: cversion
+    ! parquet_core has to make this public so the sibling parquet_tables module can split a
+    ! comma/semicolon name list the same way parquet_prefetch_columns does -- Fortran has no
+    ! package scope. It is plumbing, not API: one tokenizer shared by two layers so the two
+    ! spellings of a name list cannot disagree about punctuation.
+    private :: parquet_split_name_list
+    ! Same reason: parquet_tables parses the sort-key direction grammar ("ra,-dec") with
+    ! parquet_core's own parser rather than a second copy of it.
+    private :: parquet_parse_sort_key
     ! parquet_settings has to make these two public so the write path (a submodule of parquet_core,
     ! a different module) can reach them -- Fortran has no package scope. They are plumbing, not
     ! API, so the facade keeps them out of the namespace `use parquet` hands a user, exactly as it

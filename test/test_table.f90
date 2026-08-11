@@ -240,6 +240,20 @@ contains
             new_unittest("compact is a no-op on a table read from a file", test_compact_noop_after_read), &
             new_unittest("compact releases what appending left behind", test_compact_after_appends), &
             new_unittest("reserve removes the reallocations that follow it", test_table_reserve), &
+            new_unittest("reserve_columns keeps a %col pointer valid across add_column", &
+                test_reserve_columns_guarantee), &
+            new_unittest("column_capacity agrees with ncols and with reserve_columns", &
+                test_column_capacity), &
+            new_unittest("the no-relocation guarantee excludes force=, and survives a clone", &
+                test_reserve_columns_limits), &
+            new_unittest("column and row handles follow the no-relocation guarantee", &
+                test_reserve_columns_handles), &
+            new_unittest("materialize is prefetch, and both take a separated name list", &
+                test_materialize_is_prefetch), &
+            new_unittest("require_columns and missing_columns report every missing name", &
+                test_require_and_missing_columns), &
+            new_unittest("a string key list matches the array form, directions included", &
+                test_key_list_string_form), &
             new_unittest("compact leaves an unread column unread and attached", test_compact_keeps_lazy), &
             new_unittest("a clone is independent, stays lazy and keeps the row scope", test_clone), &
             new_unittest("extra: remap: renames a file column for reading", test_remap_basic), &
@@ -8463,6 +8477,295 @@ contains
             "a reserve below the current row count must be a no-op")
     end subroutine test_table_reserve
     !
+    !> `%reserve_columns`' published guarantee, in the only form that actually proves it: the
+    !! pointer is USED after the adds, not merely the counter inspected.
+    !!
+    !! Both arms are load-bearing. Without the reserve arm the test says nothing about the
+    !! guarantee; without the negative control it passes just as happily against an
+    !! implementation that never bumps the counter at all, which would be a far worse bug than
+    !! the one the guarantee fixes.
+    subroutine test_reserve_columns_guarantee(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64), pointer :: p(:)
+        real(real64), allocatable :: got(:)
+        integer(int64) :: gen0
+        integer :: i
+        character(len=32) :: nm
+        !
+        ! --- with a reservation: nothing moves, and the pointer still works -------------------
+        !
+        ! Filled to capacity BEFORE reserving, deliberately. A fresh table opens with spare
+        ! headroom, so a reserve inside it changes nothing and the adds that follow would fit
+        ! anyway -- this test would then pass against a %reserve_columns that did nothing at all,
+        ! which is a mutation that really did survive an earlier version of it.
+        call parquet_new_table(t)
+        call t%add_column("base", [1.0_real64, 2.0_real64, 3.0_real64])
+        do i = t%ncols() + 1, t%column_capacity()
+            write(nm, "('pad', I0)") i
+            call t%add_column(trim(nm), [0.0_real64, 0.0_real64, 0.0_real64])
+        end do
+        call check(error, t%column_capacity(free=.true.) == 0, &
+            "the table must be at capacity, or the reservation under test does nothing")
+        if (allocated(error)) return
+        call t%reserve_columns(t%column_capacity() + 4)
+        call t%col("base", p)
+        gen0 = t%generation()
+        do i = 1, 4
+            write(nm, "('derived', I0)") i
+            call t%add_column(trim(nm), [real(i, real64), 0.0_real64, 0.0_real64])
+        end do
+        call check(error, t%generation() == gen0, &
+            "an %add_column within reserved capacity must not advance the generation counter")
+        if (allocated(error)) return
+        ! The counter not moving is only half of it: the pointer has to still ALIAS the column,
+        ! which a write-then-read through the table proves and an assertion on the counter cannot.
+        p(2) = 42.5_real64
+        call t%get("base", got)
+        call check(error, got(2) == 42.5_real64, &
+            "a %col pointer taken before reserved %add_column calls must still alias the column")
+        if (allocated(error)) return
+        !
+        ! --- negative control: past capacity, the counter MUST move --------------------------
+        call parquet_new_table(t)
+        call t%add_column("base", [1.0_real64, 2.0_real64, 3.0_real64])
+        gen0 = t%generation()
+        do i = 1, t%column_capacity() + 1
+            write(nm, "('fill', I0)") i
+            call t%add_column(trim(nm), [real(i, real64), 0.0_real64, 0.0_real64])
+        end do
+        call check(error, t%generation() > gen0, &
+            "adding past the column capacity must advance the generation counter")
+    end subroutine test_reserve_columns_guarantee
+    !
+    !> `%column_capacity` is what a caller sizes a reservation against, so its two forms have to
+    !! agree with `%ncols` and with `%reserve_columns` exactly.
+    subroutine test_column_capacity(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer :: cap0
+        !
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        cap0 = t%column_capacity()
+        call check(error, cap0 >= t%ncols(), "capacity must be at least the column count")
+        if (allocated(error)) return
+        call check(error, t%column_capacity(free=.true.) == cap0 - t%ncols(), &
+            "free capacity must be the total less the columns in use")
+        if (allocated(error)) return
+        ! `n` is a TOTAL, not an increment, so a reserve below the current capacity does nothing
+        ! -- the same rule %reserve (rows) follows.
+        call t%reserve_columns(1)
+        call check(error, t%column_capacity() == cap0, &
+            "reserve_columns below the current capacity must be a no-op")
+        if (allocated(error)) return
+        call t%reserve_columns(cap0 + 7)
+        call check(error, t%column_capacity() == cap0 + 7, &
+            "reserve_columns above the current capacity must grow it to exactly that total")
+        if (allocated(error)) return
+        call check(error, t%column_capacity(free=.true.) == cap0 + 7 - t%ncols(), &
+            "free capacity must follow a reservation")
+    end subroutine test_column_capacity
+    !
+    !> Two things the guarantee deliberately does NOT cover, and a copy that does.
+    !!
+    !! `force=.true.` frees the replaced column's storage, so no amount of reserved capacity makes
+    !! a pointer into it survive -- stating the guarantee without this arm would over-promise. The
+    !! clone arm is the opposite case: a reservation is part of what a copy inherits, or a caller
+    !! who reserved and then cloned would be back to relocating with nothing to say so.
+    subroutine test_reserve_columns_limits(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, c
+        integer(int64) :: gen0
+        integer :: cap
+        !
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call t%reserve_columns(t%ncols() + 8)
+        gen0 = t%generation()
+        call t%add_column("a", [7_int32, 8_int32], force=.true.)
+        call check(error, t%generation() > gen0, &
+            "a force=.true. replace frees the column's storage, so it must still bump the " // &
+            "generation counter however much capacity is spare")
+        if (allocated(error)) return
+        !
+        cap = t%column_capacity()
+        call t%clone(c)
+        call check(error, c%column_capacity() >= cap, &
+            "a clone must inherit at least the source's column capacity")
+        if (allocated(error)) return
+        call t%clone_structure(c)
+        call check(error, c%column_capacity() >= cap, &
+            "clone_structure must inherit the source's column capacity too")
+    end subroutine test_reserve_columns_limits
+    !
+    !> A column handle and a row handle both key on the generation counter, so the guarantee
+    !! reaches them as well -- and must stop reaching them the moment the array actually grows.
+    subroutine test_reserve_columns_handles(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        type(parquet_table_row) :: r
+        integer(int32) :: v
+        integer :: i
+        character(len=32) :: nm
+        !
+        call parquet_new_table(t)
+        call t%add_column("a", [10_int32, 20_int32])
+        call t%reserve_columns(t%ncols() + 3)
+        call t%column("a", c)
+        r = t%row(2)
+        call t%add_column("b", [1_int32, 2_int32])
+        call check(error, c%is_valid(), "a column handle must survive an add within capacity")
+        if (allocated(error)) return
+        call check(error, r%is_valid(), "a row handle must survive an add within capacity")
+        if (allocated(error)) return
+        ! Still correct, not merely still "valid": the handle must read the column it named.
+        call c%get(1, v)
+        call check(error, v == 10_int32, "the surviving column handle must still read its column")
+        if (allocated(error)) return
+        !
+        do i = 1, t%column_capacity() + 1
+            write(nm, "('fill', I0)") i
+            call t%add_column(trim(nm), [1_int32, 2_int32])
+        end do
+        call check(error, .not. c%is_valid(), &
+            "a column handle must go stale once an add grows the slot array")
+        if (allocated(error)) return
+        call check(error, .not. r%is_valid(), &
+            "a row handle must go stale once an add grows the slot array")
+    end subroutine test_reserve_columns_handles
+    !
+    !> `%materialize` is a second spelling of `%prefetch`, sharing its specifics -- so the two
+    !! cannot drift, and the comma form reaches both.
+    subroutine test_materialize_is_prefetch(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, u
+        character(len=*), parameter :: f = "test_run/table_materialize_synonym.parquet"
+        logical :: ok
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%materialize("i32,f64")
+        call check(error, t%residency("i32") == RES_FULL .and. t%residency("f64") == RES_FULL, &
+            "%materialize with a comma list must read every named column")
+        if (allocated(error)) return
+        ! And only those: the point of the column-list form over %materialize_all is that it does
+        ! not read the whole file.
+        call check(error, t%residency("i64") == RES_EMPTY, &
+            "%materialize must not read a column that was not named")
+        if (allocated(error)) return
+        !
+        call parquet_open_table(u, f)
+        call u%prefetch([character(len=3) :: "i32", "f64"])
+        call check(error, u%residency("i32") == t%residency("i32") .and. &
+                          u%residency("i64") == t%residency("i64"), &
+            "%materialize(string) and %prefetch(array) must leave the same columns resident")
+        if (allocated(error)) return
+        ! Semicolons, blanks and an empty token are all accepted, exactly as the reader-level
+        ! parquet_prefetch_columns has accepted them since 1.0.0.
+        call parquet_open_table(u, f)
+        call u%materialize(" i32 ; f64 ,")
+        call check(error, u%residency("f64") == RES_FULL, &
+            "the separated form must tolerate semicolons, blanks and a trailing separator")
+        if (allocated(error)) return
+        ! found= is the conjunction over every token, as it is for the array form.
+        call parquet_open_table(u, f)
+        call u%materialize("i32,nope", found=ok)
+        call check(error, .not. ok, "found= must report .false. when any named column is missing")
+        if (allocated(error)) return
+        call check(error, u%residency("i32") == RES_FULL, &
+            "a missing name must not stop the names that do exist from being read")
+    end subroutine test_materialize_is_prefetch
+    !
+    !> `%require_columns`/`%missing_columns`: the non-aborting half, both spellings, and the two
+    !! semantic rules that are easy to get wrong (exact matching, and the virtual row index).
+    subroutine test_require_and_missing_columns(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=:), allocatable :: absent(:)
+        character(len=*), parameter :: f = "test_run/table_require_columns.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        !
+        call t%missing_columns([character(len=3) :: "i32", "f64"], absent)
+        call check(error, size(absent) == 0, &
+            "missing_columns must return a zero-size array when nothing is missing")
+        if (allocated(error)) return
+        !
+        call t%missing_columns("i32,nope,f64,alsonope", absent)
+        call check(error, size(absent) == 2, "missing_columns must report EVERY missing name")
+        if (allocated(error)) return
+        call check(error, trim(absent(1)) == "nope" .and. trim(absent(2)) == "alsonope", &
+            "missing_columns must report the missing names, in the order they were asked for")
+        if (allocated(error)) return
+        ! Sized to the longest name reported, so a packed result cannot truncate one.
+        call check(error, len(absent) == len("alsonope"), &
+            "missing_columns must size its result to the longest name it reports")
+        if (allocated(error)) return
+        !
+        ! %require_columns passes silently when everything is there; the abort is an error
+        ! scenario, since it kills the process.
+        call t%require_columns("i32;f64")
+        call t%require_columns([character(len=3) :: "i32", "f64"])
+        !
+        ! parquet_row_index counts as present on a file-backed table even before anything asks
+        ! for it -- the same answer %has_column gives, because the question is "can I use this
+        ! name?".
+        call t%missing_columns(PARQUET_ROW_INDEX, absent)
+        call check(error, size(absent) == 0, &
+            "the reserved row-index column must count as present on a file-backed table")
+        if (allocated(error)) return
+        ! Metadata only: asking must not read anything.
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "missing_columns/require_columns must not read any column")
+    end subroutine test_require_and_missing_columns
+    !
+    !> A string key list must mean exactly what the array form means, including the direction
+    !! tokens -- which is asserted against an independently built array call rather than against
+    !! itself, so a split that dropped or reordered a key fails.
+    subroutine test_key_list_string_form(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, u
+        integer(int64), allocatable :: pa(:), pb(:)
+        character(len=*), parameter :: f = "test_run/table_key_list_string.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call parquet_open_table(u, f)
+        !
+        ! Two keys that genuinely disagree, so dropping the second would change the answer.
+        call t%argsort_by("b,i32", pa)
+        call u%argsort_by([character(len=3) :: "b", "i32"], pb)
+        call check(error, size(pa) == size(pb), "the string key form must order the same rows")
+        if (allocated(error)) return
+        call check(error, all(pa == pb), &
+            "a comma key list must produce the same order as the equivalent array")
+        if (allocated(error)) return
+        !
+        ! A direction token means what it means for a read-time parquet_sortkey key: "-i32" is
+        ! descending, and so is "i32 desc".
+        call t%argsort_by("b,-i32", pa)
+        call u%argsort_by([character(len=3) :: "b", "i32"], pb, descending=[.false., .true.])
+        call check(error, all(pa == pb), &
+            "a '-' direction token must match the equivalent descending= argument")
+        if (allocated(error)) return
+        call t%argsort_by("b asc; i32 desc", pa)
+        call check(error, all(pa == pb), &
+            "the longhand direction words must match, and a semicolon must separate keys")
+        if (allocated(error)) return
+        !
+        ! Without any token, descending= still applies exactly as it does to the array form.
+        call t%argsort_by("b,i32", pa, descending=[.false., .true.])
+        call check(error, all(pa == pb), &
+            "descending= must still apply to a string key list that carries no direction token")
+        if (allocated(error)) return
+        !
+        call check(error, t%is_sorted_by("i32") .eqv. u%is_sorted_by(["i32"]), &
+            "a single-key string must take the same path as a one-element array")
+    end subroutine test_key_list_string_form
+    !
     !> `%compact` must not read the file. A column nobody has touched has no storage to shrink,
     !! and touching it would defeat the laziness the table exists to provide.
     subroutine test_compact_keeps_lazy(error)
@@ -9669,9 +9972,10 @@ contains
     !! by one exactly as it does after a `%get`.
     subroutine test_prefetch_row_index(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_table) :: t
+        type(parquet_table) :: t, u
         integer(int64), allocatable :: ri(:)
         integer :: before, i
+        logical :: ok
         character(len=*), parameter :: f = "test_run/table_prefetch_rowidx.parquet"
         !
         call write_basic_fixture(f)
@@ -9691,6 +9995,18 @@ contains
         ! A second prefetch is a no-op, like any other already-resident column.
         call t%prefetch(PARQUET_ROW_INDEX)
         call check(error, t%ncols() == before + 1, "a second prefetch should not add another slot")
+        if (allocated(error)) return
+        ! The reserved name resolves during the prefetch itself -- there is no slot to find until
+        ! that call creates one -- so `found=` has to report the resolve's own answer rather than
+        ! "no column of this name". Asserted on a FRESH table, where the column is still virtual:
+        ! on the table above it already has a slot and would be found the ordinary way.
+        call parquet_open_table(u, f)
+        call u%prefetch(PARQUET_ROW_INDEX, found=ok)
+        call check(error, ok, &
+            "prefetching the still-virtual row-index column must report found=.true.")
+        if (allocated(error)) return
+        call check(error, u%residency(PARQUET_ROW_INDEX) == RES_FULL, &
+            "...and must actually materialize it")
     end subroutine test_prefetch_row_index
     !
     !> `parquet_write_table` parses a schema the caller built but never parsed.
@@ -10184,16 +10500,21 @@ contains
         integer :: op, i
         !> Structural entry points, plus the six calls that must NOT bump. Raise this and add a
         !! `case` below when a new structural operation is added.
-        integer, parameter :: NBUMP = 14, NNOOP = 6
+        integer, parameter :: NBUMP = 15, NNOOP = 7
         !> Named so a failure says WHICH entry point stopped bumping, rather than only that one did.
-        character(len=18), parameter :: bump_names(NBUMP) = [ &
-            "add_column        ", "drop_column       ", "rename_column     ", "copy_column       ", &
-            "cast              ", "evict_column      ", "reload            ", "filter_rows       ", &
-            "sort_by           ", "delete_rows       ", "truncate          ", "append            ", &
-            "append_null_rows  ", "write_table       "]
-        character(len=18), parameter :: noop_names(NNOOP) = [ &
-            "truncate past end ", "filter_rows all   ", "delete_rows none  ", "append_null_rows 0", &
-            "sort_by ordered   ", "append zero rows  "]
+        character(len=23), parameter :: bump_names(NBUMP) = [ &
+            "add_column growing     ", "drop_column            ", "rename_column          ", &
+            "copy_column            ", &
+            "cast                   ", "evict_column           ", "reload                 ", &
+            "filter_rows            ", &
+            "sort_by                ", "delete_rows            ", "truncate               ", &
+            "append                 ", &
+            "append_null_rows       ", "write_table            ", "reserve_columns growing"]
+        character(len=23), parameter :: noop_names(NNOOP) = [ &
+            "truncate past end      ", "filter_rows all        ", "delete_rows none       ", &
+            "append_null_rows 0     ", &
+            "sort_by ordered        ", "append zero rows       ", "add_column in capacity "]
+        character(len=32) :: fillname
         character(len=*), parameter :: f = "test_run/table_generation_sweep.parquet"
         character(len=*), parameter :: fout = "test_run/table_generation_sweep_out.parquet"
         !
@@ -10210,6 +10531,15 @@ contains
             ! operation under test can be responsible for the bump.
             select case (op)
             case (1)
+                ! Filled to capacity FIRST, so that the add under test is one that genuinely has
+                ! to grow the slot array. Since %reserve_columns, an add that fits in the spare
+                ! capacity every table opens with deliberately does NOT bump -- that is the
+                ! guarantee, and its own arm is the no-op sweep below. Without this fill the case
+                ! would silently be testing the wrong one of the two.
+                do i = t%ncols() + 1, t%column_capacity()
+                    write(fillname, "('fill', I0)") i
+                    call t%add_column(trim(fillname), extra)
+                end do
                 gen0 = t%generation()
                 call t%add_column("extra", extra)
             case (2)
@@ -10263,6 +10593,12 @@ contains
                 ! nothing must not bump, which is the neighbouring test's own assertion.
                 gen0 = t%generation()
                 call parquet_write_table(t, fout, sch, overwrite=.true.)
+            case (15)
+                ! The counterpart of case (1): reserving BEYOND the current capacity relocates
+                ! every descriptor, so it must bump exactly as a growing add does. Reserving
+                ! within it is the no-op arm below.
+                gen0 = t%generation()
+                call t%reserve_columns(t%column_capacity() + 4)
             end select
             call check(error, t%generation() > gen0, &
                 "%" // trim(bump_names(op)) // " must advance the generation counter -- " // &
@@ -10294,9 +10630,18 @@ contains
             case (6)
                 call t%clone_structure(batch)
                 call t%append(batch)
+            case (7)
+                ! %reserve_columns' guarantee, in the only form the counter can express it: an
+                ! add that fits in the capacity already allocated relocates nothing, so it must
+                ! NOT bump -- otherwise a caller following the documented re-fetch recipe
+                ! re-fetches on every derived column and the reservation buys nothing. The
+                ! reserve itself is done before gen0 is read, since that call does bump.
+                call t%reserve_columns(t%ncols() + 4)
+                gen0 = t%generation()
+                call t%add_column("within_capacity", extra)
             end select
             call check(error, t%generation() == gen0, &
-                "%" // trim(noop_names(op)) // " changes no row, so it must not advance the " // &
+                "%" // trim(noop_names(op)) // " relocates nothing, so it must not advance the " // &
                 "generation counter")
             if (allocated(error)) return
         end do
@@ -11726,10 +12071,13 @@ contains
     !! * **A lazy first touch does NOT invalidate a sibling handle.** `table_touch` deliberately
     !!   leaves `generation` alone, and if it did not, the conservative staleness rule would
     !!   swallow the ordinary case of reading a second column.
-    !! * **The first read of `parquet_row_index` DOES invalidate every handle**, because it
-    !!   materialises a slot through `table_new_slot`, which bumps `generation`. This is the case a
-    !!   caller cannot predict from their own code, and it is the reason `%is_valid()` exists as a
-    !!   public predicate rather than the rule just being documented.
+    !! * **The first read of `parquet_row_index` materialises a slot** through `table_new_slot`,
+    !!   so whether it invalidates depends on whether that had to GROW the slot array. Within the
+    !!   spare capacity every table opens with it does not, and `%reserve_columns`' guarantee says
+    !!   so: nothing moved, so both outstanding handles stay valid AND keep reading their own
+    !!   columns. Past capacity it would relocate every descriptor and both would go stale. This
+    !!   is the case a caller cannot predict from their own code, and it is the reason
+    !!   `%is_valid()` exists as a public predicate rather than the rule just being documented.
     subroutine test_col_handle_file_backed(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         character(len=*), parameter :: f = "test_run/table_colhandle_file.parquet"
@@ -11766,14 +12114,26 @@ contains
         call check(error, abs(v - 3.0_real64 * 2.25_real64) < 1.0e-12_real64, &
             "and the handle still reads correctly afterwards")
         if (allocated(error)) return
-        ! --- but parquet_row_index materialises a NEW SLOT, which does invalidate ---
+        ! --- parquet_row_index materialises a NEW SLOT, and whether that invalidates depends on
+        !     whether the slot array had to GROW for it. This table was opened with the usual
+        !     headroom, so it did not, and the no-relocation guarantee applies: nothing moved, so
+        !     both handles are still exactly as correct as they were.
+        call check(error, t%column_capacity(free=.true.) > 0, &
+            "this fixture is meant to have spare column capacity for the row index to land in")
+        if (allocated(error)) return
         call t%column(PARQUET_ROW_INDEX, ri)
         call check(error, ri%is_valid(), "the row-index handle itself is valid")
         if (allocated(error)) return
-        call check(error, .not. c%is_valid(), &
-            "the first read of parquet_row_index adds a column, so it invalidates outstanding handles")
+        call check(error, c%is_valid(), &
+            "materialising parquet_row_index within spare capacity relocates nothing, so an " // &
+            "outstanding handle stays valid")
         if (allocated(error)) return
-        call check(error, .not. other%is_valid(), "including the sibling handle")
+        call check(error, other%is_valid(), "including the sibling handle")
+        if (allocated(error)) return
+        ! Still CORRECT, not merely still "valid" -- the slot it named must not have moved.
+        call c%get(4_int64, v)
+        call check(error, abs(v - 4.0_real64 * 2.25_real64) < 1.0e-12_real64, &
+            "and the surviving handle still reads its own column")
         if (allocated(error)) return
         call ri%get(1_int64, idx)
         call check(error, idx == 1_int64, "the row-index handle reads the file row number")

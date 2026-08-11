@@ -844,6 +844,14 @@ program error_scenarios
         call scenario_columns_append_row_of_width_mismatch()
     case ("columns_append_row_of_row_out_of_range")
         call scenario_columns_append_row_of_row_out_of_range()
+    case ("columns_element_index_out_of_range")
+        call scenario_columns_element_index_out_of_range()
+    case ("columns_set_validity_elem_shape_mismatch")
+        call scenario_columns_set_validity_elem_shape_mismatch()
+    case ("columns_set_validity_row_count_mismatch")
+        call scenario_columns_set_validity_row_count_mismatch()
+    case ("columns_clear_null_elem_temporal")
+        call scenario_columns_clear_null_elem_temporal()
     case ("table_append_row_validates_first")
         call scenario_table_append_row_validates_first()
     case ("columns_append_width_mismatch")
@@ -9925,6 +9933,88 @@ contains
         call col%get_at(99_int64, v)   ! index 99 > nrows 3 -> aborts
         print '(a,f0.1)', "unexpectedly read an out-of-range row: ", v
     end subroutine scenario_columns_get_at_index_out_of_range
+
+    !> The ELEMENT axis has its own guard and its own message, deliberately different from the row
+    !! one: the commonest way to get this wrong is to pass a FLAT element position where a row and
+    !! an element index were wanted, and on a width-2 column that flat position is a perfectly
+    !! valid row index, so a shared message would send the reader looking at the wrong axis.
+    !!
+    !! Element 3 of a width-2 column is asked for AFTER a valid `(2, 2)` read, which is the
+    !! negative control -- a guard that rejected every element index would abort on that instead
+    !! and the scenario would fail with the wrong output.
+    subroutine scenario_columns_element_index_out_of_range()
+        type(parquet_column) :: col
+        integer(int32) :: v
+        call col%init(PK_INT32_VEC, 3_int64, 2_int32)
+        call col%set_at(2_int64, [10_int32, 20_int32])
+        call col%get_elem(2_int64, 2_int64, v)          ! in range: must NOT abort
+        print '(a,i0)', "read the last element of row 2: ", v
+        call col%get_elem(2_int64, 3_int64, v)          ! element 3 of a width-2 column -> aborts
+        print '(a,i0)', "unexpectedly read an out-of-range element: ", v
+    end subroutine scenario_columns_element_index_out_of_range
+
+    !> A rank-2 validity mask is per ELEMENT and must be shaped exactly (width, nrows). Accepting a
+    !! mismatched one would read the mask off its own edge, or -- worse, and the reason the check is
+    !! on both extents rather than on the total size -- silently transpose a square mask.
+    !!
+    !! The correctly-shaped call first is the negative control.
+    subroutine scenario_columns_set_validity_elem_shape_mismatch()
+        type(parquet_column) :: col
+        logical :: ok_mask(2, 3), bad_mask(3, 2)
+        call col%init(PK_INT32_VEC, 3_int64, 2_int32)
+        ok_mask = .true.
+        ok_mask(1, 2) = .false.
+        call col%set_validity(ok_mask)                  ! correctly shaped: must NOT abort
+        print '(a,l1)', "the correctly shaped mask was accepted, row 2 null: ", col%is_null(2_int64)
+        bad_mask = .true.
+        bad_mask(1, 1) = .false.
+        call col%set_validity(bad_mask)                 ! (3, 2) on a (2, 3) column -> aborts
+        print '(a)', "unexpectedly accepted a transposed element mask"
+    end subroutine scenario_columns_set_validity_elem_shape_mismatch
+
+    !> A rank-1 validity mask is per ROW and must have exactly nrows entries. The message names both
+    !! counts, because the usual cause is a mask built for a different column and the two numbers
+    !! are what identify which.
+    !!
+    !! The correctly-sized call first is the negative control.
+    subroutine scenario_columns_set_validity_row_count_mismatch()
+        type(parquet_column) :: col
+        logical :: ok_mask(3), bad_mask(5)
+        call col%init(PK_INT32, 3_int64)
+        call col%set_all([1_int32, 2_int32, 3_int32])
+        ok_mask = [.true., .false., .true.]
+        call col%set_validity(ok_mask)                  ! correctly sized: must NOT abort
+        print '(a,l1)', "the correctly sized mask was accepted, row 2 null: ", col%is_null(2_int64)
+        bad_mask = .true.
+        call col%set_validity(bad_mask)                 ! 5 entries for 3 rows -> aborts
+        print '(a)', "unexpectedly accepted a row mask of the wrong length"
+    end subroutine scenario_columns_set_validity_row_count_mismatch
+
+    !> A temporal element carries its own null state, so there is no bitmap bit to clear and no way
+    !! to make it valid without giving it a value -- `%clear_null` would have to invent one. It
+    !! therefore refuses rather than silently leaving the element null while reporting it valid,
+    !! which is what a no-op implementation would do.
+    !!
+    !! The same call on a bitmap kind first is the negative control: clear_null is a perfectly
+    !! ordinary operation there, so a refusal that fired for every kind could not pass this.
+    subroutine scenario_columns_clear_null_elem_temporal()
+        type(parquet_column) :: num, col
+        type(parquet_date) :: d(2)
+        integer :: i
+        call num%init(PK_INT32, 2_int64)
+        call num%set_all([1_int32, 2_int32])
+        call num%set_null(2_int64, 1_int64)
+        call num%clear_null(2_int64, 1_int64)           ! a bitmap kind: must NOT abort
+        print '(a,l1)', "cleared a bitmap column's element null, still null: ", num%is_null(2_int64, 1_int64)
+        do i = 1, 2
+            call d(i)%set(2026, 8, 10 + i)
+        end do
+        call col%init(PK_DATE, 2_int64)
+        call col%set_all(d)
+        call col%set_null(2_int64, 1_int64)
+        call col%clear_null(2_int64, 1_int64)           ! a temporal element -> aborts
+        print '(a)', "unexpectedly cleared a temporal element's null without writing a value"
+    end subroutine scenario_columns_clear_null_elem_temporal
 
     !> append requires identical kinds: silently widening an int32 source into a float64 target
     !! would change the target column's storage kind, which section E of feature_table.md rules

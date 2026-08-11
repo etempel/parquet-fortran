@@ -109,7 +109,31 @@ contains
             new_unittest("shrink_to_fit copies the values back on every kind", &
                 test_shrink_to_fit_every_kind), &
             new_unittest("append_row_of copies a row and its nulls on every kind", &
-                test_append_row_of_every_kind) &
+                test_append_row_of_every_kind), &
+            new_unittest("get_elem/set_elem address one element of a string vector", &
+                test_string_vector_elem_access), &
+            new_unittest("reserve accepts a default-kind integer and covers a string column", &
+                test_reserve_int32_and_string), &
+            new_unittest("shrink_to_fit trims a bitmap left oversized by the shrink", &
+                test_shrink_to_fit_trims_bitmap), &
+            new_unittest("paste clears a validity range spanning several bitmap blocks", &
+                test_paste_clears_multi_block_range), &
+            new_unittest("ensure_validity pre-allocates a string column's own validity", &
+                test_ensure_validity_string), &
+            new_unittest("the element form of the validity API works on a scalar temporal kind", &
+                test_temporal_scalar_element_validity), &
+            new_unittest("clear_null(i, e) marks one string element valid", &
+                test_clear_null_string_element), &
+            new_unittest("row_validity/element_validity cover every temporal kind", &
+                test_temporal_bulk_validity_every_kind), &
+            new_unittest("set_validity writes an element mask on every temporal kind", &
+                test_set_validity_elems_temporal), &
+            new_unittest("set_validity writes a row mask on the element-carried kinds", &
+                test_set_validity_rows_element_carried), &
+            new_unittest("a temporal column's null cache is read, not rescanned, while clean", &
+                test_temporal_null_cache_is_read_when_clean), &
+            new_unittest("an all-zero bitmap reports no nulls without dropping it", &
+                test_all_zero_bitmap_reports_no_nulls) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -3426,5 +3450,620 @@ contains
         end do
         call check(error, .true., "every array kind copies one row, and its null state, through append_row_of")
     end subroutine test_append_row_of_every_kind
+    !
+    ! ==================================================================================
+    ! Paths reached only through the type-bound bindings, or only on one kind
+    ! ==================================================================================
+    !
+    !> `%get_elem`/`%set_elem` on a PK_STRING_VEC column. The string kinds keep their storage in an
+    !! embedded parquet_string_column indexed by a FLAT element position, so the element form has
+    !! to compute `(i-1)*width + e` itself rather than indexing a rank-2 array the way every other
+    !! vector kind does -- which is exactly the arithmetic a test that only ever asks for element 1,
+    !! or only ever reads row 1, cannot tell apart from a stride of zero.
+    !!
+    !! Every element gets a distinct value for that reason, and the assertions cross both axes.
+    subroutine test_string_vector_elem_access(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        character(len=6) :: vals(3, 4)
+        character(len=:), allocatable :: s
+        integer :: e, i
+        !
+        do i = 1, 4
+            do e = 1, 3
+                write(vals(e, i), '("r", i0, "e", i0)') i, e
+            end do
+        end do
+        call c%init(PK_STRING_VEC, 4_int64, 3_int32)
+        call c%set_all(vals)
+        !
+        call c%get_elem(4_int64, 3_int64, s)
+        call check(error, s == "r4e3", "get_elem must reach the last element of the last row")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 1_int64, s)
+        call check(error, s == "r2e1", "get_elem must reach the first element of an interior row")
+        if (allocated(error)) return
+        call c%get_elem(1_int64, 2_int64, s)
+        call check(error, s == "r1e2", "get_elem must reach an interior element of the first row")
+        if (allocated(error)) return
+        !
+        call c%set_elem(3_int64, 2_int64, "written")
+        call c%get_elem(3_int64, 2_int64, s)
+        call check(error, s == "written", "set_elem must write the element get_elem reads back")
+        if (allocated(error)) return
+        ! The neighbours on both axes must be untouched -- a wrong stride shows up here, not above.
+        call c%get_elem(3_int64, 1_int64, s)
+        call check(error, s == "r3e1", "set_elem must not disturb the previous element of the same row")
+        if (allocated(error)) return
+        call c%get_elem(3_int64, 3_int64, s)
+        call check(error, s == "r3e3", "set_elem must not disturb the next element of the same row")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, s)
+        call check(error, s == "r2e2", "set_elem must not disturb the same element of the previous row")
+        if (allocated(error)) return
+        call c%get_elem(4_int64, 2_int64, s)
+        call check(error, s == "r4e2", "set_elem must not disturb the same element of the next row")
+        if (allocated(error)) return
+        !
+        ! A null element reads back as "" rather than aborting; %is_null is how the two are told
+        ! apart, and %set_elem clears the null it lands on.
+        call c%set_null(1_int64, 3_int64)
+        call c%get_elem(1_int64, 3_int64, s)
+        call check(error, s == "" .and. c%is_null(1_int64, 3_int64), &
+            "a null string element must read back as an empty string, with is_null reporting it")
+        if (allocated(error)) return
+        call c%set_elem(1_int64, 3_int64, "back")
+        call check(error, .not. c%is_null(1_int64, 3_int64), "set_elem must clear that element's null")
+    end subroutine test_string_vector_elem_access
+    !
+    !> Two `%reserve` paths a caller reaches without meaning to: passing a plain default-kind
+    !! `integer` (the int32 specific, which exists so that `call c%reserve(1000)` compiles at all),
+    !! and reserving on a STRING column, whose store is indexed by element rather than by row, so
+    !! the reservation has to be scaled by the width.
+    !!
+    !! The width scaling is the part worth asserting: reserving `n` rows of a width-`w` string
+    !! column must make room for `n*w` elements, and a test on a scalar column cannot see the
+    !! difference because `w` is 1 there.
+    subroutine test_reserve_int32_and_string(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c, s, sv
+        integer(int32) :: vals(4) = [1, 2, 3, 4]
+        integer(int32) :: got
+        !
+        call c%init(PK_INT32, 4_int64)
+        call c%set_all(vals)
+        call c%reserve(64)              ! default-kind integer: the int32 specific
+        call check(error, c%capacity() >= 64_int64, "reserve(default-kind integer) must grow the capacity")
+        if (allocated(error)) return
+        call check(error, c%length() == 4_int64, "reserve must not change the row count")
+        if (allocated(error)) return
+        call c%get_at(1_int64, got)
+        call check(error, got == 1_int32, "reserve must not disturb the values already stored")
+        if (allocated(error)) return
+        call c%get_at(4_int64, got)
+        call check(error, got == 4_int32, "reserve must not disturb the last value stored")
+        if (allocated(error)) return
+        !
+        call s%init(PK_STRING, 0_int64)
+        call s%reserve(32_int64)
+        call check(error, s%length() == 0_int64, "reserve on a string column must not create rows")
+        if (allocated(error)) return
+        call check(error, s%capacity() >= 32_int64, "reserve on a string column must grow its capacity")
+        if (allocated(error)) return
+        !
+        ! A width-4 string column indexes its store per ELEMENT, so 10 rows need 40 element slots.
+        call sv%init(PK_STRING_VEC, 0_int64, 4_int32)
+        call sv%reserve(10_int64)
+        call check(error, sv%capacity() >= 10_int64, &
+            "reserve on a string VECTOR column must scale the reservation by the width, not treat " // &
+            "the store's element index as a row index")
+    end subroutine test_reserve_int32_and_string
+    !
+    !> `%shrink_to_fit` releases the spare row capacity, and the validity bitmap is sized from that
+    !! capacity rather than from the row count -- so shrinking leaves the bitmap oversized unless
+    !! it is trimmed too. That trim is the one place the bitmap ever gets smaller (`ensure_bitmap`
+    !! only grows), and nothing else in the suite reached it, because it needs a column that has
+    !! BOTH a bitmap and enough slack for the trimmed size to differ by a whole 64-bit block.
+    !!
+    !! 200 rows reserved, shrunk back to 3: 200 bits is four blocks, 3 bits is one. A shrink that
+    !! forgot the bitmap would leave three blocks of nothing, and the nulls must survive either way
+    !! -- which is what stops the trim from being "free" by simply dropping the map.
+    subroutine test_shrink_to_fit_trims_bitmap(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer(int32) :: vals(3) = [10, 20, 30]
+        integer(int32) :: got
+        integer(int64) :: before, after
+        logical :: released
+        !
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all(vals)
+        call c%set_null(2_int64)
+        call c%reserve(200_int64)
+        before = c%validity_bytes()
+        call check(error, before > 0_int64, "the fixture must actually have a bitmap to trim")
+        if (allocated(error)) return
+        call check(error, c%capacity() >= 200_int64, "the fixture must actually have slack to release")
+        if (allocated(error)) return
+        !
+        call c%shrink_to_fit(released)
+        after = c%validity_bytes()
+        call check(error, released, "shrink_to_fit must report that it released capacity")
+        if (allocated(error)) return
+        call check(error, c%capacity() == 3_int64, "shrink_to_fit must bring the capacity back to the row count")
+        if (allocated(error)) return
+        call check(error, after < before, &
+            "the bitmap is sized from the capacity, so shrinking the storage must trim it too")
+        if (allocated(error)) return
+        call check(error, after > 0_int64, "trimming the bitmap must not discard it -- the column still has a null")
+        if (allocated(error)) return
+        call check(error, c%is_null(2_int64), "the surviving null must still be reported after the trim")
+        if (allocated(error)) return
+        call check(error, (.not. c%is_null(1_int64)) .and. (.not. c%is_null(3_int64)), &
+            "trimming the bitmap must not invent nulls on the valid rows")
+        if (allocated(error)) return
+        call c%get_at(1_int64, got)
+        call check(error, got == 10_int32, "shrink_to_fit must not disturb the first value")
+        if (allocated(error)) return
+        call c%get_at(3_int64, got)
+        call check(error, got == 30_int32, "shrink_to_fit must not disturb the last value")
+    end subroutine test_shrink_to_fit_trims_bitmap
+    !
+    !> `%paste` from a null-free source into a column that has nulls must clear the pasted range's
+    !! validity bits -- that is `%paste`'s REPLACE rule. The clearing goes through `bits_clear_range`,
+    !! which has a single-word fast path and a multi-word one, and every existing paste test fits
+    !! inside one 64-bit block, so only the fast path had ever run.
+    !!
+    !! The fixture spans three blocks deliberately: bits 11..160 of a 200-row column, so the range
+    !! starts mid-block, ends mid-block, and has one whole block strictly between the two -- the
+    !! only shape that reaches the interior-block loop at all. Nulls are placed immediately outside
+    !! both ends so that a range that over-clears by even one bit is visible.
+    subroutine test_paste_clears_multi_block_range(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: dst, src
+        integer(int32) :: dvals(200), svals(150)
+        integer(int32) :: got
+        integer(int64) :: i
+        !
+        do i = 1_int64, 200_int64
+            dvals(i) = int(i, int32)
+        end do
+        do i = 1_int64, 150_int64
+            svals(i) = int(1000_int64 + i, int32)
+        end do
+        call dst%init(PK_INT32, 200_int64)
+        call dst%set_all(dvals)
+        ! Null every row of the destination, so that anything the paste fails to clear stays null.
+        do i = 1_int64, 200_int64
+            call dst%set_null(i)
+        end do
+        call src%init(PK_INT32, 150_int64)
+        call src%set_all(svals)          ! null-free: set_all drops the bitmap in O(1)
+        call check(error, .not. src%any_null(), "the source must be null-free for paste to take the clearing path")
+        if (allocated(error)) return
+        !
+        call dst%paste(src, 11_int64)    ! rows 11..160, i.e. bits 11..160: blocks 1, 2 and 3
+        !
+        call check(error, dst%is_null(10_int64), &
+            "the row immediately before the pasted range must keep its null -- the clear over-reached")
+        if (allocated(error)) return
+        call check(error, dst%is_null(161_int64), &
+            "the row immediately after the pasted range must keep its null -- the clear over-reached")
+        if (allocated(error)) return
+        do i = 11_int64, 160_int64
+            if (dst%is_null(i)) then
+                call check(error, .false., "every pasted row must come back valid: a bit was left set in the range")
+                return
+            end if
+        end do
+        ! One assertion per block the range touches, so a failure names where it went wrong.
+        call check(error, .not. dst%is_null(11_int64), "the first bit of the range (block 1) must be cleared")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(100_int64), "an interior whole block (block 2) must be cleared")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null(160_int64), "the last bit of the range (block 3) must be cleared")
+        if (allocated(error)) return
+        call dst%get_at(11_int64, got)
+        call check(error, got == 1001_int32, "paste must write the source values from the start of the range")
+        if (allocated(error)) return
+        call dst%get_at(160_int64, got)
+        call check(error, got == 1150_int32, "paste must write the source values to the end of the range")
+    end subroutine test_paste_clears_multi_block_range
+    !
+    !> `%ensure_validity` pre-allocates the validity storage so that the first null does not have to.
+    !! It has three dispatch classes and the string one was unexercised: a string column's validity
+    !! lives in the embedded parquet_string_column, not in this column's bitmap, so it has to be
+    !! reserved through the store rather than by `ensure_bitmap`.
+    !!
+    !! `%validity_bytes` reports the COLUMN bitmap, which is 0 for a string column either way -- so
+    !! `%has_validity_storage` is the observation that can tell the two apart, and the negative
+    !! control is the same column before the call.
+    subroutine test_ensure_validity_string(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        character(len=4) :: vals(3) = [character(len=4) :: "aa", "bb", "cc"]
+        !
+        call c%init(PK_STRING, 3_int64)
+        call c%set_all(vals)
+        call check(error, .not. c%has_validity_storage(), &
+            "a null-free string column must start without validity storage -- otherwise the call below proves nothing")
+        if (allocated(error)) return
+        !
+        call c%ensure_validity()
+        call check(error, c%has_validity_storage(), &
+            "ensure_validity on a string column must reserve the embedded store's own validity")
+        if (allocated(error)) return
+        call check(error, c%validity_bytes() == 0_int64, &
+            "a string column must NOT gain a column-level bitmap -- its nulls live in the string store")
+        if (allocated(error)) return
+        call check(error, .not. c%any_null(), "reserving validity must not mark anything null")
+        if (allocated(error)) return
+        call c%set_null(2_int64)
+        call check(error, c%is_null(2_int64) .and. (.not. c%is_null(1_int64)), &
+            "the reserved validity must still record a null correctly afterwards")
+    end subroutine test_ensure_validity_string
+    !
+    !> The element forms `%is_null(i, e)` and `%set_null(i, e)` are defined on SCALAR kinds too,
+    !! where `width` is 1 so `e` can only be 1 and they mean the same as the row forms. That is
+    !! deliberate -- it is what lets generic code use one shape for every kind -- and on the three
+    !! scalar temporal kinds it had never been called, because those kinds carry their null inside
+    !! the element rather than in a bitmap and so take their own arm of both dispatches.
+    !!
+    !! The pairing is the assertion: the element form and the row form must agree in both
+    !! directions, on each of date, time and timestamp.
+    subroutine test_temporal_scalar_element_validity(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: cd, ct, cs
+        type(parquet_date) :: d(2)
+        type(parquet_time) :: t(2)
+        type(parquet_timestamp) :: ts(2)
+        integer :: i
+        !
+        do i = 1, 2
+            call d(i)%set(2026, 8, 10 + i)
+            call t(i)%set(i, 30, 0)
+            call ts(i)%set(2026, 8, 10 + i, i, 30, 0)
+        end do
+        call cd%init(PK_DATE, 2_int64)
+        call cd%set_all(d)
+        call ct%init(PK_TIME, 2_int64)
+        call ct%set_all(t)
+        call cs%init(PK_TIMESTAMP, 2_int64)
+        call cs%set_all(ts)
+        !
+        call check(error, .not. cd%is_null(1_int64, 1_int64), "a valid date element must not report null")
+        if (allocated(error)) return
+        call check(error, .not. ct%is_null(1_int64, 1_int64), "a valid time element must not report null")
+        if (allocated(error)) return
+        call check(error, .not. cs%is_null(1_int64, 1_int64), "a valid timestamp element must not report null")
+        if (allocated(error)) return
+        !
+        call cd%set_null(2_int64, 1_int64)
+        call ct%set_null(2_int64, 1_int64)
+        call cs%set_null(2_int64, 1_int64)
+        !
+        call check(error, cd%is_null(2_int64, 1_int64) .and. cd%is_null(2_int64), &
+            "set_null(i, e) on a scalar date column must agree with the row form in both directions")
+        if (allocated(error)) return
+        call check(error, ct%is_null(2_int64, 1_int64) .and. ct%is_null(2_int64), &
+            "set_null(i, e) on a scalar time column must agree with the row form in both directions")
+        if (allocated(error)) return
+        call check(error, cs%is_null(2_int64, 1_int64) .and. cs%is_null(2_int64), &
+            "set_null(i, e) on a scalar timestamp column must agree with the row form in both directions")
+        if (allocated(error)) return
+        ! Row 1 is the negative control: nulling row 2's element must not touch it.
+        call check(error, (.not. cd%is_null(1_int64, 1_int64)) .and. (.not. ct%is_null(1_int64, 1_int64)) &
+            .and. (.not. cs%is_null(1_int64, 1_int64)), &
+            "set_null(i, e) must mark only the element it names")
+        if (allocated(error)) return
+        ! The cached "has a null" flag has to see an element-form write as well as a row-form one.
+        call check(error, cd%any_null() .and. ct%any_null() .and. cs%any_null(), &
+            "the temporal null cache must be refreshed by the element form of set_null too")
+    end subroutine test_temporal_scalar_element_validity
+    !
+    !> `%clear_null(i, e)` on a string column. The string kinds clear a null by writing an empty
+    !! string into the store (there is no bitmap bit to clear), and only the whole-row form had
+    !! been exercised -- so on a string VECTOR the element form's flat-index arithmetic was
+    !! unchecked, which is where clearing the wrong element would hide.
+    subroutine test_clear_null_string_element(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        character(len=4) :: vals(2, 3)
+        integer :: e, i
+        !
+        do i = 1, 3
+            do e = 1, 2
+                write(vals(e, i), '("v", i0, i0)') i, e
+            end do
+        end do
+        call c%init(PK_STRING_VEC, 3_int64, 2_int32)
+        call c%set_all(vals)
+        call c%set_null(2_int64, 1_int64)
+        call c%set_null(2_int64, 2_int64)
+        call check(error, c%is_null(2_int64, 1_int64) .and. c%is_null(2_int64, 2_int64), &
+            "the fixture must actually start with both of row 2's elements null")
+        if (allocated(error)) return
+        !
+        call c%clear_null(2_int64, 2_int64)
+        call check(error, .not. c%is_null(2_int64, 2_int64), "clear_null(i, e) must mark that element valid")
+        if (allocated(error)) return
+        call check(error, c%is_null(2_int64, 1_int64), &
+            "clear_null(i, e) must leave the row's other element null -- it names one element, not the row")
+        if (allocated(error)) return
+        ! Also on a scalar string column, where the flat index is the row index.
+        call c%clear_null(2_int64, 1_int64)
+        call check(error, .not. c%is_null(2_int64), &
+            "clearing the last null element of a row must make the row itself report valid")
+    end subroutine test_clear_null_string_element
+    !
+    !> `%row_validity` and `%element_validity` specialise on the kind ONCE and then use an elemental
+    !! array expression per temporal kind, so each of the six has its own arm in each of the two
+    !! procedures -- twelve arms that share no code. Several had never run.
+    !!
+    !! Both masks are built for all six kinds and cross-checked against `%is_null`, which is the
+    !! independent oracle: the bulk form must agree with the per-element one everywhere. The vector
+    !! fixtures null ONE element of a row rather than the whole row, because that is where the two
+    !! shapes differ -- `row_validity` must report the row null while `element_validity` reports
+    !! only that element null, and a mask built with the wrong `dim=` would swap them.
+    subroutine test_temporal_bulk_validity_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer, parameter :: TEMPORAL_KINDS(6) = [PK_DATE, PK_TIME, PK_TIMESTAMP, &
+            PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC]
+        logical, allocatable :: rowv(:), elemv(:, :)
+        integer(int64) :: i, e, w
+        integer :: ki
+        character(len=:), allocatable :: kn
+        !
+        do ki = 1, 6
+            call parquet_kind_name(TEMPORAL_KINDS(ki), kn)
+            w = merge(int(FIXW, int64), 1_int64, ki > 3)
+            call make_fixture(c, TEMPORAL_KINDS(ki), 4_int64)
+            ! Null exactly one ELEMENT of row 3. On a scalar kind that is the whole row; on a
+            ! vector kind it deliberately is not.
+            call c%set_null(3_int64, w)
+            !
+            call c%row_validity(rowv)
+            call check(error, allocated(rowv), kn // ": row_validity must build a mask for a column that has a null")
+            if (allocated(error)) return
+            call check(error, size(rowv, kind=int64) == 4_int64, kn // ": the row mask must be nrows long")
+            if (allocated(error)) return
+            call check(error, .not. rowv(3), kn // ": a row with a null element must report as not valid")
+            if (allocated(error)) return
+            call check(error, rowv(1) .and. rowv(2) .and. rowv(4), &
+                kn // ": rows with no null element must report as valid")
+            if (allocated(error)) return
+            !
+            call c%element_validity(elemv)
+            call check(error, allocated(elemv), kn // ": element_validity must build a mask too")
+            if (allocated(error)) return
+            call check(error, size(elemv, 1, kind=int64) == w .and. size(elemv, 2, kind=int64) == 4_int64, &
+                kn // ": the element mask must be shaped (width, nrows)")
+            if (allocated(error)) return
+            ! The oracle: the bulk mask must agree with %is_null element by element.
+            do i = 1_int64, 4_int64
+                do e = 1_int64, w
+                    if (elemv(e, i) .eqv. c%is_null(i, e)) then
+                        call check(error, .false., &
+                            kn // ": element_validity disagrees with is_null on some element")
+                        return
+                    end if
+                end do
+            end do
+            ! On a vector kind the two masks must genuinely differ: the row is not valid, but the
+            ! element that was NOT nulled still is.
+            if (w > 1_int64) then
+                call check(error, elemv(1, 3), &
+                    kn // ": nulling one element must leave the row's other element valid in the element mask")
+                if (allocated(error)) return
+            end if
+        end do
+        call check(error, .true., "every temporal kind builds both bulk validity masks consistently with is_null")
+    end subroutine test_temporal_bulk_validity_every_kind
+    !
+    !> `%set_validity` with a rank-2 `(width, nrows)` mask writes the whole per-element null state in
+    !! one pass. Each temporal kind has its own arm -- the setters are elemental but only a subset
+    !! of elements is being nulled, and Fortran has no masked elemental call, so each arm is a
+    !! hand-written loop -- and only the timestamp-vector one had ever run.
+    !!
+    !! `set_validity` only ADDS nulls (a `.true.` entry never clears one), so the fixture starts
+    !! null-free and the assertion is an exact match against the mask, checked through `%is_null`.
+    subroutine test_set_validity_elems_temporal(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer, parameter :: TEMPORAL_KINDS(6) = [PK_DATE, PK_TIME, PK_TIMESTAMP, &
+            PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC]
+        logical, allocatable :: mask(:, :)
+        logical, allocatable :: rowv(:)
+        integer(int64) :: i, e, w
+        integer :: ki
+        character(len=:), allocatable :: kn
+        !
+        do ki = 1, 6
+            call parquet_kind_name(TEMPORAL_KINDS(ki), kn)
+            w = merge(int(FIXW, int64), 1_int64, ki > 3)
+            call make_fixture(c, TEMPORAL_KINDS(ki), 3_int64)
+            call check(error, .not. c%any_null(), kn // ": the fixture must start null-free")
+            if (allocated(error)) return
+            !
+            if (allocated(mask)) deallocate(mask)
+            allocate(mask(w, 3_int64))
+            mask = .true.
+            mask(1, 2) = .false.                       ! first element of row 2
+            if (w > 1_int64) mask(w, 3) = .false.      ! LAST element of row 3, on a vector kind
+            call c%set_validity(mask)
+            !
+            do i = 1_int64, 3_int64
+                do e = 1_int64, w
+                    if (c%is_null(i, e) .eqv. mask(e, i)) then
+                        call check(error, .false., kn // ": set_validity did not reproduce the mask it was given")
+                        return
+                    end if
+                end do
+            end do
+            call check(error, c%any_null(), kn // ": a mask carrying a .false. entry must leave the column with a null")
+            if (allocated(error)) return
+            ! The consequence, not just the flag: a temporal column caches that answer, and every
+            ! bulk validity path short-circuits on it. A stale cache therefore hands back an
+            ! UNALLOCATED mask, which reaches an optional dummy as absent -- so a write would emit
+            ! the column as non-nullable and lose every null this call just recorded, silently.
+            if (allocated(rowv)) deallocate(rowv)
+            call c%row_validity(rowv)
+            call check(error, allocated(rowv), &
+                kn // ": after set_validity the bulk row mask must be built, not skipped as null-free")
+            if (allocated(error)) return
+            call check(error, .not. rowv(2), kn // ": the bulk row mask must report the row the element mask nulled")
+            if (allocated(error)) return
+            if (w > 1_int64) then
+                call check(error, .not. c%is_null(2_int64, w), &
+                    kn // ": nulling element 1 of a row must not null its other elements")
+                if (allocated(error)) return
+            end if
+        end do
+        call check(error, .true., "every temporal kind writes an element-level validity mask correctly")
+    end subroutine test_set_validity_elems_temporal
+    !
+    !> `%set_validity` with a rank-1 `(nrows)` mask means "this ROW is null", i.e. every element of
+    !! it. The kinds that carry their null inside the element -- the two string kinds and the six
+    !! temporal ones -- cannot use the bitmap shortcut the other kinds take and go through a
+    !! per-row `%set_null(i)` loop instead, which nothing had exercised.
+    !!
+    !! A vector fixture is used so that "the whole row" is more than one element, which is what
+    !! distinguishes the row form from the element form.
+    subroutine test_set_validity_rows_element_carried(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        integer, parameter :: KINDS(3) = [PK_STRING_VEC, PK_DATE_VEC, PK_TIME_VEC]
+        logical :: mask(3) = [.true., .false., .true.]
+        integer(int64) :: e
+        integer :: ki
+        character(len=:), allocatable :: kn
+        character(len=4) :: svals(2, 3)
+        integer :: i, ee
+        !
+        do i = 1, 3
+            do ee = 1, 2
+                write(svals(ee, i), '("s", i0, i0)') i, ee
+            end do
+        end do
+        do ki = 1, 3
+            call parquet_kind_name(KINDS(ki), kn)
+            if (KINDS(ki) == PK_STRING_VEC) then
+                call c%init(PK_STRING_VEC, 3_int64, FIXW)
+                call c%set_all(svals)
+            else
+                call make_fixture(c, KINDS(ki), 3_int64)
+            end if
+            call check(error, .not. c%any_null(), kn // ": the fixture must start null-free")
+            if (allocated(error)) return
+            !
+            call c%set_validity(mask)
+            do e = 1_int64, int(FIXW, int64)
+                call check(error, c%is_null(2_int64, e), &
+                    kn // ": a .false. row entry must null EVERY element of that row")
+                if (allocated(error)) return
+                call check(error, .not. c%is_null(1_int64, e), &
+                    kn // ": a .true. row entry must leave every element of that row valid")
+                if (allocated(error)) return
+                call check(error, .not. c%is_null(3_int64, e), &
+                    kn // ": the row after the nulled one must be untouched")
+                if (allocated(error)) return
+            end do
+            call check(error, c%is_null(2_int64), kn // ": the nulled row must report null in the row form too")
+            if (allocated(error)) return
+        end do
+        call check(error, .true., "a row mask nulls whole rows on every kind that carries its nulls in the element")
+    end subroutine test_set_validity_rows_element_carried
+    !
+    !> A temporal column caches "does this column hold a null?", because answering it means an O(n)
+    !! element scan. The read-only view of that question (`any_null_view`, used by every bulk
+    !! validity path that holds the column `intent(in)`) has two arms: READ the cache when it is
+    !! clean, and rescan when it is dirty. Only the rescan had run -- so a cache that was never
+    !! consulted would have looked exactly like one that was.
+    !!
+    !! `%any_null` is what marks the cache clean, so calling it first and then a bulk path is the
+    !! sequence that reaches the read. Asserting the two agree is the point: a stale-cache read
+    !! would disagree with the scan.
+    subroutine test_temporal_null_cache_is_read_when_clean(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        logical, allocatable :: rowv(:)
+        type(parquet_date) :: d(3)
+        integer :: i
+        !
+        do i = 1, 3
+            call d(i)%set(2026, 8, 10 + i)
+        end do
+        call c%init(PK_DATE, 3_int64)
+        call c%set_all(d)
+        call c%set_null(2_int64)
+        !
+        ! Marks the cache clean: any_null is the only entry point that writes it.
+        call check(error, c%any_null(), "the fixture must hold a null for the cached answer to be interesting")
+        if (allocated(error)) return
+        !
+        ! Now a bulk path, which reads the cache rather than rescanning.
+        call c%row_validity(rowv)
+        call check(error, allocated(rowv), &
+            "row_validity must still build a mask when the null cache answers from a clean read")
+        if (allocated(error)) return
+        call check(error, (.not. rowv(2)) .and. rowv(1) .and. rowv(3), &
+            "the mask built after a cache read must match the column's actual null state")
+        if (allocated(error)) return
+        !
+        ! And the negative control on the same path: a column whose cache is clean and says
+        ! "no nulls" must leave the mask unallocated rather than building an all-true one.
+        call c%set_at(2_int64, d(2))
+        call check(error, .not. c%any_null(), "overwriting the null must clear the cached answer")
+        if (allocated(error)) return
+        if (allocated(rowv)) deallocate(rowv)
+        call c%row_validity(rowv)
+        call check(error, .not. allocated(rowv), &
+            "a null-free column must leave the mask unallocated, so it reaches an optional dummy as absent")
+    end subroutine test_temporal_null_cache_is_read_when_clean
+    !
+    !> A bitmap column that has had its last null cleared one cell at a time keeps its bitmap --
+    !! single-cell edits deliberately skip the O(n) scan that would let it be dropped. The question
+    !! "does this column hold a null?" then has to be answered by walking the map and finding every
+    !! block zero, which is the one exit from that walk nothing had taken: every other test either
+    !! has no bitmap at all, or finds a set bit and returns early.
+    !!
+    !! `%compact_validity` is the negative control at the end: it performs the scan the cell edits
+    !! skipped, so the bitmap goes away only when it is asked to.
+    subroutine test_all_zero_bitmap_reports_no_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_column) :: c
+        logical, allocatable :: rowv(:)
+        integer(int32) :: vals(3) = [7, 8, 9]
+        integer(int32) :: got
+        !
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all(vals)
+        call c%set_null(1_int64)
+        call c%set_null(3_int64)
+        call check(error, c%validity_bytes() > 0_int64, "the fixture must have allocated a bitmap")
+        if (allocated(error)) return
+        !
+        call c%clear_null(1_int64)
+        call c%clear_null(3_int64)
+        call check(error, c%validity_bytes() > 0_int64, &
+            "clearing a null cell by cell must NOT drop the bitmap -- a single-cell edit does not pay for a scan")
+        if (allocated(error)) return
+        !
+        call check(error, .not. c%any_null(), &
+            "an allocated but all-zero bitmap must answer 'no nulls' -- the walk has to reach the end")
+        if (allocated(error)) return
+        call c%row_validity(rowv)
+        call check(error, .not. allocated(rowv), &
+            "the read-only view must agree: an all-zero bitmap leaves the row mask unallocated")
+        if (allocated(error)) return
+        !
+        call c%compact_validity()
+        call check(error, c%validity_bytes() == 0_int64, &
+            "compact_validity performs the scan the cell edits skipped, so the all-zero bitmap is dropped here")
+        if (allocated(error)) return
+        call c%get_at(2_int64, got)
+        call check(error, got == 8_int32, "none of this may disturb the values")
+    end subroutine test_all_zero_bitmap_reports_no_nulls
 
 end module test_columns

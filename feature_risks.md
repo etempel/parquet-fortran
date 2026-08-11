@@ -33,11 +33,11 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-78` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-79` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
-**Counts today: 61 covered, 1 proposed, 14 not testable.** An empty section 2 is the healthy
+**Counts today: 62 covered, 1 proposed, 14 not testable.** An empty section 2 is the healthy
 state rather than a finished one — it means every risk currently identified as testable has its
 test — so the entry sitting there is a to-do, not a milestone. Nine entries are covered by
 something other than a unit test, deliberately: Risk-1 by a
@@ -142,6 +142,7 @@ something a reader is expected to have.
 | [Risk-75](#risk-75--the-name-indexs-linear-scan-fallback-is-a-safety-net-nothing-exercised) | The name index's linear-scan fallback is a safety net nothing exercised | 4 — covered |
 | [Risk-76](#risk-76--casts-post-touch-re-check-guards-an-invariant-that-lives-in-another-file) | `%cast`'s post-touch re-check guards an invariant that lives in another file | 3 — not testable |
 | [Risk-77](#risk-77--a-masked-write-compacts-the-values-and-the-validity-mask-separately) | A masked write compacts the values and the validity mask separately | 4 — covered |
+| [Risk-78](#risk-78--a-temporal-columns-null-cache-is-invalidated-by-the-writer-not-by-the-reader) | A temporal column's null cache is invalidated by the writer, not by the reader | 4 — covered |
 
 ---
 
@@ -149,7 +150,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-78**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-79**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3223,3 +3224,52 @@ scrambles the order.
 - **Do not test the block expansion with `col_size` values that make the two orders coincide.** A
   width of 1 is the identity and a uniform row makes a transposed expansion look correct; the tests
   use distinct per-element values so that row 3's pair cannot pass for row 1's.
+
+
+### Risk-78 — A temporal column's null cache is invalidated by the writer, not by the reader
+
+**What breaks.** A temporal `parquet_column` keeps its null state inside each element, so "does
+this column hold a null?" is an O(n) scan. `nulls_cached`/`nulls_dirty` (`src/parquet_columns.f90`)
+cache the answer, and the contract is one-sided: **every path that changes an element's null state
+must set `nulls_dirty = .true.` itself.** Nothing checks that it did. A path that nulls elements
+without marking the cache dirty leaves `%any_null` answering `.false.` for a column that demonstrably
+holds nulls.
+
+**Why it is quiet, and why it is worse than a wrong flag.** `any_null_view` — the read-only form
+every bulk validity path uses — returns early on that answer, so `%row_validity`/`%element_validity`
+hand back an **unallocated** mask. An unallocated allocatable passed to an `optional` dummy is an
+*absent argument* (see [Risk-8](#risk-8--the-table-write-must-stay-the-same-calls-as-a-hand-written-write),
+which relies on it), and that is exactly how a null-free column is meant to signal "no mask needed". So the writer emits the
+column as non-nullable and every null is dropped from the file, with no abort, no warning, and a
+row count that still matches. The column itself is not corrupted, which is what makes it hard to
+find from the symptom: reading the file back shows plausible values where nulls should be.
+
+**Confirmed instance.** `set_validity_elems`' six temporal arms
+(`src/parquet_columns_validity.f90`) write `%dt(i)%set_null()` and friends **directly** rather than
+through `%set_null(i, e)` — deliberately, because resolving the kind once instead of per element is
+what makes the bulk form worth having — and so bypassed the one place that marks the cache dirty.
+`set_validity_rows` was unaffected because its temporal arm still goes through `%set_null(i)`. Found
+by the test below, on the first run, in code that had shipped its way through a full suite.
+
+**Test.** `set_validity writes an element mask on every temporal kind` (`test/test_columns.f90`).
+It asserts three things in order, and the third is the one that matters: that `%is_null` reproduces
+the mask, that `%any_null` reports the column as holding a null, and that `%row_validity` then
+returns an **allocated** mask naming the right row. Only the third describes the actual damage; the
+first passes even with the bug, because the elements really were nulled.
+
+**What this forbids.**
+
+- **A bulk validity writer must invalidate the cache once, kind-agnostically, not per arm.** The
+  fix is a single `if (is_temporal_kind(self%kind)) self%nulls_dirty = .true.` after the dispatch,
+  placed so that a seventh temporal kind cannot be added without it. Six per-arm assignments would
+  work today and would be one arm short the moment the kind list grows.
+- **Resolving the kind once is a licence to skip the dispatch, not the bookkeeping.** Any future
+  path that writes an element's null flag directly for speed inherits this obligation. The ones that
+  already do are `parquet_column_set_null_row` and `parquet_column_set_null_elem`; grep
+  `nulls_dirty` before adding a third.
+- **Do not test a validity writer by reading back `%is_null`.** That is the assertion the bug
+  passes. The cache and the elements disagree, so the test has to ask something that consults the
+  cache — `%any_null`, or better a bulk mask, since that is what a writer actually calls.
+- **`any_null_view` must stay read-only.** Refreshing the cache there would hide this class of bug
+  rather than fix it, and it takes the column `intent(in)` precisely so that read-only consumers can
+  use the bulk API at all — see its own doc-comment for the 10x measurement that motivated it.

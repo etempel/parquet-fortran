@@ -391,7 +391,9 @@ contains
         if (.not. any_false) return
         select case (self%kind)
         case (PK_NONE)
-            error stop EP//"set_validity: column has no kind assigned"
+            ! Unreachable through the public API: `init` rejects PK_NONE outright, so a kindless
+            ! column always has nrows == 0 and the `n <= 0` return above fires first. Defensive only.
+            error stop EP//"set_validity: column has no kind assigned" ! GCOVR_EXCL_LINE
         case (PK_DATE, PK_TIME, PK_TIMESTAMP, PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC, &
               PK_STRING, PK_STRING_VEC)
             ! No bitmap to write: these carry their null state in the element itself, so a
@@ -444,6 +446,16 @@ contains
                     end do
                 end do
             end select
+            ! Resolving the kind once above is what makes this necessary: the six temporal arms
+            ! write the element's own null flag directly instead of going through `%set_null`, so
+            ! nothing else invalidates the cached "does this column hold a null?" answer. Leaving
+            ! it stale makes `%any_null` report a column null-free just after nulls were written
+            ! into it, and every bulk validity path short-circuits on that -- so the mask comes
+            ! back UNALLOCATED, reaches an optional dummy as absent, and a write drops the nulls
+            ! with nothing to report. Kept kind-agnostic rather than repeated per arm so a future
+            ! temporal kind cannot be added without it. (The string kinds keep their nulls in the
+            ! embedded store and have no cache, so this is a no-op for them.)
+            if (is_temporal_kind(self%kind)) self%nulls_dirty = .true.
         case default
             call ensure_bitmap(self)
             ! One store per 64 elements instead of a call per null. The destination bit index runs
@@ -486,7 +498,8 @@ contains
         if (.not. any_false) return
         select case (self%kind)
         case (PK_NONE)
-            error stop EP//"set_validity: column has no kind assigned"
+            ! Unreachable, exactly as in set_validity_elems above: a kindless column has no rows.
+            error stop EP//"set_validity: column has no kind assigned" ! GCOVR_EXCL_LINE
         case (PK_STRING, PK_STRING_VEC, PK_DATE, PK_TIME, PK_TIMESTAMP, &
               PK_DATE_VEC, PK_TIME_VEC, PK_TIMESTAMP_VEC)
             ! No bitmap: these carry their null state in the element itself, so the per-row setter

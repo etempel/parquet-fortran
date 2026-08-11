@@ -695,6 +695,14 @@ contains
                 test_columns_append_row_of_width_mismatch_aborts), &
             new_unittest("parquet_column append_row_of past the source's last row aborts", &
                 test_columns_append_row_of_row_out_of_range_aborts), &
+            new_unittest("parquet_column element index past the column's width aborts", &
+                test_columns_element_index_out_of_range_aborts), &
+            new_unittest("set_validity with a transposed element mask aborts", &
+                test_columns_set_validity_elem_shape_mismatch_aborts), &
+            new_unittest("set_validity with a row mask of the wrong length aborts", &
+                test_columns_set_validity_row_count_mismatch_aborts), &
+            new_unittest("clear_null on a temporal element aborts", &
+                test_columns_clear_null_elem_temporal_aborts), &
             new_unittest("table: append(row) validates every column before writing any", &
                 test_table_append_row_validates_first_aborts), &
             new_unittest("parquet_column paste of a different kind aborts", &
@@ -1991,6 +1999,50 @@ contains
             failure_message="appending a row past the source's last row was expected to abort", &
             required_stderr="parquet_columns: append_row_of: source row index out of range")
     end subroutine test_columns_append_row_of_row_out_of_range_aborts
+    !
+    !> The element axis has its own guard and its own message; see the scenario's own comment for
+    !! why sharing the row one would point the reader at the wrong axis. The scenario reads a valid
+    !! element first, so a guard that refused every element index would fail rather than pass.
+    subroutine test_columns_element_index_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_element_index_out_of_range", &
+            expect_abort=.true., &
+            failure_message="asking for an element past the column's width was expected to abort", &
+            required_stderr="parquet_columns: get_elem: element index out of range")
+    end subroutine test_columns_element_index_out_of_range_aborts
+    !
+    !> A rank-2 validity mask must match (width, nrows) on BOTH extents, so a transposed square-ish
+    !! mask is rejected rather than silently applied the wrong way round. The scenario applies a
+    !! correctly shaped mask first as its negative control.
+    subroutine test_columns_set_validity_elem_shape_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_set_validity_elem_shape_mismatch", &
+            expect_abort=.true., &
+            failure_message="a transposed element validity mask was expected to abort", &
+            required_stderr="parquet_columns: set_validity: mask shape does not match the column")
+    end subroutine test_columns_set_validity_elem_shape_mismatch_aborts
+    !
+    !> A rank-1 validity mask must have exactly nrows entries, and the message names both counts.
+    !! The scenario applies a correctly sized mask first as its negative control.
+    subroutine test_columns_set_validity_row_count_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_set_validity_row_count_mismatch", &
+            expect_abort=.true., &
+            failure_message="a row validity mask of the wrong length was expected to abort", &
+            required_stderr="parquet_columns: set_validity: mask has 5 entries but the column has 3 rows")
+    end subroutine test_columns_set_validity_row_count_mismatch_aborts
+    !
+    !> A temporal element becomes valid only by having a value written to it, so clear_null refuses
+    !! rather than reporting an element valid while it still holds no value. The scenario clears a
+    !! BITMAP column's element null first, which is the negative control: the refusal must be about
+    !! the kind, not about the operation.
+    subroutine test_columns_clear_null_elem_temporal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "columns_clear_null_elem_temporal", &
+            expect_abort=.true., &
+            failure_message="clearing a temporal element's null was expected to abort", &
+            required_stderr="parquet_columns: clear_null: a temporal element becomes valid by writing a value to it")
+    end subroutine test_columns_clear_null_elem_temporal_aborts
 
     !> Asserts the ORDER of a row append, not merely that it fails.
     !>

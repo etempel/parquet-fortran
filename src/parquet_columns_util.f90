@@ -57,9 +57,20 @@ contains
     end procedure parquet_column_check_index
     !
     !> Aborts unless `i` is a valid 1-based row index (polymorphic form).
+    !!
+    !! Currently has no caller. It is one of five polymorphic guards (`check_kind`, `check_index`,
+    !! `check_element`, `check_nrows`, `check_width`), and the other three are still reached from
+    !! the bulk/whole-column paths that legitimately keep a `class` dummy -- see CLAUDE.md's
+    !! "`parquet_column`'s TYPED accessor tier", whose scope deliberately stops at per-cell. This
+    !! one lost its callers when the per-cell paths moved to `parquet_column_check_index`, and is
+    !! kept so the set stays complete for the next polymorphic bulk path rather than being deleted
+    !! and re-added. Excluded from coverage because it is private to `parquet_columns`, so nothing
+    !! -- test included -- can reach it while it has no caller.
+    ! GCOVR_EXCL_START
     module procedure check_index
         call parquet_column_check_index(self, i, proc)
     end procedure check_index
+    ! GCOVR_EXCL_STOP
     !
     !> Aborts unless `e` is a valid 1-based element index within a row (`1 <= e <= width`).
     !!
@@ -74,9 +85,14 @@ contains
     end procedure parquet_column_check_element
     !
     !> Aborts unless `e` is a valid 1-based element index within a row (polymorphic form).
+    !!
+    !! Has never had a caller -- the element-indexed API was typed from the start. Kept and
+    !! excluded for the same reason as `check_index` above; see its note.
+    ! GCOVR_EXCL_START
     module procedure check_element
         call parquet_column_check_element(self, e, proc)
     end procedure check_element
+    ! GCOVR_EXCL_STOP
     !
     !> Aborts unless `n` matches the column's own row count.
     module procedure check_nrows
@@ -230,7 +246,10 @@ contains
         if (n >= BITS_PER_BLOCK) then
             res = v
         else if (n <= 0_int64) then
-            res = 0_int64
+            ! Defensive. No caller can ask for zero bits: `bits_copy_range`'s two `min` expressions
+            ! are both bounded below by 1 (its loops only run while `taken < chunk` and `n < nbits`,
+            ! and a bit offset is at most 63), and `range_mask` passes `b1 - b0 + 1` with b1 >= b0.
+            res = 0_int64 ! GCOVR_EXCL_LINE
         else
             res = iand(v, not(ishft(ALL_BITS, int(n))))
         end if

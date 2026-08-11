@@ -74,6 +74,12 @@ contains
                 test_qc_warning_printed_for_numeric_violation), &
             new_unittest("qc=.true. WARNING for a fractional bound uses fractional formatting", &
                 test_qc_warning_printed_for_fractional_bound), &
+            new_unittest("qc: a strict min:/max: operator excludes the boundary value", &
+                test_qc_int64_strict_operators), &
+            new_unittest("qc: a fractional bound still checks int64 values, in real64", &
+                test_qc_int64_values_fractional_bound), &
+            new_unittest("qc=.true. prints a WARNING for an out-of-range float64 value", &
+                test_qc_warning_float64), &
             new_unittest("qc: an int64 bound is judged in int64, not after widening to real64", &
                 test_qc_int64_bound_judged_in_int64), &
             new_unittest("qc=.true. prints a WARNING for an out-of-range string value", &
@@ -251,6 +257,16 @@ contains
                 test_mask_row_mask_temporal), &
             new_unittest("parquet_write_row_mask compacts a masked parquet_string_column (compact) write", &
                 test_mask_row_mask_string_column_compact), &
+            new_unittest("parquet_write_row_mask + is_valid compacts both, for every scalar type", &
+                test_mask_row_mask_every_scalar_type), &
+            new_unittest("parquet_write_chunk_row_mask + is_valid compacts both, for every scalar type", &
+                test_mask_chunk_row_mask_every_scalar_type), &
+            new_unittest("parquet_write_chunk_row_mask compacts a chunked date/time/timestamp write", &
+                test_mask_chunk_row_mask_temporal), &
+            new_unittest("parquet_write_row_mask expands to whole rows of a vector column", &
+                test_mask_row_mask_vector_columns), &
+            new_unittest("parquet_write_chunk_row_mask expands to whole rows of a chunked vector column", &
+                test_mask_chunk_row_mask_vector_columns), &
             new_unittest("a matrix write auto-resolves a col_size: auto column from the data's own shape", &
                 test_matrix_write_col_size_auto_resolves), &
             new_unittest("a chunked matrix write auto-resolves col_size: auto on its first chunk", &
@@ -1012,6 +1028,90 @@ contains
         call check(error, .not. warned_at, &
             "2**53 satisfies max: 2**53, so the 'at' column must not produce a qc warning")
     end subroutine test_qc_int64_bound_judged_in_int64
+
+    !> A STRICT qc operator (`min: > 0`, `max: < 100`) must exclude the boundary value that its
+    !> inclusive twin would accept -- qc_int64_satisfies' ">" and "<" arms. The scenario carries
+    !> its own negative control (`inside`, one step in from each boundary), so an operator that
+    !> had silently degraded into ">=" / "<=" fails the first assertion while a checker that
+    !> warned indiscriminately fails the second.
+    subroutine test_qc_int64_strict_operators(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_strict, warned_inside
+
+        call run_error_scenario("qc_int64_strict_operators", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a qc violation must warn, never error stop")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'strict'", warned_strict)
+        call check(error, warned_strict, &
+            "0 violates `min: > 0` and 100 violates `max: < 100`, but no qc warning named the " // &
+            "'strict' column -- a strict operator was applied as if it were inclusive")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'inside'", warned_inside)
+        call check(error, .not. warned_inside, &
+            "1 and 99 satisfy `min: > 0` / `max: < 100`, so the 'inside' column must not warn")
+    end subroutine test_qc_int64_strict_operators
+
+    !> A fractional bound has no exact int64 equivalent, so qc_numeric_i64 must fall back to
+    !> comparing in real64 rather than skipping the check. Reached with a float64-typed schema
+    !> column handed int64 values -- see scenario_qc_int64_values_fractional_bound's own comment
+    !> for why that is the only route to it. `frac_ok` is the negative control.
+    subroutine test_qc_int64_values_fractional_bound(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_frac, warned_ok
+
+        call run_error_scenario("qc_int64_values_fractional_bound", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a qc violation must warn, never error stop")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'frac'", warned_frac)
+        call check(error, warned_frac, &
+            "1 and 10 violate the fractional bounds [1.5, 9.5], but no qc warning named the 'frac' " // &
+            "column -- a bound with no exact int64 form left the values unchecked")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'frac_ok'", warned_ok)
+        call check(error, .not. warned_ok, &
+            "2 and 9 satisfy the fractional bounds [1.5, 9.5], so the 'frac_ok' column must not warn")
+    end subroutine test_qc_int64_values_fractional_bound
+
+    !> Write-time qc's float64 checker must report a violation, not merely count one. Every other
+    !> value kind's checker was already observed reporting; this is the one that was not.
+    !> `f64_ok` is the negative control on the same declaration.
+    subroutine test_qc_warning_float64(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_f64, warned_ok
+
+        call run_error_scenario("qc_warning_float64", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a qc violation must warn, never error stop")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'f64'", warned_f64)
+        call check(error, warned_f64, &
+            "0.25 and 12.5 fall outside [1, 10], but no qc warning named the 'f64' column -- " // &
+            "the float64 checker never reported what it had counted")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'f64_ok'", warned_ok)
+        call check(error, .not. warned_ok, &
+            "every value of 'f64_ok' is within [1, 10], so it must not warn")
+    end subroutine test_qc_warning_float64
 
     subroutine test_qc_warning_printed_for_string_violation(error)
         type(error_type), allocatable, intent(out) :: error
@@ -4136,11 +4236,19 @@ contains
     !> A masked parquet_date/parquet_time/parquet_timestamp write: the temporal types' own
     !> per-element null state is orthogonal to masking -- a dropped row's null state is simply
     !> irrelevant, exactly as for is_valid elsewhere.
+    !>
+    !> All three types are written, not just the date: each has its own flat worker with its own
+    !> masked branch (write_date_flat/write_time_flat/write_timestamp_flat), so a date-only test
+    !> leaves two thirds of what this test's name claims unexercised. The null sits at a
+    !> masked-out row in each, which is what makes a worker that compacted the values but read
+    !> the null state from the pre-mask array visibly wrong rather than merely lucky.
     subroutine test_mask_row_mask_temporal(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
-        type(parquet_date) :: d(4), read_back(2)
+        type(parquet_date) :: d(4), read_d(2)
+        type(parquet_time) :: t(4), read_t(2)
+        type(parquet_timestamp) :: ts(4), read_ts(2)
         logical :: mask(4) = [.true., .false., .false., .true.]
         character(len=*), parameter :: out_file = "test_run/test_mask_temporal.parquet"
 
@@ -4149,17 +4257,37 @@ contains
         call d(3)%set_null()
         call d(4)%set(2024, 4, 4)
 
+        call t(1)%set(1, 11, 11)
+        call t(2)%set(2, 22, 22)
+        call t(3)%set_null()
+        call t(4)%set(4, 44, 44)
+
+        call ts(1)%set(2024, 1, 1, 1, 11, 11)
+        call ts(2)%set(2024, 2, 2, 2, 22, 22)
+        call ts(3)%set_null()
+        call ts(4)%set(2024, 4, 4, 4, 44, 44)
+
         call parquet_open_writer(writer, out_file)
         call parquet_write_row_mask(writer, mask)
         call parquet_write_column(writer, "d", d)
+        call parquet_write_column(writer, "t", t)
+        call parquet_write_column(writer, "ts", ts)
         call parquet_close_writer(writer)
 
         call parquet_open_reader(reader, out_file)
-        call parquet_read_column(reader, "d", read_back)
+        call parquet_read_column(reader, "d", read_d)
+        call parquet_read_column(reader, "t", read_t)
+        call parquet_read_column(reader, "ts", read_ts)
         call parquet_close_reader(reader)
 
-        call check(error, read_back(1) == d(1) .and. read_back(2) == d(4), &
+        call check(error, read_d(1) == d(1) .and. read_d(2) == d(4), &
             "masked parquet_date write did not round-trip the surviving rows correctly")
+        if (allocated(error)) return
+        call check(error, read_t(1) == t(1) .and. read_t(2) == t(4), &
+            "masked parquet_time write did not round-trip the surviving rows correctly")
+        if (allocated(error)) return
+        call check(error, read_ts(1) == ts(1) .and. read_ts(2) == ts(4), &
+            "masked parquet_timestamp write did not round-trip the surviving rows correctly")
     end subroutine test_mask_row_mask_temporal
 
     !> A masked parquet_string_column (compact) write: rows are dropped by iterating the
@@ -4195,6 +4323,348 @@ contains
         if (allocated(error)) return
         call check(error, back%is_null(2), "masked compact string write: row 2 should be the un-masked Null (was row 3)")
     end subroutine test_mask_row_mask_string_column_compact
+
+    !> Every whole-column write worker carries its own masked branch, and inside that branch the
+    !> validity mask is compacted by a SECOND, separate `if (present(valid))` arm. So a masked
+    !> write with no is_valid= leaves half of each branch unexercised, and the tests above reached
+    !> only int32's and float64's. This sweeps the rest -- int64, float32, float64, logical and
+    !> the padded (character array) string form -- through one masked write each, all with
+    !> is_valid=.
+    !>
+    !> The fixture is what gives it teeth: the Nulls sit at row 2 (dropped by the mask) and row 3
+    !> (surviving), so a worker that compacted `values` but left `valid` indexed against the
+    !> pre-mask buffer would shift the Null onto the wrong row rather than losing it -- a file
+    !> that still reads back cleanly and is simply wrong. Every column shares one mask and one
+    !> is_valid, so a type whose worker gets this wrong disagrees with its five neighbours.
+    subroutine test_mask_row_mask_every_scalar_type(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        logical :: mask(5) = [.true., .false., .true., .false., .true.]
+        logical :: valid_in(5) = [.true., .false., .false., .true., .true.]
+        integer(int64) :: i64v(5) = [11_int64, 22_int64, 33_int64, 44_int64, 55_int64]
+        real(real32) :: f32v(5) = [1.5_real32, 2.5_real32, 3.5_real32, 4.5_real32, 5.5_real32]
+        real(real64) :: f64v(5) = [10.25_real64, 20.25_real64, 30.25_real64, 40.25_real64, 50.25_real64]
+        logical :: lgv(5) = [.true., .true., .true., .false., .false.]
+        character(len=5) :: strv(5) = [character(len=5) :: "alpha", "bravo", "charl", "delta", "echo"]
+        integer(int64) :: r_i64(3)
+        real(real32) :: r_f32(3)
+        real(real64) :: r_f64(3)
+        logical :: r_lg(3)
+        character(len=5) :: r_str(3)
+        logical :: v_i64(3), v_f32(3), v_f64(3), v_lg(3), v_str(3)
+        logical, parameter :: expect_valid(3) = [.true., .false., .true.]
+        character(len=*), parameter :: out_file = "test_run/test_mask_every_scalar_type.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_row_mask(writer, mask)
+        call parquet_write_column(writer, "i64", i64v, is_valid=valid_in)
+        call parquet_write_column(writer, "f32", f32v, is_valid=valid_in)
+        call parquet_write_column(writer, "f64", f64v, is_valid=valid_in)
+        call parquet_write_column(writer, "lg", lgv, is_valid=valid_in)
+        call parquet_write_column(writer, "str", strv, is_valid=valid_in)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "i64", r_i64, is_valid=v_i64)
+        call parquet_read_column(reader, "f32", r_f32, is_valid=v_f32)
+        call parquet_read_column(reader, "f64", r_f64, is_valid=v_f64)
+        call parquet_read_column(reader, "lg", r_lg, is_valid=v_lg)
+        call parquet_read_column(reader, "str", r_str, is_valid=v_str)
+        call parquet_close_reader(reader)
+
+        ! Surviving rows are 1, 3, 5; the Null among them is the middle one (source row 3).
+        call check(error, all(v_i64 .eqv. expect_valid), "masked int64 write: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_f32 .eqv. expect_valid), "masked float32 write: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_f64 .eqv. expect_valid), "masked float64 write: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_lg .eqv. expect_valid), "masked logical write: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_str .eqv. expect_valid), "masked string write: is_valid was not compacted with the values")
+        if (allocated(error)) return
+
+        call check(error, r_i64(1) == 11_int64 .and. r_i64(3) == 55_int64, &
+            "masked int64 write did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, r_f32(1) == 1.5_real32 .and. r_f32(3) == 5.5_real32, &
+            "masked float32 write did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, r_f64(1) == 10.25_real64 .and. r_f64(3) == 50.25_real64, &
+            "masked float64 write did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, r_lg(1) .and. (.not. r_lg(3)), "masked logical write did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, trim(r_str(1)) == "alpha" .and. trim(r_str(3)) == "echo", &
+            "masked string write did not keep rows 1 and 5")
+    end subroutine test_mask_row_mask_every_scalar_type
+
+    !> The row-group-chunked counterpart of test_mask_row_mask_every_scalar_type: every chunked
+    !> write worker has its own masked branch too, reached through parquet_write_chunk_row_mask
+    !> rather than parquet_write_row_mask. Same fixture, same reasoning about the two Nulls --
+    !> plus the compact (parquet_string_column) chunk form, whose masked branch rebuilds the
+    !> column row by row instead of packing an array, and so carries the null state itself rather
+    !> than through a separate is_valid.
+    subroutine test_mask_chunk_row_mask_every_scalar_type(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: compact, r_compact
+        logical :: mask(5) = [.true., .false., .true., .false., .true.]
+        logical :: valid_in(5) = [.true., .false., .false., .true., .true.]
+        integer(int32) :: i32v(5) = [1, 2, 3, 4, 5]
+        integer(int64) :: i64v(5) = [11_int64, 22_int64, 33_int64, 44_int64, 55_int64]
+        real(real32) :: f32v(5) = [1.5_real32, 2.5_real32, 3.5_real32, 4.5_real32, 5.5_real32]
+        real(real64) :: f64v(5) = [10.25_real64, 20.25_real64, 30.25_real64, 40.25_real64, 50.25_real64]
+        logical :: lgv(5) = [.true., .true., .true., .false., .false.]
+        character(len=5) :: strv(5) = [character(len=5) :: "alpha", "bravo", "charl", "delta", "echo"]
+        integer(int32) :: r_i32(3)
+        integer(int64) :: r_i64(3)
+        real(real32) :: r_f32(3)
+        real(real64) :: r_f64(3)
+        logical :: r_lg(3)
+        character(len=5) :: r_str(3)
+        logical :: v_i32(3), v_i64(3), v_f32(3), v_f64(3), v_lg(3), v_str(3)
+        logical, parameter :: expect_valid(3) = [.true., .false., .true.]
+        character(len=:), allocatable :: s
+        character(len=*), parameter :: out_file = "test_run/test_mask_chunk_every_scalar_type.parquet"
+
+        call compact%append_string("alpha")
+        call compact%append_string("bravo")
+        call compact%append_null()
+        call compact%append_string("delta")
+        call compact%append_string("echo")
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_new_row_group(writer, 5_int64)
+        call parquet_write_chunk_row_mask(writer, mask)
+        call parquet_write_column_chunk(writer, "i32", i32v, is_valid=valid_in)
+        call parquet_write_column_chunk(writer, "i64", i64v, is_valid=valid_in)
+        call parquet_write_column_chunk(writer, "f32", f32v, is_valid=valid_in)
+        call parquet_write_column_chunk(writer, "f64", f64v, is_valid=valid_in)
+        call parquet_write_column_chunk(writer, "lg", lgv, is_valid=valid_in)
+        call parquet_write_column_chunk(writer, "str", strv, is_valid=valid_in)
+        call parquet_write_column_chunk(writer, "compact", compact)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "i32", r_i32, is_valid=v_i32)
+        call parquet_read_column(reader, "i64", r_i64, is_valid=v_i64)
+        call parquet_read_column(reader, "f32", r_f32, is_valid=v_f32)
+        call parquet_read_column(reader, "f64", r_f64, is_valid=v_f64)
+        call parquet_read_column(reader, "lg", r_lg, is_valid=v_lg)
+        call parquet_read_column(reader, "str", r_str, is_valid=v_str)
+        call parquet_read_column(reader, "compact", r_compact)
+        call parquet_close_reader(reader)
+
+        call check(error, all(v_i32 .eqv. expect_valid), "masked int32 chunk: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_i64 .eqv. expect_valid), "masked int64 chunk: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_f32 .eqv. expect_valid), "masked float32 chunk: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_f64 .eqv. expect_valid), "masked float64 chunk: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_lg .eqv. expect_valid), "masked logical chunk: is_valid was not compacted with the values")
+        if (allocated(error)) return
+        call check(error, all(v_str .eqv. expect_valid), "masked string chunk: is_valid was not compacted with the values")
+        if (allocated(error)) return
+
+        call check(error, r_i32(1) == 1 .and. r_i32(3) == 5, "masked int32 chunk did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, r_i64(1) == 11_int64 .and. r_i64(3) == 55_int64, &
+            "masked int64 chunk did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, r_f32(1) == 1.5_real32 .and. r_f32(3) == 5.5_real32, &
+            "masked float32 chunk did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, r_f64(1) == 10.25_real64 .and. r_f64(3) == 50.25_real64, &
+            "masked float64 chunk did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, r_lg(1) .and. (.not. r_lg(3)), "masked logical chunk did not keep rows 1 and 5")
+        if (allocated(error)) return
+        call check(error, trim(r_str(1)) == "alpha" .and. trim(r_str(3)) == "echo", &
+            "masked string chunk did not keep rows 1 and 5")
+        if (allocated(error)) return
+
+        call check(error, r_compact%size() == 3_int64, "masked compact string chunk: expected 3 surviving rows")
+        if (allocated(error)) return
+        call check(error, r_compact%is_null(2), &
+            "masked compact string chunk: the surviving Null (source row 3) landed on the wrong row")
+        if (allocated(error)) return
+        call r_compact%get(1, s)
+        call check(error, s == "alpha", "masked compact string chunk: row 1 content")
+        if (allocated(error)) return
+        call r_compact%get(3, s)
+        call check(error, s == "echo", "masked compact string chunk: row 3 content")
+    end subroutine test_mask_chunk_row_mask_every_scalar_type
+
+    !> The chunked counterpart of test_mask_row_mask_temporal: each temporal type's chunk worker
+    !> has its own masked branch, separate from the whole-column one that test covers.
+    subroutine test_mask_chunk_row_mask_temporal(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_date) :: d(4), read_d(2)
+        type(parquet_time) :: t(4), read_t(2)
+        type(parquet_timestamp) :: ts(4), read_ts(2)
+        logical :: mask(4) = [.true., .false., .false., .true.]
+        character(len=*), parameter :: out_file = "test_run/test_mask_chunk_temporal.parquet"
+
+        call d(1)%set(2024, 1, 1)
+        call d(2)%set(2024, 2, 2)
+        call d(3)%set_null()
+        call d(4)%set(2024, 4, 4)
+
+        call t(1)%set(1, 11, 11)
+        call t(2)%set(2, 22, 22)
+        call t(3)%set_null()
+        call t(4)%set(4, 44, 44)
+
+        call ts(1)%set(2024, 1, 1, 1, 11, 11)
+        call ts(2)%set(2024, 2, 2, 2, 22, 22)
+        call ts(3)%set_null()
+        call ts(4)%set(2024, 4, 4, 4, 44, 44)
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_new_row_group(writer, 4_int64)
+        call parquet_write_chunk_row_mask(writer, mask)
+        call parquet_write_column_chunk(writer, "d", d)
+        call parquet_write_column_chunk(writer, "t", t)
+        call parquet_write_column_chunk(writer, "ts", ts)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "d", read_d)
+        call parquet_read_column(reader, "t", read_t)
+        call parquet_read_column(reader, "ts", read_ts)
+        call parquet_close_reader(reader)
+
+        call check(error, read_d(1) == d(1) .and. read_d(2) == d(4), &
+            "masked chunked parquet_date write did not round-trip the surviving rows correctly")
+        if (allocated(error)) return
+        call check(error, read_t(1) == t(1) .and. read_t(2) == t(4), &
+            "masked chunked parquet_time write did not round-trip the surviving rows correctly")
+        if (allocated(error)) return
+        call check(error, read_ts(1) == ts(1) .and. read_ts(2) == ts(4), &
+            "masked chunked parquet_timestamp write did not round-trip the surviving rows correctly")
+    end subroutine test_mask_chunk_row_mask_temporal
+
+    !> A row mask names ROWS, but the buffer it is applied to holds col_size elements per row, so
+    !> parquet_mask_expand_block has to widen each mask bit into a whole block before `pack` is
+    !> used on it. Every masked test above writes scalar (col_size = 1) columns, where that
+    !> expansion is the identity and the block-widening arm never runs -- so a mask that dropped
+    !> ELEMENTS rather than rows would have gone unnoticed on a vector column.
+    !>
+    !> The fixture makes both failure modes visible: dropping elements instead of rows would
+    !> leave the wrong element count, and expanding in the wrong order would put row 3's pair
+    !> where row 1's belongs. The string matrix form has its own separate masked branch (it packs
+    !> and reshapes rather than going through a shared flat worker), so it is written alongside.
+    subroutine test_mask_row_mask_vector_columns(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        logical :: mask(4) = [.true., .false., .true., .false.]
+        integer(int32) :: vec(2, 4)
+        logical :: vec_valid(2, 4)
+        character(len=4) :: svec(2, 4)
+        integer(int32) :: r_vec(2, 2)
+        logical :: r_valid(2, 2)
+        character(len=4) :: r_svec(2, 2)
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_mask_vector_columns.parquet"
+
+        do i = 1, 4
+            vec(1, i) = 10 * i + 1
+            vec(2, i) = 10 * i + 2
+            write(svec(1, i), '("a", i0)') i
+            write(svec(2, i), '("b", i0)') i
+        end do
+        vec_valid = .true.
+        vec_valid(2, 3) = .false.   ! a Null on a SURVIVING row, at the second element.
+        vec_valid(1, 2) = .false.   ! a Null on a dropped row: must vanish with it.
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_row_mask(writer, mask)
+        call parquet_write_column(writer, "vec", vec, is_valid=vec_valid)
+        call parquet_write_column(writer, "svec", svec)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "vec", r_vec, is_valid=r_valid)
+        call parquet_read_column(reader, "svec", r_svec)
+        call parquet_close_reader(reader)
+
+        ! Surviving rows are 1 and 3, each keeping BOTH of its elements.
+        call check(error, all(r_vec(:, 1) == [11, 12]), "masked vector write: row 1's elements were not kept intact")
+        if (allocated(error)) return
+        call check(error, r_vec(1, 2) == 31, "masked vector write: row 3's first element was not kept")
+        if (allocated(error)) return
+        call check(error, all(r_valid(:, 1)) .and. r_valid(1, 2) .and. (.not. r_valid(2, 2)), &
+            "masked vector write: the per-element validity mask was not expanded and compacted with the rows")
+        if (allocated(error)) return
+        call check(error, trim(r_svec(1, 1)) == "a1" .and. trim(r_svec(2, 1)) == "b1", &
+            "masked string matrix write: row 1's elements were not kept intact")
+        if (allocated(error)) return
+        call check(error, trim(r_svec(1, 2)) == "a3" .and. trim(r_svec(2, 2)) == "b3", &
+            "masked string matrix write: row 3's elements were not kept intact")
+    end subroutine test_mask_row_mask_vector_columns
+
+    !> The row-group-chunked counterpart of test_mask_row_mask_vector_columns; see its
+    !> doc-comment for what the block expansion is protecting.
+    subroutine test_mask_chunk_row_mask_vector_columns(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        logical :: mask(4) = [.true., .false., .true., .false.]
+        integer(int32) :: vec(2, 4)
+        logical :: vec_valid(2, 4)
+        character(len=4) :: svec(2, 4)
+        integer(int32) :: r_vec(2, 2)
+        logical :: r_valid(2, 2)
+        character(len=4) :: r_svec(2, 2)
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_mask_chunk_vector_columns.parquet"
+
+        do i = 1, 4
+            vec(1, i) = 10 * i + 1
+            vec(2, i) = 10 * i + 2
+            write(svec(1, i), '("a", i0)') i
+            write(svec(2, i), '("b", i0)') i
+        end do
+        vec_valid = .true.
+        vec_valid(2, 3) = .false.
+        vec_valid(1, 2) = .false.
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_new_row_group(writer, 4_int64)
+        call parquet_write_chunk_row_mask(writer, mask)
+        call parquet_write_column_chunk(writer, "vec", vec, is_valid=vec_valid)
+        call parquet_write_column_chunk(writer, "svec", svec)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "vec", r_vec, is_valid=r_valid)
+        call parquet_read_column(reader, "svec", r_svec)
+        call parquet_close_reader(reader)
+
+        call check(error, all(r_vec(:, 1) == [11, 12]), "masked vector chunk: row 1's elements were not kept intact")
+        if (allocated(error)) return
+        call check(error, r_vec(1, 2) == 31, "masked vector chunk: row 3's first element was not kept")
+        if (allocated(error)) return
+        call check(error, all(r_valid(:, 1)) .and. r_valid(1, 2) .and. (.not. r_valid(2, 2)), &
+            "masked vector chunk: the per-element validity mask was not expanded and compacted with the rows")
+        if (allocated(error)) return
+        call check(error, trim(r_svec(1, 1)) == "a1" .and. trim(r_svec(2, 1)) == "b1", &
+            "masked string matrix chunk: row 1's elements were not kept intact")
+        if (allocated(error)) return
+        call check(error, trim(r_svec(1, 2)) == "a3" .and. trim(r_svec(2, 2)) == "b3", &
+            "masked string matrix chunk: row 3's elements were not kept intact")
+    end subroutine test_mask_chunk_row_mask_vector_columns
 
     !> A schema declaring col_size: auto leaves col_size unresolved until either
     !> schema%set_col_size is called or a matrix-form write resolves it automatically from the

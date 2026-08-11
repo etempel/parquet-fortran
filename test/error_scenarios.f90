@@ -692,6 +692,12 @@ program error_scenarios
         call scenario_qc_warning_fractional_bound()
     case ("qc_int64_beyond_float64_precision")
         call scenario_qc_int64_beyond_float64_precision()
+    case ("qc_int64_strict_operators")
+        call scenario_qc_int64_strict_operators()
+    case ("qc_int64_values_fractional_bound")
+        call scenario_qc_int64_values_fractional_bound()
+    case ("qc_warning_float64")
+        call scenario_qc_warning_float64()
     case ("qc_warning_string")
         call scenario_qc_warning_string()
     case ("qc_silently_ignored_for_boolean")
@@ -7083,6 +7089,117 @@ contains
         call parquet_write_column(writer, "at", at)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_int64_beyond_float64_precision
+
+    !> qc_int64_satisfies applies the declared comparison operator to an int64 value and an
+    !> exactly-int64 bound. Every existing scenario declares its bounds plainly, which parses to
+    !> the inclusive ">=" / "<=" defaults, so the two STRICT arms were never taken -- and a
+    !> strict operator silently behaving as its inclusive twin is a wrong answer nothing else
+    !> would notice: it accepts exactly the boundary value the declaration excludes.
+    !>
+    !> `strict` holds the two boundary values, which violate `> 0` and `< 100` and must warn.
+    !> `inside` is the negative control, one step in from each boundary: it satisfies both, so a
+    !> checker that had degraded either strict operator into an inclusive one would still warn
+    !> about `strict`, but one that warned about everything could not stay silent here.
+    subroutine scenario_qc_int64_strict_operators()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: strict(2) = [0_int64, 100_int64]  !! exactly the excluded boundaries.
+        integer(int64) :: inside(2) = [1_int64, 99_int64]   !! one step inside both: compliant.
+
+        schema%maml%name = "qc_int64_strict.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: strict", &
+            "  data_type: int64", &
+            "  qc:", &
+            "    min: > 0", &
+            "    max: < 100", &
+            "- name: inside", &
+            "  data_type: int64", &
+            "  qc:", &
+            "    min: > 0", &
+            "    max: < 100" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_int64_strict.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "strict", strict)
+        call parquet_write_column(writer, "inside", inside)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_int64_strict_operators
+
+    !> A fractional qc bound cannot be converted to an exact int64 one, so qc_numeric_i64 falls
+    !> back to comparing in real64 instead of using qc_int64_satisfies. That fallback is only
+    !> reachable the way this scenario reaches it: the SCHEMA type is float64 (which is what
+    !> permits a fractional bound at all -- an int32/int64 schema type rejects one outright), and
+    !> the caller hands the column int64 values, which the writer widens on the way out.
+    !>
+    !> `frac` violates at both ends and must warn. `frac_ok` is the negative control: the same
+    !> declaration with values strictly between the two bounds, which must stay silent.
+    subroutine scenario_qc_int64_values_fractional_bound()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: frac(2) = [1_int64, 10_int64]    !! below 1.5 and above 9.5.
+        integer(int64) :: frac_ok(2) = [2_int64, 9_int64]  !! inside [1.5, 9.5]: compliant.
+
+        schema%maml%name = "qc_int64_fractional.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: frac", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: 1.5", &
+            "    max: 9.5", &
+            "- name: frac_ok", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: 1.5", &
+            "    max: 9.5" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_int64_fractional.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "frac", frac)
+        call parquet_write_column(writer, "frac_ok", frac_ok)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_int64_values_fractional_bound
+
+    !> Write-time qc has one checker per value kind, and float64's (qc_numeric_r64) was the only
+    !> one never observed reporting a violation -- the existing scenarios cover int32, int64 and
+    !> float32. A checker that computed the violation count but never reported it would satisfy
+    !> every other qc test in the suite while telling a real64 caller nothing at all.
+    !>
+    !> `f64` violates; `f64_ok` is the negative control on the same declaration.
+    subroutine scenario_qc_warning_float64()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real64) :: f64(3) = [0.25_real64, 5.0_real64, 12.5_real64]  !! first and last are out of range.
+        real(real64) :: f64_ok(3) = [1.0_real64, 5.0_real64, 10.0_real64] !! all within [1, 10].
+
+        schema%maml%name = "qc_warning_float64.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: f64", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: 1", &
+            "    max: 10", &
+            "- name: f64_ok", &
+            "  data_type: float64", &
+            "  qc:", &
+            "    min: 1", &
+            "    max: 10" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_warning_float64.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "f64", f64)
+        call parquet_write_column(writer, "f64_ok", f64_ok)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_warning_float64
 
     subroutine scenario_qc_warning_string()
         type(parquet_schema) :: schema

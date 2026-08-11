@@ -33,13 +33,14 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-46` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-78` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
-**Counts today: 40 covered, 0 proposed, 5 not testable.** Section 2 being empty is the healthy
+**Counts today: 61 covered, 1 proposed, 14 not testable.** An empty section 2 is the healthy
 state rather than a finished one — it means every risk currently identified as testable has its
-test. Nine entries are covered by something other than a unit test, deliberately: Risk-1 by a
+test — so the entry sitting there is a to-do, not a milestone. Nine entries are covered by
+something other than a unit test, deliberately: Risk-1 by a
 maintainer check under `app/` with a `tools/*.sh` wrapper (it measures memory, so it needs its own
 process per measurement), and Risk-2, Risk-4, Risk-5, Risk-12, Risk-13, Risk-19, Risk-43 and Risk-44 by static
 checks in `tools/check_source_conventions.py`, which is the right tool for an invariant about what the code
@@ -140,6 +141,7 @@ something a reader is expected to have.
 | [Risk-74](#risk-74--discarding-a-column-the-caller-wrote-into-silently-restores-the-files-values) | Discarding a column the caller wrote into silently restores the file's values | 4 — covered |
 | [Risk-75](#risk-75--the-name-indexs-linear-scan-fallback-is-a-safety-net-nothing-exercised) | The name index's linear-scan fallback is a safety net nothing exercised | 4 — covered |
 | [Risk-76](#risk-76--casts-post-touch-re-check-guards-an-invariant-that-lives-in-another-file) | `%cast`'s post-touch re-check guards an invariant that lives in another file | 3 — not testable |
+| [Risk-77](#risk-77--a-masked-write-compacts-the-values-and-the-validity-mask-separately) | A masked write compacts the values and the validity mask separately | 4 — covered |
 
 ---
 
@@ -147,7 +149,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-77**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-78**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -2840,6 +2842,16 @@ control is what stops a checker that simply warns about every `int64` column fro
 by mutation: making `qc_bound_as_int64` always answer `.false.` — i.e. restoring the old widening —
 fails the test.
 
+**The four operators are now exercised, which is what makes that warning concrete.** Until
+`qc: a strict min:/max: operator excludes the boundary value` (`test/test_writing.f90`, over the
+`qc_int64_strict_operators` scenario), every scenario declared its bounds plainly — which parses to
+the inclusive `>=`/`<=` defaults — so `qc_int64_satisfies`' two strict arms had never run. A strict
+operator quietly behaving as its inclusive twin accepts exactly the boundary value the declaration
+excludes, and warns about nothing. The scenario's `inside` column (one step in from each boundary) is
+the negative control that separates that failure from a checker warning indiscriminately. The
+fractional fallback described above has the same treatment, in
+`qc: a fractional bound still checks int64 values, in real64`.
+
 **What this forbids.** Do not "fix" the remaining half by rounding, clamping or ceiling the bound
 into the value's kind: the operator makes that a different question for each of `>=`, `>`, `<=`, `<`,
 and getting it wrong turns a silently-loose check into a silently-tight one, which is worse. The
@@ -3155,3 +3167,59 @@ Two mutations are caught deterministically: deleting the scan (every lookup then
   `intent(in)` precisely so concurrent readers need no atomics; the next *mutation* rebuilds, which
   is what makes a dropped index a slowdown rather than a permanent one, and the test asserts that
   recovery.
+
+
+### Risk-77 — A masked write compacts the values and the validity mask separately
+
+**What breaks.** `parquet_write_row_mask`/`parquet_write_chunk_row_mask` install a row-keep mask,
+and every write worker's masked branch then does two independent things: it `pack`s the values down
+to the kept rows, and — in a **second, separate `if (present(valid))` arm** — packs `is_valid` the
+same way. Nothing ties the two together. A worker that compacts one and not the other, or that
+expands the row mask into element positions differently for the two, writes a file whose Nulls sit
+on rows that were never null.
+
+There are roughly twenty such branches and they are written out one by one, not shared: five numeric
+types x whole-column/chunked, three temporal types x whole-column/chunked, the padded string form
+scalar/matrix x whole-column/chunked, and the compact (`parquet_string_column`) form, whose masked
+branch rebuilds the column row by row rather than packing an array. The property has to hold
+independently in each.
+
+**Why it is quiet.** The row count still comes out right, every value is a value that really was in
+the caller's buffer, and the file reads back without a complaint from anything. A Null that moved is
+indistinguishable from a Null that was meant to be there — there is no checksum, no count, and no
+abort. The vector case is quieter still: `parquet_mask_expand_block` widens each mask bit into a
+whole `col_size`-element block, and for a scalar column that expansion is the identity, so a bug in
+it drops *elements* rather than *rows* and is invisible until something masks a vector column.
+
+**Test.** Four sweeps in `test/test_writing.f90`, sharing one fixture design:
+`parquet_write_row_mask + is_valid compacts both, for every scalar type` and its
+`parquet_write_chunk_row_mask` counterpart cover int32/int64/float32/float64/logical and the padded
+string form plus the compact one; `parquet_write_row_mask compacts a masked
+parquet_date/time/timestamp write` and `parquet_write_chunk_row_mask compacts a chunked
+date/time/timestamp write` cover the three temporal types; and `parquet_write_row_mask expands to
+whole rows of a vector column` (plus its chunked twin) covers the block expansion.
+
+Confirmed by mutation, each caught by exactly its own test and nothing else: dropping
+`vmask => valid_c` from `write_int64_flat` and from `write_int32_chunk_flat`; pointing
+`write_time_chunk_flat` and `write_timestamp_flat` at the un-compacted array; and expanding along
+dimension 2 instead of 1 in `parquet_mask_expand_block`, which keeps the element count right and
+scrambles the order.
+
+**What this forbids.**
+
+- **A masked write with no `is_valid=` exercises only half of its branch.** The `present(valid)` arm
+  is separate code; before these tests, several types had their masked branch covered and their
+  validity compaction not. A new write specific, or a new element-type family, inherits both arms
+  and needs both written.
+- **The fixture's shape is the test, not the values.** Put a Null on a *dropped* row and another on
+  a *surviving* one: a worker that compacted the values but left `valid` indexed against the
+  pre-mask buffer then shifts the Null onto the wrong row instead of losing it, which is the failure
+  a "does it still round-trip?" test cannot see. Sharing one mask and one `is_valid` across every
+  column in the file is the other half — a type that gets it wrong disagrees with its five
+  neighbours rather than being wrong on its own.
+- **`parquet_mask_expand_block` must stay the single place a row mask becomes an element mask.** A
+  worker that inlines its own expansion re-opens the vector case for itself alone, and a scalar-only
+  test suite will not notice.
+- **Do not test the block expansion with `col_size` values that make the two orders coincide.** A
+  width of 1 is the identity and a uniform row makes a transposed expansion look correct; the tests
+  use distinct per-element values so that row 3's pair cannot pass for row 1's.

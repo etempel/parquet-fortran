@@ -98,6 +98,7 @@ module parquet_tables
     !! doc-comment for why it has to be public at all.
     public :: parquet_debug_table_set_inflight
     public :: parquet_debug_colread_block_rows
+    public :: parquet_debug_table_drop_name_index
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_table: "
@@ -6020,6 +6021,29 @@ module parquet_tables
             character(len=*), intent(in) :: name           !! column name.
             integer :: idx                                 !! slot index, or 0.
         end function cache_find
+        !> TEST-ONLY -- deallocates this table's name index, so the next lookup has to take
+        !! `cache_find`'s linear-scan fallback.
+        !!
+        !! **This is a debug hook, not API**, public for the same reason
+        !! `parquet_debug_table_set_inflight` is: the index lives on `parquet_table_cache`, whose
+        !! components are private to this module, so nothing outside can reach it. It is excluded
+        !! from README.md's API overview and no library code calls it.
+        !!
+        !! It exists because that fallback is a SAFETY NET with no route to it through the public
+        !! API: every mutation maintains the index eagerly, so a correct library never reaches the
+        !! scan, and it was measured executing zero times across the whole suite and every error
+        !! scenario. What it protects against is a future mutation that forgets to maintain the
+        !! index -- which would otherwise turn into wrong-column answers rather than a slower
+        !! lookup. Untested, the net could rot away and nothing would say so.
+        !!
+        !! `had_index` is not optional on purpose: dropping the index is invisible from outside, so
+        !! a test that did not check it would pass just as happily against a hook that did nothing.
+        !! It reports whether an index was there to drop, which makes the before/after states
+        !! assertable -- `.true.` on the first call, `.false.` on a second one.
+        module subroutine parquet_debug_table_drop_name_index(table, had_index)
+            type(parquet_table), intent(in) :: table !! the table whose index to drop.
+            logical, intent(out) :: had_index        !! .true. when an index was present.
+        end subroutine parquet_debug_table_drop_name_index
         !> error stops unless slot `idx` holds exactly `kind` -- the row handle's counterpart of
         !! `table_require_kind`, for the string kinds, which have no widening to fall back on.
         module subroutine row_require_kind(self, name, idx, kind)

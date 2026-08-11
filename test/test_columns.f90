@@ -92,7 +92,9 @@ contains
             new_unittest("a character ARRAY trims, a scalar does not", test_string_array_trims_scalar_does_not), &
             new_unittest("set_all preserves null elements under modify_nulls=.false.", test_string_set_all_keeps_nulls), &
             new_unittest("bulk validity is exact at every width, across block boundaries", &
-                test_bulk_validity_widths) &
+                test_bulk_validity_widths), &
+            new_unittest("get_elem/set_elem address one element on every vector kind", &
+                test_elem_access_every_vector_kind) &
             ]
     end subroutine collect_tests_parquet_columns
     !
@@ -2889,5 +2891,246 @@ contains
         end do
         call check(error, .true., what)
     end subroutine expect_mask
+    !
+    !> Exercises `%get_elem`/`%set_elem` -- the type-bound element accessors -- on all eight
+    !! non-string vector kinds. (`strv` has its own coverage in the string tests; its specifics
+    !! live in `parquet_columns_string`, not `parquet_columns_access`.)
+    !!
+    !! These bindings are one-line forwarders onto the `parquet_column_get_elem_*` typed tier,
+    !! and that tier is reached from `parquet_tables` -- but nothing called the bindings
+    !! themselves, so a forwarder naming the wrong specific or transposing `i` and `e` would
+    !! have gone unnoticed. Every fixture value therefore encodes BOTH its row and its element
+    !! (`10*i + e`, or the temporal equivalent), which is what makes a transposed or off-by-one
+    !! index a failure rather than a coincidence.
+    !!
+    !! Each kind also has one element marked null before `%set_elem` writes it, to assert the
+    !! documented rule that writing an element clears THAT element's null bit and leaves its
+    !! neighbour in the same row alone.
+    subroutine test_elem_access_every_vector_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), parameter :: NR = 4_int64
+        integer(int32), parameter :: NW = 3_int32
+        type(parquet_column) :: c
+        integer(int32) :: m32(NW, NR), g32
+        integer(int64) :: m64(NW, NR), g64
+        real(real32) :: r32(NW, NR), h32
+        real(real64) :: r64(NW, NR), h64
+        logical :: mb(NW, NR), gb
+        type(parquet_date) :: md(NW, NR), gd, wd
+        type(parquet_time) :: mt(NW, NR), gt, wt
+        type(parquet_timestamp) :: ms(NW, NR), gs, ws
+        integer(int64) :: i, e
+        !
+        ! One fixture pattern, built once and reused per kind: value(e, i) distinguishes every
+        ! (row, element) pair, so no two cells of the column hold the same value.
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                m32(e, i) = int(10_int64*i + e, int32)
+                m64(e, i) = 10_int64*i + e
+                r32(e, i) = real(10_int64*i + e, real32) + 0.5_real32
+                r64(e, i) = real(10_int64*i + e, real64) + 0.25_real64
+                mb(e, i) = mod(i + e, 2_int64) == 0_int64
+                call md(e, i)%set(2020 + int(i, int32), int(e, int32), 10 + int(i, int32))
+                call mt(e, i)%set(int(i, int32), 10*int(e, int32), 0_int32)
+                call ms(e, i)%set(2020 + int(i, int32), int(e, int32), 5, 12, 0, 0)
+            end do
+        end do
+        !
+        ! ---- PK_INT32_VEC ----
+        call c%init(PK_INT32_VEC, NR, width=NW)
+        call c%set_all(m32)
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                call c%get_elem(i, e, g32)
+                if (g32 /= m32(e, i)) then
+                    call check(error, .false., "int32 vector get_elem should return element (e, i)")
+                    return
+                end if
+            end do
+        end do
+        call c%set_null(2_int64, 3_int64)
+        call c%set_elem(2_int64, 3_int64, 777_int32)
+        call c%get_elem(2_int64, 3_int64, g32)
+        call check(error, g32 == 777_int32, "int32 vector set_elem should store the new value")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), &
+            "int32 vector set_elem should clear that element's own null bit")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, g32)
+        call check(error, g32 == m32(2, 2), "int32 vector set_elem should leave its neighbour alone")
+        if (allocated(error)) return
+        !
+        ! ---- PK_INT64_VEC ----
+        call c%init(PK_INT64_VEC, NR, width=NW)
+        call c%set_all(m64)
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                call c%get_elem(i, e, g64)
+                if (g64 /= m64(e, i)) then
+                    call check(error, .false., "int64 vector get_elem should return element (e, i)")
+                    return
+                end if
+            end do
+        end do
+        call c%set_null(2_int64, 3_int64)
+        call c%set_elem(2_int64, 3_int64, 777_int64)
+        call c%get_elem(2_int64, 3_int64, g64)
+        call check(error, g64 == 777_int64, "int64 vector set_elem should store the new value")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), &
+            "int64 vector set_elem should clear that element's own null bit")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, g64)
+        call check(error, g64 == m64(2, 2), "int64 vector set_elem should leave its neighbour alone")
+        if (allocated(error)) return
+        !
+        ! ---- PK_FLOAT32_VEC ----
+        call c%init(PK_FLOAT32_VEC, NR, width=NW)
+        call c%set_all(r32)
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                call c%get_elem(i, e, h32)
+                if (h32 /= r32(e, i)) then
+                    call check(error, .false., "float32 vector get_elem should return element (e, i)")
+                    return
+                end if
+            end do
+        end do
+        call c%set_null(2_int64, 3_int64)
+        call c%set_elem(2_int64, 3_int64, 777.5_real32)
+        call c%get_elem(2_int64, 3_int64, h32)
+        call check(error, h32 == 777.5_real32, "float32 vector set_elem should store the new value")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), &
+            "float32 vector set_elem should clear that element's own null bit")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, h32)
+        call check(error, h32 == r32(2, 2), "float32 vector set_elem should leave its neighbour alone")
+        if (allocated(error)) return
+        !
+        ! ---- PK_FLOAT64_VEC ----
+        call c%init(PK_FLOAT64_VEC, NR, width=NW)
+        call c%set_all(r64)
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                call c%get_elem(i, e, h64)
+                if (h64 /= r64(e, i)) then
+                    call check(error, .false., "float64 vector get_elem should return element (e, i)")
+                    return
+                end if
+            end do
+        end do
+        call c%set_null(2_int64, 3_int64)
+        call c%set_elem(2_int64, 3_int64, 777.25_real64)
+        call c%get_elem(2_int64, 3_int64, h64)
+        call check(error, h64 == 777.25_real64, "float64 vector set_elem should store the new value")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), &
+            "float64 vector set_elem should clear that element's own null bit")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, h64)
+        call check(error, h64 == r64(2, 2), "float64 vector set_elem should leave its neighbour alone")
+        if (allocated(error)) return
+        !
+        ! ---- PK_LOGICAL_VEC ----
+        call c%init(PK_LOGICAL_VEC, NR, width=NW)
+        call c%set_all(mb)
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                call c%get_elem(i, e, gb)
+                if (gb .neqv. mb(e, i)) then
+                    call check(error, .false., "logical vector get_elem should return element (e, i)")
+                    return
+                end if
+            end do
+        end do
+        call c%set_null(2_int64, 3_int64)
+        call c%set_elem(2_int64, 3_int64, .not. mb(3, 2))
+        call c%get_elem(2_int64, 3_int64, gb)
+        call check(error, gb .neqv. mb(3, 2), "logical vector set_elem should store the new value")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), &
+            "logical vector set_elem should clear that element's own null bit")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, gb)
+        call check(error, gb .eqv. mb(2, 2), "logical vector set_elem should leave its neighbour alone")
+        if (allocated(error)) return
+        !
+        ! ---- PK_DATE_VEC ----
+        call wd%set(1999, 12, 31)
+        call c%init(PK_DATE_VEC, NR, width=NW)
+        call c%set_all(md)
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                call c%get_elem(i, e, gd)
+                if (gd /= md(e, i)) then
+                    call check(error, .false., "date vector get_elem should return element (e, i)")
+                    return
+                end if
+            end do
+        end do
+        call c%set_null(2_int64, 3_int64)
+        call c%set_elem(2_int64, 3_int64, wd)
+        call c%get_elem(2_int64, 3_int64, gd)
+        call check(error, gd == wd, "date vector set_elem should store the new element")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), &
+            "date vector set_elem should clear that element's own null state")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, gd)
+        call check(error, gd == md(2, 2), "date vector set_elem should leave its neighbour alone")
+        if (allocated(error)) return
+        !
+        ! ---- PK_TIME_VEC ----
+        call wt%set(23, 59, 58)
+        call c%init(PK_TIME_VEC, NR, width=NW)
+        call c%set_all(mt)
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                call c%get_elem(i, e, gt)
+                if (gt /= mt(e, i)) then
+                    call check(error, .false., "time vector get_elem should return element (e, i)")
+                    return
+                end if
+            end do
+        end do
+        call c%set_null(2_int64, 3_int64)
+        call c%set_elem(2_int64, 3_int64, wt)
+        call c%get_elem(2_int64, 3_int64, gt)
+        call check(error, gt == wt, "time vector set_elem should store the new element")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), &
+            "time vector set_elem should clear that element's own null state")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, gt)
+        call check(error, gt == mt(2, 2), "time vector set_elem should leave its neighbour alone")
+        if (allocated(error)) return
+        !
+        ! ---- PK_TIMESTAMP_VEC ----
+        call ws%set(1999, 12, 31, 23, 59, 58)
+        call c%init(PK_TIMESTAMP_VEC, NR, width=NW)
+        call c%set_all(ms)
+        do i = 1_int64, NR
+            do e = 1_int64, int(NW, int64)
+                call c%get_elem(i, e, gs)
+                if (gs /= ms(e, i)) then
+                    call check(error, .false., "timestamp vector get_elem should return element (e, i)")
+                    return
+                end if
+            end do
+        end do
+        call c%set_null(2_int64, 3_int64)
+        call c%set_elem(2_int64, 3_int64, ws)
+        call c%get_elem(2_int64, 3_int64, gs)
+        call check(error, gs == ws, "timestamp vector set_elem should store the new element")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2_int64, 3_int64), &
+            "timestamp vector set_elem should clear that element's own null state")
+        if (allocated(error)) return
+        call c%get_elem(2_int64, 2_int64, gs)
+        call check(error, gs == ms(2, 2), "timestamp vector set_elem should leave its neighbour alone")
+        if (allocated(error)) return
+        call check(error, .true., "every vector kind supports get_elem and set_elem")
+    end subroutine test_elem_access_every_vector_kind
 
 end module test_columns

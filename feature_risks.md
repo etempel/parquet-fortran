@@ -137,6 +137,8 @@ something a reader is expected to have.
 | [Risk-71](#risk-71--a-stale-handle-reads-the-wrong-column-or-row-and-nothing-says-so) | A stale handle reads the wrong column or row, and nothing says so | 4 — covered |
 | [Risk-72](#risk-72--the-name-form-and-the-handle-form-of-one-accessor-can-silently-disagree) | The name form and the handle form of one accessor can silently disagree | 4 — covered |
 | [Risk-73](#risk-73--a-keydatatype-entry-that-disagrees-with-its-value-is-worse-than-no-entry) | A `<KEY>.datatype` entry that disagrees with its value is worse than no entry | 4 — covered |
+| [Risk-74](#risk-74--discarding-a-column-the-caller-wrote-into-silently-restores-the-files-values) | Discarding a column the caller wrote into silently restores the file's values | 4 — covered |
+| [Risk-75](#risk-75--the-name-indexs-linear-scan-fallback-is-a-safety-net-nothing-exercised) | The name index's linear-scan fallback is a safety net nothing exercised | 4 — covered |
 
 ---
 
@@ -144,7 +146,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-75**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-76**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3073,3 +3075,51 @@ flag again: a cast changes a column's *kind*, not whose values those are, and on
 nothing has been read yet. Moving `%clone_structure`'s reset into the shared
 `clone_copy_descriptor`, which compiles, passes every eviction test, and silently stops `%clone`
 carrying the flag. And documenting the protection as total.
+
+### Risk-75 — The name index's linear-scan fallback is a safety net nothing exercised
+
+**What breaks.** `cache_find` (`src/parquet_tables_query.f90`) bisects `cache%name_order`, and when
+that search comes up empty it falls through to a **linear scan** of the slots. Its own comment says
+what the scan is for: it "deliberately does NOT trust" the index, so a mutation that forgets to
+maintain it costs a scan rather than returning whichever column the bisection happened to land on.
+Delete the scan, or let the bisection answer without re-comparing the name at the slot it found, and
+that class of mistake stops being a slowdown and becomes a **wrong column**, silently — on a table
+whose shape, column list, kinds and row count are all still perfectly correct.
+
+**Why it went untested, and why the coverage report said otherwise.** There is no route to the scan
+through the public API: every column-set mutation maintains the index eagerly (`table_new_slot` and
+`add_file_slot` through `cache_name_index_insert`; drop, rename, clone and reset through
+`cache_name_index_rebuild`), so a *correct* library never reaches it. Direct instrumentation — a
+temporary `write` on the scan's hit — measured it executing **zero times** across the whole test
+suite and all error scenarios. Coverage nevertheless reported those two lines as hit on some runs
+and not others, which is the mis-attributed-`return` artifact this project already documents for
+Fortran gcov, and it is the part worth remembering: **a coverage report credited an unexercised
+safety net, so the gap was invisible from the one instrument that was supposed to show it.**
+
+**Test.** `column lookup falls back to a linear scan when the name index is gone`
+(`test/test_table.f90`), through `parquet_debug_table_drop_name_index` — a public Fortran-side debug
+hook, added for this and nothing else, for the reason
+[Risk-6](#risk-6--the-concurrency-guards-must-keep-agreeing-and-one-of-them-protects-a-wrong-answer)
+records for `parquet_debug_table_set_inflight`: the index lives on `parquet_table_cache`, whose
+components are private to `parquet_tables`, so nothing outside can reach it. The fixture is
+deliberately `test_lookup_name_index`'s own — a strict-prefix pair (`flux`/`flux_err`), three names
+sharing their entire 7-byte packed sort key, and reverse-alphabetical insertion — because those are
+exactly the inputs on which a scan and a bisection could disagree. Both paths must answer
+identically, misses included.
+
+Two mutations are caught deterministically: deleting the scan (every lookup then aborts with
+`no column of this name`), and a hook that drops nothing (the `had_index` assertions fail).
+
+**What this forbids.**
+
+- **Do not delete the linear scan on the strength of a coverage report**, and do not "simplify"
+  `cache_find` into trusting `name_order(mid)` without comparing the name at that slot. Both changes
+  keep every current test green, because the index is currently always correct — the scan protects
+  against the *future* mutation that breaks that, not against anything shipping today.
+- **`had_index` must stay a required `intent(out)` argument.** Both lookup paths return the same
+  answers, so a test that does not assert the before/after index state passes just as happily
+  against a hook that dropped nothing. That argument *is* the negative control.
+- **Do not let `cache_find` rebuild the index lazily** when it finds it missing. It takes the cache
+  `intent(in)` precisely so concurrent readers need no atomics; the next *mutation* rebuilds, which
+  is what makes a dropped index a slowdown rather than a permanent one, and the test asserts that
+  recovery.

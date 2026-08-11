@@ -233,6 +233,16 @@ contains
         end do
     end procedure cache_find
     !
+    module procedure parquet_debug_table_drop_name_index
+        ! Written through the cache POINTER, so `table` is intent(in) for the same reason
+        ! parquet_debug_table_set_inflight's is: the index is not part of the table's own value.
+        had_index = .false.
+        if (.not. associated(table%cache)) return
+        had_index = allocated(table%cache%name_order) .or. allocated(table%cache%name_key)
+        if (allocated(table%cache%name_order)) deallocate(table%cache%name_order)
+        if (allocated(table%cache%name_key)) deallocate(table%cache%name_key)
+    end procedure parquet_debug_table_drop_name_index
+    !
     module procedure cache_name_index_rebuild
         integer :: n, i, k, lo, hi, mid
         integer(int64) :: key

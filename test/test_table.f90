@@ -335,6 +335,8 @@ contains
                 test_add_column_chr_trims), &
             new_unittest("column lookup is exact for prefixes, shared key prefixes and misses", &
                 test_lookup_name_index), &
+            new_unittest("column lookup falls back to a linear scan when the name index is gone", &
+                test_lookup_linear_fallback), &
             new_unittest("column lookup stays correct across every column-set mutation", &
                 test_lookup_index_after_mutations), &
             new_unittest("column_index and column_name are inverses across the whole table", &
@@ -10321,6 +10323,101 @@ contains
         call t%get("nope", got, found=found)
         call check(error, .not. found, "%get with found= reports a miss rather than aborting")
     end subroutine test_lookup_name_index
+    !
+    !> `cache_find` bisects a name index when there is one and falls back to a LINEAR SCAN when
+    !! there is not. That fallback is a safety net for a future column-set mutation that forgets to
+    !! maintain the index: without it such a mutation answers with the WRONG COLUMN, with it the
+    !! lookup is merely slower. It is the difference between a silent wrong answer and a
+    !! performance regression, which is why it exists at all.
+    !!
+    !! Nothing reaches it through the public API -- every mutation maintains the index eagerly, so
+    !! a correct library never scans, and the scan was measured (by direct instrumentation)
+    !! executing ZERO times across the entire test suite and every error scenario. A net nothing
+    !! exercises can rot away with nothing to say so, so this test drops the index outright and
+    !! re-runs the same lookups against the scan.
+    !!
+    !! The fixture is `test_lookup_name_index`'s, deliberately: a strict-prefix pair, three names
+    !! sharing their whole 7-byte packed sort key, and reverse-alphabetical insertion. Those are
+    !! precisely the cases where a scan and a bisection could disagree, so both paths answering
+    !! identically -- misses included -- is the property worth asserting.
+    !!
+    !! **The `had_index` assertions are the negative control.** Both paths give the same answers,
+    !! so without them the whole test would pass just as happily against a hook that dropped
+    !! nothing: `.true.` first proves an index really was there (so the first sweep bisected),
+    !! `.false.` second proves it really went (so the second sweep scanned).
+    subroutine test_lookup_linear_fallback(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=*), parameter :: NAMES(9) = [character(len=9) :: &
+            "zulu     ", "flux_err ", "flux     ", "abcdefgh1", "abcdefgh2", &
+            "abcdefgh3", "mike     ", "alpha    ", "a        "]
+        real(real64) :: vals(4)
+        integer :: i
+        logical :: had_index
+        !
+        vals = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64]
+        call parquet_new_table(t)
+        do i = 1, size(NAMES)
+            call t%add_column(trim(NAMES(i)), vals * real(i, real64))
+        end do
+        !
+        ! With the index: the ordinary path, and the control the fallback is compared against.
+        call expect_names_resolve(t, NAMES, "bisected", error)
+        if (allocated(error)) return
+        !
+        call parquet_debug_table_drop_name_index(t, had_index)
+        call check(error, had_index, "the table had a name index to drop before it was dropped")
+        if (allocated(error)) return
+        !
+        ! Without it: every answer must be identical, which is the whole point of the net.
+        call expect_names_resolve(t, NAMES, "scanned", error)
+        if (allocated(error)) return
+        !
+        call parquet_debug_table_drop_name_index(t, had_index)
+        call check(error, .not. had_index, &
+            "the index stayed dropped, so the lookups above really did take the linear scan")
+        if (allocated(error)) return
+        !
+        ! A read must not quietly rebuild it -- `cache_find` takes the cache intent(in) precisely
+        ! so concurrent readers need no atomics, and a lookup that rebuilt would break that.
+        ! The next MUTATION does rebuild, so a dropped index is a slowdown and never permanent.
+        call t%add_column("omega", vals)
+        call parquet_debug_table_drop_name_index(t, had_index)
+        call check(error, had_index, "the next column-set mutation rebuilds the index it found missing")
+        if (allocated(error)) return
+        call expect_names_resolve(t, NAMES, "after rebuild", error)
+    end subroutine test_lookup_linear_fallback
+    !
+    !> Every name in `names` must resolve to the column added under it (column `i` holds `i` in its
+    !! first row), and four names that were never added must all report absent. Shared by
+    !! `test_lookup_linear_fallback`'s indexed and scanned sweeps so that the two are compared
+    !! against one set of expectations rather than two hand-written ones that could drift apart.
+    subroutine expect_names_resolve(t, names, what, error)
+        type(parquet_table), intent(inout) :: t             !! the table to interrogate.
+        character(len=*), intent(in) :: names(:)            !! every name that was added, in order.
+        character(len=*), intent(in) :: what                !! which lookup path, for the message.
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        real(real64), allocatable :: got(:)
+        integer :: i
+        logical :: found
+        !
+        do i = 1, size(names)
+            call t%get(trim(names(i)), got)
+            call check(error, abs(got(1) - real(i, real64)) < 1.0e-12_real64, &
+                what // ": '" // trim(names(i)) // "' resolves to its own column")
+            if (allocated(error)) return
+        end do
+        call check(error, .not. t%has_column("flux_er"), &
+            what // ": a strict prefix of a real name is absent")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("abcdefgh4"), &
+            what // ": a 7-byte-key sibling that was never added is absent")
+        if (allocated(error)) return
+        call check(error, .not. t%has_column("zzz"), what // ": a name past every column is absent")
+        if (allocated(error)) return
+        call t%get("nope", got, found=found)
+        call check(error, .not. found, what // ": %get with found= reports a miss rather than aborting")
+    end subroutine expect_names_resolve
     !
     !> The name index is maintained EAGERLY by each column-set mutation, so a mutation that forgot
     !! to maintain it would leave lookups answering from a stale order. Each mutation below is a

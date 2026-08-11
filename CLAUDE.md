@@ -3608,6 +3608,16 @@ counters so that the two concurrency aborts can be provoked from **one thread**,
 threads to overlap on demand, and a timing-dependent test is worse than no test — it passes on a
 quiet machine, fails on a busy one, and gets disabled. See `feature_risks.md` Risk-6.
 
+**`parquet_debug_table_drop_name_index` (`parquet_tables_query.f90`, same template) is the same
+group and shows the OTHER shape that forces a Fortran-side hook: a fallback with no route to it
+through the public API at all.** `cache_find`'s linear scan exists for a mutation that forgets to
+maintain the name index, so a correct library never reaches it — it was measured executing zero
+times across the whole suite — and the only way to test a safety net nothing can trip is to drop the
+index deliberately. Note its `had_index` argument is **required, not optional**: both lookup paths
+return identical answers, so a test that skipped it would pass against a hook that did nothing. See
+`feature_risks.md` Risk-75, and prefer that shape — a hook that *reports what it changed* — whenever
+the forced state is otherwise unobservable from the test.
+
 **The second group is `parquet_strings`' four** (`parquet_debug_set_string_min_bytes`,
 `parquet_debug_set_string_max_auto_threads`, `parquet_debug_string_row_ranges`,
 `parquet_debug_string_bulk_threads`), and they are what shows the rule below is a *preference* rather

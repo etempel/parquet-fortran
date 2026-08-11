@@ -803,6 +803,12 @@ contains
                 test_table_reload_in_memory_column_aborts), &
             new_unittest("reloading a column of a table with no file aborts", &
                 test_table_reload_not_file_backed_aborts), &
+            new_unittest("evicting a column holding local edits aborts", &
+                test_table_evict_user_populated_aborts), &
+            new_unittest("reloading a column holding local edits aborts", &
+                test_table_reload_user_populated_aborts), &
+            new_unittest("claiming a column that holds no values aborts", &
+                test_table_set_user_populated_not_resident_aborts), &
             new_unittest("a row handle reading an unknown column aborts", &
                 test_table_row_unknown_column_aborts), &
             new_unittest("reading through an unattached row handle aborts", &
@@ -1520,6 +1526,28 @@ contains
             failure_message="reloading a column of a fileless table was expected to abort", &
             required_stderr="this column was not read from a file, so there is nothing to reload it from")
     end subroutine test_table_reload_not_file_backed_aborts
+
+    subroutine test_table_evict_user_populated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_evict_user_populated", expect_abort=.true., &
+            failure_message="evicting a column holding local edits was expected to abort", &
+            required_stderr="this column holds values written into the table")
+    end subroutine test_table_evict_user_populated_aborts
+
+    subroutine test_table_reload_user_populated_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_reload_user_populated", expect_abort=.true., &
+            failure_message="reloading a column holding local edits was expected to abort", &
+            required_stderr="reloading would replace them with the file's own")
+    end subroutine test_table_reload_user_populated_aborts
+
+    subroutine test_table_set_user_populated_not_resident_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_user_populated_not_resident", &
+            expect_abort=.true., &
+            failure_message="claiming a column that holds no values was expected to abort", &
+            required_stderr="this column holds no values to claim")
+    end subroutine test_table_set_user_populated_not_resident_aborts
 
     subroutine test_table_row_unknown_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

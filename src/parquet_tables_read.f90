@@ -1306,7 +1306,9 @@ contains
         end if
         ! The slot is made directly rather than through %add_column, which would call
         ! table_fix_nrows and mark the column user_populated: nobody wrote these values, the table
-        ! derived them, and %print_stat and %clone both care about the difference.
+        ! derived them, and %evict_column, %reload, %print_stat and %clone all care about the
+        ! difference -- marking it would refuse an eviction of a column the table can rebuild
+        ! from nothing, and report it as edited.
         call table_new_slot(self, PARQUET_ROW_INDEX, .false., idx)
         call col%adopt(rows)
         call self%cache%cols(idx)%values%move_from(col)
@@ -1363,6 +1365,7 @@ contains
     !
     module procedure table_evict_column
         integer :: idx
+        logical :: forced
         character(len=:), allocatable :: sfx
         !
         call table_check_not_shared(self, "evict_column")
@@ -1373,6 +1376,8 @@ contains
         ! Nothing held, nothing to release. Said before the checks below so that evicting an
         ! already-evicted column stays idempotent whatever else is true of the table.
         if (self%cache%cols(idx)%residency /= RES_FULL) return
+        forced = .false.
+        if (present(force)) forced = force
         if (.not. self%cache%cols(idx)%file_source) then
             call table_context_suffix(self%cache, name, sfx)
             error stop EP // "evict_column: this column was not read from a file, so its values " // &
@@ -1383,6 +1388,24 @@ contains
             error stop EP // "evict_column: this table has been detached from its file, so an " // &
                 "evicted column could never be read back; use %drop_column if you mean to " // &
                 "discard it" // sfx
+        end if
+        ! LAST of the three, and the order is load-bearing rather than incidental. The two checks
+        ! above have no force= escape and must not acquire one: when there is no file to read back
+        ! from, the values really are unrecoverable, so the answer is %drop_column and not a
+        ! keyword. Only once a re-read is known to be possible does the question "would that lose
+        ! anything?" arise at all -- which is this check, and the one force= may answer.
+        !
+        ! Testing it before them would also give an %add_column column the wrong message, since
+        ! %add_column claims its column: the caller would be told to pass force=.true., and doing
+        ! so would then hit the file_source abort anyway.
+        !
+        ! Only what the value-setting API wrote is seen here; a write through a %col/%ref pointer
+        ! marks nothing, which is why %set_user_populated exists (see its own doc-comment).
+        if (self%cache%cols(idx)%user_populated .and. .not. forced) then
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "evict_column: this column holds values written into the table, " // &
+                "which are the only copy there is -- the file's own values would come back on " // &
+                "the next read; pass force=.true. if you really mean to discard them" // sfx
         end if
         ! Values only: the descriptor stays exactly as it is, so %column_names, %kind, %width and
         ! %unit keep answering and the next touch reads the column again.
@@ -1396,11 +1419,14 @@ contains
     !
     module procedure table_reload
         integer :: idx
+        logical :: forced
         character(len=:), allocatable :: sfx
         !
         call table_check_not_shared(self, "reload")
         call table_prefetch_resolve(self, name, "reload", idx, found)
         if (idx == 0) return
+        forced = .false.
+        if (present(force)) forced = force
         if (.not. self%cache%cols(idx)%file_source) then
             ! A column added in memory has no file behind it, so there is nothing to reload
             ! FROM -- and silently keeping the current values would make %reload look like it
@@ -1414,15 +1440,78 @@ contains
             error stop EP // "reload: this table has been detached from its file by a " // &
                 "row-structural change, so a re-read would no longer line up" // sfx
         end if
+        ! LAST of the three, for the reason table_evict_column's own comment gives at length: the
+        ! two checks above have no force= escape and must not gain one, and testing this first
+        ! would tell the caller of an %add_column column to pass force=.true. -- advice that then
+        ! hits the abort above anyway, since %add_column claims the column it creates.
+        !
+        ! Discarding the caller's edits is what %reload is FOR, but it is a strong enough action
+        ! to be worth saying rather than assuming -- and it puts %reload under the same rule as
+        ! %evict_column instead of a second one. A caller reloading a column they never wrote to
+        ! loses nothing by the guard, because a column nobody wrote to is never marked.
+        if (self%cache%cols(idx)%user_populated .and. .not. forced) then
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "reload: this column holds values written into the table, and " // &
+                "reloading would replace them with the file's own; pass force=.true. if that " // &
+                "is what you mean" // sfx
+        end if
         ! Drop what is there and take the first-touch path again, so a reload and a first read
         ! cannot drift apart.
         call self%cache%cols(idx)%values%clear()
         self%cache%cols(idx)%residency = RES_EMPTY
+        ! Whatever was here is being replaced by the file's own values, so the claim goes with it.
+        ! Load-bearing, not tidiness: leaving it set would make the NEXT %evict_column refuse a
+        ! column that now holds exactly what the file holds, and would let a non-resident column
+        ! be marked -- which the rest of this file (and %print_stat) takes to be impossible.
+        self%cache%cols(idx)%user_populated = .false.
         ! A re-read replaces the column's storage outright, so any pointer into it is stale --
         ! which is what the generation counter is for (%generation).
         self%cache%generation = self%cache%generation + 1_int64
         call table_touch(self%cache, table_scope_of(self), idx, "reload")
     end procedure table_reload
+    !
+    module procedure table_set_user_populated
+        integer :: idx
+        character(len=:), allocatable :: sfx
+        !
+        call table_check_open(self, "set_user_populated")
+        ! A descriptor mutation on a table another thread may be reading, so it belongs outside a
+        ! parallel region like every other one -- exactly as %ensure_validity is guarded.
+        call table_check_not_shared(self, "set_user_populated")
+        ! table_lookup_or_fail, not table_resolve: marking a column must not READ it, for the same
+        ! reason %evict_column gives for its own lookup.
+        call table_lookup_or_fail(self, name, "set_user_populated", idx, found)
+        if (idx == 0) return
+        ! Nothing in an empty slot for the caller to be claiming, and the mark would outlive the
+        ! read that eventually fills it -- so %reload would then refuse a column holding exactly
+        ! what the file holds. Clearing stays unconditional: a slot with no values has no claim on
+        ! it either way, so `.false.` is always already true and saying so again costs nothing.
+        if (flag .and. self%cache%cols(idx)%residency /= RES_FULL) then
+            call table_context_suffix(self%cache, name, sfx)
+            error stop EP // "set_user_populated: this column holds no values to claim -- it " // &
+                "has not been read, or was evicted; read it first (%prefetch/%get), or pass " // &
+                ".false." // sfx
+        end if
+        ! No guard against being called twice, and no %generation() bump. The first because
+        ! setting a boolean to the same value twice is provably idempotent, which is the stated
+        ! exemption from the check-before-mutate default. The second because nothing here
+        ! reallocates: no %col pointer and no row or column handle is invalidated, and bumping
+        ! would force every outstanding handle to be re-fetched for a change that cannot have
+        ! affected any of them -- including the handle whose %ref write is the reason this
+        ! procedure exists, which could then never call it.
+        self%cache%cols(idx)%user_populated = flag
+    end procedure table_set_user_populated
+    !
+    module procedure table_is_user_populated
+        integer :: idx
+        !
+        ok = .false.
+        call table_check_open(self, "is_user_populated")
+        ! A query: no shared-table guard (it mutates nothing) and no read (table_lookup_or_fail).
+        call table_lookup_or_fail(self, name, "is_user_populated", idx, found)
+        if (idx == 0) return
+        ok = self%cache%cols(idx)%user_populated
+    end procedure table_is_user_populated
     !
     !> The part of a (possibly dotted) column path before its first "." -- i.e. the name the
     !! reader caches the decoded array under. A name with no dot is its own top level.

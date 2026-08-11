@@ -272,8 +272,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`parquet_new_table` + `%add_column`), and writes one back out through an ordinary
   `parquet_schema` (`parquet_write_table`). Columns are read on first use rather than at open
   time, so opening reads only the file's schema and a program pays only for the columns it
-  touches — `%prefetch`, `%materialize_all` and `%reload` control this explicitly and
-  `%residency` reports it. Also included: a row-range (slice) form of `parquet_open_table`, with
+  touches — `%prefetch`, `%materialize_all`, `%reload` and `%evict_column` control this
+  explicitly and `%residency` reports it. `%reload` and `%evict_column` **refuse a column the
+  program has written into** unless `force=.true.` is passed: the values in such a column are not
+  in the file, so discarding them would put the file's own values back on the next read with
+  nothing to notice. `%is_user_populated(name)` reports whether a column is claimed that way, and
+  `%set_user_populated(name, flag)` sets or releases the claim by hand — needed because a write
+  through a `%col`/`%ref` pointer is indistinguishable from a read, so the library cannot mark it
+  itself. The column handle carries the same pair. `%print_stat` marks a claimed column with a
+  trailing `*`. Also included: a row-range (slice) form of `parquet_open_table`, with
   `parquet_table_row_group_bounds`/`%row_group_bounds` for finding the natural boundaries to
   split a file on; `parquet_table_row` (`t%row(i)`), a lightweight handle on a single row; and
   `parquet_slice` with `parquet_slice_range`/`parquet_slice_list` and `%get_slice`, which copies

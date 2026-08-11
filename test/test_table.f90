@@ -129,6 +129,18 @@ contains
             new_unittest("nested struct leaves become dotted columns", test_struct_leaves), &
             new_unittest("prefetch(struct) reads every leaf, evict_column gives them back", &
                 test_prefetch_prefix_and_evict), &
+            new_unittest("evict_column and reload refuse a column holding local edits, force= gets through", &
+                test_user_populated_guard), &
+            new_unittest("the user_populated claim tracks what the library itself writes", &
+                test_user_populated_tracks_writes), &
+            new_unittest("a cast leaves the user_populated claim alone, on both paths", &
+                test_cast_leaves_user_populated_alone), &
+            new_unittest("set_user_populated closes the %col pointer gap", &
+                test_user_populated_pointer_gap), &
+            new_unittest("clone keeps the user_populated claim, clone_structure drops it", &
+                test_clone_keeps_user_populated), &
+            new_unittest("the column handle's user_populated forms agree with the table's", &
+                test_user_populated_handle), &
             new_unittest("validate_qc checks every declaring column and holds none", &
                 test_validate_qc), &
             new_unittest("print_stat reports without reading anything", test_print_stat), &
@@ -1552,18 +1564,318 @@ contains
         call check(error, all(abs(g) < 1.0e-12_real64), "precondition: set replaced the values")
         if (allocated(error)) return
         !
-        call t%reload("f64")
+        ! force= is REQUIRED here: %reload on a column holding the caller's own writes is refused
+        ! (the abort is table_reload_user_populated). Passing it is what proves the keyword reaches
+        ! the guard rather than being accepted and ignored -- the file's values must come back.
+        call t%reload("f64", force=.true.)
         call t%get("f64", g)
         call check(error, abs(g(2) - 4.5_real64) < 1.0e-12_real64, &
             "reload should bring back the file's own values")
         if (allocated(error)) return
         call check(error, t%residency("f64") == RES_FULL, "a reloaded column is resident")
         if (allocated(error)) return
+        ! The control for the flag-CLEARING half of that guard, which nothing else asserts: the
+        ! column now holds the file's values, so a second reload must not need force= any more.
+        ! A %reload that guards but forgets to clear passes every other assertion here.
+        call check(error, .not. t%is_user_populated("f64"), &
+            "a forced reload must clear the claim -- the slot holds the file's values now")
+        if (allocated(error)) return
+        call t%reload("f64")
+        call t%get("f64", g)
+        call check(error, abs(g(2) - 4.5_real64) < 1.0e-12_real64, &
+            "a second reload, with no force=, should succeed and read the file again")
+        if (allocated(error)) return
         ! Reloading a column that was never touched is just a first touch.
         call t%reload("i32")
         call check(error, t%residency("i32") == RES_FULL, &
             "reloading an untouched column should simply read it")
     end subroutine test_reload
+    !
+    !> The negative controls for the two `user_populated` guards, plus the `force=` escape.
+    !!
+    !! The aborts themselves live in `error_scenarios.f90` (`table_evict_user_populated`,
+    !! `table_reload_user_populated`), since they kill the process. What is asserted here is
+    !! everything a guard that fired UNCONDITIONALLY would break: an unedited file-read column
+    !! must still evict and still reload with no keyword at all. Without these, a guard written as
+    !! `if (.true.)` passes every abort scenario ever written for it.
+    subroutine test_user_populated_guard(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), allocatable :: g(:)
+        integer(int32) :: edited(NROW)
+        character(len=*), parameter :: f = "test_run/table_userpop_guard.parquet"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        edited = [(int(100 + i, int32), i = 1, NROW)]
+        !
+        ! --- unedited: both calls work with no force= ------------------------------------------
+        call parquet_open_table(t, f)
+        call t%prefetch("i32")
+        call check(error, .not. t%is_user_populated("i32"), &
+            "a column read from the file is not the caller's own")
+        if (allocated(error)) return
+        call t%evict_column("i32")
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "evicting an unedited column must not need force=")
+        if (allocated(error)) return
+        call t%get("i32", g)
+        call check(error, all(g == [(int(i, int32), i = 1, NROW)]), &
+            "the evicted column should read back from the file")
+        if (allocated(error)) return
+        call t%reload("i32")
+        call check(error, t%residency("i32") == RES_FULL, &
+            "reloading an unedited column must not need force= either")
+        if (allocated(error)) return
+        !
+        ! --- edited: force= is what gets through, and the FILE's values come back ---------------
+        call parquet_open_table(t, f)
+        call t%set("i32", edited)
+        call check(error, t%is_user_populated("i32"), "a %set claims the column")
+        if (allocated(error)) return
+        call t%evict_column("i32", force=.true.)
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "force=.true. should let the eviction through")
+        if (allocated(error)) return
+        call check(error, .not. t%is_user_populated("i32"), &
+            "an evicted column holds nothing, so it cannot still be claimed")
+        if (allocated(error)) return
+        call t%get("i32", g)
+        ! The assertion that proves force= reached the guard rather than being accepted and
+        ! ignored: the edits really are gone and the file's own values are back.
+        call check(error, all(g == [(int(i, int32), i = 1, NROW)]), &
+            "after a forced eviction the next read must return the FILE's values")
+    end subroutine test_user_populated_guard
+    !
+    !> `%is_user_populated` reports what the library sets by itself, across a column's whole life.
+    !!
+    !! One test rather than five, because the point is the SEQUENCE: unclaimed when read, claimed
+    !! by a write, unclaimed again once the file's values are back. The %reload leg is what pins
+    !! the flag-clearing half of `table_reload`, and the %add_column leg pins that a column with no
+    !! file behind it is claimed from the moment it exists.
+    subroutine test_user_populated_tracks_writes(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32) :: extra(NROW)
+        character(len=*), parameter :: f = "test_run/table_userpop_tracks.parquet"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        extra = [(int(i, int32), i = 1, NROW)]
+        call parquet_open_table(t, f)
+        !
+        call check(error, .not. t%is_user_populated("i32"), &
+            "a column nothing has read yet is not claimed")
+        if (allocated(error)) return
+        call t%prefetch("i32")
+        call check(error, .not. t%is_user_populated("i32"), &
+            "reading a column from the file does not claim it")
+        if (allocated(error)) return
+        call t%set_element("i32", 1, 42_int32)
+        call check(error, t%is_user_populated("i32"), "a %set_element claims the column")
+        if (allocated(error)) return
+        call t%reload("i32", force=.true.)
+        call check(error, .not. t%is_user_populated("i32"), &
+            "a forced reload puts the file's values back, so the claim goes with them")
+        if (allocated(error)) return
+        !
+        ! %set_null is a write like any other -- the null is the caller's, not the file's.
+        call t%set_null("i32", 2_int64)
+        call check(error, t%is_user_populated("i32"), "a %set_null claims the column")
+        if (allocated(error)) return
+        !
+        ! A column with no file behind it: claimed from the moment it is added.
+        call t%add_column("extra", extra)
+        call check(error, t%is_user_populated("extra"), "%add_column claims the column it creates")
+        if (allocated(error)) return
+        !
+        ! The derived row-index column is the table's own work, not the caller's.
+        call t%prefetch(PARQUET_ROW_INDEX)
+        call check(error, .not. t%is_user_populated(PARQUET_ROW_INDEX), &
+            "the derived row-index column is the table's own, not the caller's")
+    end subroutine test_user_populated_tracks_writes
+    !
+    !> A `%cast` changes a column's KIND, not whose values those are — so it leaves the claim alone.
+    !!
+    !! Both paths, because they are different code: the DEFERRED one (a file-backed column nothing
+    !! has read, where marking would claim values that do not exist yet) and the EAGER one (a
+    !! resident column whose values are converted in place). If either starts claiming again, a
+    !! cast column can no longer be evicted without `force=` — which is exactly the false refusal
+    !! this asserts against. The `%set`-then-`%cast` leg checks the other direction too: a cast
+    !! must not CLEAR a claim the caller's own write put there.
+    subroutine test_cast_leaves_user_populated_alone(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64), allocatable :: g(:)
+        character(len=*), parameter :: f = "test_run/table_userpop_cast.parquet"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        !
+        ! --- deferred: cast before anything is read --------------------------------------------
+        call parquet_open_table(t, f)
+        call t%cast("i32", PK_INT64)
+        call check(error, .not. t%is_user_populated("i32"), &
+            "a deferred cast claims nothing -- there are no values yet")
+        if (allocated(error)) return
+        call t%get("i32", g)
+        call check(error, .not. t%is_user_populated("i32"), &
+            "carrying out a deferred cast on first touch still claims nothing")
+        if (allocated(error)) return
+        ! The consequence that matters, and the reason this is not merely a flag assertion.
+        call t%evict_column("i32")
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "a cast column must still evict without force=")
+        if (allocated(error)) return
+        !
+        ! --- eager: cast a column that is already resident -------------------------------------
+        call parquet_open_table(t, f)
+        call t%prefetch("i32")
+        call t%cast("i32", PK_INT64)
+        call check(error, .not. t%is_user_populated("i32"), &
+            "an eager cast converts the file's values; they are still the file's")
+        if (allocated(error)) return
+        call t%evict_column("i32")
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "an eagerly cast column must still evict without force=")
+        if (allocated(error)) return
+        !
+        ! --- and the other direction: a cast must not clear a claim a %set made -----------------
+        call parquet_open_table(t, f)
+        call t%set_element("i32", 1, 7_int32)
+        call t%cast("i32", PK_INT64)
+        call check(error, t%is_user_populated("i32"), &
+            "a cast must not clear a claim the caller's own write put there")
+        if (allocated(error)) return
+        call t%get("i32", g)
+        call check(error, g(1) == 7_int64, "the cast should have converted the caller's own value")
+    end subroutine test_cast_leaves_user_populated_alone
+    !
+    !> The `%col`/`%ref` gap, and the manual remedy for it.
+    !!
+    !! The library cannot tell a write through a `%col` pointer from a read, so it marks nothing —
+    !! this test asserts that gap is real rather than pretending otherwise, then shows
+    !! `%set_user_populated` closing it for a caller who knows they edited. **The first assertion
+    !! is deliberately documenting a limitation**: if a later change makes `%col` claim the column
+    !! by itself, this test should be rewritten to assert the new behaviour, not deleted.
+    subroutine test_user_populated_pointer_gap(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int32), pointer :: p(:)
+        integer(int32), allocatable :: g(:)
+        character(len=*), parameter :: f = "test_run/table_userpop_ptr.parquet"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%col("i32", p)
+        p = 999_int32
+        call check(error, .not. t%is_user_populated("i32"), &
+            "a write through a %col pointer marks nothing -- the documented gap")
+        if (allocated(error)) return
+        !
+        call t%set_user_populated("i32", .true.)
+        call check(error, t%is_user_populated("i32"), "%set_user_populated should claim the column")
+        if (allocated(error)) return
+        ! Now protected exactly as a %set would have made it: the eviction needs force=, and with
+        ! force= the file's values come back.
+        call t%evict_column("i32", force=.true.)
+        call t%get("i32", g)
+        call check(error, all(g == [(int(i, int32), i = 1, NROW)]), &
+            "a forced eviction of a hand-claimed column returns the file's values")
+        if (allocated(error)) return
+        !
+        ! Clearing is always allowed, including on a column holding nothing -- which is what makes
+        ! the abort scenario's opposite case (flag=.true. on an empty slot) meaningful.
+        call parquet_open_table(t, f)
+        call t%set_user_populated("i32", .false.)
+        call check(error, .not. t%is_user_populated("i32"), &
+            "clearing the claim on a column that holds no values must be allowed")
+        if (allocated(error)) return
+        call t%prefetch("i32")
+        call t%set_user_populated("i32", .true.)
+        call t%set_user_populated("i32", .true.)
+        call check(error, t%is_user_populated("i32"), &
+            "setting the same value twice is idempotent, not an error")
+    end subroutine test_user_populated_pointer_gap
+    !
+    !> `%clone` carries the claim; `%clone_structure` does not.
+    !!
+    !! The two share `clone_copy_descriptor`, so the reset has to sit in `%clone_structure`'s own
+    !! loop. Putting it in the shared helper instead compiles, passes every eviction test, and
+    !! silently stops `%clone` carrying the flag — which is the half this test exists to catch.
+    subroutine test_clone_keeps_user_populated(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, c, batch
+        integer(int32) :: edited(NROW)
+        character(len=*), parameter :: f = "test_run/table_userpop_clone.parquet"
+        integer :: i
+        !
+        call write_basic_fixture(f)
+        edited = [(int(100 + i, int32), i = 1, NROW)]
+        call parquet_open_table(t, f)
+        call t%set("i32", edited)
+        !
+        call t%clone(c)
+        call check(error, c%is_user_populated("i32"), &
+            "%clone copies the values, so it must copy the claim on them")
+        if (allocated(error)) return
+        ! The consequence, not just the flag: the clone's own eviction is refused too.
+        call check(error, .not. c%is_user_populated("f64"), &
+            "a column the clone never had written into stays unclaimed")
+        if (allocated(error)) return
+        !
+        call t%clone_structure(batch)
+        call check(error, .not. batch%is_user_populated("i32"), &
+            "%clone_structure produces a column set with no values, so nothing is claimed")
+        if (allocated(error)) return
+        call check(error, batch%nrows() == 0_int64, "precondition: the batch has no rows")
+    end subroutine test_clone_keeps_user_populated
+    !
+    !> The handle forms answer the same as the table forms, in both directions.
+    !!
+    !! Per `feature_risks.md` Risk-72, an accessor with a name form and a handle form needs the
+    !! cross-check rather than one test each — the two can silently disagree. Also asserts that
+    !! `%set_user_populated` does NOT bump `%generation()`: if it did, the handle would go stale on
+    !! its own call and the `%ref`-write case this exists for could never use it.
+    subroutine test_user_populated_handle(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        integer(int64) :: gen0
+        character(len=*), parameter :: f = "test_run/table_userpop_handle.parquet"
+        !
+        call write_basic_fixture(f)
+        call parquet_open_table(t, f)
+        call t%prefetch("i32")
+        call t%column("i32", c)
+        gen0 = t%generation()
+        !
+        call check(error, .not. c%is_user_populated(), "the handle agrees: not claimed yet")
+        if (allocated(error)) return
+        call c%set_user_populated(.true.)
+        call check(error, t%generation() == gen0, &
+            "%set_user_populated must NOT bump the generation -- it reallocates nothing")
+        if (allocated(error)) return
+        call check(error, c%is_valid(), "the handle must survive its own %set_user_populated")
+        if (allocated(error)) return
+        call check(error, t%is_user_populated("i32"), &
+            "the table form must see what the handle form set")
+        if (allocated(error)) return
+        !
+        call t%set_user_populated("i32", .false.)
+        call check(error, .not. c%is_user_populated(), &
+            "the handle form must see what the table form cleared")
+        if (allocated(error)) return
+        !
+        ! A stale handle refuses, like every other handle method. %drop_column bumps the
+        ! generation, which is what col_resolve compares against.
+        call t%prefetch("i64")
+        call t%column("i64", c)
+        call t%drop_column("f64")
+        call check(error, .not. c%is_valid(), &
+            "precondition: a structural change should have invalidated the handle")
+    end subroutine test_user_populated_handle
     !
     subroutine test_unsupported_column(error)
         type(error_type), allocatable, intent(out) :: error
@@ -4690,8 +5002,11 @@ contains
         ! so a cast survives it. Re-reading into the FILE's kind instead would silently undo a
         ! conversion the caller never asked to undo, and would change the column's kind under any
         ! pointer taken since.
+        !
+        ! force= is needed because of the %set_element, not because of the %cast -- a cast leaves
+        ! the column unclaimed (see test_cast_leaves_user_populated_alone).
         call t%set_element("i32", 1, 99_int64)
-        call t%reload("i32")
+        call t%reload("i32", force=.true.)
         call check(error, t%kind("i32") == PK_INT64, "%reload must keep the column's cast kind")
         if (allocated(error)) return
         call t%col("i32", p_i64)

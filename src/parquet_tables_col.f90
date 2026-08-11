@@ -119,6 +119,28 @@ contains
         r = self%cache%cols(self%slot)%residency
     end procedure col_residency
     !
+    module procedure col_set_user_populated
+        character(len=:), allocatable :: sfx
+        !
+        call col_resolve(self, "set_user_populated")
+        ! The same rule the table form applies, and for the same reason -- see
+        ! table_set_user_populated, which is where it is explained. Kept as its own body rather
+        ! than forwarding to the table form because that one is name-keyed: the handle would have
+        ! to hand back the name it already resolved past, only for the table to look it up again.
+        if (flag .and. self%cache%cols(self%slot)%residency /= RES_FULL) then
+            call table_context_suffix(self%cache, self%cache%cols(self%slot)%name, sfx)
+            error stop EP // "column handle: set_user_populated: this column holds no values " // &
+                "to claim -- it has not been read, or was evicted; read it first " // &
+                "(%prefetch/%get), or pass .false." // sfx
+        end if
+        self%cache%cols(self%slot)%user_populated = flag
+    end procedure col_set_user_populated
+    !
+    module procedure col_is_user_populated
+        call col_resolve(self, "is_user_populated")
+        ok = self%cache%cols(self%slot)%user_populated
+    end procedure col_is_user_populated
+    !
     module procedure col_resolve
         character(len=:), allocatable :: sfx
         character(len=32) :: g_now, g_then

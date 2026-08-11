@@ -439,6 +439,17 @@ contains
         if (self%cache%cols(idx)%declared_kind == to_kind) return
         call cast_check_pair(self%cache, name, "cast", self%cache%cols(idx)%declared_kind, to_kind)
         !
+        ! %cast is deliberately unaware of `user_populated`, in BOTH directions: it never sets it
+        ! and never reads it. A cast changes a column's KIND, not whose values those are -- and on
+        ! the deferred path below nothing has even been read yet, so there would be no values to
+        ! claim. It follows that a cast column may be evicted and reloaded freely: %reload re-reads
+        ! into the column's CURRENT kind, so the file's values come back already converted and the
+        ! cast survives (test_cast_deferred asserts exactly that).
+        !
+        ! Both halves are easy to undo by symmetry once %evict_column and %reload have force=
+        ! guards. Neither belongs here. What a caller wrote with %set before casting stays marked
+        ! by that %set, which is correct: those values are still theirs, merely converted.
+        !
         ! The deferred path: a file-backed column nothing has read yet does not need to be read
         ! and then converted. Rewriting `declared_kind` is enough, because table_materialize reads
         ! into whatever kind the slot declares -- so the first touch decodes STRAIGHT into the
@@ -457,7 +468,6 @@ contains
         if (deferred) then
             self%cache%cols(idx)%declared_kind = to_kind
             self%cache%cols(idx)%cast_pending = .true.
-            self%cache%cols(idx)%user_populated = .true.
             ! Bumped here as well as on the eager path below, even though no pointer into this
             ! column can exist (taking one would have materialized it, which disqualifies the
             ! deferred path). The counter is documented as advancing on EVERY structural entry
@@ -483,7 +493,6 @@ contains
         call cast_apply(self%cache%cols(idx)%values, to_kind)
         self%cache%cols(idx)%declared_kind = to_kind
         self%cache%cols(idx)%cast_pending = .false.
-        self%cache%cols(idx)%user_populated = .true.
         self%cache%generation = self%cache%generation + 1_int64
     end procedure table_cast
     !

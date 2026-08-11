@@ -141,6 +141,12 @@ contains
             call clone_copy_descriptor(self%cache%cols(i), out%cache%cols(n))
             call clone_empty_column(self%cache%cols(i), out%cache%cols(n)%values)
             out%cache%cols(n)%file_source = .false.
+            ! Overridden HERE and not in clone_copy_descriptor, which %clone shares: a %clone
+            ! copies the values, so it must copy the claim on them too, while this produces a
+            ! column set with no values at all and nothing for a claim to be about. Moving this
+            ! line into the helper would compile, pass every eviction test, and silently stop
+            ! %clone carrying the flag -- which test_clone_keeps_user_populated is what catches.
+            out%cache%cols(n)%user_populated = .false.
             out%cache%cols(n)%residency = RES_FULL
         end do
         out%cache%ncols = n

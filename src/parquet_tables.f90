@@ -484,8 +484,10 @@ module parquet_tables
         !! region: a first touch inside one is a hard error, since it would mutate shared state.
         generic :: prefetch => prefetch_one, prefetch_many
         procedure :: materialize_all => table_materialize_every !! Read every column not yet read.
-        procedure :: reload => table_reload           !! Re-read one column, discarding local edits.
-        procedure :: evict_column => table_evict_column !! Drop a column's VALUES, keeping the slot.
+        procedure :: reload => table_reload           !! Re-read one column; force= to discard local edits.
+        procedure :: evict_column => table_evict_column !! Drop a column's VALUES; force= if it holds local edits.
+        procedure :: set_user_populated => table_set_user_populated !! Claim a column's values as the caller's own, or unclaim.
+        procedure :: is_user_populated => table_is_user_populated !! Whether a column is claimed as holding the caller's values.
         procedure :: validate_qc => table_validate_qc !! Check every qc-declaring column, holding none.
         procedure :: print_stat => table_print_stat  !! Print what the table holds, to stdout.
         procedure :: nrows_unfiltered => table_nrows_unfiltered !! Rows before filter=/sample_fraction=.
@@ -1214,6 +1216,8 @@ module parquet_tables
         procedure :: width => col_width         !! This column's values per row (1 for a scalar kind).
         procedure :: unit => col_unit           !! This column's unit string, or "".
         procedure :: residency => col_residency !! Whether this column is RES_EMPTY/RES_PARTIAL/RES_FULL.
+        procedure :: set_user_populated => col_set_user_populated !! Claim this column's values as the caller's own, or unclaim.
+        procedure :: is_user_populated => col_is_user_populated !! Whether this column is claimed as holding the caller's values.
         ! NO `final` -- see the type's own doc-comment. This is a decision, not an omission.
     end type parquet_table_col
     !
@@ -1868,6 +1872,20 @@ module parquet_tables
             class(parquet_table_col), intent(in) :: self !! the handle.
             integer :: r                                 !! one of the RES_* constants.
         end function col_residency
+        !> Marks this column as holding values the CALLER wrote, or clears that mark.
+        !!
+        !! The handle form of `%set_user_populated`, and the one the case it exists for actually
+        !! reaches for: `%ref` is a handle method, so a caller who edits through the pointer it
+        !! hands out already has the handle. See parquet_table%set_user_populated for the rule.
+        module subroutine col_set_user_populated(self, flag)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            logical, intent(in) :: flag                  !! .true. = the caller's own values; .false. = the file's.
+        end subroutine col_set_user_populated
+        !> Whether this column is marked as holding values the caller wrote rather than the file's.
+        module function col_is_user_populated(self) result(ok)
+            class(parquet_table_col), intent(in) :: self !! the handle.
+            logical :: ok                                !! .true. when the slot holds the caller's own writes.
+        end function col_is_user_populated
         !> Aborts unless `i` is a valid 1-based row index for the handle's own row scope.
         module subroutine col_require_row(self, i, proc)
             class(parquet_table_col), intent(in) :: self !! the handle.
@@ -3760,19 +3778,61 @@ module parquet_tables
         !!
         !! Eviction is user-driven only. Nothing in this library evicts on its own -- no LRU, no
         !! memory budget -- so what a table holds stays predictable from the calls you wrote.
-        module subroutine table_evict_column(self, name, found)
+        !!
+        !! A column holding values the CALLER wrote (%user_populated) is refused as well, because
+        !! the file's own values would come back on the next read and the edits would be gone with
+        !! nothing to notice -- pass force=.true. to discard them on purpose. Note the protection
+        !! covers what the value-setting API wrote, NOT a write made through a %col/%ref pointer:
+        !! the library cannot tell such a write from a read, so a caller who edits that way marks
+        !! the column with %set_user_populated themselves.
+        module subroutine table_evict_column(self, name, force, found)
             class(parquet_table), intent(inout) :: self !! the table.
             character(len=*), intent(in) :: name        !! column to release.
+            logical, intent(in), optional :: force      !! .true. to evict a column holding local edits.
             logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
         end subroutine table_evict_column
         !> Re-reads one column from the file, discarding whatever is in the store -- the escape
         !! hatch back to the file's own values after %set has changed them locally. Only valid
         !! for a file-backed column of a table that has not been detached.
-        module subroutine table_reload(self, name, found)
+        !!
+        !! Discarding local edits is what this is FOR, so it says so rather than assuming: a
+        !! column holding values the caller wrote (%user_populated) is refused unless force=.true.
+        !! is passed, which puts %reload and %evict_column under one rule instead of two. A
+        !! forced reload clears the mark, since the slot then holds the file's values again.
+        module subroutine table_reload(self, name, force, found)
             class(parquet_table), intent(in) :: self !! the table (refills through %cache).
             character(len=*), intent(in) :: name     !! column to re-read.
+            logical, intent(in), optional :: force   !! .true. to discard local edits and re-read.
             logical, intent(out), optional :: found  !! present: report a miss instead of aborting.
         end subroutine table_reload
+        !> Marks a column as holding values the CALLER wrote, or clears that mark.
+        !!
+        !! The library sets this itself for every value-setting call (%set, %set_element,
+        !! %set_slice, a row or column handle's %set, %set_null, %add_column, ...), and
+        !! %evict_column and %reload then refuse that column unless force=.true. is passed. It
+        !! cannot set it for a write made through the pointer %col/%ref hands out, because it
+        !! cannot tell such a write from a read -- so a caller who edits a column that way marks
+        !! it here, and gets the same protection. Clearing it says the opposite: the slot's values
+        !! are the file's again, and may be discarded without force=.
+        !!
+        !! Marking a column that holds no values is refused: there is nothing to protect, and the
+        !! mark would outlive the read that filled the slot. Clearing is always allowed.
+        module subroutine table_set_user_populated(self, name, flag, found)
+            class(parquet_table), intent(inout) :: self !! the table.
+            character(len=*), intent(in) :: name        !! column to mark.
+            logical, intent(in) :: flag                 !! .true. = the caller's own values; .false. = the file's.
+            logical, intent(out), optional :: found     !! present: report a miss instead of aborting.
+        end subroutine table_set_user_populated
+        !> Whether a column is marked as holding values the caller wrote rather than the file's.
+        !!
+        !! Reads no values and never triggers a read. A column that has not been read is never
+        !! marked, so this answers .false. for one -- see %set_user_populated for what sets it.
+        module function table_is_user_populated(self, name, found) result(ok)
+            class(parquet_table), intent(in) :: self  !! the table.
+            character(len=*), intent(in) :: name      !! column to ask about.
+            logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
+            logical :: ok                             !! .true. when the slot holds the caller's own writes.
+        end function table_is_user_populated
     end interface
     !
     ! ---- Write-out (parquet_tables_write) ----

@@ -1324,6 +1324,12 @@ program error_scenarios
         call scenario_table_reload_in_memory_column()
     case ("table_reload_not_file_backed")
         call scenario_table_reload_not_file_backed()
+    case ("table_evict_user_populated")
+        call scenario_table_evict_user_populated()
+    case ("table_reload_user_populated")
+        call scenario_table_reload_user_populated()
+    case ("table_set_user_populated_not_resident")
+        call scenario_table_set_user_populated_not_resident()
     case ("table_row_unknown_column")
         call scenario_table_row_unknown_column()
     case ("table_row_unattached")
@@ -11063,6 +11069,48 @@ contains
         call t%reload("a")   ! -> aborts
         print '(a,i0)', "unexpectedly reloaded a column of an in-memory table, ncols=", t%ncols()
     end subroutine scenario_table_reload_not_file_backed
+
+    !> Evicting a column the caller has written into would silently restore the FILE's values on
+    !! the next read, which is data loss with nothing to notice -- so it is refused unless
+    !! force=.true. says otherwise. The negative controls (an unedited column evicts freely, and
+    !! force=.true. really does get through) are test_user_populated_guard in test_table.f90.
+    subroutine scenario_table_evict_user_populated()
+        type(parquet_table) :: t
+        real(real64), allocatable :: g(:)
+        call write_table_scenario_fixture("test_run/es_table_evict_userpop.parquet")
+        call parquet_open_table(t, "test_run/es_table_evict_userpop.parquet")
+        call t%get("val", g)
+        call t%set("val", [9.0_real64, 9.0_real64, 9.0_real64])
+        call t%evict_column("val")   ! -> aborts
+        print '(a,i0)', "unexpectedly evicted a column holding local edits, ncols=", t%ncols()
+    end subroutine scenario_table_evict_user_populated
+
+    !> The same rule for %reload: discarding the caller's edits is what it is FOR, but it says so
+    !! rather than assuming, so that %reload and %evict_column are one rule instead of two.
+    subroutine scenario_table_reload_user_populated()
+        type(parquet_table) :: t
+        real(real64), allocatable :: g(:)
+        call write_table_scenario_fixture("test_run/es_table_reload_userpop.parquet")
+        call parquet_open_table(t, "test_run/es_table_reload_userpop.parquet")
+        call t%get("val", g)
+        call t%set("val", [9.0_real64, 9.0_real64, 9.0_real64])
+        call t%reload("val")   ! -> aborts
+        print '(a,i0)', "unexpectedly reloaded a column holding local edits, ncols=", t%ncols()
+    end subroutine scenario_table_reload_user_populated
+
+    !> Claiming a column that holds no values: there is nothing to protect, and the claim would
+    !! outlive the read that eventually fills the slot. The %set_user_populated(..., .false.) call
+    !! just before it is the negative control INSIDE the scenario -- clearing is always allowed,
+    !! on any residency, so a guard that refused every non-resident column would abort there
+    !! instead and the stderr check below would not match.
+    subroutine scenario_table_set_user_populated_not_resident()
+        type(parquet_table) :: t
+        call write_table_scenario_fixture("test_run/es_table_setuserpop.parquet")
+        call parquet_open_table(t, "test_run/es_table_setuserpop.parquet")
+        call t%set_user_populated("val", .false.)
+        call t%set_user_populated("val", .true.)   ! -> aborts
+        print '(a,i0)', "unexpectedly claimed a column holding no values, ncols=", t%ncols()
+    end subroutine scenario_table_set_user_populated_not_resident
 
     !> A row handle resolves its column by name on every access, so a name that is not there is
     !! as fatal as it is on the table itself.

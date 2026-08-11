@@ -144,7 +144,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-74**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-75**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3022,3 +3022,54 @@ MAML-declared value stays a string. The `metadata_datatype_key_collision` scenar
 **What this still forbids.** Asserting a companion's *presence* without its *value*; adding a
 thirteenth typed overload without adding its token to the two token tests; and "simplifying"
 `carried_companion_is_superseded` back to an unbounded `schema_declares_key` scan.
+
+### Risk-74 — Discarding a column the caller wrote into silently restores the file's values
+
+**What breaks.** `%evict_column` and `%reload` both empty a column's storage and let the next touch
+re-read it from the file. For a column the caller has written into — with `%set`, `%set_element`,
+`%set_slice`, `%set_null`, or either handle's `%set` — that replaces the caller's values with the
+file's own, and there is nothing to notice: every call succeeds, the table's shape, column list,
+kinds, widths, units and row count are all unchanged, and the values that come back are valid,
+plausible values from the file. The user guide's promise that eviction is "an error rather than
+silent data loss" makes a reader *less* likely to check.
+
+Both procedures now refuse such a column unless `force=.true.` is passed, keyed on
+`parquet_table_column%user_populated` — a flag that was maintained correctly at every assignment
+site from the day the table layer was written and **read nowhere at all** until this change. That
+history is the reason this entry exists rather than being deleted as "works and is tested": a
+predicate can be perfectly maintained and still be worth nothing, and nothing in a test suite
+reports the difference.
+
+**What the guard deliberately does NOT cover.** `%col(name, p)` and the column handle's `%ref(p)`
+hand back a mutable pointer and mark nothing, because the library cannot tell a write through it
+from a read. Marking there was considered and rejected: `%col` is overwhelmingly a *read* idiom, so
+it would refuse eviction on precisely the largest columns and make `force=` the ordinary spelling —
+a guard that teaches people to bypass it. The remedy is instead **opt-in**:
+`%set_user_populated(name, .true.)` claims a column by hand. So the residual risk is not "this
+cannot be protected" but "this is protected only if the caller remembers", and the documentation
+must state the boundary as a boundary — *eviction will not silently discard values you `%set`* —
+never as *eviction is safe*.
+
+**Test.** `test/test_table.f90`: `test_user_populated_guard` is the negative control the abort
+scenarios cannot supply — an unedited file-read column must still evict and still reload with **no
+keyword at all**, which is what a guard written as `if (.true.)` breaks while passing every abort
+test ever written for it; it also asserts that a forced eviction really does bring the file's values
+back, which is what proves `force=` reached the guard rather than being accepted and ignored.
+`test_user_populated_tracks_writes` walks the flag across a column's whole life (unclaimed when
+read, claimed by a write, unclaimed after a forced reload) rather than asserting a single state.
+`test_user_populated_pointer_gap` asserts the `%col` gap **is real** and then closes it with
+`%set_user_populated`. `test_cast_leaves_user_populated_alone` covers both `%cast` paths.
+`test_clone_keeps_user_populated` covers the `%clone` / `%clone_structure` split.
+`test_user_populated_handle` cross-checks the name and handle forms (Risk-72's shape) and pins that
+`%set_user_populated` does not bump `%generation()`. `test_reload` carries the double-reload control
+for the flag-clearing half. The three abort scenarios are `table_evict_user_populated`,
+`table_reload_user_populated` and `table_set_user_populated_not_resident`.
+
+**What this still forbids.** Widening the guard to `%col`/`%ref` without re-reading the reasoning
+above. Removing `%reload`'s `user_populated = .false.` line, which is invisible to everything except
+`test_reload`'s second reload — a `%reload` that guards but forgets to clear passes every abort
+scenario and every force= test. Giving `%cast` a guard of its own by symmetry, or letting it set the
+flag again: a cast changes a column's *kind*, not whose values those are, and on the deferred path
+nothing has been read yet. Moving `%clone_structure`'s reset into the shared
+`clone_copy_descriptor`, which compiles, passes every eviction test, and silently stops `%clone`
+carrying the flag. And documenting the protection as total.

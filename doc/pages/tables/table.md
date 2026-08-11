@@ -326,8 +326,10 @@ Three calls control it explicitly:
 |---|---|
 | `call t%prefetch(name)` / `call t%prefetch(names)` | read those columns now |
 | `call t%materialize_all()` | read every column not yet read |
-| `call t%reload(name)` | re-read one column from the file, discarding local `%set` edits |
-| `call t%evict_column(name)` | release a column's values, keeping the column |
+| `call t%reload(name, [force], [found])` | re-read one column from the file, discarding local `%set` edits |
+| `call t%evict_column(name, [force], [found])` | release a column's values, keeping the column |
+
+(Square brackets mark optional arguments throughout this page; they are not part of the syntax.)
 
 `%prefetch`'s array form is not just a loop: it reads the named columns in one pass, which
 matters for **struct leaves**. The reader decodes a struct as one array shared by all its leaves,
@@ -361,8 +363,53 @@ for good. Evicting is only allowed where the values can be read back: a column b
 `%add_column`, and any column of a [detached](table-mutate.html#what-detaching-means) table, is an error rather
 than silent data loss. Evicting a column that is not resident is a no-op.
 
+**A third case is refused for the same reason: a column you have written into.** The values in it
+are not in the file, so evicting would put the file's own values back on the next read and your
+edits would be gone with nothing to notice. Pass `force=.true.` when that is what you mean:
+
+```fortran
+call t%get("flux", flux)
+call t%set("flux", corrected)
+call t%evict_column("flux")                 ! -> error: this column holds values you wrote
+call t%evict_column("flux", force=.true.)   ! -> accepted; the next read returns the FILE's values
+```
+
 Eviction is **user-driven only**. Nothing in this library evicts on its own — there is no LRU and
 no memory budget — so what a table holds stays predictable from the calls you wrote.
+
+### What the edit protection does and does not cover
+
+The table tracks whether a column's values came from the file or from you, and
+`t%is_user_populated(name)` reports it. Every value-setting call marks the column — `%set`,
+`%set_element`, `%set_slice`, `%set_null`, `%add_column`, and a row or column handle's `%set`.
+
+**Writing through a `%col` or `%ref` pointer does not**, and cannot: the library hands out a
+pointer and never sees what you do with it, so a write and a read are indistinguishable to it.
+The protection is therefore precise rather than total — *eviction will not silently discard values
+you `%set`*, which is not the same as *eviction is safe*. For the pointer case, say so yourself:
+
+```fortran
+call t%col("flux", p)
+p = corrected
+call t%set_user_populated("flux", .true.)   ! now %evict_column and %reload protect it too
+```
+
+`call t%set_user_populated(name, flag [, found])` claims a column's values as yours (`.true.`) or
+releases the claim (`.false.`), and the column handle carries the same pair —
+`call c%set_user_populated(flag)` and `c%is_user_populated()` — which is usually the more
+convenient spelling, since `%ref` is a handle method to begin with. Claiming a column that holds no
+values is an error, because there is nothing there to protect; releasing is always allowed.
+
+Two behaviours worth knowing, both of which you can watch through `%is_user_populated`:
+
+- **A forced `%reload` clears the claim**, because the column then holds the file's values again —
+  so a second `%reload` needs no `force=`.
+- **A `%cast` does not touch it either way.** A cast changes a column's *kind*, not whose values
+  those are, so a cast column still evicts freely, and a `%set` you made before casting keeps its
+  claim.
+
+`%print_stat` marks a claimed column with a trailing `*` and prints a one-line legend, so a report
+shows at a glance which columns would not survive a re-read.
 
 The one place a table holds slightly more than its rows need is after appending: storage grows
 geometrically, so an appended-to table can carry up to 1.5x its rows' worth until
@@ -372,7 +419,11 @@ filtered or sorted, is allocated exactly to size.
 `%reload` only applies to a column that came from a file: reloading one built with `%add_column`
 is an error, since there is nothing to reload it from, as is reloading anything once the table has
 [detached](table-mutate.html#what-detaching-means). It re-reads into the kind the column currently has, so a
-`%cast` is *not* undone by a reload — only local value edits are.
+`%cast` is *not* undone by a reload — only local value edits are, and **`force=.true.` is required
+to discard them**, exactly as for `%evict_column` above. That is deliberate: discarding your edits
+is what `%reload` is *for*, but it is a strong enough action to be worth saying rather than
+assuming, and it keeps the two calls under one rule instead of two. On a column you have not
+written into, `%reload` needs no keyword at all.
 
 > `t%prefetch` and the reader-level `parquet_prefetch_columns` are different things. The table's
 > reads a column into the table's own store; the reader's warms Arrow's side of the read.

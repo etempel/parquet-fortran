@@ -823,7 +823,7 @@ contains
     end procedure table_check_not_detached
     !
     module procedure table_print_stat
-        logical :: want_all
+        logical :: want_all, any_edited
         integer :: i, nshown, wname
         integer(int64) :: nulls, k
         character(len=:), allocatable :: kname, min_s, max_s, unit_s, fname
@@ -841,10 +841,14 @@ contains
         ! At least as wide as the header word, or the header line would be wider than the rows
         ! under it and nothing would line up.
         wname = len("column")
+        ! Gathered in the pass that is happening anyway, so the legend below costs nothing on a
+        ! table with no edited columns -- which is every table read straight from a file.
+        any_edited = .false.
         do i = 1, self%cache%ncols
             if (.not. want_all .and. self%cache%cols(i)%residency /= RES_FULL) cycle
             nshown = nshown + 1
             wname = max(wname, len(self%cache%cols(i)%name))
+            if (self%cache%cols(i)%user_populated) any_edited = .true.
         end do
         call self%filename(fname)
         write(rows_s, "(I0)") self%row_count
@@ -890,10 +894,22 @@ contains
             call self%cache%cols(i)%values%unit_string(unit_s)
             if (allocated(self%cache%cols(i)%unit)) unit_s = self%cache%cols(i)%unit
             if (len_trim(unit_s) > 0) kname = kname // " [" // trim(unit_s) // "]"
+            ! The edited marker goes AFTER `max`, which is the row's last field and the only one
+            ! that is not padded -- so it cannot overflow anything, and the layout stays
+            ! byte-identical for a table with nothing marked. The `kind` field would have been the
+            ! obvious place and is already taken: a unit is appended into the same pad(kname, 18).
+            ! Only this branch can carry it. A width_pending or non-resident column is never
+            ! user_populated, because %evict_column and %reload both clear the flag as they empty
+            ! the slot and %set_user_populated refuses to set it on one.
+            if (self%cache%cols(i)%user_populated) max_s = max_s // " *"
             print "(a)", "  " // pad(self%cache%cols(i)%name, wname) // "  " // &
                 pad(kname, 18) // "  " // pad(trim(wdt_s), 6) // "  " // pad(trim(nulls_s), 10) // &
                 "  " // pad(min_s, 22) // "  " // max_s
         end do
+        if (any_edited) then
+            print "(a)", "  * values written into the table, not the file's own -- %evict_column " // &
+                "and %reload need force=."
+        end if
     end procedure table_print_stat
     !
     !> How many of a table's columns are resident.

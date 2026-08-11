@@ -492,9 +492,21 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
   which name no entity at all and cannot be acted on even in principle.
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
-use-association accessibility limitation documented under "FORD config gotchas" and sits at a
-stable **23** (14 `public ::` re-exports in `parquet_core.f90` plus 9 `private ::` statements in
-the `parquet` facade). Compare *that*
+use-association accessibility limitation documented under "FORD config gotchas" and stands at
+**32** as of 2026-08-11 (14 `public ::` re-exports in `parquet_core.f90` plus 18 `private ::`
+names in the `parquet` facade). **It is stable only in the sense that it moves for a reason** —
+it rises by one for each name a future `private ::` in the facade hides, which is the expected
+cost of keeping a sibling module's plumbing out of `use parquet`'s namespace, and a rise of
+exactly that size is not a regression. It was recorded here as 23 until the typed accessor tier
+added nine such names at once; re-derive it rather than trusting the figure above:
+
+```bash
+ford --warn docs.md 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/Warning: Unknown entity/\n&/g' \
+  | grep -o "attribute '[^']*' in module '[^']*'" | sort | uniq -c
+```
+
+(the `tr`/`sed` dance is needed because FORD wraps a warning across two lines, so a plain
+`grep -c` on the raw output undercounts). Compare *that*
 number across a change, not the total: it is the only one that moves for a real reason. When a
 before/after total does move, break the delta down by category
 (`grep "Warning" | sed -E 's/.*Warning: //'`) rather than treating the raw count as a regression —
@@ -590,20 +602,27 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, currently
-  **23** of them and the one FORD number worth tracking across a change. Two independent groups:
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **32** of
+  them as of 2026-08-11 and the one FORD number worth tracking across a change. Two independent
+  groups:
   **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
   `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
   `parquet_maml_file` from `parquet_maml_base`), which FORD silently drops from that module's
-  generated page; and **9 `private ::`** statements in the `parquet` facade (`c_int`, the two
-  `parquet_get_*_version` bindings, and six names from `parquet_settings` —
-  `parquet_valid_compressions`, `parquet_resolve_writer_compression`, the three `parquet_emit_*`
-  output channels and `parquet_output_is_suppressed`), which are the facade's only way to keep those
-  names out of the namespace `use parquet` hands a user, so they cannot be removed.
+  generated page; and **18 `private ::`** names in the `parquet` facade — `c_int`, the two
+  `parquet_get_*_version` bindings, six names from `parquet_settings`
+  (`parquet_valid_compressions`, `parquet_resolve_writer_compression`, the three `parquet_emit_*`
+  output channels and `parquet_output_is_suppressed`), and the **nine** `parquet_column_*`
+  generics of the typed accessor tier (`_get_at`, `_set_at`, `_get_elem`, `_set_elem`, `_data_ptr`,
+  `_string_column`, `_is_null`, `_set_null`, `_clear_null`) — which are the facade's only way to
+  keep those names out of the namespace `use parquet` hands a user, so they cannot be removed.
+  Note the count is of *names*, not of `private ::` statements: one statement may list several, and
+  `src/parquet.f90` carries 10 statements for those 18 names.
   **This number rises by one for each name a future `private ::` in the facade hides**, which is
   the expected cost of keeping a sibling module's internal plumbing out of the public namespace —
-  a rise of exactly that size is not a regression. **Confirmed not fixable from
+  a rise of exactly that size is not a regression, and is exactly what took this figure from the
+  23 recorded here before the typed accessor tier added its nine names at once. **Confirmed not
+  fixable from
   source**: for the `public ::` group, neither adding a `!>` doc-comment directly on the line, nor
   an explicit `use ..., only: name1, name2` import list (already how these modules are imported),
   nor a bare unrestricted `use` with no `only:` at all changes anything — all three were tried

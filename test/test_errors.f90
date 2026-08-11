@@ -329,6 +329,10 @@ contains
                 test_sorting_keys_row_count_mismatch_aborts), &
             new_unittest("sorting: an empty key list aborts", &
                 test_sorting_keys_empty_aborts), &
+            new_unittest("sorting: an empty key list aborts a partial argsort", &
+                test_sorting_partial_keys_empty_aborts), &
+            new_unittest("sorting: an empty key list aborts an int64 partial argsort", &
+                test_sorting_partial_keys_empty_i64_aborts), &
             new_unittest("sorting: a vector column key aborts", &
                 test_sorting_column_vector_aborts), &
             new_unittest("sorting: searching unsorted input aborts", &
@@ -339,6 +343,30 @@ contains
                 test_sorting_rank_bad_method_aborts), &
             new_unittest("sorting: an all-null minmax aborts", &
                 test_sorting_minmax_all_null_aborts), &
+            new_unittest("sorting: an all-null int32 array aborts pf_minmax", &
+                test_sorting_minmax_all_null_i32_aborts), &
+            new_unittest("sorting: an all-null int64 array aborts pf_minmax", &
+                test_sorting_minmax_all_null_i64_aborts), &
+            new_unittest("sorting: an all-null real32 array aborts pf_minmax", &
+                test_sorting_minmax_all_null_f32_aborts), &
+            new_unittest("sorting: an all-null character array aborts pf_minmax", &
+                test_sorting_minmax_all_null_chr_aborts), &
+            new_unittest("sorting: an all-null parquet_date array aborts pf_minmax", &
+                test_sorting_minmax_all_null_date_aborts), &
+            new_unittest("sorting: an all-null parquet_time array aborts pf_minmax", &
+                test_sorting_minmax_all_null_time_aborts), &
+            new_unittest("sorting: an all-null parquet_timestamp array aborts pf_minmax", &
+                test_sorting_minmax_all_null_ts_aborts), &
+            new_unittest("sorting: an all-null parquet_string_column array aborts pf_minmax", &
+                test_sorting_minmax_all_null_strcol_aborts), &
+            new_unittest("sorting: an all-null column aborts pf_argminmax", &
+                test_sorting_argminmax_all_null_col_aborts), &
+            new_unittest("sorting: an empty key list aborts an int64 sort", &
+                test_sorting_keys_empty_i64_aborts), &
+            new_unittest("sorting: an empty key list aborts pf_is_sorted", &
+                test_sorting_is_sorted_keys_empty_aborts), &
+            new_unittest("sorting: a column with no element kind aborts", &
+                test_sorting_column_no_kind_aborts), &
             new_unittest("sorting: merging unsorted input aborts", &
                 test_sorting_merge_unsorted_aborts), &
             new_unittest("metadata: a caller's own <KEY>.datatype wins, with a warning", &
@@ -3408,6 +3436,26 @@ contains
             required_stderr="this pf_sort_keys has no key")
     end subroutine test_sorting_keys_empty_aborts
 
+    !> pf_partial_argsort abort path: see scenario_sorting_partial_keys_empty in
+    !> test/error_scenarios.f90 for why this needs its own scenario rather than being covered by
+    !> test_sorting_keys_empty_aborts above.
+    subroutine test_sorting_partial_keys_empty_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_partial_keys_empty", expect_abort=.true., &
+            failure_message="a partial argsort of an empty key list was expected to abort", &
+            required_stderr="this pf_sort_keys has no key")
+    end subroutine test_sorting_partial_keys_empty_aborts
+
+    !> The int64 index form of the scenario above -- a third copy of the same guard.
+    subroutine test_sorting_partial_keys_empty_i64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_partial_keys_empty_i64", expect_abort=.true., &
+            failure_message="a partial argsort of an empty key list was expected to abort", &
+            required_stderr="this pf_sort_keys has no key")
+    end subroutine test_sorting_partial_keys_empty_i64_aborts
+
     !> pf_argsort abort path: see scenario_sorting_column_vector in test/error_scenarios.f90
     !> for what it does and why that state is rejected.
     subroutine test_sorting_column_vector_aborts(error)
@@ -3463,6 +3511,121 @@ contains
             failure_message="reducing an all-null array was expected to abort", &
             required_stderr="every value is null or NaN")
     end subroutine test_sorting_minmax_all_null_aborts
+
+    !> pf_minmax abort path, once per value family: see the scenario_sorting_minmax_all_null_*
+    !> group in test/error_scenarios.f90 for why one family's scenario says nothing about the
+    !> others, and for the negative control each of them makes first.
+    subroutine test_sorting_minmax_all_null_i32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null_i32", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null int32 array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_i32_aborts
+
+    subroutine test_sorting_minmax_all_null_i64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null_i64", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null int64 array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_i64_aborts
+
+    subroutine test_sorting_minmax_all_null_f32_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null_f32", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null real32 array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_f32_aborts
+
+    subroutine test_sorting_minmax_all_null_chr_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null_chr", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null character array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_chr_aborts
+
+    subroutine test_sorting_minmax_all_null_date_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null_date", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null parquet_date array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_date_aborts
+
+    subroutine test_sorting_minmax_all_null_time_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null_time", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null parquet_time array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_time_aborts
+
+    subroutine test_sorting_minmax_all_null_ts_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null_ts", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null parquet_timestamp array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_ts_aborts
+
+    subroutine test_sorting_minmax_all_null_strcol_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_minmax_all_null_strcol", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null parquet_string_column array was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_minmax_all_null_strcol_aborts
+
+    !> The parquet_column form of the same guard, reached through pf_argminmax.
+    subroutine test_sorting_argminmax_all_null_col_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_argminmax_all_null_col", &
+            expect_abort=.true., &
+            failure_message="reducing an all-null column was expected to abort", &
+            required_stderr="every value is null or NaN")
+    end subroutine test_sorting_argminmax_all_null_col_aborts
+
+    !> pf_argsort abort path, int64 form: a separate generated body from the int32 one that
+    !> test_sorting_keys_empty_aborts drives.
+    subroutine test_sorting_keys_empty_i64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_keys_empty_i64", expect_abort=.true., &
+            failure_message="an int64 sort of an empty key list was expected to abort", &
+            required_stderr="this pf_sort_keys has no key")
+    end subroutine test_sorting_keys_empty_i64_aborts
+
+    !> pf_is_sorted abort path: answering .true. for a key list with no keys would be vacuous.
+    subroutine test_sorting_is_sorted_keys_empty_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_is_sorted_keys_empty", &
+            expect_abort=.true., &
+            failure_message="asking whether an empty key list is sorted was expected to abort", &
+            required_stderr="this pf_sort_keys has no key")
+    end subroutine test_sorting_is_sorted_keys_empty_aborts
+
+    !> pf_argsort abort path: see scenario_sorting_column_no_kind in test/error_scenarios.f90 for
+    !> why a kindless column reaches the kind switch rather than the vector-column guard above it.
+    subroutine test_sorting_column_no_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sorting_column_no_kind", expect_abort=.true., &
+            failure_message="sorting by a column with no element kind was expected to abort", &
+            required_stderr="column cannot be a sort key")
+    end subroutine test_sorting_column_no_kind_aborts
 
     !> pf_merge abort path: see scenario_sorting_merge_unsorted in test/error_scenarios.f90.
     !> Requires the message to name `b`, since a merge has two inputs and saying only "not sorted"

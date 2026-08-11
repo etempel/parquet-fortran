@@ -2031,9 +2031,13 @@ contains
         character(len=32) :: n_str
         !
         if (idx64 > int(huge(1_int32), int64)) then
+            ! GCOVR_EXCL_START -- unreachable without a >2-billion-element sort; the array
+            ! that would trip it cannot be built by any fixture this repository can run.
+            ! Kept because the alternative is a silent truncation into a wrong index.
             write (n_str, "(i0)") idx64
             error stop EP // proc // ": the answer is at element " // trim(n_str) // &
                 ", which does not fit an int32 index; declare index as integer(int64)"
+            ! GCOVR_EXCL_STOP
         end if
         idx32 = int(idx64, int32)
     end subroutine narrow_index

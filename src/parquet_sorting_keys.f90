@@ -768,7 +768,8 @@ contains
         integer :: ik
         !
         if (size(keys) < 1) then
-            error stop EP // proc // ": no sort key was given; call keys%add(...) at least once"
+            ! Unreachable: every public entry point rejects an empty key list before reaching here.
+            error stop EP // proc // ": no sort key was given; call keys%add(...) at least once" ! GCOVR_EXCL_LINE
         end if
         ! Sized EXACTLY, never max(nrows, 1): a zero-row sort must hand back a zero-length
         ! permutation, or `size(perm)` lies and a caller's `do k = 1, size(perm)` reads element 1
@@ -806,7 +807,8 @@ contains
         integer :: jk
         !
         if (size(keys) < 1) then
-            error stop EP // proc // ": no sort key was given"
+            ! Unreachable: every public entry point rejects an empty key list before reaching here.
+            error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
         allocate(perm(count))
         do ik = 1_int64, count
@@ -834,7 +836,8 @@ contains
         integer :: ik
         !
         if (size(keys) < 1) then
-            error stop EP // proc // ": no sort key was given"
+            ! Unreachable: every public entry point rejects an empty key list before reaching here.
+            error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
         if (size(keys) == 1) then
             call engine_one_shot_nth(keys(1), nrows, nth, idx)
@@ -912,7 +915,8 @@ contains
         integer :: ik
         !
         if (size(keys) < 1) then
-            error stop EP // proc // ": no sort key was given; call keys%add(...) at least once"
+            ! Unreachable: every public entry point rejects an empty key list before reaching here.
+            error stop EP // proc // ": no sort key was given; call keys%add(...) at least once" ! GCOVR_EXCL_LINE
         end if
         answer = .true.
         if (nrows < 2_int64) return
@@ -1183,9 +1187,13 @@ contains
         !
         n = size(perm64, kind=int64)
         if (n > int(huge(1_int32), int64)) then
+            ! GCOVR_EXCL_START -- unreachable without a >2-billion-element sort; the array that
+            ! would trip it cannot be built by any fixture this repository can run. Kept because
+            ! the alternative is a silent truncation into a plausible wrong index.
             write (n_str, "(i0)") n
             error stop EP // proc // ": this array has " // trim(n_str) // " elements, which " // &
                 "does not fit an int32 permutation; declare perm as integer(int64)"
+            ! GCOVR_EXCL_STOP
         end if
         allocate(perm32(n))
         perm32 = int(perm64, int32)
@@ -1200,15 +1208,17 @@ contains
         ! test passes while this one must not: a wrapped sentinel makes the last group's
         ! o(g+1) - 1 a huge negative bound, i.e. a silently wrong slice instead of an abort.
         sentinel = offsets64(size(offsets64))
-        ! GCOVR_EXCL_START -- unreachable without a >2-billion-row sort; the same reason
-        ! narrow_perm's own guard has no test either. Kept because the failure it prevents is
-        ! silent, which is precisely when an untestable guard earns its place.
         if (sentinel > int(huge(1_int32), int64)) then
+            ! GCOVR_EXCL_START -- unreachable without a >2-billion-row sort; the same reason
+            ! narrow_perm's own guard has no test either. Kept because the failure it prevents is
+            ! silent, which is precisely when an untestable guard earns its place. The marker sits
+            ! INSIDE the test: the test itself runs on every call, and excluding it too would file
+            ! it forever as a stale-exclusion candidate in tools/coverage.sh's own report.
             write (n_str, "(i0)") sentinel - 1_int64
             error stop EP // proc // ": this array has " // trim(n_str) // " elements, so the " // &
                 "group offsets do not fit int32; declare group_offsets as integer(int64)"
+            ! GCOVR_EXCL_STOP
         end if
-        ! GCOVR_EXCL_STOP
         allocate(offsets32(size(offsets64)))
         offsets32 = int(offsets64, int32)
     end procedure narrow_offsets
@@ -1217,9 +1227,13 @@ contains
         character(len=32) :: v_str
         !
         if (value > int(huge(1_int32), int64)) then
+            ! GCOVR_EXCL_START -- unreachable without a >2-billion-element sort; the array that
+            ! would trip it cannot be built by any fixture this repository can run. Kept because
+            ! the alternative is a silent truncation into a plausible wrong index.
             write (v_str, "(i0)") value
             error stop EP // proc // ": the " // noun // " is " // trim(v_str) // ", which does " // &
                 "not fit an int32; declare that argument as integer(int64)"
+            ! GCOVR_EXCL_STOP
         end if
         dst = int(value, int32)
     end procedure narrow_i64
@@ -1232,9 +1246,11 @@ contains
         if (n > 0_int64) then
             biggest = maxval(src)
             if (biggest > int(huge(1_int32), int64)) then
+                ! GCOVR_EXCL_START -- unreachable without a >2-billion-element sort; see narrow_perm.
                 write (v_str, "(i0)") biggest
                 error stop EP // proc // ": the largest " // noun // " is " // trim(v_str) // &
                     ", which does not fit an int32; declare that argument as integer(int64)"
+                ! GCOVR_EXCL_STOP
             end if
         end if
         allocate(dst(n))

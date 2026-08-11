@@ -466,6 +466,10 @@ program error_scenarios
         call scenario_sorting_keys_row_count_mismatch()
     case ("sorting_keys_empty")
         call scenario_sorting_keys_empty()
+    case ("sorting_partial_keys_empty")
+        call scenario_sorting_partial_keys_empty()
+    case ("sorting_partial_keys_empty_i64")
+        call scenario_sorting_partial_keys_empty_i64()
     case ("sorting_column_vector")
         call scenario_sorting_column_vector()
     case ("sorting_search_unsorted")
@@ -476,6 +480,30 @@ program error_scenarios
         call scenario_sorting_rank_bad_method()
     case ("sorting_minmax_all_null")
         call scenario_sorting_minmax_all_null()
+    case ("sorting_minmax_all_null_i32")
+        call scenario_sorting_minmax_all_null_i32()
+    case ("sorting_minmax_all_null_i64")
+        call scenario_sorting_minmax_all_null_i64()
+    case ("sorting_minmax_all_null_f32")
+        call scenario_sorting_minmax_all_null_f32()
+    case ("sorting_minmax_all_null_chr")
+        call scenario_sorting_minmax_all_null_chr()
+    case ("sorting_minmax_all_null_date")
+        call scenario_sorting_minmax_all_null_date()
+    case ("sorting_minmax_all_null_time")
+        call scenario_sorting_minmax_all_null_time()
+    case ("sorting_minmax_all_null_ts")
+        call scenario_sorting_minmax_all_null_ts()
+    case ("sorting_minmax_all_null_strcol")
+        call scenario_sorting_minmax_all_null_strcol()
+    case ("sorting_argminmax_all_null_col")
+        call scenario_sorting_argminmax_all_null_col()
+    case ("sorting_keys_empty_i64")
+        call scenario_sorting_keys_empty_i64()
+    case ("sorting_is_sorted_keys_empty")
+        call scenario_sorting_is_sorted_keys_empty()
+    case ("sorting_column_no_kind")
+        call scenario_sorting_column_no_kind()
     case ("sorting_merge_unsorted")
         call scenario_sorting_merge_unsorted()
     case ("sort_unknown_column")
@@ -12360,6 +12388,25 @@ contains
         print '(a,i0)', "unexpectedly sorted an empty key list, size=", size(perm)
     end subroutine scenario_sorting_keys_empty
 
+    !> The same rejection, reached through pf_partial_argsort instead of pf_argsort. It is a
+    !! SEPARATE generated body carrying its own copy of the guard, so scenario_sorting_keys_empty
+    !! above says nothing about it; a partial argsort that quietly returned the first n identity
+    !! indices would look like a successful sort of an unsorted array.
+    subroutine scenario_sorting_partial_keys_empty()
+        type(pf_sort_keys) :: k
+        integer(int32), allocatable :: perm(:)
+        call pf_partial_argsort(k, perm, 3)   ! -> aborts (no key added)
+        print '(a,i0)', "unexpectedly partial-sorted an empty key list, size=", size(perm)
+    end subroutine scenario_sorting_partial_keys_empty
+
+    !> And once more for the int64 index form, which is a third copy of the same guard.
+    subroutine scenario_sorting_partial_keys_empty_i64()
+        type(pf_sort_keys) :: k
+        integer(int64), allocatable :: perm(:)
+        call pf_partial_argsort(k, perm, 3)   ! -> aborts (no key added)
+        print '(a,i0)', "unexpectedly partial-sorted an empty key list, size=", size(perm)
+    end subroutine scenario_sorting_partial_keys_empty_i64
+
     !> A vector column has no defined order on a whole row, so it cannot be a sort key -- the
     !! same rule parquet_table%sort_by applies, enforced here for a bare parquet_column.
     subroutine scenario_sorting_column_vector()
@@ -12425,6 +12472,154 @@ contains
         call pf_minmax(v, lo, hi, is_valid=none)   ! -> aborts (the only non-null value is a NaN)
         print '(a,f0.3)', "unexpectedly reduced an all-null array, lo=", lo
     end subroutine scenario_sorting_minmax_all_null
+
+    !> The same rejection for each of the OTHER nine value families. `pf_minmax` has one shared
+    !! worker per family, each carrying its own copy of the guard, so the real64 scenario above
+    !! says nothing about any of them -- and the failure a missing guard produces is not an abort
+    !! but an ANSWER: whatever the engine left in the first slot, reported as a minimum.
+    !!
+    !! Every one of these makes a partially-null call FIRST, as the negative control: a guard that
+    !! fired unconditionally would pass the abort half of the test while breaking the ordinary case.
+    subroutine scenario_sorting_minmax_all_null_i32()
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        logical :: none(3) = [.false., .false., .false.]
+        logical :: some(3) = [.true., .false., .false.]
+        integer(int32) :: lo, hi
+        call pf_minmax(v, lo, hi, is_valid=some)
+        print '(a,i0,a,i0)', "partial nulls answered lo=", lo, " hi=", hi
+        call pf_minmax(v, lo, hi, is_valid=none)   ! -> aborts (nothing left to reduce)
+        print '(a,i0)', "unexpectedly reduced an all-null int32 array, lo=", lo
+    end subroutine scenario_sorting_minmax_all_null_i32
+
+    !> int64 counterpart of the scenario above.
+    subroutine scenario_sorting_minmax_all_null_i64()
+        integer(int64) :: v(3) = [1_int64, 2_int64, 3_int64]
+        logical :: none(3) = [.false., .false., .false.]
+        logical :: some(3) = [.true., .false., .false.]
+        integer(int64) :: lo, hi
+        call pf_minmax(v, lo, hi, is_valid=some)
+        print '(a,i0,a,i0)', "partial nulls answered lo=", lo, " hi=", hi
+        call pf_minmax(v, lo, hi, is_valid=none)   ! -> aborts (nothing left to reduce)
+        print '(a,i0)', "unexpectedly reduced an all-null int64 array, lo=", lo
+    end subroutine scenario_sorting_minmax_all_null_i64
+
+    !> real32 counterpart of the scenario above.
+    subroutine scenario_sorting_minmax_all_null_f32()
+        real(real32) :: v(3) = [1.0_real32, 2.0_real32, 3.0_real32]
+        logical :: none(3) = [.false., .false., .false.]
+        logical :: some(3) = [.true., .false., .false.]
+        real(real32) :: lo, hi
+        call pf_minmax(v, lo, hi, is_valid=some)
+        print '(a,f0.3,a,f0.3)', "partial nulls answered lo=", lo, " hi=", hi
+        call pf_minmax(v, lo, hi, is_valid=none)   ! -> aborts (nothing left to reduce)
+        print '(a,f0.3)', "unexpectedly reduced an all-null real32 array, lo=", lo
+    end subroutine scenario_sorting_minmax_all_null_f32
+
+    !> character counterpart of the scenario above.
+    subroutine scenario_sorting_minmax_all_null_chr()
+        character(len=2) :: v(3) = [character(len=2) :: "aa", "bb", "cc"]
+        logical :: none(3) = [.false., .false., .false.]
+        logical :: some(3) = [.true., .false., .false.]
+        character(len=:), allocatable :: lo, hi
+        call pf_minmax(v, lo, hi, is_valid=some)
+        print '(a,a,a,a)', "partial nulls answered lo=", lo, " hi=", hi
+        call pf_minmax(v, lo, hi, is_valid=none)   ! -> aborts (nothing left to reduce)
+        print '(a,a)', "unexpectedly reduced an all-null character array, lo=", lo
+    end subroutine scenario_sorting_minmax_all_null_chr
+
+    !> parquet_date counterpart. A temporal element carries its own null, so the all-null array is
+    !! simply one nothing has been written to -- which is also the shape a caller most easily
+    !! reaches by accident.
+    subroutine scenario_sorting_minmax_all_null_date()
+        type(parquet_date) :: v(3), some(3), lo, hi
+        call some(1)%set_raw(1000_int32)
+        call pf_minmax(some, lo, hi)
+        print '(a,i0)', "a partially null date array answered lo=", lo%raw()
+        call pf_minmax(v, lo, hi)   ! -> aborts (every element is still null)
+        print '(a,i0)', "unexpectedly reduced an all-null date array, lo=", lo%raw()
+    end subroutine scenario_sorting_minmax_all_null_date
+
+    !> parquet_time counterpart of the scenario above.
+    subroutine scenario_sorting_minmax_all_null_time()
+        type(parquet_time) :: v(3), some(3), lo, hi
+        call some(1)%set_raw(2000_int64)
+        call pf_minmax(some, lo, hi)
+        print '(a,i0)', "a partially null time array answered lo=", lo%raw()
+        call pf_minmax(v, lo, hi)   ! -> aborts (every element is still null)
+        print '(a,i0)', "unexpectedly reduced an all-null time array, lo=", lo%raw()
+    end subroutine scenario_sorting_minmax_all_null_time
+
+    !> parquet_timestamp counterpart of the scenario above.
+    subroutine scenario_sorting_minmax_all_null_ts()
+        type(parquet_timestamp) :: v(3), some(3), lo, hi
+        integer(int64) :: secs
+        integer(int32) :: nanos
+        call some(1)%set_raw(3000_int64, 7_int32)
+        call pf_minmax(some, lo, hi)
+        call lo%get_raw(secs, nanos)
+        print '(a,i0)', "a partially null timestamp array answered lo=", secs
+        call pf_minmax(v, lo, hi)   ! -> aborts (every element is still null)
+        print '(a)', "unexpectedly reduced an all-null timestamp array"
+    end subroutine scenario_sorting_minmax_all_null_ts
+
+    !> parquet_string_column counterpart: the store owns its validity, so the nulls are appended.
+    subroutine scenario_sorting_minmax_all_null_strcol()
+        type(parquet_string_column) :: v, some
+        character(len=:), allocatable :: lo, hi
+        call some%append_string("aa")
+        call some%append_null()
+        call pf_minmax(some, lo, hi)
+        print '(a,a)', "a partially null string column answered lo=", lo
+        call v%append_null()
+        call v%append_null()
+        call pf_minmax(v, lo, hi)   ! -> aborts (every element is null)
+        print '(a,a)', "unexpectedly reduced an all-null string column, lo=", lo
+    end subroutine scenario_sorting_minmax_all_null_strcol
+
+    !> parquet_column counterpart. pf_minmax has no parquet_column form -- a value out-argument
+    !! needs a compile-time element type -- so this is pf_argminmax, which shares the same worker
+    !! and the same guard.
+    subroutine scenario_sorting_argminmax_all_null_col()
+        type(parquet_column) :: c
+        integer :: imin, imax
+        call c%init(PK_INT32, 3_int64)
+        call c%set_all([1_int32, 2_int32, 3_int32])
+        call c%set_null(2_int64)
+        call pf_argminmax(c, imin, imax)
+        print '(a,i0,a,i0)', "a partially null column answered imin=", imin, " imax=", imax
+        call c%set_null(1_int64)
+        call c%set_null(3_int64)
+        call pf_argminmax(c, imin, imax)   ! -> aborts (every row is null)
+        print '(a,i0)', "unexpectedly reduced an all-null column, imin=", imin
+    end subroutine scenario_sorting_argminmax_all_null_col
+
+    !> The empty-key-list rejection reached through the INT64 pf_argsort form, which is a separate
+    !! generated body from the int32 one scenario_sorting_keys_empty drives.
+    subroutine scenario_sorting_keys_empty_i64()
+        type(pf_sort_keys) :: k
+        integer(int64), allocatable :: perm(:)
+        call pf_argsort(k, perm)   ! -> aborts (no key added)
+        print '(a,i0)', "unexpectedly sorted an empty key list, size=", size(perm)
+    end subroutine scenario_sorting_keys_empty_i64
+
+    !> And through pf_is_sorted, whose own copy of the guard is a third one. Answering .true. for
+    !! a key list with no keys would be the plausible wrong behaviour -- vacuously sorted.
+    subroutine scenario_sorting_is_sorted_keys_empty()
+        type(pf_sort_keys) :: k
+        logical :: answer
+        call pf_is_sorted(k, answer)   ! -> aborts (no key added)
+        print '(a,l1)', "unexpectedly answered for an empty key list, answer=", answer
+    end subroutine scenario_sorting_is_sorted_keys_empty
+
+    !> A column that has no kind yet cannot be a sort key. A default-initialized parquet_column
+    !! reports width 1, so it passes the vector-column guard and reaches the kind switch, where
+    !! there is nothing to extract -- the one column state that gets this far.
+    subroutine scenario_sorting_column_no_kind()
+        type(parquet_column) :: c
+        integer(int32), allocatable :: perm(:)
+        call pf_argsort(c, perm)   ! -> aborts (the column has no element kind)
+        print '(a,i0)', "unexpectedly sorted a kindless column, size=", size(perm)
+    end subroutine scenario_sorting_column_no_kind
 
     !> `pf_merge` checks BOTH inputs, not just the first -- an unsorted second input is the same
     !! silent-wrong-answer class as an unsorted array in a binary search. The all-sorted call is

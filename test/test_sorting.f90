@@ -38,7 +38,53 @@ module test_sorting
     private
     public :: collect_tests_parquet_sorting
     !
+    ! ==================================================================================
+    ! The shared sweep fixture
+    ! ==================================================================================
+    !
+    !> Every "one call per specific" sweep below builds its values from these parameters, so an
+    !> expectation is written once as a RANK and never as a per-type literal. That is what keeps a
+    !> sixty-call sweep readable, and it keeps the oracle independent of the engine under test: the
+    !> answer is read off `SWRANK`/`SWASC` by hand, not obtained from a second call into `pf_sort`.
+    !>
+    !> The order is scrambled deliberately. No element is already in place, the smallest and the
+    !> largest both sit in the interior, and the ascending permutation is neither the identity nor a
+    !> reversal -- so a specific wired to the wrong extractor, or one that transposes a value against
+    !> an index, cannot pass by coincidence.
+    integer, parameter :: SWN = 6
+    !> `SWRANK(k)` is element k's 1-based position in ascending order; no two elements tie.
+    integer, parameter :: SWRANK(SWN) = [3, 1, 5, 2, 6, 4]
+    !> `SWASC(r)` is the element index holding rank r -- the permutation a full ascending sort gives.
+    integer, parameter :: SWASC(SWN) = [2, 4, 1, 6, 3, 5]
+    !> The `logical` fixture, the one type that cannot hold six distinct values: `.false.` at
+    !> elements 2, 5 and 6, so a stable ascending sort must begin with exactly those three, in that
+    !> order. Weaker than the others, which is why it is spelled out here rather than left to look
+    !> equivalent.
+    logical, parameter :: SWBOOL(SWN) = [.true., .false., .true., .true., .false., .false.]
+    !> The DUPLICATE fixture, for the questions that only mean something with ties: six elements
+    !> over three classes, each class appearing twice, neither contiguously nor in class order. A
+    !> body that reported one entry per RUN rather than per VALUE would answer four rather than
+    !> three, and one that lost the tie in ranking would never produce a repeated rank.
+    integer, parameter :: SWDUP(SWN) = [3, 1, 3, 2, 1, 2]
+    !> The SORTED duplicate fixture, for the search questions, which require sorted input: one
+    !> element of class 1, two of class 2, three of class 3. Class 2 is what the sweeps look for --
+    !> it is neither at the start nor at the end, and its run is neither of length one nor the
+    !> longest, so its lower bound (2), upper bound (4) and equal range (2, 3) are four different
+    !> numbers and no two of the three operations can be confused for each other.
+    integer, parameter :: SWSRT(SWN) = [1, 2, 2, 3, 3, 3]
+    !> The `logical` search fixture: the same shape as far as a two-valued type allows.
+    logical, parameter :: SWSRTB(SWN) = [.false., .false., .false., .true., .true., .true.]
+    !
 contains
+    !
+    !> The sweep fixture's string value for rank `r`: "v1" through "v6", which order
+    !> lexicographically by rank. A fixed-length result, never a deferred-length one -- see
+    !> CLAUDE.md on why this module returns no `character(len=:), allocatable` function results.
+    pure function swchr(r) result(res)
+        integer, intent(in) :: r !! the 1-based rank wanted.
+        character(len=2) :: res  !! "v" followed by the rank digit.
+        res = "v"//achar(iachar("0") + r)
+    end function swchr
     !
     subroutine collect_tests_parquet_sorting(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
@@ -58,6 +104,9 @@ contains
             new_unittest("is_sorted is direction- and null-aware", test_is_sorted_options), &
             new_unittest("an int32 permutation equals the int64 one", test_perm_kinds_agree), &
             new_unittest("every scalar type sorts", test_all_scalar_types), &
+            new_unittest("pf_argsort: every type x both index kinds, with and without groups", &
+                test_argsort_every_specific), &
+            new_unittest("pf_sort: every type", test_sort_every_specific), &
             new_unittest("logical sorts false before true", test_logical), &
             new_unittest("character sorts on the full padded length", test_character_padding), &
             new_unittest("date and time sort by their raw values", test_date_time), &
@@ -86,6 +135,12 @@ contains
             new_unittest("quantile excludes nulls and counts them", test_quantile_nulls), &
             new_unittest("each rounding token resolves differently", test_quantile_rounding), &
             new_unittest("rounding tokens are case-insensitive", test_quantile_rounding_case), &
+            new_unittest("pf_partial_sort: every type", test_partial_sort_every_specific), &
+            new_unittest("pf_partial_argsort: every type x both index kinds", &
+                test_partial_argsort_every_specific), &
+            new_unittest("pf_nth_element: every type x both rank kinds x three index forms", &
+                test_nth_every_specific), &
+            new_unittest("pf_nth_quantile: every type x three index forms", test_quantile_every_specific), &
             new_unittest("searches agree with a counting oracle", test_search_linear_oracle), &
             new_unittest("equal_range brackets duplicates", test_equal_range_duplicates), &
             new_unittest("searches follow a descending order", test_search_descending), &
@@ -94,6 +149,8 @@ contains
             new_unittest("int32 and int64 searches agree", test_search_index_kinds), &
             new_unittest("strings and dates are searchable", test_search_other_types), &
             new_unittest("an empty array still gives an insertion point", test_search_degenerate), &
+            new_unittest("searches: every type x three operations x both index kinds", &
+                test_search_every_specific), &
             new_unittest("unique reports distinct values in order", test_unique_basic), &
             new_unittest("unique excludes and counts nulls", test_unique_nulls), &
             new_unittest("unique agrees on both sort paths", test_unique_both_paths), &
@@ -104,6 +161,9 @@ contains
             new_unittest("ordinal ranks invert argsort", test_rank_inverts_argsort), &
             new_unittest("descending ranks from the top", test_rank_descending), &
             new_unittest("rank agrees on both sort paths", test_rank_both_paths), &
+            new_unittest("pf_unique/pf_unique_count: every type x both count kinds", &
+                test_unique_every_specific), &
+            new_unittest("pf_rank: every type x both rank kinds", test_rank_every_specific), &
             new_unittest("minmax agrees with minval/maxval", test_minmax_basic), &
             new_unittest("minmax skips nulls and NaNs", test_minmax_skips), &
             new_unittest("argminmax reports the first of a tie", test_argminmax_ties), &
@@ -113,6 +173,9 @@ contains
             new_unittest("merge follows a descending order", test_merge_descending), &
             new_unittest("merge handles an empty input", test_merge_empty), &
             new_unittest("merge widens two string lengths", test_merge_string_widths), &
+            new_unittest("pf_minmax: every type", test_minmax_every_specific), &
+            new_unittest("pf_argminmax: every type x both index kinds", test_argminmax_every_specific), &
+            new_unittest("pf_merge: every type", test_merge_every_specific), &
             new_unittest("a threaded sort equals the serial one", test_threads_identical), &
             new_unittest("threads are really created", test_threads_really_used), &
             new_unittest("auto is serial inside a parallel region", test_threads_auto_in_parallel), &
@@ -125,6 +188,9 @@ contains
             new_unittest("strings and multi-key merge identically", test_merge_key_families), &
             new_unittest("nulls and NaNs merge identically", test_merge_tiers), &
             new_unittest("assume_valid really skips the scan for a column", test_permute_column_assume_valid), &
+            new_unittest("pf_is_sorted: every type, sorted and scrambled", test_is_sorted_every_specific), &
+            new_unittest("pf_sort_keys%add: every type", test_keys_add_every_specific), &
+            new_unittest("a parquet_column key of every runtime kind", test_argsort_column_every_kind), &
             new_unittest("group_offsets marks every run of equal rows", test_group_offsets_basic), &
             new_unittest("group_offsets handles empty, single and all-tied", test_group_offsets_edges), &
             new_unittest("all nulls form one group and all NaNs form one", test_group_offsets_tiers), &
@@ -590,6 +656,304 @@ contains
         if (allocated(error)) return
         call check(error, all(pd == pa), "real64 must sort exactly as int32 does on the same values")
     end subroutine test_all_scalar_types
+    !
+    !> **Every `pf_argsort` specific, once each, in both of its shapes** -- twelve value families
+    !> times the two index kinds, each called with and without `group_offsets`. The int32 bodies
+    !> branch on that argument (they must narrow a second array when it is asked for), so a call
+    !> without it reaches only half of one, and every `group_offsets` test in this suite before
+    !> this one used an integer key.
+    !>
+    !> `SWDUP` is the fixture because groups need ties: three classes of two, so the offsets are
+    !> `[1, 3, 5, 7]` -- a body that emitted one group per ROW would give seven entries, and one
+    !> that emitted a single group would give two.
+    subroutine test_argsort_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> Ascending, ties in original order: class 1 is rows 2 and 5, class 2 rows 4 and 6, class
+        !> 3 rows 1 and 3.
+        integer, parameter :: PEXP(SWN) = [2, 5, 4, 6, 1, 3]
+        !> Three groups of two, plus the one-past-the-end sentinel.
+        integer, parameter :: OEXP(4) = [1, 3, 5, 7]
+        !> The same two for the logical fixture: three .false. then three .true.
+        integer, parameter :: PBOOL(SWN) = [2, 5, 6, 1, 3, 4]
+        integer, parameter :: OBOOL(3) = [1, 4, 7]
+        integer(int32), allocatable :: p32(:), o32(:)
+        integer(int64), allocatable :: p64(:), o64(:)
+        integer :: k
+
+        block
+            integer(int32) :: v(SWN)
+            v = 10_int32 * int(SWDUP, int32)
+            call pf_argsort(v, p32)
+            call pf_argsort(v, p64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP), "int32 pf_argsort")
+            if (allocated(error)) return
+            call pf_argsort(v, p32, group_offsets=o32)
+            call pf_argsort(v, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "int32 pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN)
+            v = 100_int64 * int(SWDUP, int64)
+            call pf_argsort(v, p32, group_offsets=o32)
+            call pf_argsort(v, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "int64 pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN)
+            v = real(SWDUP, real32) + 0.5_real32
+            call pf_argsort(v, p32, group_offsets=o32)
+            call pf_argsort(v, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "real32 pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN)
+            v = real(SWDUP, real64) + 0.25_real64
+            call pf_argsort(v, p32, group_offsets=o32)
+            call pf_argsort(v, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "real64 pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            call pf_argsort(SWBOOL, p32, group_offsets=o32)
+            call pf_argsort(SWBOOL, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PBOOL, OBOOL), &
+                "logical pf_argsort must report two groups of three")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            do k = 1, SWN
+                v(k) = swchr(SWDUP(k))
+            end do
+            call pf_argsort(v, p32, group_offsets=o32)
+            call pf_argsort(v, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "character pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN)
+            call v%set_raw(1000_int32 + int(SWDUP, int32))
+            call pf_argsort(v, p32, group_offsets=o32)
+            call pf_argsort(v, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "parquet_date pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN)
+            call v%set_raw(2000_int64 + int(SWDUP, int64))
+            call pf_argsort(v, p32, group_offsets=o32)
+            call pf_argsort(v, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "parquet_time pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN)
+            call v%set_raw(3000_int64 + int(SWDUP, int64), 7_int32)
+            call pf_argsort(v, p32, group_offsets=o32)
+            call pf_argsort(v, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "parquet_timestamp pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            do k = 1, SWN
+                call sc%append_string(swchr(SWDUP(k)))
+            end do
+            call pf_argsort(sc, p32, group_offsets=o32)
+            call pf_argsort(sc, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "parquet_string_column pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            call c%init(PK_INT32, int(SWN, int64))
+            call c%set_all(10_int32 * int(SWDUP, int32))
+            call pf_argsort(c, p32, group_offsets=o32)
+            call pf_argsort(c, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "parquet_column pf_argsort must report three groups of two")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            integer(int32) :: v(SWN)
+            v = 10_int32 * int(SWDUP, int32)
+            call keys%add(v)
+            call pf_argsort(keys, p32)
+            call pf_argsort(keys, p64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP), "pf_sort_keys pf_argsort")
+            if (allocated(error)) return
+            call pf_argsort(keys, p32, group_offsets=o32)
+            call pf_argsort(keys, p64, group_offsets=o64)
+            call check(error, sweep_group_ok(p32, o32, p64, o64, PEXP, OEXP), &
+                "pf_sort_keys pf_argsort must report three groups of two")
+        end block
+    end subroutine test_argsort_every_specific
+    !
+    !> **Every `pf_sort` specific, once each** -- the nine families that copy their values out.
+    !> The six taking a mask are called a second time with `is_valid` AND `sorted_valid`, which is
+    !> the only shape reaching a body's validity-gathering branch.
+    subroutine test_sort_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> Five valid rows in rank order, then the one null, which sorts last.
+        logical, parameter :: SVEXP(SWN) = [.true., .true., .true., .true., .true., .false.]
+        logical :: mask(SWN)
+        integer :: k
+
+        mask = .true.
+        mask(SWASC(1)) = .false.        ! the SMALLEST value is the null, so it has to travel
+        block
+            integer(int32) :: v(SWN)
+            integer(int32), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            v = 10_int32 * int(SWRANK, int32)
+            call pf_sort(v, s)
+            call check(error, all(s == [(10_int32 * int(k, int32), k = 1, SWN)]), &
+                "int32 pf_sort must order the whole fixture")
+            if (allocated(error)) return
+            call pf_sort(v, s, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == 20_int32 .and. s(SWN) == 10_int32, &
+                "int32 pf_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN)
+            integer(int64), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            v = 100_int64 * int(SWRANK, int64)
+            call pf_sort(v, s)
+            call check(error, all(s == [(100_int64 * int(k, int64), k = 1, SWN)]), &
+                "int64 pf_sort must order the whole fixture")
+            if (allocated(error)) return
+            call pf_sort(v, s, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == 200_int64 .and. s(SWN) == 100_int64, &
+                "int64 pf_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN)
+            real(real32), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            v = real(SWRANK, real32) + 0.5_real32
+            call pf_sort(v, s)
+            call check(error, all(s == [(real(k, real32) + 0.5_real32, k = 1, SWN)]), &
+                "real32 pf_sort must order the whole fixture")
+            if (allocated(error)) return
+            call pf_sort(v, s, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == 2.5_real32 .and. s(SWN) == 1.5_real32, &
+                "real32 pf_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN)
+            real(real64), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            v = real(SWRANK, real64) + 0.25_real64
+            call pf_sort(v, s)
+            call check(error, all(s == [(real(k, real64) + 0.25_real64, k = 1, SWN)]), &
+                "real64 pf_sort must order the whole fixture")
+            if (allocated(error)) return
+            call pf_sort(v, s, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == 2.25_real64 .and. s(SWN) == 1.25_real64, &
+                "real64 pf_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: s(:), sv(:)
+            logical :: bmask(SWN)
+            call pf_sort(SWBOOL, s)
+            call check(error, .not. any(s(1:3)) .and. all(s(4:SWN)), &
+                "logical pf_sort must put all three .false. before all three .true.")
+            if (allocated(error)) return
+            bmask = .true.
+            bmask(2) = .false.          ! the first .false., i.e. the smallest, is the null
+            call pf_sort(SWBOOL, s, is_valid=bmask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. .not. s(1) .and. s(3), &
+                "logical pf_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            character(len=2), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            do k = 1, SWN
+                v(k) = swchr(SWRANK(k))
+            end do
+            call pf_sort(v, s)
+            call check(error, all(s == [(swchr(k), k = 1, SWN)]), &
+                "character pf_sort must order the whole fixture")
+            if (allocated(error)) return
+            call pf_sort(v, s, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == swchr(2) .and. s(SWN) == swchr(1), &
+                "character pf_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN)
+            type(parquet_date), allocatable :: s(:)
+            call v%set_raw(1000_int32 + int(SWRANK, int32))
+            call pf_sort(v, s)
+            call check(error, all([(s(k)%raw(), k = 1, SWN)] == [(1000 + k, k = 1, SWN)]), &
+                "parquet_date pf_sort must order the whole fixture")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN)
+            type(parquet_time), allocatable :: s(:)
+            call v%set_raw(2000_int64 + int(SWRANK, int64))
+            call pf_sort(v, s)
+            call check(error, all([(s(k)%raw(), k = 1, SWN)] == [(2000_int64 + int(k, int64), k = 1, SWN)]), &
+                "parquet_time pf_sort must order the whole fixture")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN)
+            type(parquet_timestamp), allocatable :: s(:)
+            integer(int64) :: gs(SWN)
+            integer(int32) :: gn(SWN)
+            call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+            call pf_sort(v, s, descending=.true.)
+            do k = 1, SWN
+                call s(k)%get_raw(gs(k), gn(k))
+            end do
+            call check(error, all(gs == [(3000_int64 + int(SWN - k + 1, int64), k = 1, SWN)]) .and. &
+                all(gn == 7_int32), &
+                "parquet_timestamp pf_sort must order the whole fixture, reversed under descending")
+        end block
+    end subroutine test_sort_every_specific
+    !
+    !> A permutation in both index kinds, and optionally the group offsets in both, against the
+    !> expected lists. Omitting `wanto` says the offsets were not asked for on this call and must
+    !> not be examined -- an unallocated array, not an empty one.
+    pure function sweep_group_ok(p32, o32, p64, o64, wantp, wanto) result(ok)
+        integer(int32), allocatable, intent(in) :: p32(:) !! the int32 permutation.
+        integer(int32), allocatable, intent(in) :: o32(:) !! the int32 group offsets, if asked for.
+        integer(int64), allocatable, intent(in) :: p64(:) !! the int64 permutation.
+        integer(int64), allocatable, intent(in) :: o64(:) !! the int64 group offsets, if asked for.
+        integer, intent(in) :: wantp(:)                   !! the expected permutation.
+        integer, intent(in), optional :: wanto(:)         !! the expected offsets, when asked for.
+        logical :: ok                                     !! .true. when every requested list matches.
+        ok = allocated(p32) .and. allocated(p64)
+        if (ok) ok = size(p32) == size(wantp) .and. size(p64) == size(wantp)
+        if (ok) ok = all(p32 == int(wantp, int32)) .and. all(p64 == int(wantp, int64))
+        if (ok .and. present(wanto)) then
+            ok = allocated(o32) .and. allocated(o64)
+            if (ok) ok = size(o32) == size(wanto) .and. size(o64) == size(wanto)
+            if (ok) ok = all(o32 == int(wanto, int32)) .and. all(o64 == int(wanto, int64))
+        end if
+    end function sweep_group_ok
     !
     !> A `logical` binds as 0/1, so .false. sorts before .true. and equal values stay stable.
     subroutine test_logical(error)
@@ -1309,7 +1673,704 @@ contains
         call pf_nth_quantile(v, 0.5_real64, lower, rounding="down")
         call pf_nth_quantile(v, 0.5_real64, upper, rounding="DoWn")
         call check(error, lower == upper, "a rounding token must match regardless of case")
+        if (allocated(error)) return
+        ! "nearest" NAMED is a different path from "nearest" by omission: the token resolver
+        ! returns early when the argument is absent, so its own arm for this token is reached
+        ! only when a caller spells it out.
+        call pf_nth_quantile(v, 0.5_real64, lower)
+        call pf_nth_quantile(v, 0.5_real64, upper, rounding="nearest")
+        call check(error, lower == upper, &
+            "naming the default rounding token must give what omitting it gives")
     end subroutine test_quantile_rounding_case
+    !
+    ! ----------------------------------------------------------------------------------
+    ! M2 sweeps: one call per generated specific
+    ! ----------------------------------------------------------------------------------
+    !
+    !> **Every `pf_partial_sort` specific, once each.** The tests above prove the OPERATION is
+    !> right; they prove it for `int32` and `real64` only, so each of the other seven specifics --
+    !> separately generated bodies, each naming its own extractor -- was reached by nothing at all.
+    !> A body wired to the wrong extractor, or one that gathered by the wrong array, would pass the
+    !> whole suite.
+    !>
+    !> The six types taking a mask are called twice: once plain, and once with `is_valid` AND
+    !> `sorted_valid` together, which is the only call shape that reaches a specific's
+    !> validity-gathering branch at all.
+    subroutine test_partial_sort_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> The mask's expected image: five valid rows, then the one null, which sorts last.
+        logical, parameter :: SVEXP(SWN) = [.true., .true., .true., .true., .true., .false.]
+        logical :: mask(SWN)
+        integer :: k
+
+        mask = .true.
+        mask(SWASC(1)) = .false.        ! the SMALLEST value is the null, so it has to travel
+        block
+            integer(int32) :: v(SWN)
+            integer(int32), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            v = 10_int32 * int(SWRANK, int32)
+            call pf_partial_sort(v, s, 3)
+            call check(error, size(s) == 3 .and. all(s == [10_int32, 20_int32, 30_int32]), &
+                "int32 pf_partial_sort must return the three smallest values, in order")
+            if (allocated(error)) return
+            call pf_partial_sort(v, s, SWN, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == 20_int32 .and. s(SWN) == 10_int32, &
+                "int32 pf_partial_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN)
+            integer(int64), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            v = 100_int64 * int(SWRANK, int64)
+            call pf_partial_sort(v, s, 3)
+            call check(error, size(s) == 3 .and. all(s == [100_int64, 200_int64, 300_int64]), &
+                "int64 pf_partial_sort must return the three smallest values, in order")
+            if (allocated(error)) return
+            call pf_partial_sort(v, s, SWN, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == 200_int64 .and. s(SWN) == 100_int64, &
+                "int64 pf_partial_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN)
+            real(real32), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            v = real(SWRANK, real32) + 0.5_real32
+            call pf_partial_sort(v, s, 3)
+            call check(error, size(s) == 3 .and. all(s == [1.5_real32, 2.5_real32, 3.5_real32]), &
+                "real32 pf_partial_sort must return the three smallest values, in order")
+            if (allocated(error)) return
+            call pf_partial_sort(v, s, SWN, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == 2.5_real32 .and. s(SWN) == 1.5_real32, &
+                "real32 pf_partial_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN)
+            real(real64), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            v = real(SWRANK, real64) + 0.25_real64
+            call pf_partial_sort(v, s, 3)
+            call check(error, size(s) == 3 .and. all(s == [1.25_real64, 2.25_real64, 3.25_real64]), &
+                "real64 pf_partial_sort must return the three smallest values, in order")
+            if (allocated(error)) return
+            call pf_partial_sort(v, s, SWN, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == 2.25_real64 .and. s(SWN) == 1.25_real64, &
+                "real64 pf_partial_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: s(:), sv(:)
+            logical :: bmask(SWN)
+            call pf_partial_sort(SWBOOL, s, 3)
+            call check(error, size(s) == 3 .and. .not. any(s), &
+                "logical pf_partial_sort must return the three .false. elements first")
+            if (allocated(error)) return
+            bmask = .true.
+            bmask(2) = .false.          ! the first .false., i.e. the smallest, is the null
+            call pf_partial_sort(SWBOOL, s, SWN, is_valid=bmask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. .not. s(1) .and. s(3), &
+                "logical pf_partial_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            character(len=2), allocatable :: s(:)
+            logical, allocatable :: sv(:)
+            do k = 1, SWN
+                v(k) = swchr(SWRANK(k))
+            end do
+            call pf_partial_sort(v, s, 3)
+            call check(error, size(s) == 3 .and. all(s == [swchr(1), swchr(2), swchr(3)]), &
+                "character pf_partial_sort must return the three smallest values, in order")
+            if (allocated(error)) return
+            call pf_partial_sort(v, s, SWN, is_valid=mask, sorted_valid=sv)
+            call check(error, all(sv .eqv. SVEXP) .and. s(1) == swchr(2) .and. s(SWN) == swchr(1), &
+                "character pf_partial_sort must carry validity into sorted_valid, the null last")
+        end block
+        if (allocated(error)) return
+        ! ---- the three temporal types, which carry their own nulls and so take no mask ----
+        block
+            type(parquet_date) :: v(SWN)
+            type(parquet_date), allocatable :: s(:)
+            call v%set_raw(1000_int32 + int(SWRANK, int32))
+            call pf_partial_sort(v, s, 3)
+            call check(error, size(s) == 3 .and. all([(s(k)%raw(), k = 1, 3)] == [1001, 1002, 1003]), &
+                "parquet_date pf_partial_sort must return the three earliest dates, in order")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN)
+            type(parquet_time), allocatable :: s(:)
+            call v%set_raw(2000_int64 + int(SWRANK, int64))
+            call pf_partial_sort(v, s, 3)
+            call check(error, size(s) == 3 .and. &
+                all([(s(k)%raw(), k = 1, 3)] == [2001_int64, 2002_int64, 2003_int64]), &
+                "parquet_time pf_partial_sort must return the three earliest times, in order")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN)
+            type(parquet_timestamp), allocatable :: s(:)
+            integer(int64) :: gs(3)
+            integer(int32) :: gn(3)
+            call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+            call pf_partial_sort(v, s, 3)
+            do k = 1, 3
+                call s(k)%get_raw(gs(k), gn(k))
+            end do
+            call check(error, size(s) == 3 .and. all(gs == [3001_int64, 3002_int64, 3003_int64]) .and. &
+                all(gn == 7_int32), &
+                "parquet_timestamp pf_partial_sort must return the three earliest timestamps, in order")
+        end block
+    end subroutine test_partial_sort_every_specific
+    !
+    !> **Every `pf_partial_argsort` specific, once each** -- twelve value families times the two
+    !> index kinds. The int32 and int64 forms are separate bodies (one narrows the engine's int64
+    !> permutation, the other moves it), so an int64 form that silently truncated, or an int32 form
+    !> that narrowed the wrong array, is invisible until each is called.
+    !>
+    !> The expected answer is `SWASC(1:3)` read straight off the fixture -- the elements holding
+    !> ranks 1, 2 and 3 -- so nothing here is compared against a second call into the engine.
+    subroutine test_partial_argsort_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> The three elements a partial argsort of the fixture must name, in order.
+        integer, parameter :: TOP3(3) = [SWASC(1), SWASC(2), SWASC(3)]
+        integer(int32), allocatable :: p32(:)
+        integer(int64), allocatable :: p64(:)
+        integer :: ik, k
+        character(len=16) :: ctx
+
+        do ik = 1, 2
+            write(ctx, "(A,I0,A)") "[i", 32*ik, "] "
+            block
+                integer(int32) :: v(SWN)
+                v = 10_int32 * int(SWRANK, int32)
+                if (ik == 1) then
+                    call pf_partial_argsort(v, p32, 3)
+                else
+                    call pf_partial_argsort(v, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"int32 pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                integer(int64) :: v(SWN)
+                v = 100_int64 * int(SWRANK, int64)
+                if (ik == 1) then
+                    call pf_partial_argsort(v, p32, 3)
+                else
+                    call pf_partial_argsort(v, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"int64 pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                real(real32) :: v(SWN)
+                v = real(SWRANK, real32) + 0.5_real32
+                if (ik == 1) then
+                    call pf_partial_argsort(v, p32, 3)
+                else
+                    call pf_partial_argsort(v, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"real32 pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                real(real64) :: v(SWN)
+                v = real(SWRANK, real64) + 0.25_real64
+                if (ik == 1) then
+                    call pf_partial_argsort(v, p32, 3)
+                else
+                    call pf_partial_argsort(v, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"real64 pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                ! logical has only two values, so its expectation is the three .false. elements in
+                ! their original order -- which is a stability assertion as much as an order one.
+                if (ik == 1) then
+                    call pf_partial_argsort(SWBOOL, p32, 3)
+                else
+                    call pf_partial_argsort(SWBOOL, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, [2, 5, 6]), &
+                    trim(ctx)//"logical pf_partial_argsort must name the .false. elements in order")
+            end block
+            if (allocated(error)) return
+            block
+                character(len=2) :: v(SWN)
+                do k = 1, SWN
+                    v(k) = swchr(SWRANK(k))
+                end do
+                if (ik == 1) then
+                    call pf_partial_argsort(v, p32, 3)
+                else
+                    call pf_partial_argsort(v, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"character pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_date) :: v(SWN)
+                call v%set_raw(1000_int32 + int(SWRANK, int32))
+                if (ik == 1) then
+                    call pf_partial_argsort(v, p32, 3)
+                else
+                    call pf_partial_argsort(v, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"parquet_date pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_time) :: v(SWN)
+                call v%set_raw(2000_int64 + int(SWRANK, int64))
+                if (ik == 1) then
+                    call pf_partial_argsort(v, p32, 3)
+                else
+                    call pf_partial_argsort(v, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"parquet_time pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_timestamp) :: v(SWN)
+                call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+                if (ik == 1) then
+                    call pf_partial_argsort(v, p32, 3)
+                else
+                    call pf_partial_argsort(v, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), &
+                    trim(ctx)//"parquet_timestamp pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_string_column) :: sc
+                do k = 1, SWN
+                    call sc%append_string(swchr(SWRANK(k)))
+                end do
+                if (ik == 1) then
+                    call pf_partial_argsort(sc, p32, 3)
+                else
+                    call pf_partial_argsort(sc, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), &
+                    trim(ctx)//"parquet_string_column pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_column) :: c
+                call c%init(PK_INT32, int(SWN, int64))
+                call c%set_all(10_int32 * int(SWRANK, int32))
+                if (ik == 1) then
+                    call pf_partial_argsort(c, p32, 3)
+                else
+                    call pf_partial_argsort(c, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"parquet_column pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+            block
+                type(pf_sort_keys) :: keys
+                integer(int32) :: v(SWN)
+                v = 10_int32 * int(SWRANK, int32)
+                call keys%add(v)
+                if (ik == 1) then
+                    call pf_partial_argsort(keys, p32, 3)
+                else
+                    call pf_partial_argsort(keys, p64, 3)
+                end if
+                call check(error, sweep_perm_ok(p32, p64, ik, TOP3), trim(ctx)//"pf_sort_keys pf_partial_argsort")
+            end block
+            if (allocated(error)) return
+        end do
+    end subroutine test_partial_argsort_every_specific
+    !
+    !> **Every `pf_nth_element` specific, once each** -- ten value families times two rank kinds
+    !> times {no index, int32 index, int64 index}, which is sixty separate generated bodies. Rank 2
+    !> is asked for throughout, because it is in the interior of the fixture: a body that reported
+    !> the minimum, the maximum, or the element already sitting at position 2 would each give a
+    !> different wrong answer, and all three are excluded by the same assertion.
+    subroutine test_nth_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> The element holding rank 2, which every call below must name.
+        integer, parameter :: WANT = SWASC(2)
+        integer(int32) :: i32
+        integer(int64) :: i64
+        integer :: rk, k
+        character(len=16) :: ctx
+
+        do rk = 1, 2                    ! the rank argument's own kind: int32, then int64
+            write(ctx, "(A,I0,A)") "[rank i", 32*rk, "] "
+            block
+                integer(int32) :: v(SWN), pv
+                logical :: ok
+                v = 10_int32 * int(SWRANK, int32)
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(v, 2_int32, pv)
+                    if (pv /= 20_int32) ok = .false.
+                    call pf_nth_element(v, 2_int32, pv, i32)
+                    call pf_nth_element(v, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(v, 2_int64, pv)
+                    if (pv /= 20_int32) ok = .false.
+                    call pf_nth_element(v, 2_int64, pv, i32)
+                    call pf_nth_element(v, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. pv == 20_int32 .and. i32 == WANT .and. i64 == int(WANT, int64), &
+                    trim(ctx)//"int32 pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+            block
+                integer(int64) :: v(SWN), pv
+                logical :: ok
+                v = 100_int64 * int(SWRANK, int64)
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(v, 2_int32, pv)
+                    if (pv /= 200_int64) ok = .false.
+                    call pf_nth_element(v, 2_int32, pv, i32)
+                    call pf_nth_element(v, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(v, 2_int64, pv)
+                    if (pv /= 200_int64) ok = .false.
+                    call pf_nth_element(v, 2_int64, pv, i32)
+                    call pf_nth_element(v, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. pv == 200_int64 .and. i32 == WANT .and. i64 == int(WANT, int64), &
+                    trim(ctx)//"int64 pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+            block
+                real(real32) :: v(SWN), pv
+                logical :: ok
+                v = real(SWRANK, real32) + 0.5_real32
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(v, 2_int32, pv)
+                    if (pv /= 2.5_real32) ok = .false.
+                    call pf_nth_element(v, 2_int32, pv, i32)
+                    call pf_nth_element(v, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(v, 2_int64, pv)
+                    if (pv /= 2.5_real32) ok = .false.
+                    call pf_nth_element(v, 2_int64, pv, i32)
+                    call pf_nth_element(v, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. pv == 2.5_real32 .and. i32 == WANT .and. i64 == int(WANT, int64), &
+                    trim(ctx)//"real32 pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+            block
+                real(real64) :: v(SWN), pv
+                logical :: ok
+                v = real(SWRANK, real64) + 0.25_real64
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(v, 2_int32, pv)
+                    if (pv /= 2.25_real64) ok = .false.
+                    call pf_nth_element(v, 2_int32, pv, i32)
+                    call pf_nth_element(v, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(v, 2_int64, pv)
+                    if (pv /= 2.25_real64) ok = .false.
+                    call pf_nth_element(v, 2_int64, pv, i32)
+                    call pf_nth_element(v, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. pv == 2.25_real64 .and. i32 == WANT .and. i64 == int(WANT, int64), &
+                    trim(ctx)//"real64 pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+            block
+                ! Rank 2 of the logical fixture is the SECOND .false., i.e. element 5 -- an answer
+                ! only a stable ordering gives, so this is the type's stability check too.
+                logical :: pv, ok
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(SWBOOL, 2_int32, pv)
+                    if (pv) ok = .false.
+                    call pf_nth_element(SWBOOL, 2_int32, pv, i32)
+                    call pf_nth_element(SWBOOL, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(SWBOOL, 2_int64, pv)
+                    if (pv) ok = .false.
+                    call pf_nth_element(SWBOOL, 2_int64, pv, i32)
+                    call pf_nth_element(SWBOOL, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. .not. pv .and. i32 == 5 .and. i64 == 5_int64, &
+                    trim(ctx)//"logical pf_nth_element must report the second .false. element")
+            end block
+            if (allocated(error)) return
+            block
+                character(len=2) :: v(SWN)
+                character(len=:), allocatable :: pv
+                logical :: ok
+                do k = 1, SWN
+                    v(k) = swchr(SWRANK(k))
+                end do
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(v, 2_int32, pv)
+                    if (pv /= swchr(2)) ok = .false.
+                    call pf_nth_element(v, 2_int32, pv, i32)
+                    call pf_nth_element(v, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(v, 2_int64, pv)
+                    if (pv /= swchr(2)) ok = .false.
+                    call pf_nth_element(v, 2_int64, pv, i32)
+                    call pf_nth_element(v, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. pv == swchr(2) .and. i32 == WANT .and. i64 == int(WANT, int64), &
+                    trim(ctx)//"character pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_date) :: v(SWN), pv
+                logical :: ok
+                call v%set_raw(1000_int32 + int(SWRANK, int32))
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(v, 2_int32, pv)
+                    if (pv%raw() /= 1002_int32) ok = .false.
+                    call pf_nth_element(v, 2_int32, pv, i32)
+                    call pf_nth_element(v, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(v, 2_int64, pv)
+                    if (pv%raw() /= 1002_int32) ok = .false.
+                    call pf_nth_element(v, 2_int64, pv, i32)
+                    call pf_nth_element(v, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. pv%raw() == 1002_int32 .and. i32 == WANT .and. &
+                    i64 == int(WANT, int64), &
+                    trim(ctx)//"parquet_date pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_time) :: v(SWN), pv
+                logical :: ok
+                call v%set_raw(2000_int64 + int(SWRANK, int64))
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(v, 2_int32, pv)
+                    if (pv%raw() /= 2002_int64) ok = .false.
+                    call pf_nth_element(v, 2_int32, pv, i32)
+                    call pf_nth_element(v, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(v, 2_int64, pv)
+                    if (pv%raw() /= 2002_int64) ok = .false.
+                    call pf_nth_element(v, 2_int64, pv, i32)
+                    call pf_nth_element(v, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. pv%raw() == 2002_int64 .and. i32 == WANT .and. &
+                    i64 == int(WANT, int64), &
+                    trim(ctx)//"parquet_time pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_timestamp) :: v(SWN), pv
+                integer(int64) :: gs
+                integer(int32) :: gn
+                logical :: ok
+                call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(v, 2_int32, pv)
+                    call pv%get_raw(gs, gn)
+                    if (gs /= 3002_int64 .or. gn /= 7_int32) ok = .false.
+                    call pf_nth_element(v, 2_int32, pv, i32)
+                    call pf_nth_element(v, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(v, 2_int64, pv)
+                    call pv%get_raw(gs, gn)
+                    if (gs /= 3002_int64 .or. gn /= 7_int32) ok = .false.
+                    call pf_nth_element(v, 2_int64, pv, i32)
+                    call pf_nth_element(v, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. i32 == WANT .and. i64 == int(WANT, int64), &
+                    trim(ctx)//"parquet_timestamp pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+            block
+                type(parquet_string_column) :: sc
+                character(len=:), allocatable :: pv
+                logical :: ok
+                do k = 1, SWN
+                    call sc%append_string(swchr(SWRANK(k)))
+                end do
+                ok = .true.
+                if (rk == 1) then
+                    call pf_nth_element(sc, 2_int32, pv)
+                    if (pv /= swchr(2)) ok = .false.
+                    call pf_nth_element(sc, 2_int32, pv, i32)
+                    call pf_nth_element(sc, 2_int32, pv, i64)
+                else
+                    call pf_nth_element(sc, 2_int64, pv)
+                    if (pv /= swchr(2)) ok = .false.
+                    call pf_nth_element(sc, 2_int64, pv, i32)
+                    call pf_nth_element(sc, 2_int64, pv, i64)
+                end if
+                call check(error, ok .and. pv == swchr(2) .and. i32 == WANT .and. i64 == int(WANT, int64), &
+                    trim(ctx)//"parquet_string_column pf_nth_element must report rank 2's value and element")
+            end block
+            if (allocated(error)) return
+        end do
+    end subroutine test_nth_every_specific
+    !
+    !> **Every `pf_nth_quantile` specific, once each** -- ten value families times {no index, int32
+    !> index, int64 index}. Quantile 1.0 is asked for because its answer is exact under every
+    !> rounding token, so the sweep tests the per-type wiring and nothing else; the rounding rules
+    !> themselves are `test_quantile_rounding`'s job.
+    !>
+    !> `n_null` is requested on the value-only call of each family, since it is an optional
+    !> out-argument whose assignment is a separate line in every one of these bodies.
+    subroutine test_quantile_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> The element holding rank 6, which quantile 1.0 must name for every non-logical family.
+        integer, parameter :: WANT = SWASC(SWN)
+        integer(int32) :: i32
+        integer(int64) :: i64, nn
+        integer :: k
+
+        block
+            integer(int32) :: v(SWN), pv
+            v = 10_int32 * int(SWRANK, int32)
+            call pf_nth_quantile(v, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(v, 1.0_real64, pv, i32)
+            call pf_nth_quantile(v, 1.0_real64, pv, i64)
+            call check(error, pv == 60_int32 .and. i32 == WANT .and. i64 == int(WANT, int64) .and. &
+                nn == 0_int64, "int32 pf_nth_quantile at 1.0 must be the maximum, with no nulls")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN), pv
+            v = 100_int64 * int(SWRANK, int64)
+            call pf_nth_quantile(v, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(v, 1.0_real64, pv, i32)
+            call pf_nth_quantile(v, 1.0_real64, pv, i64)
+            call check(error, pv == 600_int64 .and. i32 == WANT .and. i64 == int(WANT, int64) .and. &
+                nn == 0_int64, "int64 pf_nth_quantile at 1.0 must be the maximum, with no nulls")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN), pv
+            v = real(SWRANK, real32) + 0.5_real32
+            call pf_nth_quantile(v, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(v, 1.0_real64, pv, i32)
+            call pf_nth_quantile(v, 1.0_real64, pv, i64)
+            call check(error, pv == 6.5_real32 .and. i32 == WANT .and. i64 == int(WANT, int64) .and. &
+                nn == 0_int64, "real32 pf_nth_quantile at 1.0 must be the maximum, with no nulls")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN), pv
+            logical :: mask(SWN)
+            v = real(SWRANK, real64) + 0.25_real64
+            mask = .true.
+            mask(SWASC(SWN)) = .false.      ! the largest value is a null, so the answer steps down
+            call pf_nth_quantile(v, 1.0_real64, pv, is_valid=mask, n_null=nn)
+            call check(error, pv == 5.25_real64 .and. nn == 1_int64, &
+                "real64 pf_nth_quantile must exclude a null from the population and count it")
+            if (allocated(error)) return
+            call pf_nth_quantile(v, 1.0_real64, pv, i32)
+            call pf_nth_quantile(v, 1.0_real64, pv, i64)
+            call check(error, pv == 6.25_real64 .and. i32 == WANT .and. i64 == int(WANT, int64), &
+                "real64 pf_nth_quantile at 1.0 must be the maximum")
+        end block
+        if (allocated(error)) return
+        block
+            logical :: pv
+            call pf_nth_quantile(SWBOOL, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(SWBOOL, 1.0_real64, pv, i32)
+            call pf_nth_quantile(SWBOOL, 1.0_real64, pv, i64)
+            call check(error, pv .and. i32 == 4 .and. i64 == 4_int64 .and. nn == 0_int64, &
+                "logical pf_nth_quantile at 1.0 must be the LAST .true. element, which is 4")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            character(len=:), allocatable :: pv
+            do k = 1, SWN
+                v(k) = swchr(SWRANK(k))
+            end do
+            call pf_nth_quantile(v, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(v, 1.0_real64, pv, i32)
+            call pf_nth_quantile(v, 1.0_real64, pv, i64)
+            call check(error, pv == swchr(6) .and. i32 == WANT .and. i64 == int(WANT, int64) .and. &
+                nn == 0_int64, "character pf_nth_quantile at 1.0 must be the maximum, with no nulls")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN), pv
+            call v%set_raw(1000_int32 + int(SWRANK, int32))
+            call pf_nth_quantile(v, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(v, 1.0_real64, pv, i32)
+            call pf_nth_quantile(v, 1.0_real64, pv, i64)
+            call check(error, pv%raw() == 1006_int32 .and. i32 == WANT .and. i64 == int(WANT, int64) .and. &
+                nn == 0_int64, "parquet_date pf_nth_quantile at 1.0 must be the latest date")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN), pv
+            call v%set_raw(2000_int64 + int(SWRANK, int64))
+            call pf_nth_quantile(v, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(v, 1.0_real64, pv, i32)
+            call pf_nth_quantile(v, 1.0_real64, pv, i64)
+            call check(error, pv%raw() == 2006_int64 .and. i32 == WANT .and. i64 == int(WANT, int64) .and. &
+                nn == 0_int64, "parquet_time pf_nth_quantile at 1.0 must be the latest time")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN), pv
+            integer(int64) :: gs
+            integer(int32) :: gn
+            call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+            call pf_nth_quantile(v, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(v, 1.0_real64, pv, i32)
+            call pf_nth_quantile(v, 1.0_real64, pv, i64)
+            call pv%get_raw(gs, gn)
+            call check(error, gs == 3006_int64 .and. gn == 7_int32 .and. i32 == WANT .and. &
+                i64 == int(WANT, int64) .and. nn == 0_int64, &
+                "parquet_timestamp pf_nth_quantile at 1.0 must be the latest timestamp")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            character(len=:), allocatable :: pv
+            do k = 1, SWN
+                call sc%append_string(swchr(SWRANK(k)))
+            end do
+            call pf_nth_quantile(sc, 1.0_real64, pv, n_null=nn)
+            call pf_nth_quantile(sc, 1.0_real64, pv, i32)
+            call pf_nth_quantile(sc, 1.0_real64, pv, i64)
+            call check(error, pv == swchr(6) .and. i32 == WANT .and. i64 == int(WANT, int64) .and. &
+                nn == 0_int64, "parquet_string_column pf_nth_quantile at 1.0 must be the maximum")
+        end block
+    end subroutine test_quantile_every_specific
+    !
+    !> Whichever index kind a sweep just asked for, compared against the expected element list.
+    !> Both permutation variables are passed every time because only one of them is defined on any
+    !> given pass, and `ik` says which -- reading the other would be reading an unset allocatable.
+    pure function sweep_perm_ok(p32, p64, ik, want) result(ok)
+        integer(int32), allocatable, intent(in) :: p32(:) !! the int32 result, defined when ik == 1.
+        integer(int64), allocatable, intent(in) :: p64(:) !! the int64 result, defined when ik == 2.
+        integer, intent(in) :: ik      !! 1 for the int32 form, 2 for the int64 form.
+        integer, intent(in) :: want(:) !! the element indices expected, in order.
+        logical :: ok                  !! .true. when the requested form matches `want` exactly.
+        if (ik == 1) then
+            ok = allocated(p32)
+            if (ok) ok = size(p32) == size(want)
+            if (ok) ok = all(p32 == int(want, int32))
+        else
+            ok = allocated(p64)
+            if (ok) ok = size(p64) == size(want)
+            if (ok) ok = all(p64 == int(want, int64))
+        end if
+    end function sweep_perm_ok
     !
     ! ==================================================================================
     ! M3: searching a sorted array
@@ -1483,6 +2544,198 @@ contains
         call pf_upper_bound(one, 9_int32, pos)
         call check(error, pos == 2, "a target above the single element must insert after it")
     end subroutine test_search_degenerate
+    !
+    !> **Every `pf_lower_bound`, `pf_upper_bound` and `pf_equal_range` specific, once each** -- ten
+    !> value families times three operations times the two index kinds, which is sixty separate
+    !> generated bodies. `parquet_column` is absent because a search needs a target of the
+    !> element's own type, which a type-erased column cannot supply.
+    !>
+    !> All four expected numbers differ (2, 4, 2 and 3), so a body wired to the wrong operation,
+    !> or one that reported `last` where `first` belongs, fails rather than coinciding.
+    subroutine test_search_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> Class 2's lower bound, upper bound, and the two ends of its equal range.
+        integer, parameter :: WANT(4) = [2, 4, 2, 3]
+        !> The same four for the logical fixture, searching for `.true.`.
+        integer, parameter :: WANTB(4) = [4, 7, 4, 6]
+        integer(int32) :: lo32, up32, fi32, la32
+        integer(int64) :: lo64, up64, fi64, la64
+        integer :: k
+
+        block
+            integer(int32) :: v(SWN), t
+            v = 10_int32 * int(SWSRT, int32)
+            t = 20_int32
+            call pf_lower_bound(v, t, lo32)
+            call pf_lower_bound(v, t, lo64)
+            call pf_upper_bound(v, t, up32)
+            call pf_upper_bound(v, t, up64)
+            call pf_equal_range(v, t, fi32, la32)
+            call pf_equal_range(v, t, fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "int32 searches must bracket the duplicated class in both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN), t
+            v = 100_int64 * int(SWSRT, int64)
+            t = 200_int64
+            call pf_lower_bound(v, t, lo32)
+            call pf_lower_bound(v, t, lo64)
+            call pf_upper_bound(v, t, up32)
+            call pf_upper_bound(v, t, up64)
+            call pf_equal_range(v, t, fi32, la32)
+            call pf_equal_range(v, t, fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "int64 searches must bracket the duplicated class in both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN), t
+            v = real(SWSRT, real32) + 0.5_real32
+            t = 2.5_real32
+            call pf_lower_bound(v, t, lo32)
+            call pf_lower_bound(v, t, lo64)
+            call pf_upper_bound(v, t, up32)
+            call pf_upper_bound(v, t, up64)
+            call pf_equal_range(v, t, fi32, la32)
+            call pf_equal_range(v, t, fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "real32 searches must bracket the duplicated class in both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN), t
+            logical :: mask(SWN)
+            v = real(SWSRT, real64) + 0.25_real64
+            t = 2.25_real64
+            call pf_lower_bound(v, t, lo32)
+            call pf_lower_bound(v, t, lo64)
+            call pf_upper_bound(v, t, up32)
+            call pf_upper_bound(v, t, up64)
+            call pf_equal_range(v, t, fi32, la32)
+            call pf_equal_range(v, t, fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "real64 searches must bracket the duplicated class in both index kinds")
+            if (allocated(error)) return
+            ! A null sorts last, so it is outside the searched region entirely: marking the final
+            ! element null must not move any of the four answers.
+            mask = .true.
+            mask(SWN) = .false.
+            call pf_equal_range(v, t, fi32, la32, is_valid=mask, assume_sorted=.true.)
+            call check(error, fi32 == 2_int32 .and. la32 == 3_int32, &
+                "a trailing null must leave a range that ends before it untouched")
+        end block
+        if (allocated(error)) return
+        block
+            call pf_lower_bound(SWSRTB, .true., lo32)
+            call pf_lower_bound(SWSRTB, .true., lo64)
+            call pf_upper_bound(SWSRTB, .true., up32)
+            call pf_upper_bound(SWSRTB, .true., up64)
+            call pf_equal_range(SWSRTB, .true., fi32, la32)
+            call pf_equal_range(SWSRTB, .true., fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANTB), &
+                "logical searches must bracket the .true. run in both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            do k = 1, SWN
+                v(k) = swchr(SWSRT(k))
+            end do
+            call pf_lower_bound(v, swchr(2), lo32)
+            call pf_lower_bound(v, swchr(2), lo64)
+            call pf_upper_bound(v, swchr(2), up32)
+            call pf_upper_bound(v, swchr(2), up64)
+            call pf_equal_range(v, swchr(2), fi32, la32)
+            call pf_equal_range(v, swchr(2), fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "character searches must bracket the duplicated class in both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN), t
+            call v%set_raw(1000_int32 + int(SWSRT, int32))
+            call t%set_raw(1002_int32)
+            call pf_lower_bound(v, t, lo32)
+            call pf_lower_bound(v, t, lo64)
+            call pf_upper_bound(v, t, up32)
+            call pf_upper_bound(v, t, up64)
+            call pf_equal_range(v, t, fi32, la32)
+            call pf_equal_range(v, t, fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "parquet_date searches must bracket the duplicated class in both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN), t
+            call v%set_raw(2000_int64 + int(SWSRT, int64))
+            call t%set_raw(2002_int64)
+            call pf_lower_bound(v, t, lo32)
+            call pf_lower_bound(v, t, lo64)
+            call pf_upper_bound(v, t, up32)
+            call pf_upper_bound(v, t, up64)
+            call pf_equal_range(v, t, fi32, la32)
+            call pf_equal_range(v, t, fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "parquet_time searches must bracket the duplicated class in both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN), t
+            call v%set_raw(3000_int64 + int(SWSRT, int64), 7_int32)
+            call t%set_raw(3002_int64, 7_int32)
+            call pf_lower_bound(v, t, lo32)
+            call pf_lower_bound(v, t, lo64)
+            call pf_upper_bound(v, t, up32)
+            call pf_upper_bound(v, t, up64)
+            call pf_equal_range(v, t, fi32, la32)
+            call pf_equal_range(v, t, fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "parquet_timestamp searches must bracket the duplicated class in both index kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            do k = 1, SWN
+                call sc%append_string(swchr(SWSRT(k)))
+            end do
+            call pf_lower_bound(sc, swchr(2), lo32)
+            call pf_lower_bound(sc, swchr(2), lo64)
+            call pf_upper_bound(sc, swchr(2), up32)
+            call pf_upper_bound(sc, swchr(2), up64)
+            call pf_equal_range(sc, swchr(2), fi32, la32)
+            call pf_equal_range(sc, swchr(2), fi64, la64)
+            call check(error, sweep_search_ok([lo32, up32, fi32, la32], [lo64, up64, fi64, la64], WANT), &
+                "parquet_string_column searches must bracket the duplicated class in both index kinds")
+            if (allocated(error)) return
+            block
+                ! A descending search needs descending input -- the same fixture reversed, where
+                ! class 2's run sits at 4..5 rather than at 2..3.
+                type(parquet_string_column) :: rev
+                do k = SWN, 1, -1
+                    call rev%append_string(swchr(SWSRT(k)))
+                end do
+                call pf_lower_bound(rev, swchr(2), lo32, descending=.true.)
+                call pf_upper_bound(rev, swchr(2), up32, descending=.true.)
+                call pf_equal_range(rev, swchr(2), fi32, la32, descending=.true.)
+                call check(error, lo32 == 4_int32 .and. up32 == 6_int32 .and. fi32 == 4_int32 .and. &
+                    la32 == 5_int32, &
+                    "a descending parquet_string_column search must bracket the reversed run")
+            end block
+        end block
+    end subroutine test_search_every_specific
+    !
+    !> The four search answers in both index kinds against one expected list. Taking all four
+    !> together is what makes a body wired to the wrong operation visible: each of the three
+    !> operations has a different expected number, so a mix-up cannot coincide.
+    pure function sweep_search_ok(g32, g64, want) result(ok)
+        integer(int32), intent(in) :: g32(4) !! lower, upper, first, last -- the int32 forms.
+        integer(int64), intent(in) :: g64(4) !! the same four, the int64 forms.
+        integer, intent(in) :: want(4)       !! the expected lower, upper, first and last.
+        logical :: ok                        !! .true. when all eight answers match.
+        ok = all(g32 == int(want, int32)) .and. all(g64 == int(want, int64))
+    end function sweep_search_ok
     !
     ! ==================================================================================
     ! M3: distinct values and ranks
@@ -1704,6 +2957,446 @@ contains
             "the largest competition rank must be one past the count below the top run")
     end subroutine test_rank_both_paths
     !
+    ! ----------------------------------------------------------------------------------
+    ! Distinct-value sweeps: one call per generated specific
+    ! ----------------------------------------------------------------------------------
+    !
+    !> **Every `pf_unique_count` and `pf_unique` specific, once each** -- eleven value families
+    !> times two count kinds for the counter, and ten families for the values (`parquet_column`
+    !> has no `pf_unique`, since a distinct VALUE needs a compile-time element type where a count
+    !> does not).
+    !>
+    !> `SWDUP` is the fixture rather than `SWRANK`, because a distinct-value question needs ties to
+    !> mean anything: six elements over three classes, each class appearing twice and neither
+    !> contiguously nor in class order, so a body that reported the first occurrence of each RUN
+    !> rather than of each VALUE would give four and not three.
+    subroutine test_unique_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> Element 1 is null. It belongs to class 3, whose OTHER element (3) is not -- so the
+        !> distinct count must not move, and only the null count may. A body that dropped the
+        !> whole class, or that stopped counting nulls at the first one, fails on one or the other.
+        logical, parameter :: NMASK(SWN) = [.false., .true., .true., .true., .true., .true.]
+        integer :: k
+        integer(int32) :: c32
+        integer(int64) :: c64, nn
+
+        block
+            integer(int32) :: v(SWN)
+            integer(int32), allocatable :: d(:)
+            v = 10_int32 * int(SWDUP, int32)
+            call pf_unique_count(v, c32, n_null=nn)
+            call pf_unique_count(v, c64)
+            call pf_unique(v, d, n_null=nn)
+            call check(error, c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 0_int64 .and. &
+                size(d) == 3 .and. all(d == [10_int32, 20_int32, 30_int32]), &
+                "int32 pf_unique must report the three distinct values, ascending, and count them")
+            if (allocated(error)) return
+            call pf_unique_count(v, c32, is_valid=NMASK, n_null=nn)
+            call check(error, c32 == 3_int32 .and. nn == 1_int64, &
+                "int32 pf_unique_count must count the null and keep its surviving class-mate")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN)
+            integer(int64), allocatable :: d(:)
+            v = 100_int64 * int(SWDUP, int64)
+            call pf_unique_count(v, c32, n_null=nn)
+            call pf_unique_count(v, c64)
+            call pf_unique(v, d, n_null=nn)
+            call check(error, c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 0_int64 .and. &
+                size(d) == 3 .and. all(d == [100_int64, 200_int64, 300_int64]), &
+                "int64 pf_unique must report the three distinct values, ascending, and count them")
+            if (allocated(error)) return
+            call pf_unique_count(v, c32, is_valid=NMASK, n_null=nn)
+            call check(error, c32 == 3_int32 .and. nn == 1_int64, &
+                "int64 pf_unique_count must count the null and keep its surviving class-mate")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN)
+            real(real32), allocatable :: d(:)
+            v = real(SWDUP, real32) + 0.5_real32
+            call pf_unique_count(v, c32, n_null=nn)
+            call pf_unique_count(v, c64)
+            call pf_unique(v, d, n_null=nn)
+            call check(error, c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 0_int64 .and. &
+                size(d) == 3 .and. all(d == [1.5_real32, 2.5_real32, 3.5_real32]), &
+                "real32 pf_unique must report the three distinct values, ascending, and count them")
+            if (allocated(error)) return
+            call pf_unique_count(v, c32, is_valid=NMASK, n_null=nn)
+            call check(error, c32 == 3_int32 .and. nn == 1_int64, &
+                "real32 pf_unique_count must count the null and keep its surviving class-mate")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN)
+            real(real64), allocatable :: d(:)
+            logical :: mask(SWN)
+            v = real(SWDUP, real64) + 0.25_real64
+            mask = .true.
+            mask(2) = .false.       ! one of the two elements of class 1: the CLASS must survive
+            mask(5) = .false.       ! now the whole of class 1 is null, so it must disappear
+            call pf_unique_count(v, c32, is_valid=mask, n_null=nn)
+            call pf_unique(v, d, is_valid=mask)
+            call check(error, c32 == 2_int32 .and. nn == 2_int64 .and. size(d) == 2 .and. &
+                all(d == [2.25_real64, 3.25_real64]), &
+                "real64 pf_unique must drop a wholly-null class and count both its nulls")
+            if (allocated(error)) return
+            call pf_unique_count(v, c64)
+            call pf_unique(v, d, descending=.true.)
+            call check(error, c64 == 3_int64 .and. size(d) == 3 .and. &
+                all(d == [3.25_real64, 2.25_real64, 1.25_real64]), &
+                "real64 pf_unique must reverse its distinct values under descending")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: d(:)
+            call pf_unique_count(SWBOOL, c32, n_null=nn)
+            call pf_unique_count(SWBOOL, c64)
+            call pf_unique(SWBOOL, d, n_null=nn)
+            call check(error, c32 == 2_int32 .and. c64 == 2_int64 .and. nn == 0_int64 .and. &
+                size(d) == 2 .and. (d(1) .eqv. .false.) .and. (d(2) .eqv. .true.), &
+                "logical pf_unique must report .false. then .true., and count two distinct values")
+            if (allocated(error)) return
+            call pf_unique_count(SWBOOL, c32, is_valid=NMASK, n_null=nn)
+            call check(error, c32 == 2_int32 .and. nn == 1_int64, &
+                "logical pf_unique_count must count the null and keep both values")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            character(len=2), allocatable :: d(:)
+            do k = 1, SWN
+                v(k) = swchr(SWDUP(k))
+            end do
+            call pf_unique_count(v, c32, n_null=nn)
+            call pf_unique_count(v, c64)
+            call pf_unique(v, d, n_null=nn)
+            call check(error, c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 0_int64 .and. &
+                size(d) == 3 .and. all(d == [swchr(1), swchr(2), swchr(3)]), &
+                "character pf_unique must report the three distinct values, ascending, and count them")
+            if (allocated(error)) return
+            call pf_unique_count(v, c32, is_valid=NMASK, n_null=nn)
+            call check(error, c32 == 3_int32 .and. nn == 1_int64, &
+                "character pf_unique_count must count the null and keep its surviving class-mate")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN)
+            type(parquet_date), allocatable :: d(:)
+            call v%set_raw(1000_int32 + int(SWDUP, int32))
+            call pf_unique_count(v, c32, n_null=nn)
+            call pf_unique_count(v, c64)
+            call pf_unique(v, d, n_null=nn)
+            call check(error, c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 0_int64 .and. &
+                size(d) == 3 .and. all([(d(k)%raw(), k = 1, 3)] == [1001, 1002, 1003]), &
+                "parquet_date pf_unique must report the three distinct dates, ascending")
+            if (allocated(error)) return
+            call v(1)%set_null()        ! a temporal element carries its own null, so there is no mask
+            call pf_unique_count(v, c32, n_null=nn)
+            call check(error, c32 == 3_int32 .and. nn == 1_int64, &
+                "parquet_date pf_unique_count must count an element that marked itself null")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN)
+            type(parquet_time), allocatable :: d(:)
+            call v%set_raw(2000_int64 + int(SWDUP, int64))
+            call pf_unique_count(v, c32, n_null=nn)
+            call pf_unique_count(v, c64)
+            call pf_unique(v, d, n_null=nn)
+            call check(error, c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 0_int64 .and. &
+                size(d) == 3 .and. &
+                all([(d(k)%raw(), k = 1, 3)] == [2001_int64, 2002_int64, 2003_int64]), &
+                "parquet_time pf_unique must report the three distinct times, ascending")
+            if (allocated(error)) return
+            call v(1)%set_null()
+            call pf_unique_count(v, c32, n_null=nn)
+            call check(error, c32 == 3_int32 .and. nn == 1_int64, &
+                "parquet_time pf_unique_count must count an element that marked itself null")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN)
+            type(parquet_timestamp), allocatable :: d(:)
+            integer(int64) :: gs(3)
+            integer(int32) :: gn(3)
+            call v%set_raw(3000_int64 + int(SWDUP, int64), 7_int32)
+            call pf_unique_count(v, c32, n_null=nn)
+            call pf_unique_count(v, c64)
+            call pf_unique(v, d, n_null=nn)
+            do k = 1, min(3, size(d))
+                call d(k)%get_raw(gs(k), gn(k))
+            end do
+            call check(error, c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 0_int64 .and. &
+                size(d) == 3 .and. all(gs == [3001_int64, 3002_int64, 3003_int64]) .and. &
+                all(gn == 7_int32), &
+                "parquet_timestamp pf_unique must report the three distinct timestamps, ascending")
+            if (allocated(error)) return
+            call v(1)%set_null()
+            call pf_unique_count(v, c32, n_null=nn)
+            call check(error, c32 == 3_int32 .and. nn == 1_int64, &
+                "parquet_timestamp pf_unique_count must count an element that marked itself null")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc, d
+            character(len=:), allocatable :: got
+            logical :: ok
+            do k = 1, SWN
+                call sc%append_string(swchr(SWDUP(k)))
+            end do
+            call pf_unique_count(sc, c32, n_null=nn)
+            call pf_unique_count(sc, c64)
+            call pf_unique(sc, d, n_null=nn)
+            ok = c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 0_int64
+            if (ok) ok = d%size() == 3_int64
+            if (ok) then
+                do k = 1, 3
+                    call d%get(int(k, int64), got)
+                    if (got /= swchr(k)) ok = .false.
+                end do
+            end if
+            call check(error, ok, &
+                "parquet_string_column pf_unique must report the three distinct values, ascending")
+            if (allocated(error)) return
+            block
+                type(parquet_string_column) :: withnull
+                call withnull%append_null()     ! the store owns its validity, so there is no mask
+                do k = 2, SWN
+                    call withnull%append_string(swchr(SWDUP(k)))
+                end do
+                call pf_unique_count(withnull, c32, n_null=nn)
+                call check(error, c32 == 3_int32 .and. nn == 1_int64, &
+                    "parquet_string_column pf_unique_count must count its own null element")
+            end block
+        end block
+        if (allocated(error)) return
+        block
+            ! parquet_column counts distinct values but cannot return them: an out-argument would
+            ! need an element type the type-erased column only knows at runtime.
+            type(parquet_column) :: c
+            call c%init(PK_INT32, int(SWN, int64))
+            call c%set_all(10_int32 * int(SWDUP, int32))
+            call c%set_null(2_int64)
+            call pf_unique_count(c, c32, n_null=nn)
+            call pf_unique_count(c, c64)
+            call check(error, c32 == 3_int32 .and. c64 == 3_int64 .and. nn == 1_int64, &
+                "parquet_column pf_unique_count must count by runtime kind and report its null")
+        end block
+    end subroutine test_unique_every_specific
+    !
+    !> **Every `pf_rank` specific, once each** -- eleven value families times the two rank-array
+    !> kinds. Competition ranking over `SWDUP` is the assertion: each of the three classes appears
+    !> twice, so the ranks must be 1, 3 and 5 and never 1, 2 and 3 -- which is what separates the
+    !> default method from `dense` without either being compared against the other.
+    subroutine test_rank_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> Competition ranks of `SWDUP` ascending: class 1 ranks 1, class 2 ranks 3, class 3 ranks 5.
+        integer, parameter :: RCOMP(SWN) = [5, 1, 5, 3, 1, 3]
+        !> The same for `SWBOOL`: three .false. tie at 1, three .true. tie at 4.
+        integer, parameter :: RBOOL(SWN) = [4, 1, 4, 4, 1, 1]
+        !> DENSE ranks number the classes rather than the rows, so they are `SWDUP` itself -- the
+        !> one method whose answer is the fixture's own class labels.
+        integer, parameter :: RDENSE(SWN) = SWDUP
+        !> ORDINAL ranks break every tie on the original row order, so no two rows share a rank.
+        integer, parameter :: RORD(SWN) = [5, 1, 6, 3, 2, 4]
+        !> The same two for the logical fixture.
+        integer, parameter :: RBDENSE(SWN) = [2, 1, 2, 2, 1, 1]
+        integer, parameter :: RBORD(SWN) = [4, 1, 5, 6, 2, 3]
+        !> Competition ranks with the order reversed: class 3 leads at 1, class 1 trails at 5.
+        integer, parameter :: RDESC(SWN) = [1, 5, 1, 3, 5, 3]
+        integer(int32), allocatable :: r32(:)
+        integer(int64), allocatable :: r64(:)
+        integer :: k
+
+        block
+            integer(int32) :: v(SWN)
+            v = 10_int32 * int(SWDUP, int32)
+            call pf_rank(v, r32)
+            call pf_rank(v, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "int32 pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(v, r32, method="dense")
+            call pf_rank(v, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "int32 pf_rank must number classes under dense and every row under ordinal")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN)
+            v = 100_int64 * int(SWDUP, int64)
+            call pf_rank(v, r32)
+            call pf_rank(v, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "int64 pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(v, r32, method="dense")
+            call pf_rank(v, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "int64 pf_rank must number classes under dense and every row under ordinal")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN)
+            v = real(SWDUP, real32) + 0.5_real32
+            call pf_rank(v, r32)
+            call pf_rank(v, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "real32 pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(v, r32, method="dense")
+            call pf_rank(v, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "real32 pf_rank must number classes under dense and every row under ordinal")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN)
+            logical :: mask(SWN)
+            v = real(SWDUP, real64) + 0.25_real64
+            call pf_rank(v, r32)
+            call pf_rank(v, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "real64 pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(v, r32, method="dense")
+            call pf_rank(v, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "real64 pf_rank must number classes under dense and every row under ordinal")
+            if (allocated(error)) return
+            mask = .true.
+            mask(1) = .false.       ! a null ranks 0 and vacates rank 5 for its class-mate
+            call pf_rank(v, r32, is_valid=mask)
+            call check(error, r32(1) == 0_int32 .and. r32(3) == 5_int32, &
+                "real64 pf_rank must rank a null 0 without shifting the ranks below it")
+        end block
+        if (allocated(error)) return
+        block
+            call pf_rank(SWBOOL, r32)
+            call pf_rank(SWBOOL, r64)
+            call check(error, sweep_rank_ok(r32, r64, RBOOL), &
+                "logical pf_rank must tie the three .false. at 1 and the three .true. at 4")
+            if (allocated(error)) return
+            call pf_rank(SWBOOL, r32, method="dense")
+            call pf_rank(SWBOOL, r64, method="ordinal")
+            call check(error, all(r32 == int(RBDENSE, int32)) .and. all(r64 == int(RBORD, int64)), &
+                "logical pf_rank must number classes under dense and every row under ordinal")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            do k = 1, SWN
+                v(k) = swchr(SWDUP(k))
+            end do
+            call pf_rank(v, r32)
+            call pf_rank(v, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "character pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(v, r32, method="dense")
+            call pf_rank(v, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "character pf_rank must number classes under dense and every row under ordinal")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN)
+            call v%set_raw(1000_int32 + int(SWDUP, int32))
+            call pf_rank(v, r32)
+            call pf_rank(v, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "parquet_date pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(v, r32, method="dense")
+            call pf_rank(v, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "parquet_date pf_rank must number classes under dense and every row under ordinal")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN)
+            call v%set_raw(2000_int64 + int(SWDUP, int64))
+            call pf_rank(v, r32)
+            call pf_rank(v, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "parquet_time pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(v, r32, method="dense")
+            call pf_rank(v, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "parquet_time pf_rank must number classes under dense and every row under ordinal")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN)
+            call v%set_raw(3000_int64 + int(SWDUP, int64), 7_int32)
+            call pf_rank(v, r32)
+            call pf_rank(v, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "parquet_timestamp pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(v, r32, method="dense")
+            call pf_rank(v, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "parquet_timestamp pf_rank must number classes under dense and every row under ordinal")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            do k = 1, SWN
+                call sc%append_string(swchr(SWDUP(k)))
+            end do
+            call pf_rank(sc, r32)
+            call pf_rank(sc, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "parquet_string_column pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(sc, r32, method="dense")
+            call pf_rank(sc, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "parquet_string_column pf_rank must number classes under dense and every row under ordinal")
+            if (allocated(error)) return
+            call pf_rank(sc, r32, descending=.true.)
+            call pf_rank(sc, r64, descending=.true.)
+            call check(error, sweep_rank_ok(r32, r64, RDESC), &
+                "parquet_string_column pf_rank must rank from the top under descending")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            call c%init(PK_INT32, int(SWN, int64))
+            call c%set_all(10_int32 * int(SWDUP, int32))
+            call pf_rank(c, r32)
+            call pf_rank(c, r64)
+            call check(error, sweep_rank_ok(r32, r64, RCOMP), "parquet_column pf_rank must give competition ranks")
+            if (allocated(error)) return
+            call pf_rank(c, r32, method="dense")
+            call pf_rank(c, r64, method="ordinal")
+            call check(error, all(r32 == int(RDENSE, int32)) .and. all(r64 == int(RORD, int64)), &
+                "parquet_column pf_rank must number classes under dense and every row under ordinal")
+            if (allocated(error)) return
+            call pf_rank(c, r32, method="dense", descending=.true.)
+            call check(error, all(r32 == [1_int32, 3_int32, 1_int32, 2_int32, 3_int32, 2_int32]), &
+                "parquet_column pf_rank must take method and descending together")
+            if (allocated(error)) return
+            call pf_rank(c, r64, descending=.true.)
+            call check(error, all(r64 == int(RDESC, int64)), &
+                "an int64 parquet_column rank must take descending too")
+            if (allocated(error)) return
+            ! "competition" NAMED is a different path from "competition" by omission: the token
+            ! resolver returns early when the argument is absent, so its own arm for this token is
+            ! reached only when a caller spells it out.
+            call pf_rank(c, r32, method="competition")
+            call check(error, all(r32 == int(RCOMP, int32)), &
+                "naming the default rank method must give what omitting it gives")
+        end block
+    end subroutine test_rank_every_specific
+    !
+    !> Both rank arrays against one expected list -- the two kinds are separate specifics, so each
+    !> must be checked, and neither may be inferred from the other.
+    pure function sweep_rank_ok(r32, r64, want) result(ok)
+        integer(int32), allocatable, intent(in) :: r32(:) !! the int32 result.
+        integer(int64), allocatable, intent(in) :: r64(:) !! the int64 result.
+        integer, intent(in) :: want(:)                    !! the expected rank of each element.
+        logical :: ok                                     !! .true. when both match `want` exactly.
+        ok = allocated(r32) .and. allocated(r64)
+        if (ok) ok = size(r32) == size(want) .and. size(r64) == size(want)
+        if (ok) ok = all(r32 == int(want, int32)) .and. all(r64 == int(want, int64))
+    end function sweep_rank_ok
+    !
     ! ==================================================================================
     ! M3: extremes and merging
     ! ==================================================================================
@@ -1875,6 +3568,402 @@ contains
         call check(error, all(m == ["aaaaa", "abc  ", "mmmmm", "xyz  "]), &
             "a shorter element must order as if blank-padded to the merged width")
     end subroutine test_merge_string_widths
+    !
+    ! ----------------------------------------------------------------------------------
+    ! Extremes and merge sweeps: one call per generated specific
+    ! ----------------------------------------------------------------------------------
+    !
+    !> **Every `pf_minmax` specific, once each** -- the nine families that have one. `logical` and
+    !> `parquet_column` are absent by design and not by omission: a value out-argument needs a
+    !> compile-time element type, which the type-erased column has not got, and the extremes of a
+    !> `logical` array are not a question worth an API.
+    !>
+    !> The fixture puts neither extreme at an end, so a body that reported `values(1)` and
+    !> `values(SWN)` -- the single most likely way to get this wrong -- fails everywhere.
+    subroutine test_minmax_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: k
+
+        block
+            integer(int32) :: v(SWN), lo, hi
+            v = 10_int32 * int(SWRANK, int32)
+            call pf_minmax(v, lo, hi)
+            call check(error, lo == 10_int32 .and. hi == 60_int32, &
+                "int32 pf_minmax must report the interior extremes, not the end elements")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN), lo, hi
+            v = 100_int64 * int(SWRANK, int64)
+            call pf_minmax(v, lo, hi)
+            call check(error, lo == 100_int64 .and. hi == 600_int64, &
+                "int64 pf_minmax must report the interior extremes, not the end elements")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN), lo, hi
+            v = real(SWRANK, real32) + 0.5_real32
+            call pf_minmax(v, lo, hi)
+            call check(error, lo == 1.5_real32 .and. hi == 6.5_real32, &
+                "real32 pf_minmax must report the interior extremes, not the end elements")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN), lo, hi
+            logical :: mask(SWN)
+            v = real(SWRANK, real64) + 0.25_real64
+            call pf_minmax(v, lo, hi)
+            call check(error, lo == 1.25_real64 .and. hi == 6.25_real64, &
+                "real64 pf_minmax must report the interior extremes, not the end elements")
+            if (allocated(error)) return
+            mask = .true.
+            mask(SWASC(1)) = .false.    ! the smallest is a null, so the answer must step up
+            mask(SWASC(SWN)) = .false.  ! and the largest too, so it must step down
+            call pf_minmax(v, lo, hi, is_valid=mask)
+            call check(error, lo == 2.25_real64 .and. hi == 5.25_real64, &
+                "real64 pf_minmax must skip a null at either end rather than reporting its value")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            character(len=:), allocatable :: lo, hi
+            do k = 1, SWN
+                v(k) = swchr(SWRANK(k))
+            end do
+            call pf_minmax(v, lo, hi)
+            call check(error, lo == swchr(1) .and. hi == swchr(6), &
+                "character pf_minmax must report the lexicographic ends")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN), lo, hi
+            call v%set_raw(1000_int32 + int(SWRANK, int32))
+            call pf_minmax(v, lo, hi)
+            call check(error, lo%raw() == 1001_int32 .and. hi%raw() == 1006_int32, &
+                "parquet_date pf_minmax must report the earliest and latest dates")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN), lo, hi
+            call v%set_raw(2000_int64 + int(SWRANK, int64))
+            call pf_minmax(v, lo, hi)
+            call check(error, lo%raw() == 2001_int64 .and. hi%raw() == 2006_int64, &
+                "parquet_time pf_minmax must report the earliest and latest times")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN), lo, hi
+            integer(int64) :: gs1, gs2
+            integer(int32) :: gn1, gn2
+            call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+            call pf_minmax(v, lo, hi)
+            call lo%get_raw(gs1, gn1)
+            call hi%get_raw(gs2, gn2)
+            call check(error, gs1 == 3001_int64 .and. gs2 == 3006_int64 .and. gn1 == 7_int32 .and. &
+                gn2 == 7_int32, &
+                "parquet_timestamp pf_minmax must report the earliest and latest timestamps")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            character(len=:), allocatable :: lo, hi
+            do k = 1, SWN
+                call sc%append_string(swchr(SWRANK(k)))
+            end do
+            call pf_minmax(sc, lo, hi)
+            call check(error, lo == swchr(1) .and. hi == swchr(6), &
+                "parquet_string_column pf_minmax must report the lexicographic ends")
+        end block
+    end subroutine test_minmax_every_specific
+    !
+    !> **Every `pf_argminmax` specific, once each** -- ten families times the two index kinds.
+    !> `parquet_column` is here although `pf_minmax` excludes it, for the reason given on that
+    !> generic: an index needs no compile-time element type where a value does.
+    !>
+    !> The expected answer is `SWASC(1)` and `SWASC(SWN)` read off the fixture, so a body that
+    !> returned the extremes' VALUES where indices were asked for, or transposed the two, fails.
+    subroutine test_argminmax_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: a32, b32
+        integer(int64) :: a64, b64
+        integer :: k
+        logical :: ok
+
+        block
+            integer(int32) :: v(SWN)
+            v = 10_int32 * int(SWRANK, int32)
+            call pf_argminmax(v, a32, b32)
+            call pf_argminmax(v, a64, b64)
+            ok = sweep_argmm_ok(a32, b32, a64, b64)
+            call check(error, ok, "int32 pf_argminmax must name the extreme elements in both kinds")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v(SWN)
+            v = 100_int64 * int(SWRANK, int64)
+            call pf_argminmax(v, a32, b32)
+            call pf_argminmax(v, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "int64 pf_argminmax must name the extreme elements in both kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v(SWN)
+            v = real(SWRANK, real32) + 0.5_real32
+            call pf_argminmax(v, a32, b32)
+            call pf_argminmax(v, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "real32 pf_argminmax must name the extreme elements in both kinds")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v(SWN)
+            logical :: mask(SWN)
+            v = real(SWRANK, real64) + 0.25_real64
+            call pf_argminmax(v, a32, b32)
+            call pf_argminmax(v, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "real64 pf_argminmax must name the extreme elements in both kinds")
+            if (allocated(error)) return
+            mask = .true.
+            mask(SWASC(1)) = .false.
+            call pf_argminmax(v, a32, b32, is_valid=mask)
+            call check(error, a32 == int(SWASC(2), int32) .and. b32 == int(SWASC(SWN), int32), &
+                "real64 pf_argminmax must skip a null rather than naming the element holding it")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: v(SWN)
+            do k = 1, SWN
+                v(k) = swchr(SWRANK(k))
+            end do
+            call pf_argminmax(v, a32, b32)
+            call pf_argminmax(v, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "character pf_argminmax must name the extreme elements in both kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v(SWN)
+            call v%set_raw(1000_int32 + int(SWRANK, int32))
+            call pf_argminmax(v, a32, b32)
+            call pf_argminmax(v, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "parquet_date pf_argminmax must name the extreme elements in both kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v(SWN)
+            call v%set_raw(2000_int64 + int(SWRANK, int64))
+            call pf_argminmax(v, a32, b32)
+            call pf_argminmax(v, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "parquet_time pf_argminmax must name the extreme elements in both kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v(SWN)
+            call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+            call pf_argminmax(v, a32, b32)
+            call pf_argminmax(v, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "parquet_timestamp pf_argminmax must name the extreme elements in both kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: sc
+            do k = 1, SWN
+                call sc%append_string(swchr(SWRANK(k)))
+            end do
+            call pf_argminmax(sc, a32, b32)
+            call pf_argminmax(sc, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "parquet_string_column pf_argminmax must name the extreme elements in both kinds")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            call c%init(PK_INT32, int(SWN, int64))
+            call c%set_all(10_int32 * int(SWRANK, int32))
+            call pf_argminmax(c, a32, b32)
+            call pf_argminmax(c, a64, b64)
+            call check(error, sweep_argmm_ok(a32, b32, a64, b64), &
+                "parquet_column pf_argminmax must name the extreme elements in both kinds")
+        end block
+    end subroutine test_argminmax_every_specific
+    !
+    !> **Every `pf_merge` specific, once each** -- the nine families defined on plain arrays.
+    !> `parquet_string_column` and `parquet_column` are out because merging is defined on arrays.
+    !>
+    !> The two inputs strictly INTERLEAVE (odd ranks in `a`, even ranks in `b`), which is what
+    !> makes both arms of each body's gather loop run: a merge that took everything from one side
+    !> before looking at the other would still be sorted, and would still pass a test whose inputs
+    !> did not overlap. The six families taking masks are additionally called with both input masks
+    !> and `merged_valid` together, the only shape that reaches their validity-gathering loop.
+    subroutine test_merge_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        !> Each input's LAST element is its null. `pf_merge` merges, it does not sort, so an input
+        !> must already be in the order asked for -- including its null tier, which is why a null
+        !> cannot sit in the middle of one of these arrays.
+        logical, parameter :: MA(3) = [.true., .true., .false.]
+        !> `b`'s mask, the same shape, so each of the two null rows comes from a DIFFERENT input --
+        !> a body that read one input's mask for both would still produce this pattern from one.
+        logical, parameter :: MB(3) = [.true., .true., .false.]
+        !> With nulls last, the four valid ranks in order, then a's null, then b's.
+        logical, parameter :: MVEXP(SWN) = [.true., .true., .true., .true., .false., .false.]
+        integer :: k
+
+        block
+            integer(int32) :: a(3), b(3)
+            integer(int32), allocatable :: m(:)
+            logical, allocatable :: mv(:)
+            a = [10_int32, 30_int32, 50_int32]
+            b = [20_int32, 40_int32, 60_int32]
+            call pf_merge(a, b, m)
+            call check(error, all(m == [10_int32, 20_int32, 30_int32, 40_int32, 50_int32, 60_int32]), &
+                "int32 pf_merge must interleave two sorted inputs")
+            if (allocated(error)) return
+            ! The null rows carry ranks 1 and 6, i.e. values that would sort at the two ENDS were
+            ! they not null -- so the answer differs from the null-free merge above at every
+            ! position, and a body that ignored the masks cannot produce it.
+            call pf_merge([30_int32, 50_int32, 10_int32], [20_int32, 40_int32, 60_int32], m, &
+                is_valid_a=MA, is_valid_b=MB, merged_valid=mv)
+            call check(error, all(mv .eqv. MVEXP) .and. &
+                all(m == [20_int32, 30_int32, 40_int32, 50_int32, 10_int32, 60_int32]), &
+                "int32 pf_merge must take each null from the input that declared it")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: a(3), b(3)
+            integer(int64), allocatable :: m(:)
+            logical, allocatable :: mv(:)
+            a = [100_int64, 300_int64, 500_int64]
+            b = [200_int64, 400_int64, 600_int64]
+            call pf_merge(a, b, m)
+            call check(error, all(m == [100_int64, 200_int64, 300_int64, 400_int64, 500_int64, 600_int64]), &
+                "int64 pf_merge must interleave two sorted inputs")
+            if (allocated(error)) return
+            call pf_merge([300_int64, 500_int64, 100_int64], [200_int64, 400_int64, 600_int64], m, &
+                is_valid_a=MA, is_valid_b=MB, merged_valid=mv)
+            call check(error, all(mv .eqv. MVEXP) .and. &
+                all(m == [200_int64, 300_int64, 400_int64, 500_int64, 100_int64, 600_int64]), &
+                "int64 pf_merge must take each null from the input that declared it")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: a(3), b(3)
+            real(real32), allocatable :: m(:)
+            logical, allocatable :: mv(:)
+            a = [1.5_real32, 3.5_real32, 5.5_real32]
+            b = [2.5_real32, 4.5_real32, 6.5_real32]
+            call pf_merge(a, b, m)
+            call check(error, all(m == [1.5_real32, 2.5_real32, 3.5_real32, 4.5_real32, 5.5_real32, 6.5_real32]), &
+                "real32 pf_merge must interleave two sorted inputs")
+            if (allocated(error)) return
+            call pf_merge([3.5_real32, 5.5_real32, 1.5_real32], [2.5_real32, 4.5_real32, 6.5_real32], m, &
+                is_valid_a=MA, is_valid_b=MB, merged_valid=mv)
+            call check(error, all(mv .eqv. MVEXP) .and. &
+                all(m == [2.5_real32, 3.5_real32, 4.5_real32, 5.5_real32, 1.5_real32, 6.5_real32]), &
+                "real32 pf_merge must take each null from the input that declared it")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: a(3), b(3)
+            real(real64), allocatable :: m(:)
+            logical, allocatable :: mv(:)
+            a = [1.25_real64, 3.25_real64, 5.25_real64]
+            b = [2.25_real64, 4.25_real64, 6.25_real64]
+            ! descending needs inputs ALREADY in that order -- pf_merge merges, it does not sort.
+            call pf_merge(a(3:1:-1), b(3:1:-1), m, descending=.true.)
+            call check(error, all(m == [6.25_real64, 5.25_real64, 4.25_real64, 3.25_real64, 2.25_real64, &
+                1.25_real64]), "real64 pf_merge must reverse the merged order under descending")
+            if (allocated(error)) return
+            call pf_merge([3.25_real64, 5.25_real64, 1.25_real64], [2.25_real64, 4.25_real64, 6.25_real64], &
+                m, is_valid_a=MA, is_valid_b=MB, merged_valid=mv, assume_sorted=.true.)
+            call check(error, all(mv .eqv. MVEXP) .and. &
+                all(m == [2.25_real64, 3.25_real64, 4.25_real64, 5.25_real64, 1.25_real64, 6.25_real64]), &
+                "real64 pf_merge must give the same answer with the sortedness check skipped")
+        end block
+        if (allocated(error)) return
+        block
+            logical :: a(3), b(3)
+            logical, allocatable :: m(:), mv(:)
+            a = [.false., .false., .true.]
+            b = [.false., .true., .true.]
+            call pf_merge(a, b, m)
+            call check(error, .not. any(m(1:3)) .and. all(m(4:6)), &
+                "logical pf_merge must put all three .false. before all three .true.")
+            if (allocated(error)) return
+            call pf_merge([.false., .true., .false.], [.false., .true., .true.], m, &
+                is_valid_a=MA, is_valid_b=MB, merged_valid=mv)
+            call check(error, all(mv .eqv. MVEXP) .and. .not. any(m(1:2)) .and. all(m(3:4)), &
+                "logical pf_merge must take each null from the input that declared it")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: a(3), b(3)
+            character(len=:), allocatable :: m(:)
+            logical, allocatable :: mv(:)
+            a = [swchr(1), swchr(3), swchr(5)]
+            b = [swchr(2), swchr(4), swchr(6)]
+            call pf_merge(a, b, m)
+            call check(error, all(m == [(swchr(k), k = 1, SWN)]), &
+                "character pf_merge must interleave two sorted inputs")
+            if (allocated(error)) return
+            call pf_merge([swchr(3), swchr(5), swchr(1)], [swchr(2), swchr(4), swchr(6)], m, &
+                is_valid_a=MA, is_valid_b=MB, merged_valid=mv)
+            call check(error, all(mv .eqv. MVEXP) .and. &
+                all(m == [swchr(2), swchr(3), swchr(4), swchr(5), swchr(1), swchr(6)]), &
+                "character pf_merge must take each null from the input that declared it")
+        end block
+        if (allocated(error)) return
+        ! ---- the three temporal families, which carry their own nulls and so take no masks ----
+        block
+            type(parquet_date) :: a(3), b(3)
+            type(parquet_date), allocatable :: m(:)
+            call a%set_raw([1001_int32, 1003_int32, 1005_int32])
+            call b%set_raw([1002_int32, 1004_int32, 1006_int32])
+            call pf_merge(a, b, m)
+            call check(error, all([(m(k)%raw(), k = 1, SWN)] == [(1000 + k, k = 1, SWN)]), &
+                "parquet_date pf_merge must interleave two sorted inputs")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: a(3), b(3)
+            type(parquet_time), allocatable :: m(:)
+            call a%set_raw([2001_int64, 2003_int64, 2005_int64])
+            call b%set_raw([2002_int64, 2004_int64, 2006_int64])
+            call pf_merge(a, b, m)
+            call check(error, all([(m(k)%raw(), k = 1, SWN)] == [(2000_int64 + int(k, int64), k = 1, SWN)]), &
+                "parquet_time pf_merge must interleave two sorted inputs")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: a(3), b(3)
+            type(parquet_timestamp), allocatable :: m(:)
+            integer(int64) :: gs(SWN)
+            integer(int32) :: gn(SWN)
+            call a%set_raw([3001_int64, 3003_int64, 3005_int64], 7_int32)
+            call b%set_raw([3002_int64, 3004_int64, 3006_int64], 7_int32)
+            call pf_merge(a, b, m)
+            do k = 1, SWN
+                call m(k)%get_raw(gs(k), gn(k))
+            end do
+            call check(error, all(gs == [(3000_int64 + int(k, int64), k = 1, SWN)]) .and. all(gn == 7_int32), &
+                "parquet_timestamp pf_merge must interleave two sorted inputs")
+        end block
+    end subroutine test_merge_every_specific
+    !
+    !> The four argminmax out-arguments against the fixture's own extremes, in both index kinds.
+    pure function sweep_argmm_ok(a32, b32, a64, b64) result(ok)
+        integer(int32), intent(in) :: a32 !! the int32 argmin.
+        integer(int32), intent(in) :: b32 !! the int32 argmax.
+        integer(int64), intent(in) :: a64 !! the int64 argmin.
+        integer(int64), intent(in) :: b64 !! the int64 argmax.
+        logical :: ok                     !! .true. when all four name the fixture's extremes.
+        ok = a32 == int(SWASC(1), int32) .and. b32 == int(SWASC(SWN), int32) .and. &
+             a64 == int(SWASC(1), int64) .and. b64 == int(SWASC(SWN), int64)
+    end function sweep_argmm_ok
     !
     ! ==================================================================================
     ! M4: parallel sorting
@@ -2482,7 +4571,404 @@ contains
         if (allocated(error)) return
         call sc%get(2_int64, s)
         call check(error, s == "bb", "a trusted string permute must repeat the duplicated index")
+        if (allocated(error)) return
+        !
+        ! Both container types again through their INT32 permutation specifics, which are separate
+        ! bodies: the int64 calls above say nothing about whether those two forward assume_valid.
+        block
+            type(parquet_column) :: c32
+            type(parquet_string_column) :: sc32
+            integer(int32) :: dup32(3) = [2_int32, 2_int32, 3_int32]
+            call c32%init(PK_INT32, 3_int64)
+            call c32%set_all([10_int32, 20_int32, 30_int32])
+            call pf_permute(c32, dup32, assume_valid=.true.)
+            call c32%get_at(1_int64, got)
+            call check(error, got == 20_int32, &
+                "an int32 trusted permute must gather row 2 into row 1 without its own scan")
+            if (allocated(error)) return
+            call sc32%append_string("aa")
+            call sc32%append_string("bb")
+            call sc32%append_string("cc")
+            call pf_permute(sc32, dup32, assume_valid=.true.)
+            call sc32%get(2_int64, s)
+            call check(error, s == "bb", &
+                "an int32 trusted string permute must repeat the duplicated index")
+        end block
     end subroutine test_permute_column_assume_valid
+    !
+    !> **Every `pf_is_sorted` specific, once each** -- eleven value families plus `pf_sort_keys`.
+    !> Each is asked twice, about a sorted fixture and about a scrambled one, because a body that
+    !> answered a constant would pass a one-sided test: `.true.` always passes "is this sorted
+    !> input sorted?", and `.false.` always passes the converse.
+    subroutine test_is_sorted_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        logical :: yes, no
+        integer :: k
+
+        block
+            integer(int32) :: srt(SWN), scr(SWN)
+            srt = 10_int32 * int(SWSRT, int32)
+            scr = 10_int32 * int(SWRANK, int32)
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, "int32 pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: srt(SWN), scr(SWN)
+            srt = 100_int64 * int(SWSRT, int64)
+            scr = 100_int64 * int(SWRANK, int64)
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, "int64 pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: srt(SWN), scr(SWN)
+            srt = real(SWSRT, real32) + 0.5_real32
+            scr = real(SWRANK, real32) + 0.5_real32
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, "real32 pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: srt(SWN), scr(SWN)
+            logical :: mask(SWN)
+            srt = real(SWSRT, real64) + 0.25_real64
+            scr = real(SWRANK, real64) + 0.25_real64
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, "real64 pf_is_sorted must tell the two apart")
+            if (allocated(error)) return
+            ! A null belongs at the end by default, so marking the FIRST element null makes an
+            ! otherwise sorted array unsorted -- the tier, not the value, decides.
+            mask = .true.
+            mask(1) = .false.
+            call pf_is_sorted(srt, no, is_valid=mask)
+            call pf_is_sorted(srt, yes, is_valid=mask, nulls_first=.true.)
+            call check(error, yes .and. .not. no, &
+                "real64 pf_is_sorted must place the null tier by nulls_first, not by its value")
+        end block
+        if (allocated(error)) return
+        block
+            call pf_is_sorted(SWSRTB, yes)
+            call pf_is_sorted(SWBOOL, no)
+            call check(error, yes .and. .not. no, "logical pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=2) :: srt(SWN), scr(SWN)
+            do k = 1, SWN
+                srt(k) = swchr(SWSRT(k))
+                scr(k) = swchr(SWRANK(k))
+            end do
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, "character pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: srt(SWN), scr(SWN)
+            call srt%set_raw(1000_int32 + int(SWSRT, int32))
+            call scr%set_raw(1000_int32 + int(SWRANK, int32))
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, "parquet_date pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: srt(SWN), scr(SWN)
+            call srt%set_raw(2000_int64 + int(SWSRT, int64))
+            call scr%set_raw(2000_int64 + int(SWRANK, int64))
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, "parquet_time pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: srt(SWN), scr(SWN)
+            call srt%set_raw(3000_int64 + int(SWSRT, int64), 7_int32)
+            call scr%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, &
+                "parquet_timestamp pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_string_column) :: srt, scr
+            do k = 1, SWN
+                call srt%append_string(swchr(SWSRT(k)))
+                call scr%append_string(swchr(SWRANK(k)))
+            end do
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, &
+                "parquet_string_column pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: srt, scr
+            call srt%init(PK_INT32, int(SWN, int64))
+            call srt%set_all(10_int32 * int(SWSRT, int32))
+            call scr%init(PK_INT32, int(SWN, int64))
+            call scr%set_all(10_int32 * int(SWRANK, int32))
+            call pf_is_sorted(srt, yes)
+            call pf_is_sorted(scr, no)
+            call check(error, yes .and. .not. no, "parquet_column pf_is_sorted must tell the two apart")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: ksrt, kscr
+            call ksrt%add(10_int32 * int(SWSRT, int32))
+            call kscr%add(10_int32 * int(SWRANK, int32))
+            call pf_is_sorted(ksrt, yes)
+            call pf_is_sorted(kscr, no)
+            call check(error, yes .and. .not. no, "pf_sort_keys pf_is_sorted must tell the two apart")
+        end block
+    end subroutine test_is_sorted_every_specific
+    !
+    !> **Every `pf_sort_keys%add` specific, once each** -- all eleven value families. The multi-key
+    !> tests elsewhere in this suite build their keys from two or three families only, so most of
+    !> these bodies (each naming its own extractor, exactly as the one-shot entry points do) were
+    !> reached by nothing.
+    !>
+    !> One key per builder, so the expected permutation is the fixture's own `SWASC` and a body
+    !> that extracted the wrong array shows up as a wrong order rather than as a tie.
+    subroutine test_keys_add_every_specific(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: perm(:)
+        integer :: k
+
+        block
+            type(pf_sort_keys) :: keys
+            call keys%add(10_int32 * int(SWRANK, int32))
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), "pf_sort_keys%add must take an int32 key")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            call keys%add(100_int64 * int(SWRANK, int64))
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), "pf_sort_keys%add must take an int64 key")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            call keys%add(real(SWRANK, real32) + 0.5_real32)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), "pf_sort_keys%add must take a real32 key")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            logical :: mask(SWN)
+            call keys%add(real(SWRANK, real64) + 0.25_real64)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), "pf_sort_keys%add must take a real64 key")
+            if (allocated(error)) return
+            ! %add's own descending= and is_valid= are per-key, not per-sort: the one place a
+            ! builder differs from the one-shot entry points, so it is asserted rather than assumed.
+            call keys%clear()
+            mask = .true.
+            mask(SWASC(SWN)) = .false.
+            call keys%add(real(SWRANK, real64) + 0.25_real64, descending=.true., is_valid=mask)
+            call pf_argsort(keys, perm)
+            call check(error, perm(1) == int(SWASC(SWN - 1), int32) .and. &
+                perm(SWN) == int(SWASC(SWN), int32), &
+                "a descending key must lead with the largest non-null and leave the null last")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            call keys%add(SWBOOL)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == [2_int32, 5_int32, 6_int32, 1_int32, 3_int32, 4_int32]), &
+                "pf_sort_keys%add must take a logical key, stably")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            character(len=2) :: v(SWN)
+            do k = 1, SWN
+                v(k) = swchr(SWRANK(k))
+            end do
+            call keys%add(v)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), "pf_sort_keys%add must take a character key")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            type(parquet_date) :: v(SWN)
+            call v%set_raw(1000_int32 + int(SWRANK, int32))
+            call keys%add(v)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), "pf_sort_keys%add must take a date key")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            type(parquet_time) :: v(SWN)
+            call v%set_raw(2000_int64 + int(SWRANK, int64))
+            call keys%add(v)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), "pf_sort_keys%add must take a time key")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            type(parquet_timestamp) :: v(SWN)
+            call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+            call keys%add(v)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), "pf_sort_keys%add must take a timestamp key")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            type(parquet_string_column) :: sc
+            do k = 1, SWN
+                call sc%append_string(swchr(SWRANK(k)))
+            end do
+            call keys%add(sc)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), &
+                "pf_sort_keys%add must take a parquet_string_column key")
+        end block
+        if (allocated(error)) return
+        block
+            type(pf_sort_keys) :: keys
+            type(parquet_column) :: c
+            call c%init(PK_INT32, int(SWN, int64))
+            call c%set_all(10_int32 * int(SWRANK, int32))
+            call keys%add(c)
+            call pf_argsort(keys, perm)
+            call check(error, all(perm == int(SWASC, int32)), &
+                "pf_sort_keys%add must take a parquet_column key")
+        end block
+    end subroutine test_keys_add_every_specific
+    !
+    !> **A `parquet_column` sort key of every runtime kind.** The column extractor switches on
+    !> `%kindof()` ABOVE its copy loop, so each kind is a separate arm reading through a
+    !> differently-typed pointer -- and one column type, `PK_INT32`, is what every other test in
+    !> this suite hands it. An arm reading the wrong pointer would give a wrong order, not a
+    !> type error, because the buffer it fills is `integer(int64)` for five of the nine kinds.
+    !>
+    !> A timestamp column is the one that becomes TWO engine keys rather than one, so it is asked
+    !> a second question its single-key siblings cannot answer: ties on the seconds half must be
+    !> broken by the nanoseconds half.
+    subroutine test_argsort_column_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32), allocatable :: perm(:)
+        integer :: k
+
+        block
+            type(parquet_column) :: c
+            call c%init(PK_INT64, int(SWN, int64))
+            call c%set_all(100_int64 * int(SWRANK, int64))
+            call pf_argsort(c, perm)
+            call check(error, all(perm == int(SWASC, int32)), "an int64 column key must sort by its values")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            call c%init(PK_FLOAT32, int(SWN, int64))
+            call c%set_all(real(SWRANK, real32) + 0.5_real32)
+            call pf_argsort(c, perm)
+            call check(error, all(perm == int(SWASC, int32)), "a real32 column key must sort by its values")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            call c%init(PK_FLOAT64, int(SWN, int64))
+            call c%set_all(real(SWRANK, real64) + 0.25_real64)
+            call pf_argsort(c, perm)
+            call check(error, all(perm == int(SWASC, int32)), "a real64 column key must sort by its values")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            call c%init(PK_LOGICAL, int(SWN, int64))
+            call c%set_all(SWBOOL)
+            call pf_argsort(c, perm)
+            call check(error, all(perm == [2_int32, 5_int32, 6_int32, 1_int32, 3_int32, 4_int32]), &
+                "a logical column key must sort .false. before .true., stably")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            character(len=2) :: v(SWN)
+            do k = 1, SWN
+                v(k) = swchr(SWRANK(k))
+            end do
+            call c%init(PK_STRING, int(SWN, int64))
+            call c%set_all(v)
+            call pf_argsort(c, perm)
+            call check(error, all(perm == int(SWASC, int32)), "a string column key must sort by its values")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            type(parquet_date) :: v(SWN)
+            call v%set_raw(1000_int32 + int(SWRANK, int32))
+            call c%init(PK_DATE, int(SWN, int64))
+            call c%set_all(v)
+            call pf_argsort(c, perm)
+            call check(error, all(perm == int(SWASC, int32)), "a date column key must sort by its values")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            type(parquet_time) :: v(SWN)
+            call v%set_raw(2000_int64 + int(SWRANK, int64))
+            call c%init(PK_TIME, int(SWN, int64))
+            call c%set_all(v)
+            call pf_argsort(c, perm)
+            call check(error, all(perm == int(SWASC, int32)), "a time column key must sort by its values")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_column) :: c
+            type(parquet_timestamp) :: v(SWN)
+            call v%set_raw(3000_int64 + int(SWRANK, int64), 7_int32)
+            call c%init(PK_TIMESTAMP, int(SWN, int64))
+            call c%set_all(v)
+            call pf_argsort(c, perm)
+            call check(error, all(perm == int(SWASC, int32)), &
+                "a timestamp column key must sort by its values")
+            if (allocated(error)) return
+            ! All six seconds equal: only the nanoseconds half of the pair can order these, so a
+            ! body that built one key from the seconds alone leaves them in file order.
+            call v%set_raw(spread(3000_int64, 1, SWN), int(SWRANK, int32))
+            call c%set_all(v)
+            call pf_argsort(c, perm)
+            call check(error, all(perm == int(SWASC, int32)), &
+                "a timestamp column key must break a seconds tie on its nanoseconds")
+        end block
+        if (allocated(error)) return
+        ! An EMPTY column of each extractor family. Each extractor allocates one padding element
+        ! so its buffer is never zero-length, and initialises it on a separate early-return path
+        ! that no non-empty column reaches -- a path that, left unwritten, would hand the engine
+        ! an uninitialised key.
+        block
+            type(parquet_column) :: c
+            call c%init(PK_INT64, 0_int64)
+            call pf_argsort(c, perm)
+            call check(error, size(perm) == 0, "an empty int64 column key must give an empty permutation")
+            if (allocated(error)) return
+            call c%init(PK_FLOAT64, 0_int64)
+            call pf_argsort(c, perm)
+            call check(error, size(perm) == 0, "an empty real64 column key must give an empty permutation")
+            if (allocated(error)) return
+            call c%init(PK_TIMESTAMP, 0_int64)
+            call pf_argsort(c, perm)
+            call check(error, size(perm) == 0, &
+                "an empty timestamp column key must give an empty permutation from both its keys")
+        end block
+    end subroutine test_argsort_column_every_kind
     !
     !> Builds the expected group offsets INDEPENDENTLY -- by walking the sorted values and asking
     !> where the value changes -- rather than by a second call into the sorting module.

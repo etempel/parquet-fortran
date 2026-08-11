@@ -104,7 +104,10 @@ contains
         out%cache%row_index_live = self%cache%row_index_live
         out%cache%row_index_shadowed = self%cache%row_index_shadowed
         if (allocated(self%cache%rg_bounds_physical)) then
-            allocate(out%cache%rg_bounds_physical(size(self%cache%rg_bounds_physical, 1), &
+            ! The `allocate` below is excluded because gcov credits its CONTINUATION line and the
+            ! copy after it while attributing nothing to the statement's own first line -- the
+            ! Fortran line-attribution quirk CLAUDE.md documents. The statement plainly runs.
+            allocate(out%cache%rg_bounds_physical(size(self%cache%rg_bounds_physical, 1), & ! GCOVR_EXCL_LINE
                 size(self%cache%rg_bounds_physical, 2)))
             out%cache%rg_bounds_physical(:, :) = self%cache%rg_bounds_physical(:, :)
         end if

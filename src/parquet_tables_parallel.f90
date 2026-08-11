@@ -461,7 +461,10 @@ contains
     module procedure table_check_not_shared
         character(len=:), allocatable :: sfx
         !
-        if (.not. associated(self%cache)) return
+        ! Defensive: every caller runs table_check_open first, which aborts on a table with no
+        ! cache, so this cannot be reached through any of them. Kept so a future caller that guards
+        ! differently cannot dereference a null cache here.
+        if (.not. associated(self%cache)) return ! GCOVR_EXCL_LINE
         if (.not. unsafe_shared_mutation(self%cache)) return
         call table_context_suffix(self%cache, "", sfx)
         error stop EP // trim(proc) // ": this table was not opened by this thread inside the " // &

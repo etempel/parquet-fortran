@@ -437,6 +437,22 @@ contains
                 test_settings_env_not_an_integer_aborts), &
             new_unittest("settings: two numbers in one integer variable aborts", &
                 test_settings_env_two_numbers_aborts), &
+            new_unittest("an environment value longer than the buffer aborts", &
+                test_settings_env_too_long_aborts), &
+            new_unittest("an environment value beyond a default INTEGER's range aborts", &
+                test_settings_env_int32_out_of_range_aborts), &
+            new_unittest("a long environment value is echoed truncated, not whole", &
+                test_settings_env_long_value_preview_aborts), &
+            new_unittest("the informational channel prints, and verbosity=silent suppresses it", &
+                test_settings_emit_info_channel), &
+            new_unittest("string column reindex with a duplicate index aborts", &
+                test_strings_reindex_duplicate_index_aborts), &
+            new_unittest("string column reindex_trusted of the wrong length aborts", &
+                test_strings_reindex_trusted_length_mismatch_aborts), &
+            new_unittest("copy_buffers with an offsets array shorter than size()+1 aborts", &
+                test_strings_copy_buffers_offsets_too_short_aborts), &
+            new_unittest("copy_buffers with a data array shorter than character_size() aborts", &
+                test_strings_copy_buffers_data_too_short_aborts), &
             new_unittest("settings: an out-of-range environment value aborts through its own setter", &
                 test_settings_env_out_of_range_aborts), &
             new_unittest("settings: an unaccepted boolean spelling aborts listing the accepted ones", &
@@ -973,6 +989,22 @@ contains
                 test_table_cast_exact_precision_aborts), &
             new_unittest("cast(exact=) refuses an int32 real32 cannot hold exactly", &
                 test_table_cast_exact_i32_to_f32_aborts), &
+            new_unittest("bind_predefined with mismatched array sizes aborts", &
+                test_table_bind_predefined_size_mismatch_aborts), &
+            new_unittest("bind_predefined with a units array of the wrong length aborts", &
+                test_table_bind_predefined_units_size_mismatch_aborts), &
+            new_unittest("bind_predefined warns, and still binds, on a narrowing declaration", &
+                test_table_bind_predefined_lossy_warning), &
+            new_unittest("bind_predefined of a computed column over an existing name aborts", &
+                test_table_bind_predefined_computed_name_taken_aborts), &
+            new_unittest("a slice write whose is_valid is longer than the selection aborts", &
+                test_table_set_rows_valid_length_mismatch_aborts), &
+            new_unittest("a whole-column write with a transposed element mask aborts", &
+                test_table_set_elem_valid_shape_mismatch_aborts), &
+            new_unittest("a vector slice write with a mis-shaped element mask aborts", &
+                test_table_set_rows_elem_valid_shape_mismatch_aborts), &
+            new_unittest("a slice write with more values than selected rows aborts", &
+                test_table_set_slice_size_mismatch_aborts), &
             new_unittest("cast(exact=) refuses an int64 real32 cannot hold exactly", &
                 test_table_cast_exact_i64_to_f32_aborts), &
             new_unittest("cast(exact=) refuses an int64 real64 cannot hold exactly", &
@@ -4148,6 +4180,112 @@ contains
             required_stderr="PARQUET_FORTRAN_SORT_THREADS='4 8' is not an integer")
     end subroutine test_settings_env_two_numbers_aborts
 
+    !> A truncated number is a plausible-looking wrong value, so an over-long variable is refused
+    !! rather than applied. The message names the cap rather than echoing the value.
+    subroutine test_settings_env_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_env_too_long", expect_abort=.true., &
+            failure_message="an environment value longer than the buffer was expected to abort", &
+            required_stderr="is longer than 4096 characters; refusing to apply a truncated value")
+    end subroutine test_settings_env_too_long_aborts
+
+    !> Parsed in int64 first and then range-checked, so a value beyond int32 is refused rather than
+    !! wrapping into a plausible small number. Distinct from "not an integer": the parse succeeds.
+    subroutine test_settings_env_int32_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_env_int32_out_of_range", &
+            expect_abort=.true., &
+            failure_message="an environment value beyond int32 was expected to abort, not to wrap", &
+            required_stderr="='3000000000' does not fit in a default INTEGER")
+    end subroutine test_settings_env_int32_out_of_range_aborts
+
+    !> The offending value is echoed TRUNCATED. ifx's ERROR STOP runtime corrupts the heap once the
+    !! composed message reaches 8192 bytes, so a guard that echoed an unbounded caller-supplied
+    !! value would crash on exactly the input that triggers it (CLAUDE.md). The assertion is on the
+    !! ellipsis, which is what distinguishes a capped message from a whole one.
+    subroutine test_settings_env_long_value_preview_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_env_long_value_preview", &
+            expect_abort=.true., &
+            failure_message="a long environment value was expected to abort with a truncated echo", &
+            required_stderr="xxx...' is not an integer")
+    end subroutine test_settings_env_long_value_preview_aborts
+
+    !> Not an abort: the informational channel is the quietest of the three output channels, and
+    !! `verbosity="silent"` must suppress it while leaving real warnings alone. The scenario emits
+    !! one message at the default verbosity and one after going silent; the second not appearing is
+    !! the negative control, without which a channel that ignored the setting would still pass.
+    subroutine test_settings_emit_info_channel(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: saw_visible, saw_suppressed
+
+        call run_error_scenario("settings_emit_info_channel", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "emitting an informational message must not abort")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "info-channel-marker-visible", saw_visible)
+        call check(error, saw_visible, "an informational message must be emitted at the default verbosity")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "info-channel-marker-suppressed", saw_suppressed)
+        call check(error, .not. saw_suppressed, &
+            "verbosity=""silent"" must suppress the informational channel -- otherwise the setting " // &
+            "is stored and never read")
+    end subroutine test_settings_emit_info_channel
+
+    !> A duplicate index is a separate mistake from an out-of-range one, and the more dangerous:
+    !! it silently drops one element and copies another twice, leaving a column that still passes
+    !! every structural invariant. The scenario applies a real permutation first.
+    subroutine test_strings_reindex_duplicate_index_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "strings_reindex_duplicate_index", &
+            expect_abort=.true., &
+            failure_message="a permutation with a duplicate index was expected to abort", &
+            required_stderr="reindex: permutation contains a duplicate index")
+    end subroutine test_strings_reindex_duplicate_index_aborts
+
+    !> reindex_trusted skips the O(n) validation but keeps the O(1) length check, because a
+    !! wrong-length permutation is a caller bug no amount of trust makes safe.
+    subroutine test_strings_reindex_trusted_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "strings_reindex_trusted_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="a trusted permutation of the wrong length was expected to abort", &
+            required_stderr="reindex_trusted: permutation length does not match the row count")
+    end subroutine test_strings_reindex_trusted_length_mismatch_aborts
+
+    !> copy_buffers writes into caller-supplied arrays, so an undersized one is an out-of-bounds
+    !! write that a plain Fortran build does not catch. The two arrays are sized from different
+    !! quantities, so each is checked -- and tested -- on its own.
+    subroutine test_strings_copy_buffers_offsets_too_short_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "strings_copy_buffers_offsets_too_short", &
+            expect_abort=.true., &
+            failure_message="an offsets array shorter than size()+1 was expected to abort", &
+            required_stderr="copy_buffers: the offsets array is shorter than size()+1")
+    end subroutine test_strings_copy_buffers_offsets_too_short_aborts
+
+    !> The payload half of the same check.
+    subroutine test_strings_copy_buffers_data_too_short_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "strings_copy_buffers_data_too_short", &
+            expect_abort=.true., &
+            failure_message="a data array shorter than character_size() was expected to abort", &
+            required_stderr="copy_buffers: the data array is shorter than character_size()")
+    end subroutine test_strings_copy_buffers_data_too_short_aborts
+
     subroutine test_settings_env_out_of_range_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -6832,6 +6970,100 @@ contains
             failure_message="an exact= int32 -> real32 cast that loses precision was expected to abort", &
             required_stderr="cannot be represented exactly as PK_FLOAT32, so converting from PK_INT32")
     end subroutine test_table_cast_exact_i32_to_f32_aborts
+
+    !> bind_predefined's four parallel arrays are written by a code generator, so a length
+    !! disagreement means the generator is out of step with itself.
+    subroutine test_table_bind_predefined_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_bind_predefined_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="bind_predefined with a short kinds array was expected to abort", &
+            required_stderr="bind_predefined: names, kinds, widths and from_file must all have the same size")
+    end subroutine test_table_bind_predefined_size_mismatch_aborts
+
+    !> units= is optional and so is checked separately from the four required arrays.
+    subroutine test_table_bind_predefined_units_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_bind_predefined_units_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="bind_predefined with a short units array was expected to abort", &
+            required_stderr="bind_predefined: units, when given, must have the same size as names")
+    end subroutine test_table_bind_predefined_units_size_mismatch_aborts
+
+    !> A narrowing declaration warns rather than aborting: the declaration is a contract the file
+    !! need not honour exactly. The scenario binds a WIDENING declaration first, which must stay
+    !! silent -- without that control, a bind that warned about every column would pass.
+    subroutine test_table_bind_predefined_lossy_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_wide, warned_narrow
+
+        call run_error_scenario("table_bind_predefined_lossy_warning", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a narrowing declaration must warn, never abort")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'wide' is declared", warned_wide)
+        call check(error, warned_wide, &
+            "declaring an int64 file column as int32 may lose range, so bind_predefined must say so")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'narrow' is declared", warned_narrow)
+        call check(error, .not. warned_narrow, &
+            "int32 -> int64 loses nothing, so the widening declaration must stay silent")
+    end subroutine test_table_bind_predefined_lossy_warning
+
+    !> A computed column has no file behind it, so its name must be free -- otherwise the table
+    !! would end up with two columns answering to one name.
+    subroutine test_table_bind_predefined_computed_name_taken_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_bind_predefined_computed_name_taken", &
+            expect_abort=.true., &
+            failure_message="binding a computed column over an existing name was expected to abort", &
+            required_stderr="but the table already has a column of that name")
+    end subroutine test_table_bind_predefined_computed_name_taken_aborts
+
+    !> A scattered selection pairs one validity entry with each SELECTED row, not with each row of
+    !! the table -- applying a longer mask anyway would null rows the caller never named.
+    subroutine test_table_set_rows_valid_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_rows_valid_length_mismatch", &
+            expect_abort=.true., &
+            failure_message="a slice write whose is_valid is longer than the selection was expected to abort", &
+            required_stderr="is_valid has 3 entries but the selection has 2 rows")
+    end subroutine test_table_set_rows_valid_length_mismatch_aborts
+
+    !> A rank-2 is_valid is per ELEMENT and is checked on both extents, so a transposed mask is
+    !! rejected rather than silently applied the wrong way round.
+    subroutine test_table_set_elem_valid_shape_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_elem_valid_shape_mismatch", &
+            expect_abort=.true., &
+            failure_message="a whole-column write with a transposed element mask was expected to abort", &
+            required_stderr="is_valid is shaped 3 x 2 but the column is 2 x 3 (width x rows)")
+    end subroutine test_table_set_elem_valid_shape_mismatch_aborts
+
+    !> Both axes at once: a scattered selection of a vector column, whose mask is (width, selected).
+    subroutine test_table_set_rows_elem_valid_shape_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_rows_elem_valid_shape_mismatch", &
+            expect_abort=.true., &
+            failure_message="a vector slice write with a mis-shaped element mask was expected to abort", &
+            required_stderr="is_valid is shaped 2 x 3 but the selection is 2 x 2 (width x rows)")
+    end subroutine test_table_set_rows_elem_valid_shape_mismatch_aborts
+
+    !> A slice write pairs one value with each selected row; writing only what fits would put
+    !! values on rows they were never meant for, and every value involved is legal.
+    subroutine test_table_set_slice_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_set_slice_size_mismatch", &
+            expect_abort=.true., &
+            failure_message="a slice write with more values than selected rows was expected to abort", &
+            required_stderr="the array has 3 values but the selection picks 2 rows")
+    end subroutine test_table_set_slice_size_mismatch_aborts
 
     subroutine test_table_cast_exact_i64_to_f32_aborts(error)
         type(error_type), allocatable, intent(out) :: error

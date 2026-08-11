@@ -295,10 +295,16 @@ contains
         ! Only the "appended the last slot, and the index already describes the ones before it"
         ! case can be handled incrementally. Anything else means the caller is out of step with
         ! the index, and a full rebuild is both correct and cheap at that point.
-        if (slot /= n .or. n < 1) then
+        ! Defensive: both callers (table_new_slot and add_file_slot) pass the slot they have just
+        ! appended, i.e. cache%ncols, so neither condition can hold. Kept because the incremental
+        ! path is only correct under that precondition, and a future caller that inserts elsewhere
+        ! must land here rather than corrupt the index.
+        ! gcov attribution artifact: the condition is evaluated on every call, so the `if` line
+        ! registers hits while its body reliably shows zero.
+        if (slot /= n .or. n < 1) then  ! GCOVR_EXCL_START
             call cache_name_index_rebuild(cache)
             return
-        end if
+        end if                          ! GCOVR_EXCL_STOP
         if (.not. allocated(cache%name_order) .or. .not. allocated(cache%name_key)) then
             call cache_name_index_rebuild(cache)
             return

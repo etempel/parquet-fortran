@@ -107,6 +107,8 @@ contains
                 test_target_row_group_bytes_effect), &
             new_unittest("target_row_group_bytes also sizes the streaming path's estimate", &
                 test_target_row_group_bytes_streaming), &
+            new_unittest("target_row_group_bytes accepts a default-kind integer", &
+                test_target_row_group_bytes_int32), &
             new_unittest("statistics_prescreen prunes row groups without changing the answer", &
                 test_statistics_prescreen_effect), &
             new_unittest("both integer kinds reach the same setting", test_both_integer_kinds), &
@@ -278,6 +280,33 @@ contains
         if (allocated(error)) return
         call check(error, parquet_get_statistics_prescreen(), "statistics_prescreen defaults to .true.")
     end subroutine test_factory_defaults
+
+    !> The byte-count knob is generic over int32 and int64, so that `call
+    !> parquet_set_target_row_group_bytes(64*1024*1024)` compiles with a plain `integer` literal
+    !> (CLAUDE.md's both-kinds rule). The int32 specific is a one-line converter onto the int64
+    !> one and had no caller: every existing test passes an `_int64` literal.
+    !>
+    !> A converter can only really get one thing wrong -- losing or mangling the value -- so the
+    !> assertion is that the two forms leave the getter reporting the same number, checked against
+    !> a value large enough that a narrowing conversion would be visible.
+    subroutine test_target_row_group_bytes_int32(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: WANT = 100000000    !! 100 MB: well inside int32, well outside int16.
+        !
+        call parquet_set_target_row_group_bytes(WANT)              ! the int32 specific
+        call check(error, parquet_get_target_row_group_bytes() == int(WANT, int64), &
+            "the int32 setter must store the value it was given, unnarrowed")
+        if (allocated(error)) return
+        !
+        call parquet_reset_settings()
+        call parquet_set_target_row_group_bytes(int(WANT, int64))  ! the int64 twin
+        call check(error, parquet_get_target_row_group_bytes() == int(WANT, int64), &
+            "and must agree with the int64 form on the same value")
+        if (allocated(error)) return
+        call parquet_reset_settings()
+        call check(error, parquet_get_target_row_group_bytes() == 268435456_int64, &
+            "the reset must put the factory default back, so this test leaves no state behind")
+    end subroutine test_target_row_group_bytes_int32
 
     !> A knob that is settable but not resettable leaks across the boundary parquet_reset_settings
     !> exists to draw, and nothing else in the suite would notice. Set every one to a non-factory

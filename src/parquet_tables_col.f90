@@ -127,12 +127,20 @@ contains
         ! table_set_user_populated, which is where it is explained. Kept as its own body rather
         ! than forwarding to the table form because that one is name-keyed: the handle would have
         ! to hand back the name it already resolved past, only for the table to look it up again.
-        if (flag .and. self%cache%cols(self%slot)%residency /= RES_FULL) then
+        ! Defensive: no caller can reach this through a handle. Making a handle RESOLVES the
+        ! column, so it is resident by then; every route that later takes its values away
+        ! (%evict_column, %reload) bumps the table's generation, which col_resolve above rejects
+        ! first; and %column declines to attach a handle to an unsupported column at all. Kept
+        ! because the rule is the table form's too, and a future non-generation-bumping way to
+        ! release a column's values would land here. Verified by trying all three routes.
+        ! gcov attribution artifact: the condition is evaluated on every call, so the `if` line
+        ! registers hits while its body reliably shows zero.
+        if (flag .and. self%cache%cols(self%slot)%residency /= RES_FULL) then ! GCOVR_EXCL_START
             call table_context_suffix(self%cache, self%cache%cols(self%slot)%name, sfx)
             error stop EP // "column handle: set_user_populated: this column holds no values " // &
                 "to claim -- it has not been read, or was evicted; read it first " // &
                 "(%prefetch/%get), or pass .false." // sfx
-        end if
+        end if                                                               ! GCOVR_EXCL_STOP
         self%cache%cols(self%slot)%user_populated = flag
     end procedure col_set_user_populated
     !
@@ -170,6 +178,14 @@ contains
             " is outside this table's 1.." // trim(want) // " rows"
     end procedure col_require_row
     !
+    !
+    !> Currently has NO caller: every typed `%get`/`%set` on a handle reaches the table's own kind
+    !! check first, which reports the same mismatch in the table's wording. Kept rather than
+    !! deleted because it is the handle's own message -- it names the handle, which is what a
+    !! caller who resolved a column once and reads it a million times needs to see -- and because
+    !! a future per-kind body that checks before delegating would use it. Excluded from coverage
+    !! because it is private to parquet_tables, so nothing can reach it while it has no caller.
+    ! GCOVR_EXCL_START
     module procedure col_kind_error
         character(len=:), allocatable :: sfx, got, wanted
         !
@@ -182,6 +198,7 @@ contains
         error stop EP // "column handle: " // trim(proc) // ": this column holds " // &
             trim(got) // ", which cannot be read as " // trim(wanted) // sfx
     end procedure col_kind_error
+    ! GCOVR_EXCL_STOP
     !
     ! ---- the null trio ------------------------------------------------------------------------
     !

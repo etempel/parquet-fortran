@@ -83,7 +83,13 @@ contains
             new_unittest("copy_to matches get-then-assign, padding and truncation included", &
                 test_copy_to_matches_get), &
             new_unittest("append_from matches get-then-append, null state included", &
-                test_append_from_matches_get) &
+                test_append_from_matches_get), &
+            new_unittest("copy_to/append_from/reindex_trusted accept a default-kind integer", &
+                test_default_integer_forms), &
+            new_unittest("comparison orders a trailing byte below a blank correctly", &
+                test_compare_trailing_byte_below_blank), &
+            new_unittest("copy_buffers exports the offsets and payload, empty column included", &
+                test_copy_buffers) &
             ]
     end subroutine collect_tests_parquet_string
     !
@@ -2066,6 +2072,139 @@ contains
         if (allocated(error)) return
         call check(error, viafrom%validate(), "a column built with append_from satisfies the class invariants")
     end subroutine test_append_from_matches_get
+    !
+
+    !> Every element index in this module's public surface comes in an int32 and an int64 form, so
+    !! that a plain `integer` loop variable compiles (CLAUDE.md's both-kinds rule). Three of those
+    !! int32 converters had no caller at all -- the suite reached them only through `_int64`
+    !! literals -- so a converter that dropped or mistyped its argument would not have been caught.
+    !!
+    !! Each is checked against its int64 twin on the same data rather than against a hand-written
+    !! expectation, which is what makes "the two forms are the same operation" the actual assertion.
+    subroutine test_default_integer_forms(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_string_column) :: c, d, e
+        character(len=8) :: slot32, slot64
+        integer :: perm32(3)
+        integer(int64) :: perm64(3)
+        character(len=:), allocatable :: s
+        !
+        call c%append_string("alpha")
+        call c%append_string("bravo")
+        call c%append_string("charlie")
+        !
+        ! copy_to: the int32 form must land the same bytes in the same slot as the int64 one.
+        slot32 = "########"
+        slot64 = "########"
+        call c%copy_to(2, slot32)
+        call c%copy_to(2_int64, slot64)
+        call check(error, slot32 == slot64, "copy_to's int32 form must agree with its int64 twin")
+        if (allocated(error)) return
+        call check(error, trim(slot32) == "bravo", "and must copy the element it names, not another")
+        if (allocated(error)) return
+        !
+        ! append_from: same element, appended by each form; the two results must be identical.
+        call d%append_from(c, 3)
+        call e%append_from(c, 3_int64)
+        call check(error, d%size() == 1_int64 .and. e%size() == 1_int64, &
+            "append_from must append exactly one element through either form")
+        if (allocated(error)) return
+        call d%get(1_int64, s)
+        call check(error, s == "charlie", "append_from's int32 form must take the element it names")
+        if (allocated(error)) return
+        call e%get(1_int64, s)
+        call check(error, s == "charlie", "and its int64 twin must take the same one")
+        if (allocated(error)) return
+        !
+        ! reindex_trusted: a reversal, applied through each form to an identical column.
+        perm32 = [3, 1, 2]
+        perm64 = int(perm32, int64)
+        call e%clear()
+        call e%append_string("alpha")
+        call e%append_string("bravo")
+        call e%append_string("charlie")
+        call c%reindex_trusted(perm32)
+        call e%reindex_trusted(perm64)
+        call c%get(1_int64, s)
+        call check(error, s == "charlie", "reindex_trusted's int32 form must apply the permutation")
+        if (allocated(error)) return
+        call e%get(1_int64, s)
+        call check(error, s == "charlie", "and its int64 twin must apply the same one")
+        if (allocated(error)) return
+        call c%get(3_int64, s)
+        call check(error, s == "bravo", "the whole permutation must be applied, not just its first entry")
+        if (allocated(error)) return
+        call check(error, c%validate(), "the reindexed column must still satisfy the class invariants")
+    end subroutine test_default_integer_forms
+    !
+    !> When two elements agree over their common prefix, the longer one's remaining bytes are
+    !! compared against BLANKS -- which is what Fortran's own padding rule does, so `"ab" < "ab "`
+    !! is false and `"ab" < "abx"` is true. Every fixture in the suite uses printable trailing
+    !! bytes, which are all ABOVE a blank, so the below-a-blank arm of that comparison never ran on
+    !! either side.
+    !!
+    !! A tab (below a blank) makes the longer element sort BEFORE the shorter one, which is the
+    !! opposite of what a length-only rule would give -- so this is a case where getting the arm
+    !! wrong reverses an order rather than merely tying it.
+    subroutine test_compare_trailing_byte_below_blank(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_string_column) :: c
+        integer :: cmp_low, cmp_high, cmp_rev
+        !
+        call c%append_string("ab")             ! 1: the short one
+        call c%append_string("ab" // char(9))  ! 2: longer, trailing byte BELOW a blank
+        call c%append_string("abx")            ! 3: longer, trailing byte ABOVE a blank
+        !
+        cmp_low = c%compare(1_int64, 2_int64)
+        cmp_high = c%compare(1_int64, 3_int64)
+        cmp_rev = c%compare(2_int64, 1_int64)
+        !
+        call check(error, cmp_low > 0, &
+            "a trailing byte below a blank must make the LONGER element sort first, so the " // &
+            "shorter one compares greater")
+        if (allocated(error)) return
+        call check(error, cmp_high < 0, &
+            "a trailing byte above a blank must make the longer element sort last -- the two arms " // &
+            "must disagree, or the comparison is length-only")
+        if (allocated(error)) return
+        call check(error, cmp_rev < 0, "the comparison must be antisymmetric across the same pair")
+        if (allocated(error)) return
+        call check(error, c%compare(1_int64, 1_int64) == 0, "an element must compare equal to itself")
+    end subroutine test_compare_trailing_byte_below_blank
+    !
+    !> `%copy_buffers` exports the column into caller-supplied offsets and payload arrays -- the
+    !! copying counterpart of `%raw_buffers`, for an interop caller who wants its own memory. Its
+    !! empty-column path is separate, because a column that never had an element may not have
+    !! allocated its offsets at all and still owes the caller the leading zero.
+    subroutine test_copy_buffers(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_string_column) :: c, empty
+        integer(int64) :: offs(4), eoffs(2)
+        character(len=1) :: data(9), edata(1)
+        integer :: i
+        !
+        call c%append_string("ab")
+        call c%append_string("cde")
+        call c%append_string("fghi")
+        call c%copy_buffers(offs, data)
+        !
+        call check(error, offs(1) == 0_int64, "the offsets must start at zero")
+        if (allocated(error)) return
+        call check(error, offs(2) == 2_int64 .and. offs(3) == 5_int64 .and. offs(4) == 9_int64, &
+            "the offsets must be the running element ends")
+        if (allocated(error)) return
+        call check(error, all([(data(i), i = 1, 9)] == ["a", "b", "c", "d", "e", "f", "g", "h", "i"]), &
+            "the payload must be the concatenated bytes, in element order")
+        if (allocated(error)) return
+        !
+        ! An empty column: nothing was ever appended, so the offsets array may never have been
+        ! allocated -- but the caller must still be handed the leading zero.
+        eoffs = 99_int64
+        call empty%copy_buffers(eoffs, edata)
+        call check(error, eoffs(1) == 0_int64, &
+            "an empty column must still write its leading zero offset, whether or not it ever " // &
+            "allocated an offsets array")
+    end subroutine test_copy_buffers
     !
 
 end module test_parquet_string

@@ -374,7 +374,41 @@ contains
             new_unittest("%append invalidates a row handle on the destination itself", &
                 test_row_handle_append_self_invalidates), &
             new_unittest("a column handle on a file-backed table touches, and survives a sibling touch", &
-                test_col_handle_file_backed) &
+                test_col_handle_file_backed), &
+            new_unittest("the null trio accepts a default-kind integer, on the handle and by position", &
+                test_null_trio_default_integer), &
+            new_unittest("a column handle resolved by position carries the descriptor's unit", &
+                test_col_handle_by_position_unit), &
+            new_unittest("ensure_validity pre-allocates one column's validity, or every resident one", &
+                test_ensure_validity), &
+            new_unittest("ensure_validity is what lets a shared table be nulled at all", &
+                test_ensure_validity_permits_shared_null), &
+            new_unittest("get_valid_mask reports a missing column through found= and a zero-size mask", &
+                test_get_valid_mask_missing), &
+            new_unittest("argsort_by reports group boundaries when asked for them", &
+                test_argsort_by_group_offsets), &
+            new_unittest("a file column called parquet_row_index is shadowed, with a warning", &
+                test_shadowed_row_index_column), &
+            new_unittest("a read-in MAML remap claiming an internal name is honoured", &
+                test_maml_remap_claims_internal), &
+            new_unittest("a MAML whose fields: block is followed by another top-level key parses", &
+                test_maml_fields_block_followed_by_key), &
+            new_unittest("append(row) fills from a source column the destination cannot use", &
+                test_append_row_unusable_source_column), &
+            new_unittest("argsort_by reports group boundaries into an int32 permutation too", &
+                test_argsort_by_group_offsets_int32), &
+            new_unittest("bind_predefined fills a declared unit only where there is none", &
+                test_bind_predefined_units), &
+            new_unittest("bind_predefined casts a vector column to its declared vector kind", &
+                test_bind_predefined_vector_kind), &
+            new_unittest("writing an in-memory temporal column records no unit token", &
+                test_write_table_temporal_no_unit), &
+            new_unittest("bind_predefined reduces a float vector kind to its scalar kind", &
+                test_bind_predefined_float_vector_kind), &
+            new_unittest("copy_metadata carries into an output schema that declares none", &
+                test_write_table_copy_metadata_bare_schema), &
+            new_unittest("a slice answers has_nulls and row_group_bounds in its own scope", &
+                test_slice_has_nulls_and_bounds) &
             ]
     end subroutine collect_tests_parquet_table
     !
@@ -11740,5 +11774,692 @@ contains
         if (allocated(error)) return
         call check(error, .not. other%is_valid(), "and that handle is not valid either")
     end subroutine test_col_handle_file_backed
+    !
+    !> Every row/element index in this library's public surface comes in an int32 and an int64 form,
+    !! so that `call c%set_null(i)` compiles when `i` is a plain `integer` (see CLAUDE.md's rule on
+    !! providing both kinds). The int32 forms are one-line converters onto the int64 ones, and the
+    !! null trio's -- on the column handle and on the table's by-position accessors -- had no caller
+    !! at all: the suite reached them only through explicit `_int64` literals.
+    !!
+    !! Each pair is asserted to agree, which is the only thing a converter can get wrong: dropping
+    !! the element argument, or converting the wrong one of two. The width-3 fixture makes those
+    !! visible -- with width 1 an element index can only be 1, so a converter that passed `i` where
+    !! `e` belonged would still answer correctly.
+    subroutine test_null_trio_default_integer(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        integer(int32) :: fv(3, 4)
+        integer :: i, e, j
+        !
+        do i = 1, 4
+            do e = 1, 3
+                fv(e, i) = 10*i + e
+            end do
+        end do
+        call parquet_new_table(t)
+        call t%add_column("v", fv)
+        call t%column("v", c)
+        !
+        ! Row form: default-kind integer in, and the int64 form must agree about it.
+        call c%set_null(2)
+        call check(error, c%is_null(2), "the handle's int32 %set_null/%is_null pair must agree")
+        if (allocated(error)) return
+        call check(error, c%is_null(2_int64), "the int32 %set_null must be visible to the int64 %is_null")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(1), "the int32 %set_null must not touch a neighbouring row")
+        if (allocated(error)) return
+        call c%clear_null(2)
+        call check(error, .not. c%is_null(2), "the handle's int32 %clear_null must undo its int32 %set_null")
+        if (allocated(error)) return
+        !
+        ! Element form: the two arguments must not be swapped or dropped.
+        call c%set_null(3, 2)
+        call check(error, c%is_null(3, 2), "the handle's int32 element %set_null/%is_null pair must agree")
+        if (allocated(error)) return
+        call check(error, c%is_null(3_int64, 2_int64), "the int32 element form must agree with the int64 one")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(3, 1), "nulling element 2 must leave element 1 of that row alone")
+        if (allocated(error)) return
+        call check(error, .not. c%is_null(2, 2), "nulling row 3's element must leave row 2's alone")
+        if (allocated(error)) return
+        call c%clear_null(3, 2)
+        call check(error, .not. c%is_null(3, 2), "the handle's int32 element %clear_null must undo its %set_null")
+        if (allocated(error)) return
+        !
+        ! The table's by-POSITION queries have the same pair, reached without a handle at all.
+        j = t%column_index("v")
+        call check(error, j == 1, "precondition: the fixture's only column should be at position 1")
+        if (allocated(error)) return
+        call t%set_null("v", 4_int64, 3_int64)
+        call check(error, t%is_null(j, 4), "%is_null(position, int32 row) must see the null")
+        if (allocated(error)) return
+        call check(error, t%is_null(j, 4, 3), "%is_null(position, int32 row, int32 element) must see it too")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null(j, 4, 1), "and must not report the row's other elements null")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null(j, 1), "and must not report an untouched row null")
+    end subroutine test_null_trio_default_integer
+    !
+    !> Two things a column handle can only do once it has been resolved by POSITION: be made at all
+    !! (`%column(j, c)` succeeding, as opposed to reporting an out-of-range position through
+    !! `found=`, which is all the suite exercised), and answer `%unit()` from the column DESCRIPTOR
+    !! rather than from the values.
+    !!
+    !! The descriptor is the interesting half. A file-backed column's unit comes from the read-in
+    !! MAML at open time, before anything has read a value, so a handle that asked the values would
+    !! answer "" for a column that demonstrably has a unit. The fixture therefore declares a unit on
+    !! one column and none on another, and neither is read before the question is asked.
+    subroutine test_col_handle_by_position_unit(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        character(len=:), allocatable :: u, nm
+        logical :: found
+        integer :: j
+        character(len=*), parameter :: f = "test_run/table_col_pos_unit.parquet"
+        character(len=*), parameter :: m = "test_run/table_col_pos_unit.maml"
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: colposunit", &
+            "fields:", &
+            "- name: i32", &
+            "  data_type: int32", &
+            "  unit: km", &
+            "- name: i64", &
+            "  data_type: int64" ])
+        call parquet_open_table(t, f, maml=m)
+        !
+        j = t%column_index("i32")
+        call t%column(j, c, found)
+        call check(error, found, "%column by position should resolve an in-range position")
+        if (allocated(error)) return
+        call check(error, c%is_valid(), "a handle made by position should be valid")
+        if (allocated(error)) return
+        call c%name(nm)
+        call check(error, nm == "i32", "the handle made by position should name the column at that position")
+        if (allocated(error)) return
+        ! Asked before anything reads the column: the answer has to come from the descriptor.
+        call c%unit(u)
+        call check(error, u == "km", &
+            "a column handle must answer %unit from the descriptor, which is the only place a " // &
+            "not-yet-read file-backed column's unit lives")
+        if (allocated(error)) return
+        !
+        call t%column(t%column_index("i64"), c, found)
+        call check(error, found, "%column by position should resolve the second column too")
+        if (allocated(error)) return
+        call c%unit(u)
+        call check(error, len_trim(u) == 0, "a column the MAML gave no unit must report none")
+    end subroutine test_col_handle_by_position_unit
+    !
+    !> `%ensure_validity` exists so that a program about to null rows from several threads can pay
+    !! for the validity allocation once, before the parallel region -- the first null on a column
+    !! otherwise allocates, and two threads doing that race with no diagnostic. Nothing called it.
+    !!
+    !! Both forms are exercised: named (with `found=` for a name that is not there) and the
+    !! whole-table form. The assertion is `%has_validity_storage`-shaped rather than "does it still
+    !! work afterwards", because a no-op implementation passes the latter -- and the negative
+    !! control is the same table before the call.
+    subroutine test_ensure_validity(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        integer(int32) :: a(4) = [1, 2, 3, 4]
+        real(real64) :: b(4) = [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64]
+        logical :: found
+        !
+        call parquet_new_table(t)
+        call t%add_column("a", a)
+        call t%add_column("b", b)
+        call check(error, .not. t%has_nulls("a"), "precondition: a fresh column holds no nulls")
+        if (allocated(error)) return
+        !
+        ! Named form.
+        call t%ensure_validity("a", found)
+        call check(error, found, "%ensure_validity should report a column it found")
+        if (allocated(error)) return
+        call check(error, .not. t%has_nulls("a"), "reserving validity must not mark anything null")
+        if (allocated(error)) return
+        call t%column("a", c)
+        call c%set_null(2_int64)
+        call check(error, c%is_null(2_int64), "a null recorded after ensure_validity must still be reported")
+        if (allocated(error)) return
+        !
+        ! A name that is not there: reported, not aborted.
+        call t%ensure_validity("nope", found)
+        call check(error, .not. found, "%ensure_validity must report an unknown column through found=")
+        if (allocated(error)) return
+        !
+        ! Whole-table form: every resident column, no name at all.
+        call t%ensure_validity()
+        call check(error, .not. t%has_nulls("b"), "the whole-table form must not mark anything null either")
+        if (allocated(error)) return
+        call t%column("b", c)
+        call c%set_null(3_int64)
+        call check(error, c%is_null(3_int64), "the whole-table form must leave every column nullable")
+        if (allocated(error)) return
+        call check(error, t%is_null("a", 2_int64), "and must not disturb a null recorded before it")
+    end subroutine test_ensure_validity
+    !
+    !> The OBSERVED EFFECT of `%ensure_validity`, which the round trip above cannot see: nulling is
+    !! lazy, so a column allocates its validity storage on its first null -- and doing that from
+    !! inside a parallel region on a shared table is a race the library refuses outright. Pre-
+    !! allocating is what makes the null permitted.
+    !!
+    !! Without this the sibling test passes against an `%ensure_validity` that does nothing at all,
+    !! because `%set_null` would allocate anyway on a table only one thread can see. The refusal is
+    !! the other half and lives in `error_scenarios.f90` as `table_set_null_no_validity_in_parallel`;
+    !! this is the permitted case, i.e. the negative control for that abort.
+    subroutine test_ensure_validity_permits_shared_null(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int32) :: a(4) = [1, 2, 3, 4]
+        !
+        call parquet_new_table(t)
+        call t%add_column("a", a)
+        call t%ensure_validity("a")
+        !
+        ! One thread does the nulling, but the table is visible to the whole team, so the guard
+        ! that refuses a first-null allocation on a shared table is live here.
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call t%set_null("a", 2_int64)
+        !$omp end single
+        !$omp end parallel
+        !
+        call check(error, t%is_null("a", 2_int64), &
+            "after %ensure_validity the null must be permitted and recorded -- if this aborts, " // &
+            "the pre-allocation did not happen")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("a", 1_int64), "and must land on the row it named")
+    end subroutine test_ensure_validity_permits_shared_null
+    !
+    !> `%get_valid_mask` reports an unknown column the way every other `found=`-carrying query does
+    !! -- by answering `.false.` rather than aborting -- and must still leave the caller with an
+    !! allocated, zero-size mask rather than an unallocated one. That distinction matters here more
+    !! than elsewhere: an UNALLOCATED mask is this library's documented signal for "no nulls"
+    !! (it reaches an optional dummy as absent), so returning one would say something false about a
+    !! column that does not exist.
+    subroutine test_get_valid_mask_missing(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int32) :: a(3) = [1, 2, 3]
+        logical, allocatable :: rowmask(:), elemmask(:, :)
+        logical :: found
+        !
+        call parquet_new_table(t)
+        call t%add_column("a", a)
+        !
+        call t%get_valid_mask("nope", rowmask, found)
+        call check(error, .not. found, "%get_valid_mask must report an unknown column through found=")
+        if (allocated(error)) return
+        call check(error, allocated(rowmask), "the row mask must come back allocated, not unallocated")
+        if (allocated(error)) return
+        call check(error, size(rowmask) == 0, "and zero-size, since the column does not exist")
+        if (allocated(error)) return
+        !
+        call t%get_valid_mask("nope", elemmask, found)
+        call check(error, .not. found, "the rank-2 form must report an unknown column too")
+        if (allocated(error)) return
+        call check(error, allocated(elemmask), "the element mask must come back allocated")
+        if (allocated(error)) return
+        call check(error, size(elemmask) == 0, "and zero-size")
+        if (allocated(error)) return
+        !
+        ! The negative control: a column that IS there answers normally through the same call.
+        call t%set_null("a", 2_int64)
+        call t%get_valid_mask("a", rowmask, found)
+        call check(error, found .and. size(rowmask) == 3, "a real column must still answer with a full-length mask")
+        if (allocated(error)) return
+        call check(error, .not. rowmask(2), "and the mask must report the null")
+    end subroutine test_get_valid_mask_missing
+    !
+    !> `%argsort_by` optionally reports where each group of tied rows begins, which is what lets a
+    !! caller sort within groups or aggregate by them without comparing the keys again. The
+    !! argument is optional and nothing passed it, so the branch that forwards it was dead --
+    !! and a local cannot be conditionally absent, so that branch is a genuine fork rather than
+    !! one call with a maybe-present argument.
+    !!
+    !! The fixture has deliberate ties: three distinct key values over five rows, so the offsets
+    !! must name three groups and their boundaries must fall where the value changes.
+    subroutine test_argsort_by_group_offsets(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int32) :: k(5) = [3, 1, 3, 2, 1]
+        integer(int64), allocatable :: perm(:), offsets(:)
+        !
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        ! group_nkeys is an INPUT -- how many leading keys must match for two rows to share a
+        ! group -- so it is given, not read back. group_offsets is the output.
+        call t%argsort_by(["k"], perm, group_offsets=offsets, group_nkeys=1)
+        !
+        call check(error, size(perm) == 5, "the permutation must cover every row")
+        if (allocated(error)) return
+        call check(error, allocated(offsets), "group_offsets= must come back allocated when asked for")
+        if (allocated(error)) return
+        ! Three distinct values, so three groups: offsets name the start of each plus the end.
+        call check(error, size(offsets) == 4, &
+            "three distinct key values must produce three groups, i.e. four boundaries")
+        if (allocated(error)) return
+        call check(error, offsets(1) == 1_int64 .and. offsets(size(offsets)) == 6_int64, &
+            "the boundaries must span the whole permutation, 1 .. nrows+1")
+        if (allocated(error)) return
+        ! Sorted ascending the groups are {1,1}, {2}, {3,3}: boundaries at 1, 3, 4, 6.
+        call check(error, offsets(2) == 3_int64 .and. offsets(3) == 4_int64, &
+            "the boundaries must fall where the key value changes, not at fixed intervals")
+        if (allocated(error)) return
+        ! And the same call with NEITHER grouping argument must still work: the two forms are
+        ! separate branches, because a local cannot be conditionally absent. (group_nkeys on its
+        ! own is refused -- without the boundaries it changes nothing -- so this is the other arm.)
+        deallocate(perm)
+        call t%argsort_by(["k"], perm)
+        call check(error, size(perm) == 5, "the no-offsets branch must still produce a full permutation")
+    end subroutine test_argsort_by_group_offsets
+    !
+    !> `parquet_row_index` is the reserved name of the automatic row-index column every table
+    !! offers. A file is free to contain a real column of that name, and then the two collide: the
+    !! automatic one wins, the file's own becomes unreachable, and the user is warned rather than
+    !! aborted (they may not own the file). Nothing had ever opened such a file, so the whole
+    !! shadowing path -- the warning, the slot removal, and the name-index rebuild after it -- was
+    !! dead.
+    !!
+    !! The assertions are about what survives: the shadowed column is gone from the column set, the
+    !! automatic row index still answers, and every OTHER column is still reachable by name -- that
+    !! last one is what the index rebuild is for, and a shift that forgot it would leave a column
+    !! findable at the wrong slot.
+    subroutine test_shadowed_row_index_column(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        integer(int32) :: a(3) = [10, 20, 30], shadow(3) = [7, 8, 9]
+        integer(int64) :: got
+        integer(int32) :: v
+        character(len=*), parameter :: f = "test_run/table_shadowed_row_index.parquet"
+        !
+        call parquet_open_writer(w, f)
+        call parquet_write_column(w, "a", a)
+        call parquet_write_column(w, PARQUET_ROW_INDEX, shadow)
+        call parquet_write_column(w, "b", a)
+        call parquet_close_writer(w)
+        !
+        call parquet_open_table(t, f)
+        ! The file's own column is dropped from the column set entirely.
+        call check(error, t%ncols() == 2, &
+            "the file's parquet_row_index column must be removed from the column set, not presented")
+        if (allocated(error)) return
+        call check(error, t%column_index("a") > 0 .and. t%column_index("b") > 0, &
+            "the surrounding columns must survive the shift, and stay findable by name -- which is " // &
+            "what the name-index rebuild after the shift exists for")
+        if (allocated(error)) return
+        ! The automatic row index answers, and answers with row numbers rather than the file's data.
+        call t%get_element(PARQUET_ROW_INDEX, 2_int64, got)
+        call check(error, got == 2_int64, &
+            "the AUTOMATIC row index must win the collision: row 2 is 2, not the file column's 8")
+        if (allocated(error)) return
+        call t%get_element("b", 3_int64, v)
+        call check(error, v == 30_int32, "a column after the shadowed one must still read its own values")
+    end subroutine test_shadowed_row_index_column
+    !
+    !> A read-in (Role-B) MAML may remap a file column onto a different internal name. When the name
+    !! it claims is one the table would otherwise present under its own name, the remap wins -- and
+    !! the check that answers "is this internal name already claimed by the remap?" had only ever
+    !! been asked about names it did not claim, so its .true. arm was dead.
+    subroutine test_maml_remap_claims_internal(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int64) :: v
+        character(len=*), parameter :: f = "test_run/table_remap_claims.parquet"
+        character(len=*), parameter :: m = "test_run/table_remap_claims.maml"
+        !
+        call write_basic_fixture(f)
+        ! The internal name `i32` reads the file's `i64` column -- and `i32` is the name one of
+        ! the file's OWN columns already has, so that column is deliberately shadowed out.
+        call write_maml_file(m, [character(len=60) :: &
+            "table: remapclaims", &
+            "extra:", &
+            "  remap:", &
+            "  - i32: i64" ])
+        call parquet_open_table(t, f, maml=m)
+        !
+        call check(error, t%has_column("i32"), "the remapped internal name must be present")
+        if (allocated(error)) return
+        call t%get_element("i32", 2_int64, v)
+        call check(error, v == 2000000000_int64, &
+            "the internal name must read the FILE column the remap points at (i64), not the file's " // &
+            "own column of the same name")
+        if (allocated(error)) return
+        ! The shadowing is the point: the file's own i32 is unreachable, and the column count is
+        ! one lower than the file's because that slot was never created.
+        call check(error, t%ncols() == 5, &
+            "the file column whose name the remap claimed must be shadowed out, not presented as well")
+    end subroutine test_maml_remap_claims_internal
+    !
+    !> `locate_fields_block` finds where a MAML's `fields:` block ends. Every fixture in the suite
+    !! ends its fields block at end-of-file, so the branch that stops at the NEXT top-level key --
+    !! a line starting in column 1 that is neither a continuation nor a list item -- never ran, and
+    !! a parser that ran past it would read the following section's lines as fields.
+    subroutine test_maml_fields_block_followed_by_key(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int32) :: v
+        character(len=:), allocatable :: u
+        character(len=*), parameter :: f = "test_run/table_fields_then_key.parquet"
+        character(len=*), parameter :: m = "test_run/table_fields_then_key.maml"
+        !
+        call write_basic_fixture(f)
+        ! `extra:` sits AFTER the fields block, so the block has to be terminated by it.
+        call write_maml_file(m, [character(len=40) :: &
+            "table: fieldsthenkey", &
+            "fields:", &
+            "- name: i32", &
+            "  data_type: int32", &
+            "  unit: kg", &
+            "extra:", &
+            "  keywords: one; two" ])
+        call parquet_open_table(t, f, maml=m)
+        !
+        call t%unit("i32", u)
+        call check(error, u == "kg", "the field declared before the trailing top-level key must still be read")
+        if (allocated(error)) return
+        call t%get_element("i32", 3_int64, v)
+        call check(error, v == 3_int32, "and the column must still read its values")
+        if (allocated(error)) return
+        ! The trailing section's own lines must NOT have been taken for fields.
+        call check(error, .not. t%has_column("keywords"), &
+            "a line belonging to the section after fields: must not become a column")
+    end subroutine test_maml_fields_block_followed_by_key
+    !
+    !> `%append(row)` copies one row of another table. A destination column whose counterpart in the
+    !! source is unusable -- absent, or present but holding no values -- receives a NULL row rather
+    !! than reading from a column that cannot answer. The suite only ever appended between tables
+    !! whose columns lined up, so the null-filling arm was dead, and a version that read anyway
+    !! would take its value from whatever the empty column's storage happened to hold.
+    subroutine test_append_row_unusable_source_column(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: dst, src
+        integer(int32) :: a(2) = [1, 2], b(2) = [10, 20]
+        integer(int32) :: got
+        !
+        call parquet_new_table(dst)
+        call dst%add_column("a", a)
+        call dst%add_column("b", b)
+        ! The source has only one of the two columns.
+        call parquet_new_table(src)
+        call src%add_column("a", a)
+        !
+        call dst%append(src%row(2_int64))
+        call check(error, dst%nrows() == 3_int64, "the appended row must be there")
+        if (allocated(error)) return
+        call dst%get_element("a", 3_int64, got)
+        call check(error, got == 2_int32, "the column the source HAS must be copied from it")
+        if (allocated(error)) return
+        call check(error, dst%is_null("b", 3_int64), &
+            "the column the source lacks must be filled with a null, not read from an absent column")
+        if (allocated(error)) return
+        call check(error, .not. dst%is_null("a", 3_int64), "and the copied column must not be nulled")
+    end subroutine test_append_row_unusable_source_column
+    !
+    !> `%argsort_by` comes in an int32-permutation form and an int64 one (CLAUDE.md's both-kinds
+    !! rule), and each carries its own copy of the `group_offsets=` present/absent fork -- a local
+    !! cannot be conditionally absent, so the branch cannot be shared. Only the int64 one had a
+    !! caller passing the offsets.
+    !!
+    !! The two forms must agree, which is what the assertion checks: same permutation, same
+    !! boundaries, one narrower integer kind.
+    subroutine test_argsort_by_group_offsets_int32(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int32) :: k(5) = [3, 1, 3, 2, 1]
+        integer(int32), allocatable :: perm32(:), off32(:)
+        integer(int64), allocatable :: perm64(:), off64(:)
+        !
+        call parquet_new_table(t)
+        call t%add_column("k", k)
+        call t%argsort_by(["k"], perm32, group_offsets=off32, group_nkeys=1)
+        call t%argsort_by(["k"], perm64, group_offsets=off64, group_nkeys=1)
+        !
+        call check(error, size(perm32) == 5, "the int32 form must produce a full permutation")
+        if (allocated(error)) return
+        call check(error, allocated(off32), "the int32 form must allocate group_offsets= when asked")
+        if (allocated(error)) return
+        call check(error, size(off32) == size(off64), "the two kinds must find the same number of groups")
+        if (allocated(error)) return
+        call check(error, all(int(off32, int64) == off64), "and the same boundaries")
+        if (allocated(error)) return
+        call check(error, all(int(perm32, int64) == perm64), "and the same row order")
+        if (allocated(error)) return
+        ! The no-offsets arm of the int32 form, which is the other half of the same fork.
+        deallocate(perm32)
+        call t%argsort_by(["k"], perm32)
+        call check(error, size(perm32) == 5, "the int32 no-offsets branch must still permute every row")
+    end subroutine test_argsort_by_group_offsets_int32
+    !
+    !> `bind_predefined`'s `units=` fills in a declared unit, and must not overwrite one the column
+    !! already has -- a read-in MAML's `unit:` is the more specific statement about this particular
+    !! file, while the generated type's declaration describes the schema in general. The
+    !! already-has-one arm had no caller.
+    !!
+    !! The fixture declares a unit on `i32` in the MAML and a DIFFERENT one in `units=`, so an
+    !! overwrite is visible rather than a no-op; `i64` has none in the MAML, so the declared one
+    !! must land.
+    subroutine test_bind_predefined_units(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        character(len=:), allocatable :: u
+        character(len=*), parameter :: f = "test_run/table_bind_units.parquet"
+        character(len=*), parameter :: m = "test_run/table_bind_units.maml"
+        !
+        call write_basic_fixture(f)
+        call write_maml_file(m, [character(len=40) :: &
+            "table: bindunits", &
+            "fields:", &
+            "- name: i32", &
+            "  data_type: int32", &
+            "  unit: km" ])
+        call parquet_open_table(t, f, maml=m)
+        call t%unit("i32", u)
+        call check(error, u == "km", "precondition: the MAML should have given i32 a unit")
+        if (allocated(error)) return
+        !
+        call t%bind_predefined([character(len=4) :: "i32", "i64"], [PK_INT32, PK_INT64], [1, 1], &
+            [.true., .true.], units=[character(len=4) :: "m", "s"])
+        !
+        call t%unit("i32", u)
+        call check(error, u == "km", &
+            "a column that already has a unit must keep it -- the read-in MAML is the more " // &
+            "specific statement about this file")
+        if (allocated(error)) return
+        call t%unit("i64", u)
+        call check(error, u == "s", "a column with no unit must receive the declared one")
+    end subroutine test_bind_predefined_units
+    !
+    !> A predefined column may be declared with a VECTOR kind, and the file may hold a different
+    !! vector kind -- so the deferred cast has to reduce both to the scalar kind they are built
+    !! from before deciding whether the conversion is lossless. Every existing bind declared scalar
+    !! kinds, so all four vector arms of that reduction were dead, and a bind that compared the
+    !! vector discriminators directly would call every vector-to-vector conversion lossy.
+    subroutine test_bind_predefined_vector_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        integer(int64), allocatable :: got(:,:)
+        character(len=*), parameter :: f = "test_run/table_bind_vector_kind.parquet"
+        !
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        call check(error, t%kind("v_i32") == PK_INT32_VEC, "precondition: the fixture's v_i32 is an int32 vector")
+        if (allocated(error)) return
+        !
+        ! Declared WIDER than the file holds: int32 vector -> int64 vector is lossless, so no
+        ! warning, and the values must survive the widening exactly.
+        call t%bind_predefined([character(len=8) :: "v_i32"], [PK_INT64_VEC], [NVEC], [.true.])
+        call check(error, t%kind("v_i32") == PK_INT64_VEC, &
+            "the declared vector kind must be applied, so the column reports it")
+        if (allocated(error)) return
+        call t%get("v_i32", got)
+        call check(error, size(got, 1) == NVEC, "the width must be preserved by the vector cast")
+        if (allocated(error)) return
+        call check(error, got(1, 1) == 11_int64, "and the values must survive the widening exactly")
+    end subroutine test_bind_predefined_vector_kind
+    !
+    !> When `parquet_write_table` writes a schema it records each temporal column's unit as a
+    !! `[us]`-style token. A column built in memory has no unit recorded at all -- nothing put one
+    !! there -- and must then write no token rather than an invented default, which is the arm
+    !! nothing reached: every temporal column the suite wrote came from a file or a MAML that had
+    !! already fixed its unit.
+    !!
+    !! The schema also carries no metadata, which is the other untested state: the "does this
+    !! schema already declare this key?" check has to answer for a schema whose metadata was never
+    !! allocated at all.
+    subroutine test_write_table_temporal_no_unit(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t, back
+        type(parquet_date) :: d(3)
+        type(parquet_timestamp) :: ts(3)
+        type(parquet_date), allocatable :: dback(:)
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_write_temporal_nounit.parquet"
+        !
+        do i = 1, 3
+            call d(i)%set(2026, 8, 10 + i)
+            call ts(i)%set(2026, 8, 10 + i, 12, 0, 0)
+        end do
+        call parquet_new_table(t)
+        call t%add_column("d", d)
+        call t%add_column("ts", ts)
+        !
+        ! write_maml=.true. is what makes the schema (and so the unit token) actually be built.
+        call parquet_write_table(t, f, write_maml=.true.)
+        !
+        call parquet_open_table(back, f)
+        call check(error, back%nrows() == 3_int64, "the file must hold every row")
+        if (allocated(error)) return
+        call check(error, back%kind("d") == PK_DATE, "the date column must come back as a date")
+        if (allocated(error)) return
+        call back%get("d", dback)
+        call check(error, dback(2) == d(2), "and its values must round-trip")
+        if (allocated(error)) return
+        call check(error, back%kind("ts") == PK_TIMESTAMP, "the timestamp column must come back as a timestamp")
+    end subroutine test_write_table_temporal_no_unit
+    !
+
+    !> `bind_scalar_kind` reduces a vector kind to the scalar kind it is built from, so that the
+    !! lossless-conversion rule is written once instead of once per rank. It has one arm per vector
+    !! kind, and the two FLOAT ones had no caller -- the int arms are covered by the sibling test,
+    !! and nothing bound a float vector column at all.
+    subroutine test_bind_predefined_float_vector_kind(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t
+        real(real64), allocatable :: got(:,:)
+        character(len=*), parameter :: f = "test_run/table_bind_float_vector.parquet"
+        !
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+        call check(error, t%kind("v_f32") == PK_FLOAT32_VEC, &
+            "precondition: the fixture's v_f32 is a float32 vector")
+        if (allocated(error)) return
+        !
+        ! float32 vector -> float64 vector: both arms of the reduction, in one call.
+        call t%bind_predefined([character(len=8) :: "v_f32"], [PK_FLOAT64_VEC], [NVEC], [.true.])
+        call check(error, t%kind("v_f32") == PK_FLOAT64_VEC, &
+            "the declared float vector kind must be applied")
+        if (allocated(error)) return
+        call t%get("v_f32", got)
+        call check(error, size(got, 1) == NVEC, "the width must survive the vector cast")
+        if (allocated(error)) return
+        call check(error, abs(got(1, 1)) >= 0.0_real64, "and the values must be readable afterwards")
+    end subroutine test_bind_predefined_float_vector_kind
+    !
+    !> `copy_metadata=` carries the source file's metadata into the output, except for keys the
+    !! output schema declares itself. Deciding that means asking the schema whether it declares a
+    !! key -- and a schema that was never given any metadata at all has no items array to search,
+    !! which is a state the existing carry test cannot reach because its schema declares one key.
+    subroutine test_write_table_copy_metadata_bare_schema(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_writer) :: w
+        type(parquet_table) :: t, back
+        type(parquet_schema) :: src_s, out_s
+        real(real64) :: v(NROW)
+        character(len=:), allocatable :: val
+        logical :: ok
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_copymeta_bare_in.parquet"
+        character(len=*), parameter :: fo = "test_run/table_copymeta_bare_out.parquet"
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+        end do
+        call src_s%init("source")
+        call src_s%add_field("v", "float64")
+        call parquet_parse_maml(src_s)
+        call src_s%add_metadata("origin", "survey_B")
+        call parquet_open_writer(w, f, src_s)
+        call parquet_write_column(w, "v", v)
+        call parquet_close_writer(w)
+        !
+        ! The output schema declares NO metadata at all -- the state under test.
+        call out_s%init("dest")
+        call out_s%add_field("v", "float64")
+        call parquet_parse_maml(out_s)
+        !
+        call parquet_open_table(t, f)
+        call t%materialize_all()
+        call t%truncate(3)
+        call parquet_write_table(t, fo, out_s, copy_metadata=.true.)
+        !
+        call parquet_open_table(back, fo)
+        call back%get_file_metadata("origin", val, found=ok)
+        call check(error, ok, &
+            "a carried key must still arrive when the output schema declares no metadata of its own")
+        if (allocated(error)) return
+        call check(error, val == "survey_B", "and must carry the source file's value")
+    end subroutine test_write_table_copy_metadata_bare_schema
+    !
+    !> A slice covers only part of a file, and two queries have to be answered in ITS scope rather
+    !! than the whole file's: whether a column holds nulls (asked of the row groups the slice
+    !! actually covers, so a slice is not told about nulls in rows it does not hold), and where its
+    !! row-group boundaries fall. Both had only ever been asked of whole-file tables.
+    subroutine test_slice_has_nulls_and_bounds(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table) :: t, whole
+        integer(int64), allocatable :: bounds(:,:)
+        integer, parameter :: N = 20, CH = 7, LO = 8, HI = 14
+        integer :: i
+        character(len=*), parameter :: f = "test_run/table_slice_nulls_bounds.parquet"
+        !
+        call write_slice_fixture(f, N, CH)
+        call parquet_open_table(whole, f)
+        call parquet_open_table(t, f, LO, HI)
+        call check(error, t%nrows() == int(HI - LO + 1, int64), "precondition: the slice holds its own rows")
+        if (allocated(error)) return
+        !
+        ! Asked before anything is read, so the answer comes from the footer, scoped to the slice's
+        ! own row groups rather than the file's.
+        call check(error, t%has_nulls("s_i32") .eqv. whole%has_nulls("s_i32"), &
+            "a slice must answer has_nulls from the footer, scoped to the row groups it covers")
+        if (allocated(error)) return
+        !
+        call t%row_group_bounds(bounds)
+        call check(error, size(bounds, 1) == 2, "row_group_bounds must return (2, ngroups)")
+        if (allocated(error)) return
+        call check(error, size(bounds, 2) >= 1, "a slice spanning two row groups must report at least one")
+        if (allocated(error)) return
+        call check(error, bounds(1, 1) == 1_int64, &
+            "a slice's bounds are in the slice's OWN row numbering, so the first group starts at row 1")
+        if (allocated(error)) return
+        ! Contiguity is the invariant that distinguishes slice coordinates from file ones: a set of
+        ! bounds still in FILE numbering would start at 8 rather than 1, and one that mixed the two
+        ! would leave a gap here.
+        do i = 2, size(bounds, 2)
+            if (bounds(1, i) /= bounds(2, i - 1) + 1_int64) then
+                call check(error, .false., "a slice's row-group bounds must be contiguous")
+                return
+            end if
+        end do
+        call check(error, bounds(2, size(bounds, 2)) >= t%nrows(), &
+            "the covering row groups must reach at least the slice's last row")
+    end subroutine test_slice_has_nulls_and_bounds
     !
 end module test_table

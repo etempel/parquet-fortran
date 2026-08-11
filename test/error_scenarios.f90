@@ -12,6 +12,10 @@ program error_scenarios
     use parquet
     use parquet_maml_base, only: parquet_maml_file, get_parquet_maml
     use parquet_strings, only : parquet_string_column, parquet_string
+    ! parquet_emit_info is deliberately PRIVATE in the `parquet` facade (it is an output
+    ! channel, not user API), so the informational-channel scenario imports it from the
+    ! settings module directly.
+    use parquet_settings, only : parquet_emit_info
     use parquet_columns
     use parquet_table_example, only : parquet_table_test
     use parquet_tables
@@ -332,6 +336,22 @@ program error_scenarios
         call scenario_settings_env_bad_token()
     case ("settings_env_not_an_integer")
         call scenario_settings_env_not_an_integer()
+    case ("settings_env_too_long")
+        call scenario_settings_env_too_long()
+    case ("settings_env_int32_out_of_range")
+        call scenario_settings_env_int32_out_of_range()
+    case ("settings_env_long_value_preview")
+        call scenario_settings_env_long_value_preview()
+    case ("settings_emit_info_channel")
+        call scenario_settings_emit_info_channel()
+    case ("strings_reindex_duplicate_index")
+        call scenario_strings_reindex_duplicate_index()
+    case ("strings_reindex_trusted_length_mismatch")
+        call scenario_strings_reindex_trusted_length_mismatch()
+    case ("strings_copy_buffers_offsets_too_short")
+        call scenario_strings_copy_buffers_offsets_too_short()
+    case ("strings_copy_buffers_data_too_short")
+        call scenario_strings_copy_buffers_data_too_short()
     case ("settings_env_two_numbers")
         call scenario_settings_env_two_numbers()
     case ("settings_env_out_of_range")
@@ -1498,6 +1518,22 @@ program error_scenarios
         call scenario_table_cast_fractional()
     case ("table_cast_float_overflow")
         call scenario_table_cast_float_overflow()
+    case ("table_bind_predefined_size_mismatch")
+        call scenario_table_bind_predefined_size_mismatch()
+    case ("table_bind_predefined_units_size_mismatch")
+        call scenario_table_bind_predefined_units_size_mismatch()
+    case ("table_bind_predefined_lossy_warning")
+        call scenario_table_bind_predefined_lossy_warning()
+    case ("table_bind_predefined_computed_name_taken")
+        call scenario_table_bind_predefined_computed_name_taken()
+    case ("table_set_rows_valid_length_mismatch")
+        call scenario_table_set_rows_valid_length_mismatch()
+    case ("table_set_elem_valid_shape_mismatch")
+        call scenario_table_set_elem_valid_shape_mismatch()
+    case ("table_set_rows_elem_valid_shape_mismatch")
+        call scenario_table_set_rows_elem_valid_shape_mismatch()
+    case ("table_set_slice_size_mismatch")
+        call scenario_table_set_slice_size_mismatch()
     case ("table_cast_exact_i32_to_f32")
         call scenario_table_cast_exact_i32_to_f32()
     case ("table_cast_exact_i64_to_f32")
@@ -4009,6 +4045,120 @@ contains
         call parquet_settings_from_env()   ! -> aborts (not an integer)
         print '(a)', "unexpectedly accepted two numbers as one integer from the environment"
     end subroutine scenario_settings_env_two_numbers
+
+    !> An environment variable longer than the fixed buffer the reader uses is refused rather than
+    !> applied truncated -- a truncated number is a plausible-looking wrong value, which is exactly
+    !> the failure this whole strict-parsing family exists to prevent.
+    subroutine scenario_settings_env_too_long()
+        character(len=5000) :: huge_value
+
+        huge_value = repeat("1", 5000)
+        call scenario_setenv("PARQUET_FORTRAN_SORT_THREADS", trim(huge_value))
+        call parquet_settings_from_env()   ! -> aborts (longer than the buffer)
+        print '(a)', "unexpectedly accepted an over-long environment value"
+    end subroutine scenario_settings_env_too_long
+
+    !> A knob whose Fortran type is a default INTEGER is parsed in int64 first and then range-checked,
+    !> so that a value beyond int32 is refused rather than wrapping into a plausible small number.
+    !> The int64 parse succeeding is what makes this a different failure from "not an integer".
+    subroutine scenario_settings_env_int32_out_of_range()
+
+        call scenario_setenv("PARQUET_FORTRAN_SORT_THREADS", "3000000000")
+        call parquet_settings_from_env()   ! parses as int64, does not fit int32 -> aborts
+        print '(a)', "unexpectedly accepted a value beyond the range of a default INTEGER"
+    end subroutine scenario_settings_env_int32_out_of_range
+
+    !> The rejection message echoes the offending value, which is caller-controlled text of
+    !> unbounded length -- and ifx's ERROR STOP runtime corrupts the heap once the composed message
+    !> reaches 8192 bytes, so the guard caps it to a short preview (CLAUDE.md). This is the value
+    !> that exercises the capping: long enough to be truncated, short enough to reach the parser.
+    subroutine scenario_settings_env_long_value_preview()
+        character(len=300) :: long_value
+
+        long_value = repeat("x", 300)
+        call scenario_setenv("PARQUET_FORTRAN_SORT_THREADS", trim(long_value))
+        call parquet_settings_from_env()   ! -> aborts, with the value shown truncated
+        print '(a)', "unexpectedly accepted a long non-numeric environment value"
+    end subroutine scenario_settings_env_long_value_preview
+
+    !> Not an error scenario: `parquet_emit_info` is the INFORMATIONAL output channel, the quietest
+    !> of the three, and `verbosity="silent"` is meant to suppress it while leaving real warnings
+    !> alone. Its only call site in the library is a development-build remark that a released build
+    !> never reaches, so nothing exercised the channel itself.
+    !>
+    !> Both halves are printed here: the message at the default verbosity, then a second one with
+    !> `verbosity="silent"` set, which must NOT appear. The second is the negative control -- a
+    !> channel that ignored the setting would still pass a test that only looked for the first.
+    subroutine scenario_settings_emit_info_channel()
+
+        call parquet_emit_info("info-channel-marker-visible")
+        call parquet_set_verbosity("silent")
+        call parquet_emit_info("info-channel-marker-suppressed")
+        call parquet_reset_settings()
+        print '(a)', "emit_info channel exercised"
+    end subroutine scenario_settings_emit_info_channel
+
+    !> `%reindex` validates its permutation before applying it: an out-of-range entry and a
+    !> DUPLICATE entry are separate mistakes with separate messages, because a duplicate is the one
+    !> that would otherwise silently drop an element and copy another twice, leaving a column that
+    !> still validates. The valid reindex first is the negative control.
+    subroutine scenario_strings_reindex_duplicate_index()
+        type(parquet_string_column) :: c
+
+        call c%append_string("a")
+        call c%append_string("b")
+        call c%append_string("c")
+        call c%reindex([3_int64, 1_int64, 2_int64])   ! a real permutation: must NOT abort
+        print '(a,i0)', "applied a valid permutation, size=", c%size()
+        call c%reindex([1_int64, 2_int64, 2_int64])   ! 2 twice, 3 never -> aborts
+        print '(a)', "unexpectedly accepted a permutation with a duplicate index"
+    end subroutine scenario_strings_reindex_duplicate_index
+
+    !> `%reindex_trusted` skips the O(n) range and duplicate scan for a caller that has already
+    !> established the permutation is one -- but it keeps the O(1) LENGTH check, because a
+    !> wrong-length permutation is a caller bug no amount of trust makes safe.
+    subroutine scenario_strings_reindex_trusted_length_mismatch()
+        type(parquet_string_column) :: c
+
+        call c%append_string("a")
+        call c%append_string("b")
+        call c%append_string("c")
+        call c%reindex_trusted([3_int64, 1_int64, 2_int64])   ! right length: must NOT abort
+        print '(a,i0)', "applied a trusted permutation, size=", c%size()
+        call c%reindex_trusted([1_int64, 2_int64])            ! two entries for three rows -> aborts
+        print '(a)', "unexpectedly accepted a trusted permutation of the wrong length"
+    end subroutine scenario_strings_reindex_trusted_length_mismatch
+
+    !> `%copy_buffers` writes into caller-supplied arrays, so it checks both of them before writing
+    !> anything -- an undersized offsets array is an out-of-bounds write, which a plain Fortran
+    !> build does not catch. The correctly-sized call first is the negative control.
+    subroutine scenario_strings_copy_buffers_offsets_too_short()
+        type(parquet_string_column) :: c
+        integer(int64) :: ok_offs(3), small_offs(2)
+        character(len=1) :: data(3)
+
+        call c%append_string("ab")
+        call c%append_string("c")
+        call c%copy_buffers(ok_offs, data)      ! size()+1 = 3: must NOT abort
+        print '(a,i0)', "copied into a correctly sized offsets array, last offset=", ok_offs(3)
+        call c%copy_buffers(small_offs, data)   ! 2 entries for size()+1 = 3 -> aborts
+        print '(a)', "unexpectedly accepted an offsets array shorter than size()+1"
+    end subroutine scenario_strings_copy_buffers_offsets_too_short
+
+    !> The payload half of the same check; separate because the two arrays are sized from different
+    !> quantities (element count against byte count) and a caller can get either one wrong alone.
+    subroutine scenario_strings_copy_buffers_data_too_short()
+        type(parquet_string_column) :: c
+        integer(int64) :: offs(3)
+        character(len=1) :: ok_data(3), small_data(2)
+
+        call c%append_string("ab")
+        call c%append_string("c")
+        call c%copy_buffers(offs, ok_data)      ! character_size() = 3: must NOT abort
+        print '(a,i0)', "copied into a correctly sized data array, bytes=", c%character_size()
+        call c%copy_buffers(offs, small_data)   ! 2 bytes for 3 -> aborts
+        print '(a)', "unexpectedly accepted a data array shorter than character_size()"
+    end subroutine scenario_strings_copy_buffers_data_too_short
 
     !> A well-formed number the SETTER rejects. Proves the setter still does the range checking, so
     !> an environment value and a direct call fail identically rather than through two different
@@ -12745,6 +12895,152 @@ contains
     !! the same `exact=.true.`: that is the negative control, and it must be a separate column
     !! rather than a round trip through the same one -- casting `b` down and back would round the
     !! offending value away and leave the scenario asserting nothing.
+    !> `bind_predefined` takes four parallel arrays describing a generated type's columns. They are
+    !! written by a code generator, so a length disagreement means the generator is out of step
+    !! with itself -- and a bind that read past the shortest of them would attach a column to
+    !! another column's kind, silently.
+    !!
+    !! A correctly-sized bind first is the negative control.
+    subroutine scenario_table_bind_predefined_size_mismatch()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%bind_predefined([character(len=4) :: "a", "b"], [PK_INT32, PK_INT64], [1, 1], &
+            [.false., .false.])                                   ! consistent: must NOT abort
+        print '(a,i0)', "bound two predefined columns, ncols=", t%ncols()
+        call parquet_new_table(t)
+        call t%bind_predefined([character(len=4) :: "a", "b"], [PK_INT32], [1, 1], &
+            [.false., .false.])                                   ! kinds is one short -> aborts
+        print '(a)', "unexpectedly accepted mismatched predefined array sizes"
+    end subroutine scenario_table_bind_predefined_size_mismatch
+
+    !> `units=` is optional, so its length is checked separately from the four required arrays --
+    !! and therefore has its own way of going wrong.
+    subroutine scenario_table_bind_predefined_units_size_mismatch()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%bind_predefined([character(len=4) :: "a", "b"], [PK_INT32, PK_INT64], [1, 1], &
+            [.false., .false.], units=[character(len=2) :: "m", "s"])   ! matched: must NOT abort
+        print '(a,i0)', "bound two predefined columns with units, ncols=", t%ncols()
+        call parquet_new_table(t)
+        call t%bind_predefined([character(len=4) :: "a", "b"], [PK_INT32, PK_INT64], [1, 1], &
+            [.false., .false.], units=[character(len=2) :: "m"])        ! one unit for two -> aborts
+        print '(a)', "unexpectedly accepted a units array of the wrong length"
+    end subroutine scenario_table_bind_predefined_units_size_mismatch
+
+    !> A `source: computed` field creates a column that has no file behind it, so the name must be
+    !! free. Binding one whose name is already taken would otherwise either overwrite a column the
+    !! table already holds or leave two columns answering to one name.
+    !!
+    !! The first bind is the negative control: the same declaration on a free name succeeds.
+    !> Not an error scenario: a predefined column declared NARROWER than the file holds is a
+    !! warning, not an abort. The declaration is a contract the file does not have to honour
+    !! exactly, and a caller who declared the narrower kind may well have meant it -- so the bind
+    !! proceeds and says so, rather than refusing.
+    !!
+    !! The warning is derived from the KIND PAIR before a byte is read, which is what keeps the
+    !! single-pass decode the deferred cast exists for. The WIDENING bind first is the negative
+    !! control: int32 -> int64 loses nothing, so it must stay silent.
+    subroutine scenario_table_bind_predefined_lossy_warning()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        character(len=*), parameter :: out_file = "test_run/error_scenario_bind_lossy.parquet"
+
+        call parquet_open_writer(w, out_file)
+        call parquet_write_column(w, "narrow", [1_int32, 2_int32, 3_int32])
+        call parquet_write_column(w, "wide", [1_int64, 2_int64, 3_int64])
+        call parquet_close_writer(w)
+
+        call parquet_open_table(t, out_file)
+        ! int32 in the file, declared int64: a widening, so no warning.
+        call t%bind_predefined([character(len=8) :: "narrow"], [PK_INT64], [1], [.true.])
+        ! int64 in the file, declared int32: values may not fit -- warns, and still binds.
+        call t%bind_predefined([character(len=8) :: "wide"], [PK_INT32], [1], [.true.])
+        print '(a,i0)', "bound both columns; wide is now kind ", t%kind("wide")
+    end subroutine scenario_table_bind_predefined_lossy_warning
+
+    subroutine scenario_table_bind_predefined_computed_name_taken()
+        type(parquet_table) :: t
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call t%bind_predefined([character(len=4) :: "b"], [PK_INT32], [1], [.false.])  ! free name
+        print '(a,i0)', "bound a computed column on a free name, ncols=", t%ncols()
+        call t%bind_predefined([character(len=4) :: "a"], [PK_INT32], [1], [.false.])  ! taken -> aborts
+        print '(a)', "unexpectedly bound a computed column over an existing one"
+    end subroutine scenario_table_bind_predefined_computed_name_taken
+
+    !> Writing a scattered row selection with `is_valid=` pairs one validity entry with each
+    !! SELECTED row, not with each row of the table. A mismatch means the caller built the mask
+    !! against the wrong thing, and applying it anyway would null rows it never named.
+    !!
+    !! The matched call first is the negative control.
+    subroutine scenario_table_set_rows_valid_length_mismatch()
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32, 4_int32])
+        s = parquet_slice_list([3, 1])
+        call t%set_slice("a", s, [30_int32, 10_int32], is_valid=[.true., .false.])  ! matched
+        print '(a,l1)', "wrote a two-row selection with a two-entry mask, row 1 null: ", t%is_null("a", 1_int64)
+        call t%set_slice("a", s, [30_int32, 10_int32], is_valid=[.true., .false., .true.])
+        print '(a)', "unexpectedly accepted an is_valid longer than the selection"
+    end subroutine scenario_table_set_rows_valid_length_mismatch
+
+    !> A rank-2 `is_valid=` on a whole-column write is per ELEMENT and must be shaped exactly
+    !! (width, nrows). Checked on both extents rather than on the total, so a transposed mask is
+    !! rejected instead of being applied the wrong way round.
+    subroutine scenario_table_set_elem_valid_shape_mismatch()
+        type(parquet_table) :: t
+        integer(int32) :: v(2, 3)
+        logical :: ok_mask(2, 3), bad_mask(3, 2)
+        v = 1_int32
+        call parquet_new_table(t)
+        call t%add_column("v", v)
+        ok_mask = .true.
+        ok_mask(1, 2) = .false.
+        call t%set("v", v, is_valid=ok_mask)          ! correctly shaped: must NOT abort
+        print '(a,l1)', "wrote a (2,3) column with a (2,3) mask, element null: ", t%is_null("v", 2_int64, 1_int64)
+        bad_mask = .true.
+        call t%set("v", v, is_valid=bad_mask)         ! (3,2) for a (2,3) column -> aborts
+        print '(a)', "unexpectedly accepted a transposed element mask"
+    end subroutine scenario_table_set_elem_valid_shape_mismatch
+
+    !> The two rules above at once: a scattered selection of a VECTOR column, whose `is_valid=` is
+    !! shaped (width, selected rows). Its own check, because neither of the other two knows about
+    !! both axes.
+    subroutine scenario_table_set_rows_elem_valid_shape_mismatch()
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        integer(int32) :: v(2, 4), w(2, 2)
+        logical :: ok_mask(2, 2), bad_mask(2, 3)
+        v = 1_int32
+        w = 5_int32
+        call parquet_new_table(t)
+        call t%add_column("v", v)
+        s = parquet_slice_list([3, 1])
+        ok_mask = .true.
+        ok_mask(2, 1) = .false.
+        call t%set_slice("v", s, w, is_valid=ok_mask)    ! (2,2) for a two-row selection: OK
+        print '(a,l1)', "wrote a two-row vector selection, element null: ", t%is_null("v", 3_int64, 2_int64)
+        bad_mask = .true.
+        call t%set_slice("v", s, w, is_valid=bad_mask)   ! (2,3) for a two-row selection -> aborts
+        print '(a)', "unexpectedly accepted an element mask wider than the selection"
+    end subroutine scenario_table_set_rows_elem_valid_shape_mismatch
+
+    !> A slice write pairs one value with each selected row. A length disagreement is the caller
+    !! having built the array against a different selection, and writing what fits would put values
+    !! on rows they were never meant for -- the values are all legal, so nothing downstream notices.
+    subroutine scenario_table_set_slice_size_mismatch()
+        type(parquet_table) :: t
+        type(parquet_slice) :: s
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32, 3_int32, 4_int32])
+        s = parquet_slice_list([3, 1])
+        call t%set_slice("a", s, [30_int32, 10_int32])       ! two values, two rows: must NOT abort
+        print '(a,i0)', "wrote a two-row selection, ncols=", t%ncols()
+        call t%set_slice("a", s, [30_int32, 10_int32, 99_int32])  ! three values, two rows -> aborts
+        print '(a)', "unexpectedly accepted an array longer than the selection"
+    end subroutine scenario_table_set_slice_size_mismatch
+
     subroutine scenario_table_cast_exact_i32_to_f32()
         type(parquet_table) :: t
         call parquet_new_table(t)

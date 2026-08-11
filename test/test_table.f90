@@ -173,6 +173,8 @@ contains
                 test_col_handle_every_kind), &
             new_unittest("all 18 kinds: %get_slice(found=) on a missing column", &
                 test_slice_found_every_kind), &
+            new_unittest("all 18 kinds: %get_element(found=) on a missing column", &
+                test_get_element_found_every_kind), &
             new_unittest("widening: every narrow-to-wide route", test_widening_every_route), &
             new_unittest("all 18 kinds: %print_stat summarizes every one", &
                 test_print_stat_every_kind), &
@@ -4894,20 +4896,16 @@ contains
                 "v_ts %get_slice(found=) must report a miss with an allocated empty result")
         end block
         if (allocated(error)) return
-        ! ---- the three STRING forms, which differ from the sixteen above on this exact path ----
-        !
-        ! They return `arr` UNALLOCATED on a miss, where every typed form allocates it empty. The
-        ! assertions below pin the behaviour as it actually is rather than as the typed forms
-        ! would suggest, so that a future decision to harmonize the two shows up here as a
-        ! deliberate change instead of passing unnoticed. `allocated(sl)` is therefore part of
-        ! this API's contract for a string column and a caller must test it.
+        ! ---- the three STRING forms, which reach the same miss path by their own route ----
         block
             character(len=:), allocatable :: sl(:)
             type(parquet_string_column) :: sc
             call t%get_slice("no_such_s_str", s, sl, found=got)
-            call check(error, .not. got .and. .not. allocated(sl), &
-                "s_str %get_slice(found=) must report a miss and leave the result unallocated")
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "s_str %get_slice(found=) must report a miss with an allocated empty result")
             if (allocated(error)) return
+            ! The parquet_string_column form needs no allocation: an intent(out) derived type is
+            ! default-initialized, and an empty store IS the empty result.
             call t%get_slice("no_such_s_str", s, sc, found=got)
             call check(error, .not. got .and. sc%size() == 0_int64, &
                 "the parquet_string_column %get_slice(found=) must report a miss with an empty store")
@@ -4916,8 +4914,8 @@ contains
         block
             character(len=:), allocatable :: sl(:,:)
             call t%get_slice("no_such_v_str", s, sl, found=got)
-            call check(error, .not. got .and. .not. allocated(sl), &
-                "v_str %get_slice(found=) must report a miss and leave the result unallocated")
+            call check(error, .not. got .and. allocated(sl) .and. size(sl) == 0, &
+                "v_str %get_slice(found=) must report a miss with an allocated empty result")
         end block
     end subroutine test_slice_found_every_kind
     !
@@ -5052,6 +5050,143 @@ contains
         call check(error, t%is_null("s_i32", 2_int64), &
             "%print_stat must summarize without disturbing the data it reports on")
     end subroutine test_print_stat_every_kind
+    !
+    !> **`%get_element(..., found=)` on every kind.** One rule holds across `%get`, `%get_slice`
+    !> and `%get_element`: a reported miss leaves the result DEFINED AND EMPTY, never undefined.
+    !> That is what lets a program which ignores `found` read an empty result rather than
+    !> something it must not touch -- the guarantee doc/pages/tables/table.md states for `%get`.
+    !>
+    !> For a scalar receiver "empty" means a defined zero, blank or null element; for a vector or
+    !> string-vector receiver it means a zero-length ALLOCATED array. The vector forms are the
+    !> ones worth asserting: their receiver is allocatable, so a body that simply returned would
+    !> leave the caller holding an unallocated array that `size()` may not even be applied to.
+    subroutine test_get_element_found_every_kind(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        logical :: got
+        character(len=*), parameter :: f = "test_run/table_getelem_found_every_kind.parquet"
+
+        call write_matrix_fixture(f)
+        call parquet_open_table(t, f)
+
+        block
+            integer(int32) :: v
+            call t%get_element("no_such_" // "s_i32", 1_int64, v, found=got)
+            call check(error, .not. got, "s_i32 %get_element(found=) must report a miss")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64) :: v
+            call t%get_element("no_such_" // "s_i64", 1_int64, v, found=got)
+            call check(error, .not. got, "s_i64 %get_element(found=) must report a miss")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32) :: v
+            call t%get_element("no_such_" // "s_f32", 1_int64, v, found=got)
+            call check(error, .not. got, "s_f32 %get_element(found=) must report a miss")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64) :: v
+            call t%get_element("no_such_" // "s_f64", 1_int64, v, found=got)
+            call check(error, .not. got, "s_f64 %get_element(found=) must report a miss")
+        end block
+        if (allocated(error)) return
+        block
+            logical :: v
+            call t%get_element("no_such_" // "s_bool", 1_int64, v, found=got)
+            call check(error, .not. got, "s_bool %get_element(found=) must report a miss")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date) :: v
+            call t%get_element("no_such_" // "s_date", 1_int64, v, found=got)
+            call check(error, .not. got, "s_date %get_element(found=) must report a miss")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time) :: v
+            call t%get_element("no_such_" // "s_time", 1_int64, v, found=got)
+            call check(error, .not. got, "s_time %get_element(found=) must report a miss")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp) :: v
+            call t%get_element("no_such_" // "s_ts", 1_int64, v, found=got)
+            call check(error, .not. got, "s_ts %get_element(found=) must report a miss")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int32), allocatable :: v(:)
+            call t%get_element("no_such_" // "v_i32", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_i32 %get_element(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            integer(int64), allocatable :: v(:)
+            call t%get_element("no_such_" // "v_i64", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_i64 %get_element(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            real(real32), allocatable :: v(:)
+            call t%get_element("no_such_" // "v_f32", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_f32 %get_element(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            real(real64), allocatable :: v(:)
+            call t%get_element("no_such_" // "v_f64", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_f64 %get_element(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            logical, allocatable :: v(:)
+            call t%get_element("no_such_" // "v_bool", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_bool %get_element(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_date), allocatable :: v(:)
+            call t%get_element("no_such_" // "v_date", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_date %get_element(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_time), allocatable :: v(:)
+            call t%get_element("no_such_" // "v_time", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_time %get_element(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            type(parquet_timestamp), allocatable :: v(:)
+            call t%get_element("no_such_" // "v_ts", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_ts %get_element(found=) must report a miss with an allocated empty result")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=:), allocatable :: v
+            call t%get_element("no_such_s_str", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. len(v) == 0, &
+                "s_str %get_element(found=) must report a miss with an allocated empty string")
+        end block
+        if (allocated(error)) return
+        block
+            character(len=:), allocatable :: v(:)
+            call t%get_element("no_such_v_str", 1_int64, v, found=got)
+            call check(error, .not. got .and. allocated(v) .and. size(v) == 0, &
+                "v_str %get_element(found=) must report a miss with an allocated empty result")
+        end block
+    end subroutine test_get_element_found_every_kind
     !
     !> Builds the parsed schema that writes all 18 kinds back out.
     subroutine build_matrix_schema(sc)

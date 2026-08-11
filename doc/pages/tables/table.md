@@ -281,8 +281,11 @@ call t%get("maybe_absent", v, found=ok)
 if (.not. ok) print *, "column not in this file"
 ```
 
-On a reported miss `%get` leaves a zero-length array and `%col` a null pointer, so a program that
-ignores `found` gets an empty result rather than stale data.
+On a reported miss the reader leaves an **empty result, never an undefined one**, so a program
+that ignores `found` gets nothing rather than stale data or something it must not touch. That one
+rule covers every reading form: `%get`, `%get_slice` and `%get_element` leave a zero-length array
+(a defined zero, blank or null element where the receiver is a scalar), and `%col` a null
+pointer.
 
 **Every procedure that takes a column name now accepts it**, mutators included — `%is_null`,
 `%set`, `%set_element`, `%set_null`, `%clear_null`, `%get_slice`, `%set_slice`, `%get_element`,
@@ -609,6 +612,23 @@ call t%set_slice("mass", s, m)      ! the same rows, in the same order
 The array must have exactly one value (or one vector) per selected row, and unlike `%get_slice` it
 does **not** widen — a copy *into* the table is exact-kind, as `%set` is. It also takes
 `is_valid=` (one entry per selected row) and `modify_nulls=`.
+
+**A selection is taken in the order given, duplicates included** — on both halves. A
+`parquet_slice_list` may name rows out of order and may name the same row more than once, so
+`%get_slice` returns one entry per *selection* rather than per distinct row, in the selection's
+order rather than the table's. `%set_slice` applies the writes one after another rather than
+merging or de-duplicating them, so **a row named twice ends up holding the last value written to
+it**:
+
+```fortran
+s = parquet_slice_list([4, 2, 4])
+call t%get_slice("mass", s, m)      ! m is [row 4, row 2, row 4] -- three entries
+m = [10.0_real64, 20.0_real64, 30.0_real64]
+call t%set_slice("mass", s, m)      ! row 4 ends up 30.0, not 10.0
+```
+
+That is what makes `%set_slice` the exact inverse of `%get_slice` whenever a selection names each
+row once, which is the case for every `parquet_slice_range`.
 
 ## String columns in a table
 

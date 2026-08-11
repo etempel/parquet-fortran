@@ -387,7 +387,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a zero-copy pointer to that one row's storage (every kind but the two string ones, which have no
   fixed slot to point at). **`found=` now reaches every procedure that takes a column name**,
   mutators included — and on a mutating call `found=.false.` means nothing was changed, since the
-  column is looked up before anything is written.
+  column is looked up before anything is written. On a reported miss a reading call leaves an
+  empty result rather than an undefined one, so a program that ignores `found` gets nothing rather
+  than something it must not touch: `%get`, `%get_slice` and `%get_element` all leave a
+  zero-length array (a defined zero, blank or null element for a scalar receiver) and `%col` a
+  null pointer.
   Introspection gained `%has_nulls(name)` (from the file's own footer for a column that has not
   been read, so it costs no I/O), `%get_valid_mask(name, mask)`, a `%set_null(name, is_valid)`
   form taking a whole-column mask, `resident_only=` on `%ncols`/`%column_names`/

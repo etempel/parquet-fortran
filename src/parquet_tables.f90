@@ -522,6 +522,11 @@ module parquet_tables
         procedure, private :: get_slice_chrv !! %get_slice specific returning a character (elem, row) array.
         !> Copies the rows a `parquet_slice` selects into a freshly allocated array of
         !! the caller's own kind, widening on the way exactly as %get does.
+        !!
+        !! **The selection is taken in the order given, duplicates included.** A
+        !! `parquet_slice_list` may name a row more than once and may name rows in any
+        !! order, so the result has one entry per SELECTION -- not per distinct row -- and
+        !! its order is the selection's, never the table's.
         generic :: get_slice => get_slice_i32, get_slice_i64, get_slice_f32, get_slice_f64, get_slice_bool, get_slice_date, &
             get_slice_time, get_slice_ts, get_slice_i32v, get_slice_i64v, get_slice_f32v, get_slice_f64v, get_slice_boolv, &
             get_slice_datev, get_slice_timev, get_slice_tsv, get_slice_str, get_slice_chr, get_slice_chrv
@@ -547,6 +552,12 @@ module parquet_tables
         !> Writes values into the rows a `parquet_slice` selects -- %get_slice's counterpart.
         !! The kind must match the column's exactly, and the array must have one value per
         !! selected row.
+        !!
+        !! **The selection is written in the order given, duplicates included, so a row
+        !! named twice ends up holding the LAST value written to it.** Selections are
+        !! applied one after another rather than merged or de-duplicated, which is what
+        !! makes `%set_slice` the exact inverse of `%get_slice` for a selection that names
+        !! each row once.
         generic :: set_slice => set_slice_i32, set_slice_i64, set_slice_f32, set_slice_f64, set_slice_bool, set_slice_date, &
             set_slice_time, set_slice_ts, set_slice_i32v, set_slice_i64v, set_slice_f32v, set_slice_f64v, set_slice_boolv, &
             set_slice_datev, set_slice_timev, set_slice_tsv, set_slice_chr, set_slice_chrv

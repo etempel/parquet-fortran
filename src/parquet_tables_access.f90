@@ -1694,9 +1694,11 @@ contains
     module procedure get_element_i32_i64
         integer :: idx
         !
-        value = 0_int32
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = 0_int32
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_i32(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_i32_i64
@@ -1707,9 +1709,11 @@ contains
     module procedure get_element_i64_i64
         integer :: idx
         !
-        value = 0_int64
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = 0_int64
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_i64(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_i64_i64
@@ -1720,9 +1724,11 @@ contains
     module procedure get_element_f32_i64
         integer :: idx
         !
-        value = 0.0_real32
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = 0.0_real32
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_f32(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_f32_i64
@@ -1733,9 +1739,11 @@ contains
     module procedure get_element_f64_i64
         integer :: idx
         !
-        value = 0.0_real64
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = 0.0_real64
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_f64(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_f64_i64
@@ -1746,9 +1754,11 @@ contains
     module procedure get_element_bool_i64
         integer :: idx
         !
-        value = .false.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = .false.
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_bool(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_bool_i64
@@ -1760,9 +1770,11 @@ contains
         integer :: idx
         type(parquet_date) :: blank
         !
-        value = blank
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = blank
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_date(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_date_i64
@@ -1774,9 +1786,11 @@ contains
         integer :: idx
         type(parquet_time) :: blank
         !
-        value = blank
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = blank
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_time(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_time_i64
@@ -1788,9 +1802,11 @@ contains
         integer :: idx
         type(parquet_timestamp) :: blank
         !
-        value = blank
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = blank
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_ts(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_ts_i64
@@ -1801,9 +1817,11 @@ contains
     module procedure get_element_i32v_i64
         integer :: idx
         !
-        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_i32v(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_i32v_i64
@@ -1814,9 +1832,11 @@ contains
     module procedure get_element_i64v_i64
         integer :: idx
         !
-        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_i64v(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_i64v_i64
@@ -1827,9 +1847,11 @@ contains
     module procedure get_element_f32v_i64
         integer :: idx
         !
-        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_f32v(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_f32v_i64
@@ -1840,9 +1862,11 @@ contains
     module procedure get_element_f64v_i64
         integer :: idx
         !
-        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_f64v(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_f64v_i64
@@ -1853,9 +1877,11 @@ contains
     module procedure get_element_boolv_i64
         integer :: idx
         !
-        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_boolv(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_boolv_i64
@@ -1866,9 +1892,11 @@ contains
     module procedure get_element_datev_i64
         integer :: idx
         !
-        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_datev(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_datev_i64
@@ -1879,9 +1907,11 @@ contains
     module procedure get_element_timev_i64
         integer :: idx
         !
-        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_timev(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_timev_i64
@@ -1892,9 +1922,11 @@ contains
     module procedure get_element_tsv_i64
         integer :: idx
         !
-        ! `value` stays unallocated, which is how %get reports a miss too.
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_tsv(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_tsv_i64
@@ -1905,9 +1937,11 @@ contains
     module procedure get_element_chr_i64
         integer :: idx
         !
-        value = ""
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            value = ""
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_str(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_chr_i64
@@ -1920,7 +1954,10 @@ contains
         integer :: idx
         !
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(character(len=1) :: value(0))
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_strv(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_chrv_i64
@@ -3432,7 +3469,11 @@ contains
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(character(len=1) :: arr(0))
+            if (present(is_valid)) allocate(is_valid(0))
+            return
+        end if
         call table_require_kind(self, idx, PK_STRING, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
@@ -3458,7 +3499,11 @@ contains
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(character(len=1) :: arr(0,0))
+            if (present(is_valid)) allocate(is_valid(0,0))
+            return
+        end if
         call table_require_kind(self, idx, PK_STRING_VEC, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)

@@ -672,6 +672,11 @@ def gen_table_type():
     w("        procedure, private :: get_slice_chrv !! %get_slice specific returning a character (elem, row) array.")
     w("        !> Copies the rows a `parquet_slice` selects into a freshly allocated array of")
     w("        !! the caller's own kind, widening on the way exactly as %get does.")
+    w("        !!")
+    w("        !! **The selection is taken in the order given, duplicates included.** A")
+    w("        !! `parquet_slice_list` may name a row more than once and may name rows in any")
+    w("        !! order, so the result has one entry per SELECTION -- not per distinct row -- and")
+    w("        !! its order is the selection's, never the table's.")
     w("        generic :: get_slice => " + wrap_list(
         [f"get_slice_{k[0]}" for k in ARRAY_KINDS] + ["get_slice_str", "get_slice_chr", "get_slice_chrv"], 12,
         first_prefix=len("        generic :: get_slice => ")))
@@ -684,6 +689,12 @@ def gen_table_type():
     w("        !> Writes values into the rows a `parquet_slice` selects -- %get_slice's counterpart.")
     w("        !! The kind must match the column's exactly, and the array must have one value per")
     w("        !! selected row.")
+    w("        !!")
+    w("        !! **The selection is written in the order given, duplicates included, so a row")
+    w("        !! named twice ends up holding the LAST value written to it.** Selections are")
+    w("        !! applied one after another rather than merged or de-duplicated, which is what")
+    w("        !! makes `%set_slice` the exact inverse of `%get_slice` for a selection that names")
+    w("        !! each row once.")
     w("        generic :: set_slice => " + wrap_list(
         [f"set_slice_{k[0]}" for k in ARRAY_KINDS] + ["set_slice_chr", "set_slice_chrv"], 12,
         first_prefix=len("        generic :: set_slice => ")))
@@ -4213,7 +4224,11 @@ def getslice_str_impl():
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(character(len=1) :: arr(0))
+            if (present(is_valid)) allocate(is_valid(0))
+            return
+        end if
         call table_require_kind(self, idx, PK_STRING, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
@@ -4239,7 +4254,11 @@ def getslice_str_impl():
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "get_slice", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+            allocate(character(len=1) :: arr(0,0))
+            if (present(is_valid)) allocate(is_valid(0,0))
+            return
+        end if
         call table_require_kind(self, idx, PK_STRING_VEC, "get_slice")
         call slice_resolve(s, self%row_count, rows, "get_slice")
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
@@ -4920,23 +4939,30 @@ def getelem_impl(k):
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_{tag}_i32
     !"""]
-    # The miss path must leave `value` defined -- it is intent(out). A scalar numeric kind gets
-    # its type's zero; a scalar temporal one gets a default-initialised element, which IS its null
-    # state (CLAUDE.md's parquet_temporal note), so there is no zero constant to use; an
-    # allocatable result simply stays unallocated, which is how %get reports a miss too.
+    # The miss path must leave `value` DEFINED and EMPTY -- the same rule %get and %get_slice
+    # follow, so that a program which ignores `found` reads an empty result rather than something
+    # undefined. A scalar numeric kind gets its type's zero; a scalar temporal one gets a
+    # default-initialised element, which IS its null state (CLAUDE.md's parquet_temporal note), so
+    # there is no zero constant to use; a vector kind gets a zero-length array, exactly as
+    # %get's own vector forms allocate arr(0,0) on a miss.
+    #
+    # The allocation has to sit INSIDE the miss branch, not before the lookup: on a hit,
+    # `col_fetch_<tag>` allocates `value` itself, and allocating it here first would abort.
     miss_decl = ""
     if rank == 2:
-        miss = "        ! `value` stays unallocated, which is how %get reports a miss too."
+        miss = "            allocate(value(0))"
     elif cat == "num":
-        miss = f"        value = {ZERO[tag]}"
+        miss = f"            value = {ZERO[tag]}"
     else:
-        miss_decl, miss = f"        {decl} :: blank\n", "        value = blank"
+        miss_decl, miss = f"        {decl} :: blank\n", "            value = blank"
     out.append(f"""    module procedure get_element_{tag}_i64
         integer :: idx
 {miss_decl}        !
-{miss}
         call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        if (idx == 0) then
+{miss}
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_{tag}(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_{tag}_i64""")
@@ -4946,7 +4972,9 @@ def getelem_impl(k):
 def _getelem_str_pair(tag, body):
     """One string kind's two `%get_element` specifics. `tag` is the accessor's name (`chr`), and
     `body` the kind table's (`str`) -- see BODY_TAG."""
-    blank = '        value = ""\n' if body == "str" else ""
+    # Same miss rule as the typed forms above: defined and empty, inside the branch.
+    blank = ('            value = ""' if body == "str"
+             else "            allocate(character(len=1) :: value(0))")
     return f"""    module procedure get_element_{tag}_i32
         call self%get_element(name, int(i, int64), value, found)
     end procedure get_element_{tag}_i32
@@ -4954,8 +4982,11 @@ def _getelem_str_pair(tag, body):
     module procedure get_element_{tag}_i64
         integer :: idx
         !
-{blank}        call table_resolve(self, name, "get_element", idx, found)
-        if (idx == 0) return
+        call table_resolve(self, name, "get_element", idx, found)
+        if (idx == 0) then
+{blank}
+            return
+        end if
         call table_require_row(self, i, "get_element")
         call col_fetch_{body}(self%cache, idx, self%cache%cols(idx)%declared_kind, i, value, "get_element")
     end procedure get_element_{tag}_i64

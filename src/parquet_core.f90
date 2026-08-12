@@ -748,16 +748,18 @@ module parquet_core
 
     !> Returns `writer_or_reader`'s row-group size ("chunk_size", matching parquet_open_writer's
     !> own chunk_size argument name -- Arrow's own WriteTable convenience function uses this same
-    !> term for the concept). For a parquet_writer: the resolved/authoritative row-group size --
-    !> auto-estimated from the schema (types/col_size) if chunk_size was never set explicitly,
-    !> or the caller's own explicit value, validated against every declared vector column;
-    !> usable at any point after parquet_open_writer, including before any column has been
-    !> written, and (once the streaming row-group API is used) the value actually locked in by
-    !> the first parquet_new_row_group call. For a parquet_reader: the row group's size at
-    !> `row_group` (1-based; omitted defaults to the first row group), reflecting the file's
-    !> actual, already-written-and-fixed layout -- row groups are not guaranteed uniform, so this
-    !> is only ever a suggestion for a chunked-read loop, not an enforced value the way it is on
-    !> the write side.
+    !> term for the concept). For a parquet_writer: the caller's own explicit chunk_size, validated
+    !> against every declared vector column, or -- if chunk_size was never set -- an estimate
+    !> computed from the schema's declared types/col_size. Usable at any point after
+    !> parquet_open_writer, including before any column has been written, and it does not change
+    !> afterwards: parquet_new_row_group's own `nrows` is what sizes each streamed row group and
+    !> never feeds back into this value, and a writer that only uses parquet_write_column has its
+    !> row groups sized at parquet_close_writer from the finished table's real byte size, which a
+    !> schema-only estimate here cannot anticipate. So on the write side this is a suggestion for a
+    !> chunked-write loop, not a promise about the file's final layout. For a parquet_reader: the
+    !> row group's size at `row_group` (1-based; omitted defaults to the first row group),
+    !> reflecting the file's actual, already-written-and-fixed layout -- row groups are not
+    !> guaranteed uniform, so it is only ever a suggestion for a chunked-read loop there too.
     interface parquet_get_chunk_size
         module procedure parquet_get_chunk_size_writer_int32
         module procedure parquet_get_chunk_size_writer_int64

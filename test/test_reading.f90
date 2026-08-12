@@ -67,6 +67,8 @@ contains
             new_unittest("parquet_get_col_size/parquet_get_column_total_elements/parquet_read_array_row_mode/" // &
                 "parquet_read_array_element_mode avoid a whole-column read", &
                 test_col_size_and_row_mode_avoid_whole_column_read), &
+            new_unittest("parquet_get_col_size/parquet_get_column_total_elements avoid a whole-column " // &
+                "read on a plain LIST column", test_plain_list_size_queries_avoid_whole_column_read), &
             new_unittest("read extended source types (int8/16, uint8/16/32/64, half_float, decimal32/64/128/256)", &
                 test_read_extended_types), &
             new_unittest("read a real32 column as real64", test_read_float32_column_as_float64), &
@@ -1870,6 +1872,23 @@ contains
             failure_message="parquet_get_col_size/parquet_get_column_total_elements/" // &
                 "parquet_read_array_row_mode/parquet_read_array_element_mode did not all avoid a whole-column read")
     end subroutine test_col_size_and_row_mode_avoid_whole_column_read
+    !
+    !> The same guarantee for a PLAIN LIST/LARGE_LIST column, which the scenario above cannot
+    !> reach: it writes its fixture with this library's own writer, so every column there is a
+    !> FIXED_SIZE_LIST whose width is a schema constant and no data is read at all. A plain
+    !> variable-length list is the only shape whose width lives in the data, so it is the only one
+    !> where these two queries can read anything -- and therefore the only one where reading too
+    !> much is possible. parquet_get_column_total_elements did exactly that until it was moved onto
+    !> list_width_verified, the screen-then-prove helper parquet_get_col_size already used;
+    !> reverting that change makes this test fail. Negative control:
+    !> scenario_whole_column_read_forced_error_control, which proves the forcing hook fires.
+    subroutine test_plain_list_size_queries_avoid_whole_column_read(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "plain_list_size_queries_avoid_whole_column_read", expect_abort=.false., &
+            failure_message="parquet_get_col_size/parquet_get_column_total_elements read a whole " // &
+                "plain LIST column instead of measuring it one row group at a time")
+    end subroutine test_plain_list_size_queries_avoid_whole_column_read
     !
     !> Read-time widening support for Arrow physical types this library's own
     !> writer never produces (see CONTRIBUTING.md's "Additional scalar types"

@@ -1106,12 +1106,14 @@ module parquet_core
     !> Returns the total element count of a vector (array) column named
     !> `name`, read from an open parquet_reader (reader), across every row
     !> (i.e. nrows * col_size) in `total_elements`, dispatched by its
-    !> integer(int32)/integer(int64) kind. Reads no column data (nrows and col_size are both
-    !> already known from the file footer/schema), so this is safe to call even on a column whose
-    !> total element count itself exceeds int32 -- unlike an earlier implementation, which
-    !> materialized the whole column just to answer this query and could hit Arrow's own int32
-    !> list-index ceiling on a large enough column (see CLAUDE.md's "Guarding a hard Arrow
-    !> int32-only ceiling").
+    !> integer(int32)/integer(int64) kind. Reads no column data for a scalar or FIXED_SIZE_LIST
+    !> column (nrows and col_size are both already known from the file footer/schema), so this is
+    !> safe to call even on a column whose total element count itself exceeds int32 -- unlike an
+    !> earlier implementation, which materialized the whole column just to answer this query and
+    !> could hit Arrow's own int32 list-index ceiling on a large enough column (see CLAUDE.md's
+    !> "Guarding a hard Arrow int32-only ceiling"). A plain LIST/LARGE_LIST column has no
+    !> schema-level width, so it is measured one row group at a time by the same helper
+    !> parquet_get_col_size uses -- data is read, but never more than one row group at once.
     interface parquet_get_column_total_elements
         module procedure parquet_get_column_total_elements_int64
         module procedure parquet_get_column_total_elements_int32
@@ -2611,10 +2613,13 @@ module parquet_core
             integer(int32), intent(out) :: num_row_groups !! file's row-group count.
         end subroutine parquet_get_num_row_groups_int32
         !> Returns `name`'s declared col_size (vector-column element count;
-        !> 1 for a scalar column) in `col_size`. Reads no column data (a FIXED_SIZE_LIST column's
-        !> width is a schema-level constant), so this is safe even on a column whose total
-        !> element count (nrows * col_size) itself exceeds int32 -- see
-        !> parquet_get_column_total_elements's identical note.
+        !> 1 for a scalar column) in `col_size`. Reads no column data for a scalar column or a
+        !> FIXED_SIZE_LIST one (whose width is a schema-level constant), so this is safe even on a
+        !> column whose total element count (nrows * col_size) itself exceeds int32. A plain
+        !> LIST/LARGE_LIST column -- which this library never writes, but another producer may --
+        !> has no schema-level width at all, so it is screened from the footer and then proven one
+        !> row group at a time: that does read data, but never holds more than one row group.
+        !> See parquet_get_column_total_elements, which answers via the same helper.
         module subroutine parquet_get_col_size(reader, name, col_size)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! column name.

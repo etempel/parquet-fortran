@@ -3856,7 +3856,12 @@ row-group-scoped rather than guarded — keep them that way, don't revert to a w
 straight off the schema's `FixedSizeListType::list_size()` (no data read at all) for a
 FIXED_SIZE_LIST column — **but only for that case: a plain `LIST`/`LARGE_LIST` column, which this
 library never writes but another tool can, has no schema-level width, so both fall back to
-`get_single_chunk_array` and read the whole column to measure it.** Any code path that asks for
+`list_width_verified`, which screens each row group from the footer and then proves it by reading
+one row group at a time — never the whole column.** (`total_elements` used to call
+`get_single_chunk_array` here and decode everything at once, while its sibling had already been
+moved to the row-group-scoped helper; the two now share it. Nothing about the *answers* changed —
+`get_col_size` and `list_width_verified` agree by construction — which is exactly why the
+asymmetry survived: only a memory measurement could see it, and no test asserts memory.) Any code path that asks for
 `col_size` on every column of an arbitrary file (`parquet_table`'s open-time classification is the
 existing example) is therefore not automatically metadata-only, and should release afterwards
 (`parquet_release_column`, a no-op when nothing was decoded) rather than assume nothing was read.

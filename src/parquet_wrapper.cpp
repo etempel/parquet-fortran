@@ -5013,11 +5013,16 @@ extern "C"
 		return reader_handle->column_cache.empty() ? 0 : 1;
 	}
 
-	// Returns the physical row count of row group `row_group` (1-based; already resolved/
+	// Returns the EFFECTIVE row count of row group `row_group` (1-based; already resolved/
 	// validated by the Fortran caller -- see parquet_get_chunk_size's reader specifics in
 	// parquet_read.f90, which check row_group against parquet_reader_get_num_row_groups first).
 	// Row groups are not guaranteed uniform, so this is a genuine per-row-group query, not a
 	// single file-wide constant the way the writer side's resolved chunk_size is.
+	//
+	// "Effective", not "physical": row_group_effective_rows reports that row group's SURVIVING
+	// rows once a filter or sample is active, and its physical count only when neither is. The
+	// distinction is what lets a chunked loop over a filtered reader size its buffers from this
+	// call alone, and it is why the sizes still sum to parquet_get_nrows.
 	int64_t parquet_reader_get_chunk_size_at(void *handle, int64_t row_group)
 	{
 		auto reader_handle = as_reader_handle(handle);
@@ -7542,15 +7547,27 @@ extern "C"
 		{
 			return nrows;
 		}
-		// Calls the same static helpers parquet_reader_get_column_col_size
-		// itself uses, rather than that exported function directly -- going
-		// through the exported function would re-enter as_reader_handle on
-		// the same handle while this call's own guard is still held, which
-		// ConcurrencyGuard now admits (the owner may re-enter) but only after
-		// a second, pointless atomic claim/release pair.
-		auto array = get_single_chunk_array(reader_handle, name);
-		auto asize = get_col_size(array);
-		return nrows * asize;
+		// A plain LIST/LARGE_LIST. Screened from the footer, then proven one row group at a time --
+		// the SAME helper parquet_reader_get_column_col_size uses, so the two size queries answer
+		// identically and neither materializes the whole column (see the "Measuring a plain LIST
+		// column's width" section above).
+		//
+		// This used to be get_single_chunk_array + get_col_size, i.e. decode every row group at
+		// once purely to answer a size query. That is the exact peak-memory hazard the
+		// FIXED_SIZE_LIST branch above exists to avoid, and it hid well: the answer was correct
+		// either way, so only a memory measurement could see it. The two helpers agree by
+		// construction -- get_col_size returns 0 for an empty column, 1 for a ragged one, else the
+		// uniform width, which is list_width_verified's contract exactly -- so this is a cost fix,
+		// not a behaviour change. list_width_verified still takes the whole-column path when a
+		// filter mask or a sort permutation is active, because a per-row-group width would then
+		// answer about rows the caller removed; that branch lives in the helper, where both
+		// callers get it.
+		//
+		// Calls the static helper rather than the exported parquet_reader_get_column_col_size:
+		// going through the exported function would re-enter as_reader_handle on the same handle
+		// while this call's own guard is still held, which ConcurrencyGuard now admits (the owner
+		// may re-enter) but only after a second, pointless atomic claim/release pair.
+		return nrows * list_width_verified(reader_handle, name, 0, 0);
 	}
 
 	// Returns the longest non-null string value actually present in string column `name`.

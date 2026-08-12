@@ -469,6 +469,8 @@ contains
                 test_settings_verbosity_gates_warning), &
             new_unittest("settings: silent turns %print_stat into a no-op", &
                 test_settings_silent_gates_print_stat), &
+            new_unittest("settings: silent turns parquet_close_reader(print_stat=) into a no-op", &
+                test_settings_silent_gates_reader_print_stat), &
             new_unittest("settings: the C++ half honours the mirrored verbosity", &
                 test_settings_verbosity_reaches_cpp), &
             new_unittest("settings: message_stream moves a warning off stdout", &
@@ -1286,6 +1288,8 @@ contains
                 test_get_version_invalid_mode_aborts), &
             new_unittest("parquet_column_exists with an unrecognized types= token aborts", &
                 test_column_exists_bad_type_token_aborts), &
+            new_unittest("parquet_column_exists validates types= before checking the column exists", &
+                test_column_exists_bad_type_token_missing_column_aborts), &
             new_unittest("parquet_column_exists with a blank types= filter aborts", &
                 test_column_exists_empty_type_filter_aborts), &
             new_unittest("parquet_get_column_type on a column outside the 9 canonical types aborts", &
@@ -4472,6 +4476,26 @@ contains
             forbidden_text="parquet_table:")
     end subroutine test_settings_silent_gates_print_stat
 
+    !> The same gate one layer down, on the READER's printer.
+    !>
+    !> test_settings_silent_gates_print_stat above exercises %print_stat, which is table_print_stat
+    !> -- Fortran (parquet_tables_query.f90). parquet_close_reader(print_stat=.true.) is
+    !> parquet_reader_print_stat, C++, with its own output_is_suppressed() call, and nothing
+    !> asserted it: deleting that line broke no test before this one existed. Same shape as
+    !> test_settings_verbosity_reaches_cpp, which closes the equivalent gap for the warning
+    !> channel (feature_risks.md Risk-42).
+    subroutine test_settings_silent_gates_reader_print_stat(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "reader_print_stat_normal", expect_abort=.false., &
+            failure_message="the reader print_stat scenario was not expected to abort", &
+            required_stderr="=== parquet_reader stats ===")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "reader_print_stat_silent", expect_abort=.false., &
+            failure_message="the reader print_stat scenario was not expected to abort", &
+            forbidden_text="=== parquet_reader stats ===")
+    end subroutine test_settings_silent_gates_reader_print_stat
+
     !> The mirror. Every Fortran-side assertion above passes against a C++ half that ignores the
     !> pushed verbosity entirely, so this is the only test that would catch the two drifting apart
     !> (feature_risks.md Risk-42). The warning provoked here is printed from parquet_wrapper.cpp.
@@ -6559,6 +6583,22 @@ contains
             failure_message="parquet_column_exists with an unrecognized types= token was expected to abort", &
             required_stderr="parquet_column_exists: unrecognized data type token 'itn32'")
     end subroutine test_column_exists_bad_type_token_aborts
+
+    !> The ORDER of parquet_column_exists's two checks, which its sibling above cannot show.
+    !>
+    !> That one names a column the fixture HAS, so it aborts with this same message whichever
+    !> check runs first. Here the column is absent: an implementation validating existence first
+    !> would return .false. quietly (a missing column is an answer for this procedure, not an
+    !> abort), so the scenario would exit 0 and this test would fail on expect_abort. The two
+    !> together are what pin the ordering doc/pages/io/reading.md documents; neither is enough
+    !> alone, which is why the older one is left exactly as it was rather than being retargeted.
+    subroutine test_column_exists_bad_type_token_missing_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_exists_bad_type_token_missing_column", &
+            expect_abort=.true., &
+            failure_message="parquet_column_exists must validate types= before looking the column up", &
+            required_stderr="parquet_column_exists: unrecognized data type token 'itn32'")
+    end subroutine test_column_exists_bad_type_token_missing_column_aborts
 
     subroutine test_column_exists_empty_type_filter_aborts(error)
         type(error_type), allocatable, intent(out) :: error

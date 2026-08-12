@@ -33,7 +33,7 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-79` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-81` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
@@ -144,6 +144,7 @@ something a reader is expected to have.
 | [Risk-77](#risk-77--a-masked-write-compacts-the-values-and-the-validity-mask-separately) | A masked write compacts the values and the validity mask separately | 4 — covered |
 | [Risk-78](#risk-78--a-temporal-columns-null-cache-is-invalidated-by-the-writer-not-by-the-reader) | A temporal column's null cache is invalidated by the writer, not by the reader | 4 — covered |
 | [Risk-79](#risk-79--the-no-relocation-guarantee-rests-on-one-conditional-and-nothing-else) | The no-relocation guarantee rests on one conditional and nothing else | 4 — covered |
+| [Risk-80](#risk-80--a-metadata-only-query-quietly-decodes-a-whole-column-and-the-answer-is-still-right) | A metadata-only query quietly decodes a whole column, and the answer is still right | 4 — covered |
 
 ---
 
@@ -151,7 +152,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-80**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-81**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -336,13 +337,6 @@ write bad statistics, the response is a note naming that producer, not a change 
 
 **Test.** Nothing to test — this entry records two deliberate costs, not a defect, and a test would
 only freeze the current shape.
-
-- **A sort key column is always read whole.** A global order needs every row; there is no
-  row-group-scoped equivalent the way there is for filtering. This is inherent to sorting, and the
-  fix is documentation rather than engineering.
-- **A scoped filter re-reads its filter columns**, because the row-group-scoped builder does not
-  populate `column_cache`. That is the price of the bounded-memory guarantee the scoped path exists
-  to provide.
 
 **What to do instead of testing it:** state both in the user-facing documentation where a reader is
 choosing between the scoped and unscoped paths, so that "the scoped path is the unscoped path with
@@ -779,6 +773,48 @@ The branch body is `GCOVR_EXCL`'d with that reasoning recorded beside it.
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
+
+### Risk-80 — A metadata-only query quietly decodes a whole column, and the answer is still right
+
+`parquet_get_col_size` and `parquet_get_column_total_elements` are published as cheap: ask a column
+its shape without reading it. That holds for a scalar column and for a `FIXED_SIZE_LIST`, whose
+width is a schema constant. It cannot hold for a plain variable-length `LIST`/`LARGE_LIST` — this
+library never writes one, but another producer does — because there the width is a property of the
+**data**. So those columns must read something, and the only question is *how much*: a footer screen
+plus a one-row-group-at-a-time proof (`list_width_verified`), or `get_single_chunk_array`, which
+decodes every row group at once.
+
+**Why the failure is silent.** Both give the *same answer* — `get_col_size` returns 0 for an empty
+column, 1 for a ragged one, else the uniform width, which is `list_width_verified`'s contract
+exactly. Nothing aborts, no value is wrong, no test fails. The only symptom is peak memory, on
+exactly the file shape nobody here writes and therefore nobody profiles, and RSS cannot see it
+either (Risk-1's rule: use the Arrow pool counter). `parquet_get_column_total_elements` shipped this
+way while its sibling had already been moved to the scoped helper — an asymmetry that survived
+because looking at either function alone shows nothing wrong.
+
+**Test.** `plain_list_size_queries_avoid_whole_column_read`
+(`test/error_scenarios.f90`, wrapped by `test_plain_list_size_queries_avoid_whole_column_read` in
+`test/test_reading.f90`) arms `parquet_debug_set_force_whole_column_read_error` and then makes all
+four calls against the `"strings"` list fixture (a uniform-width plain `LIST<utf8>`/`LARGE_LIST<utf8>`,
+3 rows x 2 elements). Completing is the assertion. Its negative control,
+`whole_column_read_forced_error_control`, proves the hook fires at all.
+
+**What this still forbids.**
+
+- **Do not add a third "cheap" column query that reaches for `get_single_chunk_array`.** If it can
+  be answered from the footer, answer from the footer; if it genuinely needs data, use the
+  row-group-scoped helper and add it to the scenario above. `parquet_get_string_length` is the
+  deliberate exception and must stay outside this rule — the longest string cannot be known without
+  reading every value, which is why it is documented as reading the column rather than pretending
+  otherwise.
+- **Do not "simplify" `list_width_verified`'s masked branch away.** With a filter or a sort active
+  it deliberately *does* read the whole column, because a per-row-group width would answer about
+  rows the caller removed. That branch is correctness, not an oversight, and it is why the two
+  callers share the helper rather than each carrying their own scoping.
+- **The existing `col_size_and_row_mode_avoid_whole_column_read` scenario cannot cover any of
+  this**, and reading its name suggests otherwise. It writes its fixture with this library's own
+  writer, so every column in it is a `FIXED_SIZE_LIST` and the plain-`LIST` branch is never entered.
+  A guarantee about list columns needs a foreign-written fixture.
 
 A few of these carry a suggestion of their own — Risk-18 wants a benchmark case, because the property
 in question (iterate the set bits, not all 64 positions of a word) is *correct* either way and
@@ -1671,10 +1707,6 @@ one place where a wrong answer would be *fast* rather than slow — the shape of
 casual benchmarking. It keeps its own tests plus the
 `parquet_debug_set_disable_sort_counting_path` hook that forces the comparator path for comparison.
 
-The engine's ordering must also keep reproducing `arrow::compute::SortIndices` exactly (nulls and
-NaNs absolute, never flipped by `descending`; ascending gives values → NaNs → nulls; ties hold file
-order). That equivalence is what lets a `pyarrow` cross-check agree row for row.
-
 The engine is also deliberately **free of reader state** — its keys arrive as plain typed vectors, and
 only `sort_bind_arrow_key` touches Arrow. That is what lets the same engine serve `%sort_by` and a
 possible public `parquet_sort` module. Don't reach for reader state from anything under that banner.
@@ -1699,11 +1731,6 @@ It carries the deferred-sample interaction, the `column_cache` re-filter, the qc
 statistics screen, the live-row-group read, and several justified `GCOVR_EXCL` blocks whose reasoning
 must survive any edit rather than be deleted along with the code they annotate. Changes here have a
 much wider blast radius than their diff suggests.
-
-One specific trap: the filter's own columns are read **before** any mask exists, deliberately — a
-mask installed earlier would make the filter's referenced columns come back already compacted
-mid-evaluation, breaking the row-index alignment clause evaluation depends on. That is what
-`has_pending_sample` exists for; removing the deferral looks safe and is not.
 
 **Test.** Covered across several suites — `parquet_reader_set_filter matches open-time filtering`,
 `parquet_reader_set_filter composes with sample_fraction`, `a scoped filter covers only its own row

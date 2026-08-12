@@ -68,6 +68,8 @@ program error_scenarios
         call scenario_col_size_overflow()
     case ("col_size_and_row_mode_avoid_whole_column_read")
         call scenario_col_size_and_row_mode_avoid_whole_column_read()
+    case ("plain_list_size_queries_avoid_whole_column_read")
+        call scenario_plain_list_size_queries_avoid_whole_column_read()
     case ("list_width_never_reads_whole_column")
         call scenario_list_width_never_reads_whole_column()
     case ("whole_column_read_forced_error_control")
@@ -374,6 +376,10 @@ program error_scenarios
         call scenario_settings_print_stat(level="normal")
     case ("settings_print_stat_silent")
         call scenario_settings_print_stat(level="silent")
+    case ("reader_print_stat_normal")
+        call scenario_reader_print_stat_verbosity(level="normal")
+    case ("reader_print_stat_silent")
+        call scenario_reader_print_stat_verbosity(level="silent")
     case ("settings_cpp_warning_normal")
         call scenario_settings_cpp_warning(level="normal")
     case ("settings_cpp_warning_errors_only")
@@ -1208,6 +1214,8 @@ program error_scenarios
         call scenario_get_version_invalid_mode()
     case ("column_exists_bad_type_token")
         call scenario_column_exists_bad_type_token()
+    case ("column_exists_bad_type_token_missing_column")
+        call scenario_column_exists_bad_type_token_missing_column()
     case ("column_exists_empty_type_filter")
         call scenario_column_exists_empty_type_filter()
     case ("get_column_type_unsupported")
@@ -4289,6 +4297,46 @@ contains
         call t%print_stat()
         call parquet_reset_settings()
     end subroutine scenario_settings_print_stat
+
+    !> The READER's own solicited printer at a chosen verbosity: parquet_close_reader(
+    !> print_stat=.true.), which is parquet_reader_print_stat in parquet_wrapper.cpp.
+    !>
+    !> Deliberately NOT a duplicate of scenario_settings_print_stat above. That one exercises
+    !> %print_stat, i.e. table_print_stat -- a separate FORTRAN implementation in
+    !> parquet_tables_query.f90 -- so every assertion it makes passes against a C++ half that
+    !> ignores the mirrored verbosity completely. This is the C++ printer's own gate, and before
+    !> this scenario existed, deleting `if (output_is_suppressed()) return;` from
+    !> parquet_reader_print_stat broke nothing in the whole suite. Same class of gap as the one
+    !> scenario_settings_cpp_warning closes for the warning channel (feature_risks.md Risk-42).
+    !>
+    !> The column is read before the verbosity is set, so the report has a populated row to print
+    !> and the "silent" arm is suppressing real output rather than an empty table.
+    !>
+    !> **The fixture path must stay derived from `level`**: two scenario names share this helper
+    !> and tools/run_error_scenarios.sh runs them concurrently (xargs -P), so a shared path means
+    !> one process writes while the other reads, Arrow throws `IOError: Couldn't deserialize
+    !> thrift` across the extern "C" boundary uncaught, and the run dies with exit 134 instead of
+    !> the clean exit 0 this scenario expects. See scenario_settings_cpp_warning's own note.
+    subroutine scenario_reader_print_stat_verbosity(level)
+        character(len=*), intent(in) :: level !! verbosity to set before closing the reader.
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: out_file
+        integer(int32) :: v(4)
+        integer(int32) :: back(4)
+
+        v = [1, 2, 3, 4]
+        out_file = "test_run/scenario_reader_print_stat_" // trim(level) // ".parquet"
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", back)
+        call parquet_set_verbosity(level)
+        call parquet_close_reader(reader, print_stat=.true.)
+        call parquet_reset_settings()
+    end subroutine scenario_reader_print_stat_verbosity
 
     !> Provokes a C++-side warning (qc soft mode on read) at a chosen verbosity.
     !>
@@ -9188,6 +9236,72 @@ contains
         if (strlen_large_lst /= 7) error stop "list fixture: LARGE_LIST<utf8> get_string_length expected 7 ('charlie')"
     end subroutine scenario_list_type_foreign_fixture
 
+    !> Neither size query materializes a whole PLAIN LIST/LARGE_LIST column.
+    !>
+    !> scenario_col_size_and_row_mode_avoid_whole_column_read makes the same guarantee, but builds
+    !> its fixture with this library's own writer -- so every column there is a FIXED_SIZE_LIST,
+    !> whose width is a schema constant, and the plain-LIST branch it never enters is precisely the
+    !> one that has to read data at all. That is the gap this scenario closes.
+    !>
+    !> A plain variable-length list has no schema-level width (this library never writes one, but
+    !> another producer may), so the width is a property of the DATA. Both queries answer it
+    !> through list_width_verified: a footer screen (num_values / num_rows per row group) followed
+    !> by a proof that reads one row group at a time, never the whole column.
+    !> parquet_get_column_total_elements used to call get_single_chunk_array here instead and
+    !> decode every row group at once -- the exact peak-memory hazard the guard exists to prevent,
+    !> and silent, because the ANSWER was right either way. Only this hook can see the difference:
+    !> reverting that fix makes the total_elements call below abort.
+    !>
+    !> The negative control is scenario_whole_column_read_forced_error_control, which already
+    !> exists and proves the hook itself fires -- so this scenario's "no abort" cannot simply mean
+    !> the hook is a no-op. The "strings" fixture variant is a uniform-width plain LIST<utf8> /
+    !> LARGE_LIST<utf8>: 3 rows of 2 elements each, so col_size is 2 and total_elements is 6.
+    !> parquet_get_string_length is deliberately NOT called here -- it always reads the whole
+    !> column by design, so it would trip the hook and prove nothing.
+    subroutine scenario_plain_list_size_queries_avoid_whole_column_read()
+        interface
+            subroutine parquet_debug_write_list_fixture(path, variant) &
+                bind(C, name="parquet_debug_write_list_fixture")
+                use iso_c_binding, only : c_char
+                character(kind=c_char), intent(in) :: path(*) !! NUL-terminated output path.
+                character(kind=c_char), intent(in) :: variant(*) !! NUL-terminated fixture variant.
+            end subroutine parquet_debug_write_list_fixture
+            subroutine parquet_debug_set_force_whole_column_read_error(enable) &
+                bind(C, name="parquet_debug_set_force_whole_column_read_error")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero aborts the next whole-column read; 0 restores normal behavior.
+            end subroutine parquet_debug_set_force_whole_column_read_error
+        end interface
+
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_plain_list_size_queries.parquet"
+        integer :: col_size, large_col_size
+        integer(int64) :: total_elem, large_total_elem
+
+        call parquet_debug_write_list_fixture(out_file//char(0), "strings"//char(0))
+        call parquet_open_reader(reader, out_file)
+
+        ! Armed BEFORE the four queries, so their completing (rather than the forced abort) is
+        ! the whole assertion.
+        call parquet_debug_set_force_whole_column_read_error(1)
+
+        call parquet_get_col_size(reader, "lst_str", col_size)
+        if (col_size /= 2) error stop "plain LIST col_size expected 2"
+        call parquet_get_col_size(reader, "large_lst_str", large_col_size)
+        if (large_col_size /= 2) error stop "plain LARGE_LIST col_size expected 2"
+
+        call parquet_get_column_total_elements(reader, "lst_str", total_elem)
+        if (total_elem /= 6_int64) error stop "plain LIST total_elements expected 6"
+        call parquet_get_column_total_elements(reader, "large_lst_str", large_total_elem)
+        if (large_total_elem /= 6_int64) error stop "plain LARGE_LIST total_elements expected 6"
+
+        call parquet_debug_set_force_whole_column_read_error(0)
+        call parquet_close_reader(reader)
+        print '(a)', "parquet_get_col_size/parquet_get_column_total_elements avoided a " // &
+            "whole-column read on a plain LIST column, as expected"
+    end subroutine scenario_plain_list_size_queries_avoid_whole_column_read
+
     !> schema%add_field rejects "date" with a unit/utc suffix -- date is unitless (see
     !> parquet_parse_temporal_type in parquet_metadata.f90).
     subroutine scenario_schema_add_field_date_with_unit()
@@ -9930,6 +10044,28 @@ contains
         exists = parquet_column_exists(reader, "id_with_null", types="itn32")
         print '(a)', "unexpectedly accepted an unrecognized types= token without error"
     end subroutine scenario_column_exists_bad_type_token
+
+    !> The ORDER of parquet_column_exists's two checks: the types= tokens are validated before the
+    !> column is looked up, so a typo is reported even for a column that does not exist.
+    !>
+    !> This is what makes the claim testable at all. Its sibling above names `id_with_null`, a
+    !> column that IS in the fixture, so it aborts with the same message whichever check runs
+    !> first -- it proves the token is rejected, and says nothing about the ordering that
+    !> doc/pages/io/reading.md documents. Here the column is absent, so an implementation that
+    !> checked existence first would return .false. quietly (parquet_column_exists reports a
+    !> missing column rather than aborting on it) and this scenario would print its "unexpectedly"
+    !> line and exit 0 instead of aborting. The pair is the test; neither half is alone.
+    !>
+    !> See parquet_read.f90's parquet_column_exists: the `do i = 1, size(tokens)` validation loop
+    !> precedes the parquet_reader_has_column call.
+    subroutine scenario_column_exists_bad_type_token_missing_column()
+        type(parquet_reader) :: reader
+        logical :: exists
+
+        call parquet_open_reader(reader, "test/fixtures/has_null.parquet")
+        exists = parquet_column_exists(reader, "no_such_column_at_all", types="itn32")
+        print '(a)', "unexpectedly checked column existence before validating the types= tokens"
+    end subroutine scenario_column_exists_bad_type_token_missing_column
 
     !> parquet_column_exists error stops if types= is given but blank/all-whitespace, rather than
     !> silently matching nothing.

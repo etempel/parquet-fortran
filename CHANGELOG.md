@@ -913,6 +913,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`parquet_get_column_total_elements` no longer decodes a whole column to answer a size query on
+  a plain `LIST`/`LARGE_LIST` column.** For a scalar or `fixed_size_list` column it already read
+  nothing at all, and for a plain variable-length `list` — which this library never writes, but
+  another producer may — it read every row group at once purely to measure the width, so peak
+  memory was one full copy of the column. Its sibling `parquet_get_col_size` had already moved to
+  a footer screen followed by a one-row-group-at-a-time proof; both now share that helper, so the
+  two size queries cost the same and neither ever holds more than one row group. Answers are
+  unchanged in every case, including the deliberate whole-column fallback when a filter or sort is
+  active (a width measured per row group would otherwise describe rows the caller had removed).
+
 - **A `qc: min:`/`max:` bound on an `int64` column is now judged in `int64`, not after widening
   every value to `float64`.** Each value was converted to `float64` before being compared, and past
   2^53 that conversion rounds — so a value could be reported as compliant when it violated its

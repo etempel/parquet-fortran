@@ -58,6 +58,7 @@ module parquet_bindings
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
     public :: parquet_reader_get_column_type_name
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
+    public :: parquet_reader_has_chunk_reads
     public :: c_reader_set_sort, parquet_reader_has_sort
     public :: parquet_sort_builder_new, parquet_sort_builder_add_key_int64
     public :: parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string
@@ -1042,6 +1043,18 @@ module parquet_bindings
         !> misalign what was already returned against everything read after.
         function parquet_reader_has_decoded_columns(reader) &
                 bind(C, name="parquet_reader_has_decoded_columns") result(has_any)
+            import
+            type(c_ptr), value :: reader
+            integer(c_long_long) :: has_any
+        end function
+
+        !> Whether any column of `reader` has been read through the CHUNK api
+        !> (1) or not (0). Separate from parquet_reader_has_decoded_columns
+        !> above because a chunked read caches nothing, so the column cache
+        !> stays empty and cannot answer this -- both guards are needed to
+        !> refuse a reader that has already handed rows back.
+        function parquet_reader_has_chunk_reads(reader) &
+                bind(C, name="parquet_reader_has_chunk_reads") result(has_any)
             import
             type(c_ptr), value :: reader
             integer(c_long_long) :: has_any

@@ -293,7 +293,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reproduce Arrow's own sort ordering exactly, so a result cross-checked against `pyarrow` matches
   row for row. While a sort is active, row-group-scoped operations (`parquet_read_column_chunk`,
   `parquet_get_chunk_size`) are refused and row/element mode read the whole column, since a sorted
-  row belongs to no single row group. See
+  row belongs to no single row group. **A filter must be applied before a sort, never after**: a
+  sort permutation is sized to the post-filter row count, so `parquet_reader_set_filter` on a
+  reader that already has a sort is refused rather than composed the wrong way round. Both
+  `parquet_reader_set_filter` and `parquet_reader_set_sort` also refuse a reader that has already
+  been read through `parquet_read_column_chunk`, alongside the whole-column case they already
+  refused — a chunked read caches nothing, so it needs its own check, and its rows were handed
+  back in physical row-group order. See
   [Reading rows in sorted order](doc/pages/io/filter-sort-sample.md#reading-rows-in-sorted-order-with-parquet_sortkey).
 - Streaming/chunked reads now work on a filtered or sampled reader, which previously refused them
   outright: `parquet_read_column_chunk` hands back that row group's surviving rows, and

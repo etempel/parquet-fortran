@@ -859,10 +859,29 @@ contains
             error stop "parquet_reader_set_filter: this reader already has an active filter; combine the " // &
                 "clauses into one parquet_filter instead (several %add calls are AND-combined)" // name_suffix
         end if
+        ! BEFORE the decoded-columns guard below, deliberately. Ordering, not merely state:
+        ! apply_row_transform (parquet_wrapper.cpp) masks first and permutes second, so a sort
+        ! permutation's length is the POST-filter row count, and installing a filter under an
+        ! existing sort would leave the two describing different row sets. The decoded-columns
+        ! guard already refuses this in practice -- applying a sort decodes its key columns into
+        ! the cache -- but only as a side effect, and it names the wrong mistake. Moving this
+        ! check ahead of it is what makes the caller's actual error the one reported.
+        if (parquet_reader_has_sort(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_reader_set_filter: this reader already has an active sort; apply the " // &
+                "filter before the sort" // name_suffix
+        end if
         if (parquet_reader_has_decoded_columns(reader%handle) /= 0) then
             call reader_filename_suffix(reader, name_suffix)
             error stop "parquet_reader_set_filter: a column has already been read on this reader; a filter " // &
                 "must be applied before any column is read" // name_suffix
+        end if
+        ! As for parquet_reader_set_sort: a chunked read leaves the column cache empty, so the
+        ! guard above cannot see it.
+        if (parquet_reader_has_chunk_reads(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_reader_set_filter: a chunked read has already been done on this reader; a " // &
+                "filter must be applied before any column is read" // name_suffix
         end if
         ! A rule-less filter still installs a mask when a row range was given (that range is the
         ! whole point of the call); with no rules and no range there is nothing to do.
@@ -884,6 +903,14 @@ contains
             call reader_filename_suffix(reader, name_suffix)
             error stop "parquet_reader_set_sort: a column has already been read on this reader; a sort " // &
                 "must be applied before any column is read" // name_suffix
+        end if
+        ! A CHUNKED read caches nothing, so the guard above cannot see it -- see
+        ! parquet_reader_has_chunk_reads. Rows already handed back are in physical row-group order
+        ! and could not be reconciled with anything read after the permutation is installed.
+        if (parquet_reader_has_chunk_reads(reader%handle) /= 0) then
+            call reader_filename_suffix(reader, name_suffix)
+            error stop "parquet_reader_set_sort: a chunked read has already been done on this reader; a " // &
+                "sort must be applied before any column is read" // name_suffix
         end if
         if (sort_by%n == 0) return
         call parquet_apply_sort(reader, sort_by, "parquet_reader_set_sort")

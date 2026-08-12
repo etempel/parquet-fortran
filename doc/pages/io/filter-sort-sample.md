@@ -180,9 +180,9 @@ call parquet_read_column(reader, "flux", flux)                ! may read 1 of th
 How much this saves depends entirely on how the file is laid out. A column whose values are
 **clustered by row group** (written in sorted order, or naturally grouped like an observation
 date) prunes well; one whose values are scattered uniformly gives every row group the same wide
-min/max, and nothing can be ruled out. Measured on a 4M-row, 9-column file in 40 row groups: a
-selective `id == …` read went from 0.53 s to 0.10 s, while a filter matching every row was
-unchanged.
+min/max, and nothing can be ruled out. On a well-clustered column a highly selective read can be
+several times faster — roughly 5x on a measured 4M-row, 9-column file in 40 row groups — while a
+filter matching every row is unchanged.
 
 `parquet_close_reader(reader, print_stat=.true.)` reports a `screened:` line when it skipped
 anything, which is the way to tell whether it engaged on your data.
@@ -192,8 +192,10 @@ saving:
 
 - a file written **without statistics** (or a column chunk missing them);
 - a column whose min/max this library declines to interpret: an **unsigned** integer, `decimal`,
-  `half_float`, or any column whose declared Parquet sort order is not one of signed or
-  unsigned-byte;
+  `half_float`, or legacy `int96`, and likewise any column whose declared Parquet sort order is not
+  the one the screen reads for its type — signed for numbers and temporals, unsigned-byte for
+  strings. (These last two arise only from files written by other tools; this library's own writer
+  never produces them.);
 - `is_nan`/`is_not_nan`, and a **floating-point** column under `not` or `/=` — Parquet excludes
   NaN from min/max and records no NaN count, so for a float column the statistics can never prove
   a comparison is false everywhere (see [NaN is a value, not a Null](#nan-is-a-value-not-a-null));
@@ -226,12 +228,36 @@ if (parquet_column_exists(reader, "quality")) call filt%add("quality > 0.9")
 call parquet_reader_set_filter(reader, filt)
 ```
 
-It refuses, with `error stop`, in two situations: when the reader **already has a filter**
-(combine the clauses into one `parquet_filter` instead — several `%add` calls are AND-combined),
-and when **any column has already been read** on that reader, since data already handed back
-covers the unfiltered rows and could not be lined up with anything read afterwards. A reader
+It refuses, with `error stop`, in three situations: when the reader **already has a filter**
+(combine the clauses into one `parquet_filter` instead — several `%add` calls are AND-combined);
+when **any column has already been read** on that reader, whether as a whole column or through
+[`parquet_read_column_chunk`](reading.html#streamingchunked-reads), since data already handed back
+covers the unfiltered rows and could not be lined up with anything read afterwards; and when the
+reader **already has a sort**, because a filter must be applied before one (see below). A reader
 opened with `sample_fraction=` is fine — the filter applies on top of the sample, exactly as
 passing both to `parquet_open_reader` does.
+
+**Naming row groups chooses a different engine.** The call above takes two arguments, but it also
+accepts an inclusive 1-based row-group range, and optionally a physical row range inside it:
+
+```fortran
+call parquet_reader_set_filter(reader, filt)                              ! whole file
+call parquet_reader_set_filter(reader, filt, row_group_lo, row_group_hi)  ! those row groups
+call parquet_reader_set_filter(reader, filt, row_group_lo, row_group_hi, row_lo, row_hi)
+```
+
+**Whether you name row groups at all — not which ones — chooses how the filter is evaluated.**
+Without them, every filter column is read whole-file in one batched pass and left decoded, so
+reading one afterwards is free; that is the fastest option and the right default, at the cost of
+one full copy of those columns in memory. With them, the expression is evaluated one row group at a
+time and only the mask is kept, which is what makes a filtered read possible on a file larger than
+memory. `row_group_lo = 0` selects that bounded-memory engine over the *whole* file. Both integer
+kinds are accepted throughout.
+
+A scoped filter scopes the whole reader, not just a loop over those row groups — rows outside the
+range have no mask bits, so nothing later can return them. See
+[Memory-bounded filtering with a row-group scope](reading.html#streamingchunked-reads) for the full
+treatment, including the row-range form and pairing it with a chunked loop.
 
 ## Reading rows in sorted order with `parquet_sortkey`
 
@@ -302,6 +328,11 @@ per `parquet_sortkey`, **320 characters** per key, and **64 characters** for the
 one. The first two are published constants (`parquet_max_sort_keys`, `parquet_max_sort_key_len`) —
 see [Read-only limits](../operating/settings.html#read-only-limits).
 
+If several threads each open their own reader over the same filtered or sorted file, they need not
+each rebuild that work: `parquet_reader_adopt_transform` hands one reader's mask and permutation to
+another for the cost of two atomic refcount increments — see
+[Thread safety](../operating/thread-safety.html).
+
 A sort key column is always read **whole**: a global order needs every row, so there is no
 row-group-scoped equivalent the way there is for filtering. That is the one place sorting costs
 memory that filtering does not. Sorting itself never skips I/O — the benefit is that your own code
@@ -320,6 +351,28 @@ call parquet_open_reader(reader, "cat.parquet", filter=filt, sort_by=srt)
 
 `sample_fraction=` behaves the same way. `parquet_close_reader(..., print_stat=.true.)` prints the
 keys as applied, on their own `sort:` line.
+
+### Finding out which rows you got
+
+Everything above is phrased as "the reader behaves as if the file only ever contained the surviving
+rows", which leaves one question open: *which* rows are they?
+`parquet_get_physical_row_indices(reader, rows)` answers it. It fills an
+`integer(int64), allocatable` array with the 1-based **physical file row number** of every row the
+reader currently returns, in the order it returns them — one entry per row, so `size(rows)`
+matches `parquet_get_nrows`:
+
+```fortran
+integer(int64), allocatable :: rows(:)
+
+call parquet_open_reader(reader, "cat.parquet", filter=filt, sort_by=srt)
+call parquet_get_physical_row_indices(reader, rows)
+! rows(1) is the file row that sorted first among the filter's survivors
+```
+
+This is the only way to recover that mapping: it lives in the reader's own mask and permutation and
+is not otherwise visible. Without a `filter=`, `sample_fraction=` or `sort_by=` it is simply
+`1, 2, 3, ...`. A `parquet_table` exposes the same information as an automatic `parquet_row_index`
+column — see [Row provenance](../tables/table-open.html) — which is built on this procedure.
 
 ### What a sort disallows
 
@@ -345,7 +398,16 @@ passing `sort_by=` to `parquet_open_reader` — the counterpart of
 reasons. Any column already decoded (by `prefetch=`, say) is reordered too.
 
 It refuses, with `error stop`, when the reader **already has a sort** (add every key to one
-`parquet_sortkey` instead) and when **any column has already been read** on that reader.
+`parquet_sortkey` instead) and when **any column has already been read** on that reader —
+including through [`parquet_read_column_chunk`](reading.html#streamingchunked-reads), whose rows
+were handed back in physical row-group order and cannot be reconciled with a reordering applied
+afterwards.
+
+**Apply a filter before a sort, never after.** A filter only removes rows and a sort then orders the
+survivors, so a sort permutation is sized to the post-filter row count. Giving both to
+`parquet_open_reader` gets this right automatically, as does `set_filter` followed by `set_sort`;
+calling `parquet_reader_set_filter` on a reader that is already sorted is refused rather than
+silently composing the two the wrong way round.
 
 ## Renaming the columns a filter or sort refers to
 
@@ -410,14 +472,16 @@ call parquet_close_reader(reader)
 - `sample_seed` (`integer(int32)`, optional): omitted, or `<= 0`, draws a fresh seed from entropy
   — a different sample each time you open the file. A positive value makes the draw reproducible:
   the same `sample_fraction`/`sample_seed` pair always selects the exact same rows. Whichever seed
-  actually gets used (caller-supplied or entropy-drawn) is always reported by
+  actually gets used (caller-supplied or entropy-drawn) is reported by
   `parquet_close_reader(..., print_stat=.true.)` (a `sample: fraction=... seed=...` line) — read
   it back from there to reproduce a run you didn't originally seed yourself. (A `parquet_table` is
   slightly stronger: it settles one seed when it is opened and reuses it for every reader it opens
   afterwards, so an unseeded sample stays fixed across a `%clone` — see [Filtering, sorting and
   checking rows as the file is
   opened](../tables/table-open.html#filtering-sorting-and-checking-rows-as-the-file-is-opened).
-  Two separate opens still draw independently either way.)
+  Two separate opens still draw independently either way.) The one exception is
+  `sample_fraction = 0.0`, which performs no draw at all and so reports `seed=0` whatever you
+  passed — there are no rows to reproduce in that case.
 - Bernoulli sampling means the matched row count fluctuates around `sample_fraction * nrows`
   rather than equaling it exactly (most noticeable on small files) — there is no "select exactly N
   rows" mode.

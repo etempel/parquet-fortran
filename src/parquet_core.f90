@@ -2381,11 +2381,15 @@ module parquet_core
         !> internally, say), and for building a filter from information only
         !> available once the file's schema/metadata can be inspected.
         !>
-        !> Refuses, with error stop, in two states: when the reader already has
-        !> an active filter (compose the clauses into one parquet_filter instead
-        !> -- several %add calls are AND-combined), and when any column has
-        !> already been decoded on this reader, since data already returned to
-        !> the caller could not then be aligned with anything read afterwards.
+        !> Refuses, with error stop, in three states: when the reader already
+        !> has an active filter (compose the clauses into one parquet_filter
+        !> instead -- several %add calls are AND-combined); when any column has
+        !> already been read on this reader, whether as a whole column or
+        !> through the CHUNK api, since data already returned to the caller
+        !> could not then be aligned with anything read afterwards; and when the
+        !> reader already has an active SORT, because apply_row_transform masks
+        !> first and permutes second, so a permutation's length is the
+        !> post-filter row count -- filter first, then sort.
         !> A reader opened with sample_fraction= is fine: the filter combines
         !> with the sample draw, the same way passing both to
         !> parquet_open_reader does.
@@ -2457,9 +2461,13 @@ module parquet_core
         !> has a sort (add every key to one parquet_sortkey instead), when any
         !> column has already been decoded on this reader (data already handed
         !> back could not then be aligned with anything read afterwards), and
-        !> when a chunked read has already been done (its row groups have no
-        !> meaning once the rows are reordered). A reader opened with filter=
-        !> or sample_fraction= is fine: the sort orders the surviving rows.
+        !> when a chunked read has already been done (its rows were handed back
+        !> in physical row-group order, which no permutation can reconcile).
+        !> The last two are separate checks because a chunked read caches
+        !> nothing, so the decoded-columns predicate cannot see it. A reader
+        !> opened with filter= or sample_fraction= is fine: the sort orders the
+        !> surviving rows -- that is the supported order, and the reverse
+        !> (set_filter under an active sort) is refused by set_filter itself.
         module subroutine parquet_reader_set_sort(reader, sort_by)
             type(parquet_reader), intent(inout) :: reader !! open, unsorted reader with no column decoded yet.
             type(parquet_sortkey), intent(in) :: sort_by !! sort keys, parsed and validated here.

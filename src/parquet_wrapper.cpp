@@ -5013,6 +5013,21 @@ extern "C"
 		return reader_handle->column_cache.empty() ? 0 : 1;
 	}
 
+	// Whether any column has been read through the CHUNK api on this reader. Deliberately a
+	// separate question from parquet_reader_has_decoded_columns above: a chunked read frees each
+	// row group's array before returning and caches nothing, precisely so a loop over a thousand
+	// row groups holds no more than a loop over one -- so column_cache stays empty and cannot
+	// answer this. Without it, parquet_reader_set_filter/_set_sort would accept a reader that has
+	// already handed back rows in physical, unfiltered order.
+	//
+	// chunk_read_row_groups is reused rather than a fresh flag being added: it already records
+	// exactly this, per column, for parquet_reader_check_complete.
+	int64_t parquet_reader_has_chunk_reads(void *handle)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		return reader_handle->chunk_read_row_groups.empty() ? 0 : 1;
+	}
+
 	// Returns the EFFECTIVE row count of row group `row_group` (1-based; already resolved/
 	// validated by the Fortran caller -- see parquet_get_chunk_size's reader specifics in
 	// parquet_read.f90, which check row_group against parquet_reader_get_num_row_groups first).

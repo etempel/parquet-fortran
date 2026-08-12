@@ -83,11 +83,14 @@ contains
                 test_float_not_declines), &
             new_unittest("float /= never prunes", test_float_not_equal_declines), &
             new_unittest("a NaN-bearing float column agrees with an unpruned read", test_float_nan_equality), &
-            new_unittest("is_nan / is_not_nan agree with an unpruned read and never prune", test_is_nan_declines), &
+            new_unittest("is_nan / is_not_nan agree with an unpruned read and never prune on bounds", &
+                test_is_nan_declines), &
             new_unittest("a string column prunes and agrees with an unpruned read", test_string_equality), &
             new_unittest("a boolean column agrees with an unpruned read", test_bool_equality), &
             new_unittest("a date column prunes on an ISO literal", test_temporal_equality), &
             new_unittest("is_null / is_not_null prune on the footer null count", test_null_tests_prune), &
+            new_unittest("is_nan / is_not_nan prune a row group whose column is entirely null", &
+                test_is_nan_prunes_all_null_row_group), &
             new_unittest("a struct-leaf path agrees with an unpruned read", test_struct_leaf_equality), &
             new_unittest("a file without statistics is never pruned", test_no_stats_declines), &
             new_unittest("a column whose bounds exceed the statistics size limit is never pruned", &
@@ -654,6 +657,70 @@ contains
         if (allocated(error)) return
         call check(error, pruned == 1_int64, "is_not_null: expected the all-null row group pruned")
     end subroutine test_null_tests_prune
+    !
+    !> An all-null row group IS prunable under is_nan/is_not_nan, and this is the one case
+    !> test_is_nan_declines above does not reach -- its fixture has no nulls at all, so every row
+    !> group has num_values > 0 and the screen can never rule one out.
+    !>
+    !> The rule and why it is sound: a Null row is kUnknown for BOTH operators (eval_filter_clause),
+    !> and only kTrue survives, so neither ever returns a Null row. A row group whose filter column
+    !> is entirely null therefore contributes nothing whether it is read or skipped, and
+    !> screen_row_groups says exactly that with `may_true = nn > 0` on the non-null count.
+    !>
+    !> That soundness is a coupling between two functions with nothing tying them together: if the
+    !> evaluator's Null arm ever changed -- say is_not_nan were "fixed" to answer true for a Null --
+    !> an all-null row group would have to return every row while the screen went on pruning it, and
+    !> the rows would vanish with no abort. This test is what would notice.
+    subroutine test_is_nan_prunes_all_null_row_group(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        logical :: agree
+        integer(int64) :: pruned
+        integer :: nrows, i
+        real(real64) :: x(100)
+        integer(int32) :: u(100)
+        logical :: valid(100)
+        character(len=*), parameter :: file = "test_run/screen_is_nan_all_null.parquet"
+        character(len=*), parameter :: control = "test_run/screen_is_nan_all_null_control.parquet"
+
+        ! Row group 3 (rows 21..30) is entirely null; row 45 (row group 5) is the one NaN.
+        do i = 1, 100
+            x(i) = real(i, real64)
+            u(i) = i
+            valid(i) = .not. (i >= 21 .and. i <= 30)
+        end do
+        x(45) = ieee_value(0.0_real64, ieee_quiet_nan)
+        call parquet_open_writer(writer, file, chunk_size=10)
+        call parquet_write_column(writer, "x", x, is_valid=valid)
+        call parquet_write_column(writer, "u", u)
+        call parquet_close_writer(writer)
+
+        call compare_screened(file, "x is_nan", "u", agree, pruned, nrows)
+        call check(error, agree, "is_nan all-null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 1, "is_nan all-null: expected the one NaN row")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, "is_nan all-null: expected the all-null row group pruned")
+        if (allocated(error)) return
+        ! The null rows must not come back, which is what makes pruning their row group sound.
+        call compare_screened(file, "x is_not_nan", "u", agree, pruned, nrows)
+        call check(error, agree, "is_not_nan all-null: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, nrows == 89, "is_not_nan all-null: 100 rows less 10 null less 1 NaN")
+        if (allocated(error)) return
+        call check(error, pruned == 1_int64, "is_not_nan all-null: expected the all-null row group pruned")
+        if (allocated(error)) return
+
+        ! NEGATIVE CONTROL. The same expression over a fixture with no nulls must prune NOTHING --
+        ! without this the test passes just as happily against a screen that prunes unconditionally,
+        ! and the assertions above would say nothing about the all-null case specifically.
+        call write_float_fixture(control, .true.)
+        call compare_screened(control, "x is_nan", "u", agree, pruned, nrows)
+        call check(error, agree, "is_nan control: pruned and unpruned reads must be identical")
+        if (allocated(error)) return
+        call check(error, pruned == 0_int64, &
+            "is_nan control: a null-free fixture must prune nothing -- no footer field counts NaNs")
+    end subroutine test_is_nan_prunes_all_null_row_group
     !
     !> A dotted struct-leaf path is allowed by the screen, unlike in parquet_column_has_nulls: a
     !> Parquet leaf's null count includes ancestor-struct nulls, i.e. exactly the rows

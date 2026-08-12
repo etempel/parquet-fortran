@@ -397,6 +397,8 @@ contains
                 test_sort_set_sort_twice_aborts), &
             new_unittest("sort: parquet_reader_set_sort after a read aborts", &
                 test_sort_set_sort_after_read_aborts), &
+            new_unittest("errors: filter/sort ordering guards abort (chunked read, sorted reader)", &
+                test_set_transform_ordering_aborts), &
             new_unittest("adopt_transform onto an already-transformed reader aborts", &
                 test_adopt_transform_onto_transformed_aborts), &
             new_unittest("adopt_transform after a column has been read aborts", &
@@ -4101,6 +4103,30 @@ contains
             failure_message="applying a sort after reading a column was expected to abort", &
             required_stderr="a column has already been read on this reader")
     end subroutine test_sort_set_sort_after_read_aborts
+
+    !> The three ordering guards a chunked read and an active sort would otherwise slip past: see
+    !> scenario_sort_set_sort_after_chunked_read, scenario_filter_set_filter_after_chunked_read and
+    !> scenario_filter_set_filter_after_sort in test/error_scenarios.f90.
+    !>
+    !> Each asserts its OWN message rather than merely that the process aborted, and for the last
+    !> one that is the whole point: a sorted reader also trips the decoded-columns guard (applying
+    !> a sort decodes its key columns), so a test asserting only "it aborted" would keep passing if
+    !> the has-sort check were removed or moved back below that guard.
+    subroutine test_set_transform_ordering_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "sort_set_sort_after_chunked_read", expect_abort=.true., &
+            failure_message="applying a sort after a chunked read was expected to abort", &
+            required_stderr="a chunked read has already been done on this reader")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "filter_set_filter_after_chunked_read", expect_abort=.true., &
+            failure_message="applying a filter after a chunked read was expected to abort", &
+            required_stderr="a chunked read has already been done on this reader")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "filter_set_filter_after_sort", expect_abort=.true., &
+            failure_message="applying a filter to a sorted reader was expected to abort", &
+            required_stderr="this reader already has an active sort; apply the filter before the sort")
+    end subroutine test_set_transform_ordering_aborts
 
     !> parquet_reader_adopt_transform abort paths: see the three scenario_adopt_transform_*
     !> subroutines in test/error_scenarios.f90 for what each does and why that state is rejected.

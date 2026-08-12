@@ -574,6 +574,12 @@ program error_scenarios
         call scenario_sort_set_sort_twice()
     case ("sort_set_sort_after_read")
         call scenario_sort_set_sort_after_read()
+    case ("sort_set_sort_after_chunked_read")
+        call scenario_sort_set_sort_after_chunked_read()
+    case ("filter_set_filter_after_chunked_read")
+        call scenario_filter_set_filter_after_chunked_read()
+    case ("filter_set_filter_after_sort")
+        call scenario_filter_set_filter_after_sort()
     case ("adopt_transform_onto_transformed")
         call scenario_adopt_transform_onto_transformed()
     case ("adopt_transform_after_read")
@@ -4633,6 +4639,81 @@ contains
         call parquet_reader_set_sort(reader, srt)   ! -> aborts (a column has already been read)
         print '(a)', "unexpectedly applied a sort after reading a column"
     end subroutine scenario_sort_set_sort_after_read
+
+    !> A CHUNKED read before parquet_reader_set_sort. Distinct from scenario_sort_set_sort_after_read
+    !> above and NOT covered by it: a chunked read frees each row group's array and caches nothing,
+    !> so the decoded-columns predicate stays 0 and only parquet_reader_has_chunk_reads sees it.
+    !> Deleting that second guard makes this scenario pass silently while the reader hands back rows
+    !> it already returned in physical order.
+    subroutine scenario_sort_set_sort_after_chunked_read()
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: chunk(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sort_after_chunked.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v asc")
+        call parquet_open_reader(reader, out_file)
+        ! Negative control, in-scenario: a sort is legal until something has actually been read, so
+        ! this same call on an untouched reader must succeed. Without it the scenario would pass
+        ! just as happily against a guard that refuses unconditionally.
+        block
+            type(parquet_reader) :: control
+            type(parquet_sortkey) :: control_srt
+
+            call control_srt%add("v asc")
+            call parquet_open_reader(control, out_file)
+            call parquet_reader_set_sort(control, control_srt)
+            call parquet_close_reader(control)
+        end block
+        call parquet_read_column_chunk(reader, "v", 1, chunk)
+        call parquet_reader_set_sort(reader, srt)   ! -> aborts (a chunked read has already been done)
+        print '(a)', "unexpectedly applied a sort after a chunked read"
+    end subroutine scenario_sort_set_sort_after_chunked_read
+
+    !> The filter twin of the scenario above -- same blind spot, same guard, same failure mode.
+    subroutine scenario_filter_set_filter_after_chunked_read()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: chunk(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_after_chunked.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call filt%add("v >= 20")
+        call parquet_open_reader(reader, out_file)
+        block
+            type(parquet_reader) :: control
+            type(parquet_filter) :: control_filt
+
+            call control_filt%add("v >= 20")
+            call parquet_open_reader(control, out_file)
+            call parquet_reader_set_filter(control, control_filt)
+            call parquet_close_reader(control)
+        end block
+        call parquet_read_column_chunk(reader, "v", 1, chunk)
+        call parquet_reader_set_filter(reader, filt)   ! -> aborts (a chunked read has already been done)
+        print '(a)', "unexpectedly applied a filter after a chunked read"
+    end subroutine scenario_filter_set_filter_after_chunked_read
+
+    !> A filter applied to an already-SORTED reader. apply_row_transform masks first and permutes
+    !> second, so a permutation's length is the post-filter row count -- filter first, then sort.
+    !> The decoded-columns guard would refuse this anyway (applying a sort decodes its key columns),
+    !> which is exactly why the has-sort check sits AHEAD of it: this scenario asserts the message
+    !> that names the caller's real mistake, so moving the check back below would fail it while a
+    !> plain "did it abort?" test would not notice.
+    subroutine scenario_filter_set_filter_after_sort()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        type(parquet_sortkey) :: srt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_after_sort.parquet"
+
+        call write_sort_scenario_fixture(out_file)
+        call srt%add("v asc")
+        call filt%add("v >= 20")
+        call parquet_open_reader(reader, out_file, sort_by=srt)
+        call parquet_reader_set_filter(reader, filt)   ! -> aborts (this reader already has an active sort)
+        print '(a)', "unexpectedly applied a filter to a sorted reader"
+    end subroutine scenario_filter_set_filter_after_sort
 
     !> parquet_reader_adopt_transform onto a reader that already has a transform of its own: the two
     !> would have to compose, and the adopted mask indexes rows the reader's own mask has already

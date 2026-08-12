@@ -444,6 +444,20 @@ Working rules:
   any signature you write or edit, and retrofit a whole page the next time that page is touched
   for another reason (`doc/pages/tables/table.md` is retrofitted; the others are not yet). The first
   bracketed signature on a page should carry a one-line note saying what the brackets mean.
+- **A fenced code block is NEVER indented, not even to sit under the bullet it belongs to.**
+  python-markdown — the engine FORD drives — does not recognise a ``` fence carrying any leading
+  whitespace: the fence is emitted literally inside a `<p>`, the enclosing list is closed before it,
+  and because the block has become prose a blank line inside the example splits it in two. The
+  published page shows the example as running text with a stray ``` in it, while the source looks
+  right, FORD exits 0 and no test reads the generated HTML. Measured against python-markdown 3.3.4
+  and 3.4.4 with the extensions `fpm.toml`'s `[extra.ford]` configures: **2 spaces broken, 4 spaces
+  broken** (that one becomes an indented code block *containing* the ``` line), **column 0 correct**.
+  So put the fence and its content at column 0 — the list closes before it and reopens after, which
+  is only cosmetic — or restructure the bullet into a subheading; and dedent any bullet-continuation
+  prose that follows the fence, or it is orphaned at an indent belonging to a list that has closed.
+  Enforced by `check_no_indented_code_fence` (`tools/check_source_conventions.py`, run by both
+  `tools/run_lint_check.sh` and CI's `lint` stage); six blocks across three pages had been published
+  this way before it existed.
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
   everywhere) — see the MAML→header flow in `doc/pages/schema/maml-format.md`'s "The MAML metadata format".
@@ -3293,6 +3307,18 @@ assert afterwards is that Y kept the answer." Two such tests were written that w
 gate's `filter=`/`sort=` clauses and both were converted rather than deleted when the clause lifted,
 by following their own instructions. The same applies to the *code*: a refusal comment must read
 "deferred until X", never "this cannot be done", or the next reader takes the clause as settled.
+
+**A refusal can also disappear entirely rather than narrow, and then its test is deleted, not
+converted — in all three places at once.** Widening `parquet_get_column_type` to report a
+narrowest-lossless target left *no* type that makes it abort, so `get_column_type_unsupported` was
+asserting a guard that no longer exists anywhere; it had to go from `test/error_scenarios.f90`'s
+`select case`, from `tools/run_error_scenarios.sh`'s array and from its `test/test_errors.f90`
+wrapper, since a partial removal fails `check_scenario_list_is_complete`. Two rules follow, and the
+second is the one that keeps coverage from quietly dropping: **before deleting, check whether the
+behaviour has a positive form worth asserting instead** (that one became "reports `unknown` rather
+than aborting", which is a stronger test than the refusal ever was), and **expect the widening to
+break tests far from the change** — six unrelated error scenarios had been using a `uint32` column
+precisely *because* it was unreadable. Run the whole suite, not the area's own.
 
 ### A static check that enumerates names goes stale silently
 

@@ -489,7 +489,8 @@ module parquet_core
     !> Rules are unvalidated here -- the expression is parsed, and every clause
     !> validated (column exists, is a scalar column, value is well-formed for
     !> that column's type), once a reader actually applies the filter. See "Row
-    !> filtering with parquet_filter" in doc/pages/io/reading.md for the grammar.
+    !> filtering with parquet_filter" in doc/pages/io/filter-sort-sample.md for
+    !> the grammar.
     !>
     !> %remap_column_names(from, to) rewrites the columns the rules refer to, in place, replacing
     !> from(k) with to(k) throughout every rule's expression. It exists for callers that build a
@@ -536,8 +537,8 @@ module parquet_core
     !> sort ordering exactly, so a result cross-checked against pyarrow matches row for row.
     !>
     !> Keys are unvalidated here -- the column must exist and be a sortable scalar column, which
-    !> is checked once a reader actually applies the sort. See "Reading rows in sorted order" in
-    !> doc/pages/io/reading.md.
+    !> is checked once a reader actually applies the sort. See "Reading rows in sorted order with
+    !> parquet_sortkey" in doc/pages/io/filter-sort-sample.md.
     !>
     !> The type is named for what it holds (the keys), not for the operation; a sorted read is
     !> requested through parquet_open_reader/parquet_reader_set_sort.
@@ -1028,7 +1029,8 @@ module parquet_core
     !> row (the current/default behavior); must not be negative or NaN
     !> (error stops); exactly 0.0 deterministically yields zero rows. Shares
     !> its underlying mask with filter= (see "Row filtering with
-    !> parquet_filter" in the README): a filter, if also given, is applied
+    !> parquet_filter" in doc/pages/io/filter-sort-sample.md): a filter, if
+    !> also given, is applied
     !> on top of the downsample, and sample_fraction < 1.0 alone (even with
     !> no filter=) carries the same consequences filter= already has --
     !> chunked reads (parquet_read_column_chunk) are disallowed, and array

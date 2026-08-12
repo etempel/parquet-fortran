@@ -399,6 +399,8 @@ contains
                 test_sort_set_sort_after_read_aborts), &
             new_unittest("errors: filter/sort ordering guards abort (chunked read, sorted reader)", &
                 test_set_transform_ordering_aborts), &
+            new_unittest("errors: reading a non-uniform plain LIST column aborts", &
+                test_non_uniform_list_read_aborts), &
             new_unittest("adopt_transform onto an already-transformed reader aborts", &
                 test_adopt_transform_onto_transformed_aborts), &
             new_unittest("adopt_transform after a column has been read aborts", &
@@ -4127,6 +4129,45 @@ contains
             failure_message="applying a filter to a sorted reader was expected to abort", &
             required_stderr="this reader already has an active sort; apply the filter before the sort")
     end subroutine test_set_transform_ordering_aborts
+
+    !> Reading a plain LIST column whose rows do NOT all hold the same number of elements aborts
+    !> cleanly. See scenario_read_ragged_list_column, scenario_table_read_ragged_list_column and
+    !> scenario_table_read_avg_ok_list_column in test/error_scenarios.f90.
+    !>
+    !> The suite measured this distinction exhaustively (parquet_measure_list_width, %width against
+    !> every column of test/fixtures/list_widths.parquet) and never once READ a non-uniform one --
+    !> which is how a test that did read one reached main and aborted the whole table suite.
+    !>
+    !> Two DIFFERENT mechanisms are covered, not one example twice, and the messages are what tell
+    !> them apart -- so each is asserted by message rather than by "did it abort":
+    !>
+    !>   * `avg_ok` (rows 3,1,3,1) has an integral mean of 2, so the footer screen cannot reject it
+    !>     and hands back a candidate of 2. The READ is what catches it, which is the design: a
+    !>     table resolves a deferred width with the unproven candidate on purpose, because
+    !>     get_uniform_list_values checks every row against the width it was handed. Hence
+    !>     "shape mismatch", from the ARRAY entry point, at both reader and table level.
+    !>   * `ragged` (rows 1,2,3,4) has a non-integral mean, so the screen rejects it for free and
+    !>     the width resolves to 1 -- the column is then classified SCALAR, and the scalar read
+    !>     path rejects the list type. Hence "type mismatch", from a different entry point.
+    !>
+    !> Each scenario carries its own in-process negative control on `uniform` (rows all length 3),
+    !> which is a genuine width-3 vector column and must read normally; without it these would pass
+    !> against a library that refused every plain LIST column, which is the opposite defect.
+    subroutine test_non_uniform_list_read_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "read_ragged_list_column", expect_abort=.true., &
+            failure_message="reading a list column at a width its rows do not have was expected to abort", &
+            required_stderr="parquet_read_int32_array_column: shape mismatch for column: avg_ok")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "table_read_avg_ok_list_column", expect_abort=.true., &
+            failure_message="a table read at an unproven width candidate was expected to abort", &
+            required_stderr="parquet_read_int32_array_column: shape mismatch for column: avg_ok")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "table_read_ragged_list_column", expect_abort=.true., &
+            failure_message="reading a screen-rejected ragged list column was expected to abort", &
+            required_stderr="type mismatch for column: ragged")
+    end subroutine test_non_uniform_list_read_aborts
 
     !> parquet_reader_adopt_transform abort paths: see the three scenario_adopt_transform_*
     !> subroutines in test/error_scenarios.f90 for what each does and why that state is rejected.

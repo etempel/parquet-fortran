@@ -580,6 +580,12 @@ program error_scenarios
         call scenario_filter_set_filter_after_chunked_read()
     case ("filter_set_filter_after_sort")
         call scenario_filter_set_filter_after_sort()
+    case ("read_ragged_list_column")
+        call scenario_read_ragged_list_column()
+    case ("table_read_ragged_list_column")
+        call scenario_table_read_ragged_list_column()
+    case ("table_read_avg_ok_list_column")
+        call scenario_table_read_avg_ok_list_column()
     case ("adopt_transform_onto_transformed")
         call scenario_adopt_transform_onto_transformed()
     case ("adopt_transform_after_read")
@@ -4714,6 +4720,87 @@ contains
         call parquet_reader_set_filter(reader, filt)   ! -> aborts (this reader already has an active sort)
         print '(a)', "unexpectedly applied a filter to a sorted reader"
     end subroutine scenario_filter_set_filter_after_sort
+
+    !> Reading a RAGGED plain-LIST column aborts, at reader level.
+    !>
+    !> A plain `list<int32>` carries no width in the schema, so whether it is a usable vector column
+    !> is a property of the data (see test/fixtures/list_widths.parquet's own generator header).
+    !> `uniform` -- every row length 3 -- IS an ordinary width-3 vector column; `ragged` -- lengths
+    !> 1,2,3,4 -- has no single width and is rejected when read. The whole suite measured this
+    !> distinction (parquet_measure_list_width, %width) and never once READ a ragged column, which
+    !> is how a test that did read one reached main and aborted the whole table suite.
+    !>
+    !> The `uniform` read below is the NEGATIVE CONTROL and is the point of the scenario: without
+    !> it this passes just as happily against a library that rejects every plain LIST column, which
+    !> is the opposite defect and the more likely one.
+    subroutine scenario_read_ragged_list_column()
+        type(parquet_reader) :: reader
+        integer(int32), allocatable :: wide(:,:)
+        integer(int64) :: nrows
+        integer :: cs
+        character(len=*), parameter :: f = "test/fixtures/list_widths.parquet"
+
+        call parquet_open_reader(reader, f)
+        call parquet_get_nrows(reader, nrows)
+        ! NEGATIVE CONTROL: the same call sequence on a plain LIST whose rows really are uniform
+        ! must succeed. Without it this passes against a library that rejects every plain LIST.
+        call parquet_measure_list_width(reader, "uniform", 0, 0, .false., cs)
+        if (cs /= 3) error stop "control failed: uniform's unproven width should be 3"
+        allocate(wide(cs, nrows))
+        call parquet_read_column(reader, "uniform", wide)
+        if (size(wide, 1) /= 3) error stop "control failed: uniform did not read back at width 3"
+        deallocate(wide)
+        ! avg_ok's rows alternate 3,1 so the footer mean is exactly 2 and the SCREEN cannot reject
+        ! it: the unproven measurement hands back a candidate of 2, which is wrong. Reading at that
+        ! candidate is what catches it -- get_uniform_list_values checks every row's length against
+        ! the width it was given. This is the reader-level half of the read-is-the-proof design.
+        call parquet_measure_list_width(reader, "avg_ok", 0, 0, .false., cs)
+        if (cs /= 2) error stop "expected avg_ok's unproven screen candidate to be 2"
+        allocate(wide(cs, nrows))
+        call parquet_read_column(reader, "avg_ok", wide)   ! -> aborts (shape mismatch)
+        print '(a)', "unexpectedly read a list column at a width its rows do not have"
+    end subroutine scenario_read_ragged_list_column
+
+    !> The table-level twin of the scenario above -- the path that actually broke.
+    subroutine scenario_table_read_ragged_list_column()
+        type(parquet_table) :: t
+        integer(int32), allocatable :: wide(:,:), flat(:)
+        character(len=*), parameter :: f = "test/fixtures/list_widths.parquet"
+
+        call parquet_open_table(t, f)
+        ! NEGATIVE CONTROL, as above: the uniform column is a real vector column and reads.
+        if (.not. t%is_supported("uniform")) error stop "control failed: uniform should be supported"
+        if (t%width("uniform") /= 3) error stop "control failed: uniform should have width 3"
+        call t%get("uniform", wide)
+        if (size(wide, 1) /= 3) error stop "control failed: uniform did not read back at width 3"
+        ! %is_supported answers .true. for the ragged column too, and that is correct rather than a
+        ! wart -- it reports on the TYPE, which is readable, and cannot know about raggedness
+        ! without reading. The read is where it is caught.
+        if (.not. t%is_supported("ragged")) error stop "ragged's element type should still report supported"
+        call t%get("ragged", flat)   ! -> aborts
+        print '(a)', "unexpectedly read a ragged list column through a table"
+    end subroutine scenario_table_read_ragged_list_column
+
+    !> `avg_ok` is a DIFFERENT mechanism from `ragged`, not a second example of it, and it is the
+    !> one worth having.
+    !>
+    !> Its rows alternate 3,1,3,1, so the footer screen's mean is exactly 2 and the screen CANNOT
+    !> reject it -- it yields a candidate of 2. A table read then resolves the width with that
+    !> UNPROVEN candidate on purpose (table_touch passes proven=.false.), because
+    !> get_uniform_list_values checks every row's length against the width it was handed, so the
+    !> read that was going to happen anyway doubles as the proof and the scan is never paid for.
+    !> This scenario is what pins that: it is the only place the read-is-the-proof design is
+    !> exercised end to end. Trusting the candidate without that check would mis-shape the column
+    !> instead of aborting.
+    subroutine scenario_table_read_avg_ok_list_column()
+        type(parquet_table) :: t
+        integer(int32), allocatable :: flat(:)
+        character(len=*), parameter :: f = "test/fixtures/list_widths.parquet"
+
+        call parquet_open_table(t, f)
+        call t%get("avg_ok", flat)   ! -> aborts (shape mismatch)
+        print '(a)', "unexpectedly read a list column whose screen candidate was not its real width"
+    end subroutine scenario_table_read_avg_ok_list_column
 
     !> parquet_reader_adopt_transform onto a reader that already has a transform of its own: the two
     !> would have to compose, and the adopted mask indexes rows the reader's own mask has already

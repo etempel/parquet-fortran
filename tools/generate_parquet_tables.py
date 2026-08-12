@@ -1578,19 +1578,28 @@ def gen_spec_interfaces():
             logical, intent(out), optional :: found   !! present: report an out-of-range j instead of aborting.
             integer :: r                              !! the RES_* constant.
         end function table_column_residency_at
-        !> Whether a column's physical type is one this library can read.
+        !> Whether a column's physical TYPE is one this library can read. It answers from the
+        !> schema alone and reads no data, so for a plain LIST/LARGE_LIST column it is a
+        !> statement about the element type, not a promise that the read will succeed: such a
+        !> column carries no width in the schema, and whether one uniform width exists is a
+        !> property of the DATA. A `list<int32>` whose rows all hold 3 elements is an ordinary
+        !> vector column of width 3; one whose rows differ in length is rejected when it is read.
+        !> Both answer .true. here. Every other type is settled by the schema, so for them this
+        !> does predict the read. Use %width (which resolves a deferred width for real) when the
+        !> distinction matters.
         module function table_is_supported(self, name, found) result(ok)
             class(parquet_table), intent(in) :: self  !! the table.
             character(len=*), intent(in) :: name      !! column name.
             logical, intent(out), optional :: found   !! present: report a miss instead of aborting.
-            logical :: ok                             !! .true. if readable.
+            logical :: ok                             !! .true. if the column's TYPE is readable.
         end function table_is_supported
-        !> Whether a column's type can be read, by 1-based position.
+        !> Whether a column's type can be read, by 1-based position -- see table_is_supported
+        !> above for the plain-LIST caveat.
         module function table_is_supported_at(self, j, found) result(ok)
             class(parquet_table), intent(in) :: self  !! the table.
             integer, intent(in) :: j                  !! 1-based column position.
             logical, intent(out), optional :: found   !! present: report an out-of-range j instead of aborting.
-            logical :: ok                             !! .true. if readable.
+            logical :: ok                             !! .true. if the column's TYPE is readable.
         end function table_is_supported_at
         !> Whether the table has been detached from its file by a row-structural mutation.
         module function table_is_detached(self) result(d)

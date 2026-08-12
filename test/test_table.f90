@@ -1991,16 +1991,31 @@ contains
         call check(error, t%residency("map_col") == RES_EMPTY, &
             "an unsupported column should hold no values")
         if (allocated(error)) return
-        ! A supported column in the same file still works normally.
-        call check(error, t%is_supported("list_col"), &
+        ! A supported column in the same file still works normally. It has to be a genuine SCALAR
+        ! leaf: every top-level column in this fixture is a container, and `list_col` -- the
+        ! obvious-looking choice -- is a RAGGED list<int32> (rows of length 2, 0, 3), so it aborts
+        ! on read for want of a single width.
+        !
+        ! `%is_supported` reports .true. for it all the same, and that is correct rather than a
+        ! wart: a plain LIST carries no width in the schema, so a list<int32> whose rows are all
+        ! the same length IS an ordinary vector column (see test/fixtures/list_widths.parquet's
+        ! `uniform`). Whether a given plain-LIST column is usable is a property of the DATA, which
+        ! %is_supported does not read -- %width is the query that resolves it for real.
+        ! `struct_of_struct.inner.a` is an int32 leaf reached through a struct path, so it is
+        ! readable in the ordinary way and makes this arm about the unsupported SIBLING, which is
+        ! what the test is for.
+        call check(error, t%is_supported("struct_of_struct.inner.a"), &
             "a supported column in the same file should still be readable")
         if (allocated(error)) return
-        call check(error, t%residency("list_col") == RES_EMPTY, &
+        call check(error, t%residency("struct_of_struct.inner.a") == RES_EMPTY, &
             "a supported column starts empty like any other")
         if (allocated(error)) return
-        call t%get("list_col", ids)
-        call check(error, t%residency("list_col") == RES_FULL, &
+        call t%get("struct_of_struct.inner.a", ids)
+        call check(error, t%residency("struct_of_struct.inner.a") == RES_FULL, &
             "a supported column should still be readable despite an unsupported sibling")
+        if (allocated(error)) return
+        call check(error, size(ids) == t%nrows(), &
+            "the readable sibling should yield one value per row")
         if (allocated(error)) return
         ! And a soft-failing read of the unsupported column reports rather than aborts.
         call t%get("map_col", names, found=ok)

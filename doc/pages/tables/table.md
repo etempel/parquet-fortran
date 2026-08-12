@@ -239,7 +239,7 @@ column is numeric at all.
 | `t%width(name)` | values per row: 1 for a scalar column, the element count for a vector one |
 | `call t%unit(name, u)` | its unit string, or `""` |
 | `t%residency(name)` | `RES_FULL` once read, `RES_EMPTY` before that (and for an unreadable column) |
-| `t%is_supported(name)` | whether its physical type is one this library can read |
+| `t%is_supported(name)` | whether its physical type is one this library can read (see the note below for plain `LIST` columns) |
 | `t%is_null(name, i)` | whether row `i` of that column is null |
 | `t%has_nulls(name [, found])` | whether the column holds any null — from the file's footer if it has not been read |
 | `call t%get_valid_mask(name, mask [, found])` | its per-row validity as a `logical` array, `.true.` where the row holds a value |
@@ -251,6 +251,21 @@ column is numeric at all.
 
 (An argument in **square brackets** is optional — `[found]` above means `found` may be omitted.
 The brackets are notation for this documentation, never something you type.)
+
+**`%is_supported` answers about the column's TYPE, and for one type that is not the same as "the
+read will succeed".** It reads no data. For everything except a plain `LIST`/`LARGE_LIST` the
+schema settles the question, so the answer does predict the read. A plain `LIST` carries **no
+width in the schema**, though — unlike the `fixed_size_list` this library's own writer emits — so
+whether the column is a usable vector column depends on the *data*:
+
+- a `list<int32>` whose every row holds 3 elements **is** an ordinary vector column of width 3,
+  and reads normally;
+- a `list<int32>` whose rows differ in length has no single width and is rejected when it is read.
+
+`%is_supported` reports `.true.` for **both**, because the element type is readable in both and it
+cannot tell them apart without reading. Use `%width(name)` when you need the stronger answer: it
+resolves a deferred width for real (footer screen, then a row-group scan) and so distinguishes the
+two. See [Reading parquet files](../io/reading.html) for how that resolution works.
 
 ### Asking about a column by position instead of by name
 

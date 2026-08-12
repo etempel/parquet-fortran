@@ -209,8 +209,8 @@ contains
                 test_streaming_write_single_row_group_roundtrip), &
             new_unittest("streaming row-group write: string and logical chunked columns round-trip", &
                 test_streaming_write_string_logical_roundtrip), &
-            new_unittest("parquet_get_chunk_size(writer) returns a positive value before and during streaming", &
-                test_streaming_get_chunk_size), &
+            new_unittest("parquet_get_chunk_size(writer) reports what the writer was opened with, unchanged " // &
+                "by streaming", test_streaming_get_chunk_size), &
             new_unittest("auto row-group sizing: the 1000-row floor still applies when it only moderately " // &
                 "overshoots the byte target", test_chunk_size_floor_overshoot_ok), &
             new_unittest("auto row-group sizing: a row group smaller than the 1000-row floor is used when " // &
@@ -3005,8 +3005,21 @@ contains
             "streamed string/logical columns did not round-trip correctly")
     end subroutine test_streaming_write_string_logical_roundtrip
 
-    !> parquet_get_chunk_size(writer) must return a usable positive value both before any data
-    !> is written (schema-based estimate) and once streaming is under way (locked-in value).
+    !> parquet_get_chunk_size(writer) reports what the writer was OPENED with -- the caller's own
+    !> chunk_size=, or the schema-based estimate -- and streaming never changes it. That is the
+    !> claim doc/pages/io/writing.md's "Picking rows_per_group" makes, and it is guarded by
+    !> omission rather than by code: resolve_chunk_size (parquet_wrapper.cpp) caches its answer and
+    !> parquet_new_row_group writes neither field, so a future change that helpfully refreshed the
+    !> value from the row group's own nrows would break the documented contract with nothing to
+    !> notice. Asserting merely "positive before and during" (which is what this test used to do)
+    !> passes against exactly that change.
+    !!
+    !! The two halves are each other's negative control. The auto-sized arm asserts the value is
+    !! UNCHANGED across a row group AND is not that row group's nrows -- equality alone would pass
+    !! against an implementation returning nrows at both calls. The explicit arm asserts a
+    !! caller-chosen 250 survives the same sequence, so the test also fails if an explicit
+    !! chunk_size stops being reported back.
+    !!
     !! Also exercises the int32-kind specific (parquet_get_chunk_size_writer_int32) alongside the
     !! int64 one, and the int64-kind specific of parquet_new_row_group.
     subroutine test_streaming_get_chunk_size(error)
@@ -3014,8 +3027,11 @@ contains
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         character(len=*), parameter :: out_file = "test_run/test_streaming_get_chunk_size.parquet"
-        integer(int64) :: chunk_size_before, chunk_size_during
+        character(len=*), parameter :: exp_file = "test_run/test_streaming_get_chunk_size_explicit.parquet"
+        integer(int64) :: chunk_size_before, chunk_size_during, chunk_size_after
+        integer(int64) :: exp_before, exp_during
         integer(int32) :: chunk_size_before32
+        integer(int64), parameter :: rg_rows = 2_int64 !! this row group's nrows, deliberately tiny.
         integer(int32) :: v(2, 2)
 
         v = reshape([1, 2, 3, 4], [2, 2])
@@ -3028,14 +3044,34 @@ contains
         call parquet_get_chunk_size(writer, chunk_size_before)
         call parquet_get_chunk_size(writer, chunk_size_before32)
 
-        call parquet_new_row_group(writer, 2_int64)
+        call parquet_new_row_group(writer, rg_rows)
         call parquet_write_column_chunk(writer, "v", v)
         call parquet_get_chunk_size(writer, chunk_size_during)
         call parquet_finish_row_group(writer)
+        call parquet_get_chunk_size(writer, chunk_size_after)
         call parquet_close_writer(writer)
 
-        call check(error, chunk_size_before > 0 .and. chunk_size_during > 0 .and. chunk_size_before32 > 0, &
-            "parquet_get_chunk_size(writer) did not return a positive value")
+        call check(error, chunk_size_before > 0 .and. int(chunk_size_before32, int64) == chunk_size_before, &
+            "parquet_get_chunk_size(writer) must report a positive value, the same one in both kinds")
+        if (allocated(error)) return
+        call check(error, chunk_size_during == chunk_size_before .and. chunk_size_after == chunk_size_before, &
+            "an auto-sized chunk_size must not change when a row group is opened or finished")
+        if (allocated(error)) return
+        call check(error, chunk_size_during /= rg_rows, &
+            "parquet_get_chunk_size(writer) must not start reporting the open row group's own nrows")
+        if (allocated(error)) return
+
+        ! The explicit arm: a caller-chosen value must survive the same sequence unchanged.
+        call parquet_open_writer(writer, exp_file, schema, chunk_size=250)
+        call parquet_get_chunk_size(writer, exp_before)
+        call parquet_new_row_group(writer, rg_rows)
+        call parquet_write_column_chunk(writer, "v", v)
+        call parquet_get_chunk_size(writer, exp_during)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call check(error, exp_before == 250_int64 .and. exp_during == 250_int64, &
+            "an explicit chunk_size= must be reported back unchanged, before and during streaming")
     end subroutine test_streaming_get_chunk_size
 
     !> Auto row-group sizing (chunk_size_from_bytes_per_row in parquet_wrapper.cpp, and
@@ -3078,8 +3114,16 @@ contains
         call parquet_get_num_row_groups(reader, num_row_groups)
         call parquet_close_reader(reader)
 
-        call check(error, chunk_size_before > 0 .and. nrows == 2_int64 .and. num_row_groups == 1_int64, &
-            "auto row-group sizing (bounded floor-overshoot case) did not behave as expected")
+        ! The value, not merely its sign: bytes_per_row = 4 * 100000 puts rows_for_target at 671,
+        ! below the floor, and 1000 rows overshoot the 256 MiB target by only 1.5x (inside
+        ! kMaxFloorOvershootFactor), so the floor is applied and the answer is exactly 1000. This
+        ! is the negative control for test_chunk_size_floor_blown_past's own assertion, and vice
+        ! versa: "> 0" passed against an implementation returning one constant for both branches.
+        call check(error, chunk_size_before == 1000_int64, &
+            "auto row-group sizing must apply the 1000-row floor when it only moderately overshoots")
+        if (allocated(error)) return
+        call check(error, nrows == 2_int64 .and. num_row_groups == 1_int64, &
+            "the bounded floor-overshoot case did not write the expected rows/row groups")
     end subroutine test_chunk_size_floor_overshoot_ok
 
     !> Same shape as test_chunk_size_floor_overshoot_ok, but for the OTHER new branch: a
@@ -3114,8 +3158,18 @@ contains
         call parquet_get_num_row_groups(reader, num_row_groups)
         call parquet_close_reader(reader)
 
-        call check(error, chunk_size_before > 0 .and. nrows == 2_int64 .and. num_row_groups == 1_int64, &
-            "auto row-group sizing (floor-blown-past case) did not behave as expected")
+        ! BELOW the floor is the whole point of this branch: bytes_per_row = 4 * 300000 makes even
+        ! 1000 rows overshoot the 256 MiB target by more than kMaxFloorOvershootFactor, so the
+        ! floor is abandoned for max(rows_for_target, 1) -- 223 at the built-in target, measured.
+        ! The bound rather than the exact number is asserted, so this does not have to be
+        ! re-derived if the byte target's default ever moves; "< 1000" is what distinguishes this
+        ! branch from test_chunk_size_floor_overshoot_ok's exact 1000, and each fails the mutation
+        ! that would satisfy the other.
+        call check(error, chunk_size_before > 0 .and. chunk_size_before < 1000_int64, &
+            "auto row-group sizing must fall below the 1000-row floor when the floor would blow past the target")
+        if (allocated(error)) return
+        call check(error, nrows == 2_int64 .and. num_row_groups == 1_int64, &
+            "the floor-blown-past case did not write the expected rows/row groups")
     end subroutine test_chunk_size_floor_blown_past
 
     !> estimated_bytes_per_element (parquet_wrapper.cpp) only ever saw its int32/float32/int64/

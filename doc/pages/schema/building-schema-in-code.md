@@ -21,6 +21,54 @@ Both `%init` and `%add_field` build the schema's underlying MAML text, so you st
 
 The file form, `parquet_parse_maml(filename, schema)`, has the same "not already initialized" requirement as `%init` (and no `force=` option): loading a `.maml` file into a `schema` that is already initialized — via `%init` or an earlier parse — fails with `error stop`, rather than silently discarding whatever `schema` held before. Call `schema%clear()` first to reuse the same variable for a different file.
 
+## Choosing which columns a schema writes
+
+A schema usually declares more columns than any one program has data for — that is the point of a
+shared schema. Every column a schema declares is **enabled** to begin with (whether it came from a
+`.maml` file or from `%add_field`), and three type-bound procedures change or query that. Square
+brackets mark an optional argument; they are not part of the code you write.
+
+- **`call schema%set_column_unavailable([name])`** — disables `name`, or **every** column when
+  called with no name at all.
+- **`call schema%set_column_available([name])`** — enables `name`, or every column when called with
+  no name.
+- **`schema%is_column_set(name)`** — `.true.` if that column is currently enabled. `error stop`s if
+  the schema has no such column, so it answers about a real column or not at all.
+
+The usual shape is to turn everything off and then name what you actually have, which is what the
+[combined example](combined-example.html#maml-schema-vector-columns-and-metadata) does:
+
+```fortran
+call schema%set_column_unavailable()      ! disable every column
+call schema%set_column_available("id0")   ! ... then re-enable the two we have data for
+call schema%set_column_available("idarr")
+```
+
+Being enabled or not decides three things, all of them at
+[write](../io/writing.html#writer-options) time:
+
+- **Only enabled columns reach the file.** `parquet_open_writer` takes its column list from them.
+- **`parquet_close_writer` requires every enabled column to have been written**, and names the
+  offending column, the output file and the schema if one was missed. Disabling a column you have no
+  data for is therefore how you satisfy that check, rather than an optimisation.
+- **A `write_maml=.true.` sidecar lists only the enabled columns**, so the saved `.maml` describes
+  the file that was actually written.
+
+Two behaviours worth knowing before you rely on them:
+
+- **Writing a disabled column is silently skipped, not an error.** `parquet_write_column` returns
+  without doing anything for a column the schema declares but has disabled — which is what lets a
+  program call it unconditionally for every column it knows about and let the schema decide. Writing
+  a name the schema does not declare **at all** is still an immediate `error stop`; the two cases are
+  deliberately different.
+- **A column excluded by a user MAML cannot be re-enabled.** Where a user MAML declares a subset of
+  a base schema (`parquet_validate_user_maml`, see [The fields:
+  section](maml-format.html#the-fields-section)), the columns it leaves out are marked
+  *deactivated*, and naming one in either procedure fails with
+  `error stop` rather than quietly overriding the user's own subset. The no-name (bulk) forms skip
+  deactivated columns instead of failing, so `set_column_unavailable()` followed by
+  `set_column_available()` is always safe.
+
 ## Runtime table metadata: schema%add_metadata and schema%clear_metadata
 
 `schema%metadata%items` (read back via [`parquet_get_metadata`](../io/reading.html#reading-table-metadata-with-parquet_get_metadata)) is populated from two sources that end up indistinguishable in storage: the schema's own top-level header keys (`table:`, `survey:`, `dataset:`, `version:`, `date:`, `author:`, `description:`, `license:`, `MAML_version:` — whichever a real `keyarray:` entry declares, `table:` included) parsed by `parquet_parse_maml` (see [How table-level keys become metadata entries](maml-format.html#how-table-level-keys-become-metadata-entries) for which MAML key produces which entry), and any `schema%add_metadata(key, value [, description] [, warn])` call made afterward. `add_metadata` is a `generic` over every scalar/array `int32`/`int64`/`float32`/`float64`/`logical`/`string` type/kind (`float32`/`float64` also accept an optional `fmt` edit descriptor); duplicate keys are never rejected or overwritten — a later `add_metadata` call with a key already present just appends a second entry, and `parquet_get_metadata` always resolves the *first* match, so a duplicate silently has no effect on read.

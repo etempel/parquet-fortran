@@ -1805,7 +1805,10 @@ extern "C"
 	// would_overflow_string_offset_limit does) rather than computing it directly.
 	static void check_chunk_size_fits_limit_for_col_size(int64_t chunk_size, const std::string &name,
 		int64_t col_size, const char *context, const char *value_label = "chunk_size",
-		const char *advice = "pass a smaller chunk_size to parquet_open_writer/parquet_set_writer_options, or "
+		// Names parquet_open_writer only: parquet_set_writer_options is a bind(C) binding
+		// (parquet_bindings.f90), never re-exported by the parquet facade, so advising a user to
+		// call it points at something they cannot reach from `use parquet`.
+		const char *advice = "pass a smaller chunk_size to parquet_open_writer, or "
 			"omit it to auto-size safely")
 	{
 		if (col_size <= 1) return;
@@ -1840,7 +1843,9 @@ extern "C"
 	// column's arrow::Field to exist yet.
 	static void check_chunk_size_fits_metadata_limit(int64_t chunk_size,
 		const std::vector<ColumnMetadata> &column_metadata, const char *context, const char *value_label = "chunk_size",
-		const char *advice = "pass a smaller chunk_size to parquet_open_writer/parquet_set_writer_options, or "
+		// See check_chunk_size_fits_limit_for_col_size above for why the advice names only
+		// parquet_open_writer.
+		const char *advice = "pass a smaller chunk_size to parquet_open_writer, or "
 			"omit it to auto-size safely")
 	{
 		for (const auto &col : column_metadata)

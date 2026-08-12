@@ -458,6 +458,16 @@ Working rules:
   Enforced by `check_no_indented_code_fence` (`tools/check_source_conventions.py`, run by both
   `tools/run_lint_check.sh` and CI's `lint` stage); six blocks across three pages had been published
   this way before it existed.
+- **A list item's continuation PARAGRAPH needs 4-space indentation; 2 spaces silently ends the
+  list.** Same engine, same silence, different construct from the fence rule above — and 2 spaces is
+  what a `- ` bullet's own wrapped continuation *lines* use, so splitting a long bullet into
+  paragraphs at the indent already in front of you is the natural mistake. python-markdown closes the
+  `<ul>` at the blank line, emits the rest of that bullet as top-level `<p>`, and renders every
+  following bullet as **literal `- ` in running prose**. Confirmed on `doc/pages/io/writing.md`'s
+  `chunk_size` bullet: `ford docs.md` exited 0, `check_no_indented_code_fence` passed, the source
+  looked right, and only reading the generated HTML found it. So indent a continuation paragraph 4
+  spaces, or leave the bullet as one paragraph — and when a page gains a multi-paragraph list item,
+  render it once and check the following bullet is still an `<li>`.
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
   everywhere) — see the MAML→header flow in `doc/pages/schema/maml-format.md`'s "The MAML metadata format".
@@ -507,7 +517,7 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and stands at
-**32** as of 2026-08-11 (14 `public ::` re-exports in `parquet_core.f90` plus 18 `private ::`
+**34** as of 2026-08-12 (14 `public ::` re-exports in `parquet_core.f90` plus 20 `private ::`
 names in the `parquet` facade). **It is stable only in the sense that it moves for a reason** —
 it rises by one for each name a future `private ::` in the facade hides, which is the expected
 cost of keeping a sibling module's plumbing out of `use parquet`'s namespace, and a rise of
@@ -616,26 +626,30 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **32** of
-  them as of 2026-08-11 and the one FORD number worth tracking across a change. Two independent
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **34** of
+  them as of 2026-08-12 and the one FORD number worth tracking across a change. Two independent
   groups:
   **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
   `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
   `parquet_maml_file` from `parquet_maml_base`), which FORD silently drops from that module's
-  generated page; and **18 `private ::`** names in the `parquet` facade — `c_int`, the two
+  generated page; and **20 `private ::`** names in the `parquet` facade — `c_int`, the two
   `parquet_get_*_version` bindings, six names from `parquet_settings`
   (`parquet_valid_compressions`, `parquet_resolve_writer_compression`, the three `parquet_emit_*`
-  output channels and `parquet_output_is_suppressed`), and the **nine** `parquet_column_*`
+  output channels and `parquet_output_is_suppressed`), `parquet_split_name_list` and
+  `parquet_parse_sort_key` from `parquet_core`, and the **nine** `parquet_column_*`
   generics of the typed accessor tier (`_get_at`, `_set_at`, `_get_elem`, `_set_elem`, `_data_ptr`,
   `_string_column`, `_is_null`, `_set_null`, `_clear_null`) — which are the facade's only way to
   keep those names out of the namespace `use parquet` hands a user, so they cannot be removed.
   Note the count is of *names*, not of `private ::` statements: one statement may list several, and
-  `src/parquet.f90` carries 10 statements for those 18 names.
+  `src/parquet.f90` carries 11 statements for those 20 names. Its twelfth, `private :: cversion`,
+  warns about nothing — `cversion` is defined in the facade rather than use-associated, which is
+  exactly the distinction this warning is about.
   **This number rises by one for each name a future `private ::` in the facade hides**, which is
   the expected cost of keeping a sibling module's internal plumbing out of the public namespace —
   a rise of exactly that size is not a regression, and is exactly what took this figure from the
-  23 recorded here before the typed accessor tier added its nine names at once. **Confirmed not
+  23 recorded here before the typed accessor tier added its nine names at once, and from 32 to 34
+  when the read-ordering guards added their two. **Confirmed not
   fixable from
   source**: for the `public ::` group, neither adding a `!>` doc-comment directly on the line, nor
   an explicit `use ..., only: name1, name2` import list (already how these modules are imported),

@@ -2,6 +2,20 @@
 title: Writing parquet files from your Fortran code
 ---
 
+This page is about writing a parquet file one column at a time: opening a `parquet_writer`,
+writing whole Fortran arrays as columns, declaring what the file contains with a MAML schema,
+saving that schema alongside the output, streaming a column too large to hold at once, and
+dropping rows on the way out. It is the level to work at when you already hold the data as arrays
+and want control over what reaches the file.
+
+If what you have is a whole table in memory — columns you have built up, or read from another
+file — see [Writing a table out](../tables/table-write.html) instead: one `parquet_write_table`
+call replaces most of this page, and takes every option below under the same names.
+
+To use this library in another Fortran project, add it as an FPM dependency — see
+[Minimal setup to depend on this library](../../index.html#minimal-setup-to-depend-on-this-library)
+in the README for the `fpm.toml` snippet. Then `use parquet` in your code.
+
 Minimal writer example:
 
 ```fortran

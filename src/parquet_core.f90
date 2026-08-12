@@ -670,10 +670,12 @@ module parquet_core
     !> at a time instead of as one complete array. Dispatched by the actual/declared type/kind of
     !> `values`, same as parquet_write_column (scalar values(:) or matrix/vector values(:,:)),
     !> and every column's chunk for the currently-open row group must have exactly
-    !> parquet_new_row_group's own `nrows` rows. Unlike parquet_write_column, a schema-enforced
-    !> column's declared data_type must match `values`' own kind *exactly* -- there is no
-    !> cross-numeric-type conversion on this path (e.g. writing int32 values into a
-    !> schema-declared float64 column, which parquet_write_column supports). A column written
+    !> parquet_new_row_group's own `nrows` rows. A schema-enforced column's values are converted to
+    !> its declared data_type exactly as parquet_write_column converts them (int32/int64/float32/
+    !> float64 in any combination; a float-to-integer conversion error stops on a non-integral or
+    !> out-of-range value, per chunk), so the same values are accepted whichever path writes them --
+    !> see parquet_append_as_schema_chunk_int32. A kind the declared type is not compatible with at
+    !> all (a logical chunk into an int32 column, say) is still an error stop. A column written
     !> once via parquet_write_column can never also be written via parquet_write_column_chunk
     !> (or vice versa), and every column must appear in the *first* row group written for this
     !> writer, since a Parquet file's schema is fixed from that point on.
@@ -2012,10 +2014,17 @@ module parquet_core
         !> `expected_type` (see parquet_is_type_compatible). Assumes `name` is
         !> already known to be a defined column -- every caller checks that
         !> itself (and error stops on a not-defined column) before calling this.
-        module subroutine parquet_assert_column_type(writer, name, expected_type)
+        !> Used by BOTH write paths: parquet_write_column and
+        !> parquet_write_column_chunk apply the same compatibility rule, so the
+        !> same values are accepted for a given schema either way (see
+        !> parquet_append_as_schema_int32 and its _chunk_ twin, which perform the
+        !> conversion the rule permits).
+        module subroutine parquet_assert_column_type(writer, name, expected_type, context)
             type(parquet_writer), intent(in) :: writer !! open writer to check against.
             character(len=*), intent(in) :: name !! column name being written.
             character(len=*), intent(in) :: expected_type !! data_type implied by the write call's own values.
+            character(len=*), intent(in), optional :: context !! calling procedure named in the error
+            !! message; defaults to "parquet_write_column", the chunked path passes its own name.
         end subroutine parquet_assert_column_type
         !> True if `name` is a currently enabled/set column of a schema-
         !> enforced writer (see parquet_column_type%is_set); always .true.

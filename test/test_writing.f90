@@ -211,6 +211,8 @@ contains
                 test_streaming_write_string_logical_roundtrip), &
             new_unittest("parquet_get_chunk_size(writer) reports what the writer was opened with, unchanged " // &
                 "by streaming", test_streaming_get_chunk_size), &
+            new_unittest("streaming row-group write: a chunk is converted to the schema's declared numeric " // &
+                "type, exactly as a whole-column write is", test_streaming_chunk_converts_to_schema_type), &
             new_unittest("auto row-group sizing: the 1000-row floor still applies when it only moderately " // &
                 "overshoots the byte target", test_chunk_size_floor_overshoot_ok), &
             new_unittest("auto row-group sizing: a row group smaller than the 1000-row floor is used when " // &
@@ -2857,6 +2859,118 @@ contains
     !> parquet_finish_row_group. Verifies both columns round-trip correctly, exercising the
     !> whole-column-sliced-per-row-group path (for "id") alongside the freshly-built-per-chunk
     !> path (for "big_vec").
+    !> parquet_write_column_chunk converts a chunk's values to the schema's declared numeric type,
+    !> exactly as parquet_write_column does for a whole column. Until this was implemented the
+    !> chunked path required an EXACT type match, so swapping parquet_write_column for the streaming
+    !> calls could turn a working program into an abort purely because the schema said float64 and
+    !> the data was int32 -- an asymmetry the read path never had (parquet_read_int32_column and
+    !> parquet_read_int32_column_chunk share one conversion helper in parquet_wrapper.cpp).
+    !!
+    !! The assertion that matters is that the FILE holds the declared type, not merely that the
+    !! write was accepted, so each column's stored type is checked with parquet_get_column_type.
+    !! Reading the values back cannot establish that on its own: the read path converts too, so a
+    !! column stored in the wrong type would still come back with the right numbers. Values are
+    !! chosen to survive every conversion exactly, so a wrong one shows up as a wrong number rather
+    !! than a rounding difference.
+    !!
+    !! Negative control: `same_kind`, an int32 chunk into an int32 column, must round-trip too --
+    !! without it this test would pass against an implementation that converted everything to
+    !! float64 regardless of the schema. What is still refused is asserted out of process by
+    !! scenario_write_chunk_type_mismatch (a logical chunk into an int32 column).
+    subroutine test_streaming_chunk_converts_to_schema_type(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_streaming_chunk_type_conversion.parquet"
+        integer(int32), parameter :: i32_data(4) = [1_int32, -2_int32, 3_int32, -4_int32]
+        real(real64), parameter :: f64_data(4) = [10.0_real64, -20.0_real64, 30.0_real64, -40.0_real64]
+        real(real64) :: as_f64(4), wide_back(4)
+        real(real32) :: as_f32(4)
+        integer(int64) :: as_i64(4)
+        integer(int32) :: narrowed_back(4), same_back(4)
+        character(len=:), allocatable :: type_name
+
+        call schema%init(table="chunk_conversion_table")
+        call schema%add_field("as_f64", "float64")     ! written from int32 values
+        call schema%add_field("as_f32", "float32")     ! written from int32 values
+        call schema%add_field("as_i64", "int64")       ! written from int32 values
+        call schema%add_field("narrowed", "int32")     ! written from float64 values
+        call schema%add_field("same_kind", "int32")    ! the negative control
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_new_row_group(writer, 4_int64)
+        call parquet_write_column_chunk(writer, "as_f64", i32_data)
+        call parquet_write_column_chunk(writer, "as_f32", i32_data)
+        call parquet_write_column_chunk(writer, "as_i64", i32_data)
+        call parquet_write_column_chunk(writer, "narrowed", f64_data)
+        call parquet_write_column_chunk(writer, "same_kind", i32_data)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        ! The stored type is what proves the conversion reached the file: the reader converts on
+        ! the way out too, so the values alone would agree even if the column were stored wrongly.
+        call parquet_get_column_type(reader, "as_f64", type_name)
+        call check(error, type_name == "float64", "an int32 chunk must be STORED as float64 where the schema says so")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "as_f32", type_name)
+        call check(error, type_name == "float32", "an int32 chunk must be STORED as float32 where the schema says so")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "as_i64", type_name)
+        call check(error, type_name == "int64", "an int32 chunk must be STORED as int64 where the schema says so")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "narrowed", type_name)
+        call check(error, type_name == "int32", "a float64 chunk must be STORED as int32 where the schema says so")
+        if (allocated(error)) return
+        call parquet_get_column_type(reader, "same_kind", type_name)
+        call check(error, type_name == "int32", "an int32 chunk into an int32 column must still be stored as int32")
+        if (allocated(error)) return
+
+        call parquet_read_column(reader, "as_f64", as_f64)
+        call parquet_read_column(reader, "as_f32", as_f32)
+        call parquet_read_column(reader, "as_i64", as_i64)
+        call parquet_read_column(reader, "narrowed", narrowed_back)
+        call parquet_read_column(reader, "same_kind", same_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(as_f64 == real(i32_data, real64)), &
+            "an int32 chunk written to a float64 column must arrive as those values in float64")
+        if (allocated(error)) return
+        call check(error, all(as_f32 == real(i32_data, real32)), &
+            "an int32 chunk written to a float32 column must arrive as those values in float32")
+        if (allocated(error)) return
+        call check(error, all(as_i64 == int(i32_data, int64)), &
+            "an int32 chunk written to an int64 column must arrive as those values in int64")
+        if (allocated(error)) return
+        call check(error, all(narrowed_back == int(f64_data, int32)), &
+            "an integral float64 chunk written to an int32 column must arrive narrowed")
+        if (allocated(error)) return
+        call check(error, all(same_back == i32_data), &
+            "an int32 chunk written to an int32 column must still round-trip unchanged")
+        if (allocated(error)) return
+
+        ! The whole-column path must accept the same values for the same schema -- the point of the
+        ! change is that the two paths agree, so asserting one without the other would miss a
+        ! divergence in either direction.
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "as_f64", i32_data)
+        call parquet_write_column(writer, "as_f32", i32_data)
+        call parquet_write_column(writer, "as_i64", i32_data)
+        call parquet_write_column(writer, "narrowed", f64_data)
+        call parquet_write_column(writer, "same_kind", i32_data)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "as_f64", wide_back)
+        call parquet_read_column(reader, "narrowed", narrowed_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(wide_back == as_f64) .and. all(narrowed_back == int(f64_data, int32)), &
+            "the whole-column and chunked write paths must produce the same values for one schema")
+    end subroutine test_streaming_chunk_converts_to_schema_type
+
     subroutine test_streaming_write_schema_enforced_roundtrip(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema

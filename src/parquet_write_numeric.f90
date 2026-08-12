@@ -35,16 +35,22 @@ contains
     !> Narrows int64 `src` to int32, error stopping if any value is outside
     !> int32's representable range. Used when a schema declares a column
     !> int32 but the caller's parquet_write_column values are int64.
-    function parquet_narrow_int64_to_int32(name, src) result(dst)
+    function parquet_narrow_int64_to_int32(name, src, context) result(dst)
         character(len=*), intent(in) :: name !! column name, named only in the error-stop message.
         integer(int64), intent(in) :: src(:) !! values to narrow.
+        character(len=*), intent(in), optional :: context !! calling procedure for the message; default
+        !! "parquet_write_column". The chunked path passes its own name, so a caller is never told to
+        !! look at a procedure it did not call.
         integer(int32), allocatable :: dst(:) !! narrowed values.
         integer(int64) :: i
+        character(len=:), allocatable :: ctx
 
+        ctx = "parquet_write_column"
+        if (present(context)) ctx = context
         allocate(dst(size(src, kind=int64)))
         do i = 1_int64, size(src, kind=int64)
             if (src(i) < -huge(0_int32) - 1_int64 .or. src(i) > huge(0_int32)) then
-                error stop "parquet_write_column: int64 value out of int32 range for column " // trim(name)
+                error stop ctx // ": int64 value out of int32 range for column " // trim(name)
             end if
             dst(i) = int(src(i), kind=int32)
         end do
@@ -53,19 +59,24 @@ contains
     !> non-integral or outside int32's representable range. Used when a
     !> schema declares a column int32 but the caller's parquet_write_column
     !> values are float32/float64.
-    function parquet_float64_to_int32(name, src) result(dst)
+    function parquet_float64_to_int32(name, src, context) result(dst)
         character(len=*), intent(in) :: name !! column name, named only in the error-stop message.
         real(real64), intent(in) :: src(:) !! values to convert.
+        character(len=*), intent(in), optional :: context !! calling procedure for the message; see
+        !! parquet_narrow_int64_to_int32.
         integer(int32), allocatable :: dst(:) !! converted values.
         integer(int64) :: i
+        character(len=:), allocatable :: ctx
 
+        ctx = "parquet_write_column"
+        if (present(context)) ctx = context
         allocate(dst(size(src, kind=int64)))
         do i = 1_int64, size(src, kind=int64)
             if (src(i) /= anint(src(i))) then
-                error stop "parquet_write_column: non-integral float value written to int column " // trim(name)
+                error stop ctx // ": non-integral float value written to int column " // trim(name)
             end if
             if (src(i) < -real(huge(0_int32), real64) - 1.0_real64 .or. src(i) > real(huge(0_int32), real64)) then
-                error stop "parquet_write_column: float value out of int32 range for column " // trim(name)
+                error stop ctx // ": float value out of int32 range for column " // trim(name)
             end if
             dst(i) = int(src(i), kind=int32)
         end do
@@ -74,19 +85,24 @@ contains
     !> non-integral or outside int64's representable range. Used when a
     !> schema declares a column int64 but the caller's parquet_write_column
     !> values are float32/float64.
-    function parquet_float64_to_int64(name, src) result(dst)
+    function parquet_float64_to_int64(name, src, context) result(dst)
         character(len=*), intent(in) :: name !! column name, named only in the error-stop message.
         real(real64), intent(in) :: src(:) !! values to convert.
+        character(len=*), intent(in), optional :: context !! calling procedure for the message; see
+        !! parquet_narrow_int64_to_int32.
         integer(int64), allocatable :: dst(:) !! converted values.
         integer(int64) :: i
+        character(len=:), allocatable :: ctx
 
+        ctx = "parquet_write_column"
+        if (present(context)) ctx = context
         allocate(dst(size(src, kind=int64)))
         do i = 1_int64, size(src, kind=int64)
             if (src(i) /= anint(src(i))) then
-                error stop "parquet_write_column: non-integral float value written to int column " // trim(name)
+                error stop ctx // ": non-integral float value written to int column " // trim(name)
             end if
             if (src(i) < -real(huge(0_int64), real64) .or. src(i) >= real(huge(0_int64), real64)) then
-                error stop "parquet_write_column: float value out of int64 range for column " // trim(name)
+                error stop ctx // ": float value out of int64 range for column " // trim(name)
             end if
             dst(i) = int(src(i), kind=int64)
         end do
@@ -256,6 +272,139 @@ contains
                 trim(outname)//char(0), values, nrows, asize, valid_ptr)
         end select
     end subroutine parquet_append_as_schema_float64
+    !> Chunked counterpart of parquet_append_as_schema_int32: appends ONE ROW GROUP's int32 values,
+    !> converting them first if the schema declares this column as a different numeric type. The
+    !> conversion rules are deliberately identical to the whole-column family's, so
+    !> parquet_write_column_chunk accepts exactly the values parquet_write_column would for the same
+    !> schema -- the two families exist separately only because the C bindings differ (a chunk
+    !> append takes no row count: the open row group already fixed it). Keep them in step; a
+    !> divergence here is a silent behaviour difference between the two write paths, which is
+    !> precisely what this family was added to remove.
+    subroutine parquet_append_as_schema_chunk_int32(writer, name, values, asize, valid_ptr)
+        type(parquet_writer), intent(in) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int32), intent(in) :: values(:) !! this row group's values, as passed to parquet_write_column_chunk.
+        integer(c_long_long), intent(in) :: asize !! vector-column element count (1 for a scalar column).
+        type(c_ptr), intent(in) :: valid_ptr !! validity buffer, or c_null_ptr.
+        character(len=:), allocatable :: schema_type
+        integer(int64), allocatable :: i64values(:)
+        real(real32), allocatable :: f32values(:)
+        real(real64), allocatable :: f64values(:)
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+
+        call parquet_get_schema_type(writer, name, schema_type)
+        call parquet_resolve_output_name(writer, name, outname)
+        select case (schema_type)
+        case ("int64")
+            allocate(i64values(size(values, kind=int64)))
+            i64values = int(values, kind=int64)
+            call parquet_append_int64_column_chunk(writer%handle, trim(outname)//char(0), i64values, asize, valid_ptr)
+        case ("float32")
+            allocate(f32values(size(values, kind=int64)))
+            f32values = real(values, kind=real32)
+            call parquet_append_float32_column_chunk(writer%handle, trim(outname)//char(0), f32values, asize, valid_ptr)
+        case ("float64")
+            allocate(f64values(size(values, kind=int64)))
+            f64values = real(values, kind=real64)
+            call parquet_append_float64_column_chunk(writer%handle, trim(outname)//char(0), f64values, asize, valid_ptr)
+        case default
+            call parquet_append_int32_column_chunk(writer%handle, trim(outname)//char(0), values, asize, valid_ptr)
+        end select
+    end subroutine parquet_append_as_schema_chunk_int32
+    !> Chunked counterpart of parquet_append_as_schema_int64; see
+    !> parquet_append_as_schema_chunk_int32 for why this family exists and must stay in step.
+    subroutine parquet_append_as_schema_chunk_int64(writer, name, values, asize, valid_ptr)
+        type(parquet_writer), intent(in) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        integer(int64), intent(in) :: values(:) !! this row group's values.
+        integer(c_long_long), intent(in) :: asize !! vector-column element count (1 for a scalar column).
+        type(c_ptr), intent(in) :: valid_ptr !! validity buffer, or c_null_ptr.
+        character(len=:), allocatable :: schema_type
+        integer(int32), allocatable :: i32values(:)
+        real(real32), allocatable :: f32values(:)
+        real(real64), allocatable :: f64values(:)
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+
+        call parquet_get_schema_type(writer, name, schema_type)
+        call parquet_resolve_output_name(writer, name, outname)
+        select case (schema_type)
+        case ("int32")
+            i32values = parquet_narrow_int64_to_int32(name, values, context="parquet_write_column_chunk")
+            call parquet_append_int32_column_chunk(writer%handle, trim(outname)//char(0), i32values, asize, valid_ptr)
+        case ("float32")
+            allocate(f32values(size(values, kind=int64)))
+            f32values = real(values, kind=real32)
+            call parquet_append_float32_column_chunk(writer%handle, trim(outname)//char(0), f32values, asize, valid_ptr)
+        case ("float64")
+            allocate(f64values(size(values, kind=int64)))
+            f64values = real(values, kind=real64)
+            call parquet_append_float64_column_chunk(writer%handle, trim(outname)//char(0), f64values, asize, valid_ptr)
+        case default
+            call parquet_append_int64_column_chunk(writer%handle, trim(outname)//char(0), values, asize, valid_ptr)
+        end select
+    end subroutine parquet_append_as_schema_chunk_int64
+    !> Chunked counterpart of parquet_append_as_schema_float32; see
+    !> parquet_append_as_schema_chunk_int32 for why this family exists and must stay in step.
+    subroutine parquet_append_as_schema_chunk_float32(writer, name, values, asize, valid_ptr)
+        type(parquet_writer), intent(in) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        real(real32), intent(in) :: values(:) !! this row group's values.
+        integer(c_long_long), intent(in) :: asize !! vector-column element count (1 for a scalar column).
+        type(c_ptr), intent(in) :: valid_ptr !! validity buffer, or c_null_ptr.
+        character(len=:), allocatable :: schema_type
+        integer(int32), allocatable :: i32values(:)
+        integer(int64), allocatable :: i64values(:)
+        real(real64), allocatable :: f64values(:)
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+
+        call parquet_get_schema_type(writer, name, schema_type)
+        call parquet_resolve_output_name(writer, name, outname)
+        select case (schema_type)
+        case ("int32")
+            i32values = parquet_float64_to_int32(name, real(values, kind=real64), context="parquet_write_column_chunk")
+            call parquet_append_int32_column_chunk(writer%handle, trim(outname)//char(0), i32values, asize, valid_ptr)
+        case ("int64")
+            i64values = parquet_float64_to_int64(name, real(values, kind=real64), context="parquet_write_column_chunk")
+            call parquet_append_int64_column_chunk(writer%handle, trim(outname)//char(0), i64values, asize, valid_ptr)
+        case ("float64")
+            allocate(f64values(size(values, kind=int64)))
+            f64values = real(values, kind=real64)
+            call parquet_append_float64_column_chunk(writer%handle, trim(outname)//char(0), f64values, asize, valid_ptr)
+        case default
+            call parquet_append_float32_column_chunk(writer%handle, trim(outname)//char(0), values, asize, valid_ptr)
+        end select
+    end subroutine parquet_append_as_schema_chunk_float32
+    !> Chunked counterpart of parquet_append_as_schema_float64; see
+    !> parquet_append_as_schema_chunk_int32 for why this family exists and must stay in step.
+    subroutine parquet_append_as_schema_chunk_float64(writer, name, values, asize, valid_ptr)
+        type(parquet_writer), intent(in) :: writer !! open writer with a row group open.
+        character(len=*), intent(in) :: name !! column name.
+        real(real64), intent(in) :: values(:) !! this row group's values.
+        integer(c_long_long), intent(in) :: asize !! vector-column element count (1 for a scalar column).
+        type(c_ptr), intent(in) :: valid_ptr !! validity buffer, or c_null_ptr.
+        character(len=:), allocatable :: schema_type
+        integer(int32), allocatable :: i32values(:)
+        integer(int64), allocatable :: i64values(:)
+        real(real32), allocatable :: f32values(:)
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
+
+        call parquet_get_schema_type(writer, name, schema_type)
+        call parquet_resolve_output_name(writer, name, outname)
+        select case (schema_type)
+        case ("int32")
+            i32values = parquet_float64_to_int32(name, values, context="parquet_write_column_chunk")
+            call parquet_append_int32_column_chunk(writer%handle, trim(outname)//char(0), i32values, asize, valid_ptr)
+        case ("int64")
+            i64values = parquet_float64_to_int64(name, values, context="parquet_write_column_chunk")
+            call parquet_append_int64_column_chunk(writer%handle, trim(outname)//char(0), i64values, asize, valid_ptr)
+        case ("float32")
+            allocate(f32values(size(values, kind=int64)))
+            f32values = real(values, kind=real32)
+            call parquet_append_float32_column_chunk(writer%handle, trim(outname)//char(0), f32values, asize, valid_ptr)
+        case default
+            call parquet_append_float64_column_chunk(writer%handle, trim(outname)//char(0), values, asize, valid_ptr)
+        end select
+    end subroutine parquet_append_as_schema_chunk_float64
     !> True if `value` satisfies `bound` under the min:/max: operator `op`
     !> (">=", "<=", ">", "<"); any other `op` is treated as "no constraint"
     !> (always .true.).
@@ -908,7 +1057,6 @@ contains
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(int64) :: nkeep
         logical :: masked
 
@@ -937,9 +1085,7 @@ contains
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
         call parquet_chunk_mark_written_if_first(writer, name)
 
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nkeep > 0) call parquet_append_int32_column_chunk(writer%handle, &
-            trim(outname)//char(0), vals, asize, valid_ptr)
+        if (nkeep > 0) call parquet_append_as_schema_chunk_int32(writer, name, vals, asize, valid_ptr)
     end subroutine write_int32_chunk_flat
     !> Chunked write worker for parquet_write_int64_column_chunk/_matrix_column_chunk; see
     !> write_int32_chunk_flat.
@@ -958,7 +1104,6 @@ contains
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(int64) :: nkeep
         logical :: masked
 
@@ -987,9 +1132,7 @@ contains
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
         call parquet_chunk_mark_written_if_first(writer, name)
 
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nkeep > 0) call parquet_append_int64_column_chunk(writer%handle, &
-            trim(outname)//char(0), vals, asize, valid_ptr)
+        if (nkeep > 0) call parquet_append_as_schema_chunk_int64(writer, name, vals, asize, valid_ptr)
     end subroutine write_int64_chunk_flat
     !> Chunked write worker for parquet_write_float32_column_chunk/_matrix_column_chunk; see
     !> write_int32_chunk_flat.
@@ -1008,7 +1151,6 @@ contains
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(int64) :: nkeep
         logical :: masked
 
@@ -1037,9 +1179,7 @@ contains
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
         call parquet_chunk_mark_written_if_first(writer, name)
 
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nkeep > 0) call parquet_append_float32_column_chunk(writer%handle, &
-            trim(outname)//char(0), vals, asize, valid_ptr)
+        if (nkeep > 0) call parquet_append_as_schema_chunk_float32(writer, name, vals, asize, valid_ptr)
     end subroutine write_float32_chunk_flat
     !> Chunked write worker for parquet_write_float64_column_chunk/_matrix_column_chunk; see
     !> write_int32_chunk_flat.
@@ -1058,7 +1198,6 @@ contains
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
-        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(int64) :: nkeep
         logical :: masked
 
@@ -1087,9 +1226,7 @@ contains
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
         call parquet_chunk_mark_written_if_first(writer, name)
 
-        call parquet_resolve_output_name(writer, name, outname)
-        if (nkeep > 0) call parquet_append_float64_column_chunk(writer%handle, &
-            trim(outname)//char(0), vals, asize, valid_ptr)
+        if (nkeep > 0) call parquet_append_as_schema_chunk_float64(writer, name, vals, asize, valid_ptr)
     end subroutine write_float64_chunk_flat
     !> Chunked write worker for parquet_write_logical_column_chunk/_matrix_column_chunk; see
     !> write_logical_flat for why this one always converts rather than passing values through.
@@ -1449,7 +1586,7 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "int32")
+        call parquet_assert_column_type(writer, name, "int32", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1483,7 +1620,7 @@ contains
             call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column_chunk")
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "int32")
+        call parquet_assert_column_type(writer, name, "int32", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1506,7 +1643,7 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "int64")
+        call parquet_assert_column_type(writer, name, "int64", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1540,7 +1677,7 @@ contains
             call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column_chunk")
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "int64")
+        call parquet_assert_column_type(writer, name, "int64", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1563,7 +1700,7 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "float32")
+        call parquet_assert_column_type(writer, name, "float32", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1597,7 +1734,7 @@ contains
             call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column_chunk")
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "float32")
+        call parquet_assert_column_type(writer, name, "float32", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1620,7 +1757,7 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "float64")
+        call parquet_assert_column_type(writer, name, "float64", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1654,7 +1791,7 @@ contains
             call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column_chunk")
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "float64")
+        call parquet_assert_column_type(writer, name, "float64", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1677,7 +1814,7 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "boolean")
+        call parquet_assert_column_type(writer, name, "boolean", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -1711,7 +1848,7 @@ contains
             call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column_chunk")
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "boolean")
+        call parquet_assert_column_type(writer, name, "boolean", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 

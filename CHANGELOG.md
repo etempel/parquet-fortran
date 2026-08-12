@@ -599,6 +599,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`parquet_write_column_chunk` now converts a chunk's values to the schema's declared numeric
+  type, exactly as `parquet_write_column` always has.** Writing `int32` values into a column a
+  schema declares `float64` — or any other pair `int32`/`int64`/`float32`/`float64` — previously
+  aborted with "requires an exact type match" on the streaming path while succeeding on the
+  whole-column path, so replacing `parquet_write_column` with the row-group calls for a column too
+  large to hold at once could turn a working program into an abort for a reason that had nothing to
+  do with size. The two paths now accept the same values for the same schema, and the file holds
+  the declared type either way. A float-to-integer conversion still aborts on a non-integral or
+  out-of-range value, per chunk, as it does for a whole column, and genuinely incompatible pairs
+  (a `logical` chunk into an `int32` column, say) are still refused — with the same message the
+  whole-column path gives, naming `parquet_write_column_chunk`. Reading never had this asymmetry:
+  `parquet_read_column` and `parquet_read_column_chunk` have always shared one conversion.
+
 - **`parquet_get_column_type` and `parquet_column_exists(types=)` now answer "can I read this
   column, and as what?" instead of "is its physical type one of nine names?"** Both are driven
   from one published **narrowest-lossless** mapping from a column's physical type to the Fortran

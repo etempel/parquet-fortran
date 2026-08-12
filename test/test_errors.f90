@@ -2954,14 +2954,18 @@ contains
                 "(file: test_run/error_scenario_chunk_row_count_mismatch.parquet, maml: internal:multitype_table)")
     end subroutine test_write_chunk_row_count_mismatch_aborts
 
+    !> What the chunked path still refuses now that it converts between numeric types exactly as
+    !> parquet_write_column does: a pair parquet_is_type_compatible rejects outright. A logical
+    !> chunk written to an int32 column is such a pair, and the message is now the same one the
+    !> whole-column path gives, differing only in the procedure it names -- which is the point, so
+    !> this assertion is what fails if the two paths' diagnostics drift apart again.
     subroutine test_write_chunk_type_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
         call check_scenario_exit_status_and_stderr(error, "write_chunk_type_mismatch", expect_abort=.true., &
-            failure_message="writing a chunk with a type mismatch was expected to error stop", &
+            failure_message="writing a chunk whose kind is not compatible with the schema was expected to abort", &
             required_stderr="parquet_write_column_chunk: type mismatch for column i32 (expected boolean, " // &
-                "got int32) -- parquet_write_column_chunk requires an exact type match, unlike " // &
-                "parquet_write_column (file: test_run/error_scenario_chunk_type_mismatch.parquet, " // &
+                "got int32) (file: test_run/error_scenario_chunk_type_mismatch.parquet, " // &
                 "maml: internal:multitype_table)")
     end subroutine test_write_chunk_type_mismatch_aborts
 

@@ -2456,10 +2456,13 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_write_chunk_row_count_mismatch
 
-    !> parquet_assert_column_type_exact's own type-mismatch check, reached via
-    !> parquet_write_column_chunk -- unlike parquet_write_column, there is no cross-numeric-kind
-    !> conversion on this path, so a logical chunk written to an int32-declared column is a
-    !> mismatch (fires before any row group needs to be open, so no parquet_new_row_group here).
+    !> parquet_assert_column_type's type-mismatch check, reached via parquet_write_column_chunk.
+    !> The chunked path converts between numeric kinds exactly as parquet_write_column does, so
+    !> what is left to refuse is a pair parquet_is_type_compatible rejects outright: a logical
+    !> chunk written to an int32-declared column. Keep the pair INCOMPATIBLE if this fixture is
+    !> ever changed -- an int32 chunk into a float64 column is now a supported conversion and
+    !> would make this scenario exit 0 (fires before any row group needs to be open, so no
+    !> parquet_new_row_group here).
     subroutine scenario_write_chunk_type_mismatch()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer

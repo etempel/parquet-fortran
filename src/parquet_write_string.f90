@@ -538,7 +538,7 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "string")
+        call parquet_assert_column_type(writer, name, "string", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -604,7 +604,7 @@ contains
             end if
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "string")
+        call parquet_assert_column_type(writer, name, "string", context="parquet_write_column_chunk")
 
         if (.not. parquet_is_column_enabled(writer, name)) return
 
@@ -642,7 +642,7 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
         end if
 
-        call parquet_assert_column_type_exact(writer, name, "string")
+        call parquet_assert_column_type(writer, name, "string", context="parquet_write_column_chunk")
 
         if (writer%is_schema_enforced) then
             if (parquet_get_column_col_size(writer, name) /= 1) then

@@ -203,14 +203,18 @@ contains
     module procedure parquet_assert_column_type
         integer :: idx
         character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
+        character(len=:), allocatable :: proc !! calling procedure named in the message.
 
         if (.not. writer%is_schema_enforced) return
+
+        proc = "parquet_write_column"
+        if (present(context)) proc = context
 
         idx = parquet_get_defined_column_index(writer, name)
 
         if (.not. parquet_is_type_compatible(writer%all_columns(idx)%data_type, expected_type)) then
             call writer_context_suffix(writer, ctx)
-            error stop "parquet_write_column: type mismatch for column " // trim(name) // &
+            error stop proc // ": type mismatch for column " // trim(name) // &
                                   " (expected " // trim(expected_type) // ", got " // &
                                   trim(writer%all_columns(idx)%data_type) // ")" // &
                                   ctx
@@ -1058,37 +1062,6 @@ contains
         masked = allocated(writer%file_mask) .or. writer%chunk_mask_set_this_group
         if (masked) row_mask = writer%chunk_mask
     end subroutine parquet_check_row_group_row_count
-    !> Like parquet_assert_column_type, but requires an EXACT data_type match rather than
-    !> parquet_is_type_compatible's lenient cross-numeric-type compatibility: unlike
-    !> parquet_write_column, parquet_write_column_chunk never converts `values`' own kind to the
-    !> schema's declared type before writing (there is no parquet_append_as_schema_chunk_*
-    !> dispatcher the way there is for the batch path) -- see parquet_write_column_chunk's own
-    !> doc-comment in parquet_core.f90.
-    subroutine parquet_assert_column_type_exact(writer, name, expected_type)
-        type(parquet_writer), intent(in) :: writer !! open writer.
-        character(len=*), intent(in) :: name !! column name.
-        character(len=*), intent(in) :: expected_type !! this chunk-write call's own value kind, e.g. "int32".
-        integer :: idx
-        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
-
-        if (.not. writer%is_schema_enforced) return
-        idx = parquet_get_defined_column_index(writer, name)
-        ! Unreachable in practice: every one of this function's 12 callers (one per type/shape)
-        ! already performs this identical is_schema_enforced-guarded idx==0 check and aborts
-        ! itself first, before ever calling in here -- kept as a defensive belt-and-suspenders
-        ! check in case a future caller is added without repeating it.
-        call writer_context_suffix(writer, ctx)
-        if (idx == 0) error stop &
-            "parquet_write_column_chunk: column not defined in parquet_open_writer: " // &
-            trim(name) // ctx ! GCOVR_EXCL_LINE
-        if (trim(writer%all_columns(idx)%data_type) /= trim(expected_type)) then
-            call writer_context_suffix(writer, ctx)
-            error stop "parquet_write_column_chunk: type mismatch for column " // trim(name) // &
-                " (expected " // trim(expected_type) // ", got " // trim(writer%all_columns(idx)%data_type) // &
-                ") -- parquet_write_column_chunk requires an exact type match, unlike parquet_write_column" // &
-                ctx
-        end if
-    end subroutine parquet_assert_column_type_exact
     !> Marks `name` as written for parquet_mark_column_written's own bookkeeping (write_counts/
     !> written_names), but only on its very first chunk ever -- unlike parquet_write_column, a
     !> chunk column legitimately receives many write calls (one per row group), and

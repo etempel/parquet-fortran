@@ -8,13 +8,13 @@ saving that schema alongside the output, streaming a column too large to hold at
 dropping rows on the way out. It is the level to work at when you already hold the data as arrays
 and want control over what reaches the file.
 
-If what you have is a whole table in memory — columns you have built up, or read from another
-file — see [Writing a table out](../tables/table-write.html) instead: one `parquet_write_table`
-call replaces most of this page, and takes every option below under the same names.
+If what you have is a whole table in memory — columns you have built up, or read from another file
+— see [Writing a table out](../tables/table-write.html) instead: one `parquet_write_table` call
+replaces most of this page, and takes every option below under the same names.
 
-To use this library in another Fortran project, add it as an FPM dependency — see
-[Minimal setup to depend on this library](../../index.html#minimal-setup-to-depend-on-this-library)
-in the README for the `fpm.toml` snippet. Then `use parquet` in your code.
+To use this library in another Fortran project, add it as an FPM dependency — see [Minimal setup
+to depend on this library](../../index.html#minimal-setup-to-depend-on-this-library) in the README
+for the `fpm.toml` snippet. Then `use parquet` in your code.
 
 Minimal writer example:
 
@@ -302,9 +302,13 @@ is written, so introducing a column later aborts immediately (a C++-side abort n
 not an `ERROR STOP` — see [Error
 handling](../operating/error-handling.html#the-two-failure-classes)).
 
-**Type matching:** unlike `parquet_write_column`, a schema-declared column's `data_type` must
-match `values`' own kind *exactly* on the chunked path — there's no int32-into-a-float64-column
-conversion the way `parquet_write_column` supports.
+**Type matching:** the same as for `parquet_write_column`. A schema-declared column's values are
+converted to its declared `data_type` — `int32`, `int64`, `float32` and `float64` in any
+combination — so writing `int32` data into a column the schema declares `float64` works on either
+path, and the file holds the declared type. A float-to-integer conversion checks every value and
+fails immediately with `error stop` if one is non-integral or out of range, per chunk exactly as
+it does per column. A kind the declared type is not compatible with at all — a `logical` chunk
+into an `int32` column, say — is still refused.
 
 **Schema-less writers:** work the same way, inferring each column's type/`col_size` from its first
 chunk — but since that means `col_size` isn't known until the writer is already streaming, pass an

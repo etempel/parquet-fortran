@@ -33,7 +33,7 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-81` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-82` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
@@ -145,6 +145,7 @@ something a reader is expected to have.
 | [Risk-78](#risk-78--a-temporal-columns-null-cache-is-invalidated-by-the-writer-not-by-the-reader) | A temporal column's null cache is invalidated by the writer, not by the reader | 4 — covered |
 | [Risk-79](#risk-79--the-no-relocation-guarantee-rests-on-one-conditional-and-nothing-else) | The no-relocation guarantee rests on one conditional and nothing else | 4 — covered |
 | [Risk-80](#risk-80--a-metadata-only-query-quietly-decodes-a-whole-column-and-the-answer-is-still-right) | A metadata-only query quietly decodes a whole column, and the answer is still right | 4 — covered |
+| [Risk-81](#risk-81--two-individually-valid-ranges-that-describe-different-parts-of-the-file) | Two individually valid ranges that describe different parts of the file | 4 — covered |
 
 ---
 
@@ -152,7 +153,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-81**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-82**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -773,6 +774,41 @@ The branch body is `GCOVR_EXCL`'d with that reasoning recorded beside it.
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
+
+### Risk-81 — Two individually valid ranges that describe different parts of the file
+
+`parquet_reader_set_filter`'s six-argument form takes a row-group range **and** a physical row
+range, and they are not independent: the rows must lie inside the rows those row groups span. Each
+was validated on its own — the row groups against the file's row-group count, the rows against its
+row count — and a pair that passed both could still be disjoint, at which point the reader returned
+their intersection.
+
+**Why the failure is silent.** The intersection of a valid row range with a valid row-group range is
+a perfectly ordinary mask, frequently **empty** — and an empty result is exactly what a selective
+filter that matched nothing produces. There is no wrong value to find, no abort, no warning: the
+caller reads a row count of 0 (or a truncated one) and concludes the data did not match. The two
+ranges being separately valid is what makes it hard to see, because every error message the
+procedure could previously emit is about a range that is out of range *by itself*.
+
+**Test.** `filter_row_range_outside_row_groups` (`test/error_scenarios.f90`, wrapped by
+`test_filter_row_range_outside_row_groups_aborts` in `test/test_errors.f90`) writes a 12-row file at
+two rows per row group, so row groups 2..3 span rows 3..6, and asserts that
+`parquet_reader_set_filter(reader, filt, 2, 3, 5, 8)` aborts with a message naming both ranges and
+the span. Its **negative control comes first, in the same scenario**: row groups 2..4 span rows 3..8
+and the same row range 5..8 must be accepted, so a guard that fired unconditionally fails rather
+than passes.
+
+**What this still forbids.**
+
+- **A new range argument on this call needs a cross-check against the ranges already there, not
+  just its own bounds check.** That is the whole shape of this defect: three individually correct
+  validations that never compared their subjects to each other.
+- **Keep the message naming the row span the row groups cover.** "Out of range" is what the two
+  older checks say, and this call passes both of them — an error that does not distinguish itself
+  from those sends the reader to look at the wrong argument.
+- **Do not move the check above the `row_group_lo <= 0` resolution.** "All row groups" is resolved
+  to `1..num_row_groups` first, so that form spans the whole file and can never fail containment;
+  checking earlier would reject it against an unresolved range.
 
 ### Risk-80 — A metadata-only query quietly decodes a whole column, and the answer is still right
 

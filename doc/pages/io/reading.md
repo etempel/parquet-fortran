@@ -3,22 +3,19 @@ title: Reading parquet files from your Fortran code
 ---
 
 This page is about reading a parquet file one column at a time: opening a `parquet_reader`,
-pulling
-whole columns into Fortran arrays, reaching a single row or a single element position without
-reading the rest, asking a column its shape or type, and streaming a file too large to hold in
-memory. It is the level to work at when you want particular columns and want to control when each
-one is read.
+pulling whole columns into Fortran arrays, reaching a single row or a single element position
+without reading the rest, asking a column its shape or type, and streaming a file too large to
+hold in memory. It is the level to work at when you want particular columns and want to control
+when each one is read.
 
 If what you actually want is *the whole file* — every column available by name, read only when you
 touch it — start at [Whole tables in memory](../tables/index.html) instead: one
-`parquet_open_table`
-call replaces most of this page. Restricting a read to a subset of the *rows* is
-[Filtering, sorting and sampling rows](filter-sort-sample.html).
+`parquet_open_table` call replaces most of this page. Restricting a read to a subset of the *rows*
+is [Filtering, sorting and sampling rows](filter-sort-sample.html).
 
 To use this library in another Fortran project, add it as an FPM dependency — see
 [Minimal setup to depend on this library](../../index.html#minimal-setup-to-depend-on-this-library)
-in
-the README for the `fpm.toml` snippet. Then `use parquet` in your code.
+in the README for the `fpm.toml` snippet. Then `use parquet` in your code.
 
 Minimal reader example:
 
@@ -47,37 +44,31 @@ Notes:
 - `parquet_get_nrows` returns the number of table rows.
 - Allocate output arrays before calling `parquet_read_column`. Its row count (`size(values)` for a
   plain column, `size(values, 2)` for a vector column) must match `parquet_get_nrows` exactly, or
-  it
-  fails immediately with `error stop`, naming the column and both row counts.
+  it fails immediately with `error stop`, naming the column and both row counts.
 - `name` must be a column that actually exists in the file. Every procedure that takes a column
-  name
-  checks this and fails immediately with `error stop` naming the missing column —
+  name checks this and fails immediately with `error stop` naming the missing column —
   `parquet_read_column`, `parquet_read_column_chunk`, `parquet_get_col_size`,
   `parquet_get_column_total_elements`, `parquet_get_string_length`, `parquet_get_column_type`,
   `parquet_read_array_row_mode`, `parquet_read_array_element_mode` and `parquet_prefetch_columns`
   among them. The one deliberate exception is `parquet_column_exists`, whose whole job is to
-  answer
-  that question — it returns `.false.` instead of aborting.
+  answer that question — it returns `.false.` instead of aborting.
 - For string columns, choose a fixed string length that is large enough for your data — or read
   into a `type(parquet_string_column)` instead, which needs no pre-sizing; see
-  [Reading and writing compact string columns](../types/string-columns.html#reading-and-writing-compact-string-columns)
-  .
+  [Reading and writing compact string columns](../types/string-columns.html#reading-and-writing-compact-string-columns).
   Not sure how long is long enough? `parquet_get_string_length` answers that directly — see
   [Column shape and size queries](#column-shape-and-size-queries) below.
 - For vector columns, allocate 2D arrays with shape `(col_size, nrows)`.
 - A `DATE`/`TIME`/`TIMESTAMP` column reads into a
-  `parquet_date`/`parquet_time`/`parquet_timestamp`
-  array instead — see [Date, time and timestamp columns](../types/date-time.html); these three
-carry their
-  own null state, so `null_value=`/`is_valid=` don't apply to them.
+  `parquet_date`/`parquet_time`/`parquet_timestamp` array instead — see
+  [Date, time and timestamp columns](../types/date-time.html); these three carry their own null
+  state, so `null_value=`/`is_valid=` don't apply to them.
 - A vector column may be stored on disk either as a `fixed_size_list` (what this library's own
   writer emits) or as a variable-length `list<element>` (the Parquet `LIST` layout many other
   producers use — including its legacy 2-level and non-standard inner-element-name variants, which
   Arrow's reader normalizes to the same `list` type); both are read back identically. The only
   requirement is that every row's vector has the same length (so it fits the `(col_size, nrows)`
-  shape); a genuinely ragged `list` column (rows of differing length) is rejected with `error
-  stop`.
-  `col_size` is inferred from the data in either case.
+  shape); a genuinely ragged `list` column (rows of differing length) is rejected with
+  `error stop`. `col_size` is inferred from the data in either case.
 
 ## The `nrows=` shortcut
 
@@ -86,8 +77,7 @@ carry their
 default `INTEGER` works too, on the vast majority of platforms where that's the same kind as
 `int32`) as `nrows` and it's filled in for you, equivalent to calling
 `parquet_get_nrows(reader, nrows, check_positive=.true.)` immediately after opening (post-filter,
-if
-a `filter` was also given).
+if a `filter` was also given).
 
 Because it implies `check_positive=.true.`, a file (or filter result) with **zero rows fails
 immediately with `error stop`** — it does not return `nrows=0`. This is the right choice when your
@@ -106,26 +96,20 @@ overflows `int32`'s range, rather than silently wrapping or truncating.
 ## Reading only touches the columns you ask for
 
 `parquet_open_reader` only parses the file's footer (schema, row count, row-group layout) — it
-does
-not read or decompress any column's data. Each column is read from disk only the first time you
-ask
-for it (`parquet_read_column`, `parquet_get_string_length`, etc.), then cached for the lifetime of
-that `reader`; asking for it again doesn't re-read it, and columns you never ask for are never
-read
-at all.
+does not read or decompress any column's data. Each column is read from disk only the first time
+you ask for it (`parquet_read_column`, `parquet_get_string_length`, etc.), then cached for the
+lifetime of that `reader`; asking for it again doesn't re-read it, and columns you never ask for
+are never read at all.
 
 This follows from Parquet's layout — each column is its own contiguous byte range, so the reader
 seeks straight to just the bytes it needs, regardless of
 [compression codec](writing.html#writer-options). So opening a large file with many columns and
 reading only a handful is cheap in both I/O and memory, no matter how large the unrequested
-columns
-are.
+columns are.
 
 `parquet_get_col_size`/`parquet_get_column_total_elements` are cheaper still for the common case
-(a
-vector column stored as `fixed_size_list`): they answer straight from the schema/footer, reading
-no
-column data at all — so they're safe to call even on a column whose total element count
+(a vector column stored as `fixed_size_list`): they answer straight from the schema/footer,
+reading no column data at all — so they're safe to call even on a column whose total element count
 (`nrows * col_size`) is enormous. See
 [Column shape and size queries](#column-shape-and-size-queries) for the one column layout where
 they do have to read.
@@ -139,10 +123,9 @@ group instead.
 
 A [row filter](filter-sort-sample.html#row-filtering-with-parquet_filter) or
 [`sample_fraction`](filter-sort-sample.html#random-downsampling-with-sample_fraction) doesn't
-change
-either of these: `row_index`/`elem_index` then address the filtered result, and each row group's
-*surviving* row count is what they are resolved against. (Chunked reads work per row group on a
-filtered reader too — see [Streaming/chunked reads](#streamingchunked-reads).)
+change either of these: `row_index`/`elem_index` then address the filtered result, and each row
+group's *surviving* row count is what they are resolved against. (Chunked reads work per row group
+on a filtered reader too — see [Streaming/chunked reads](#streamingchunked-reads).)
 
 ### Releasing a column you have finished with
 
@@ -162,9 +145,8 @@ name that doesn't exist, or a column that was never read, is a silent no-op — 
 loop over column names.
 
 One trap: `name` may be a dotted struct-leaf path, but the reader caches a struct as **one**
-array,
-so releasing any leaf frees the whole struct. When walking several leaves of the same struct,
-release only after the last of them, or each leaf re-reads the struct.
+array, so releasing any leaf frees the whole struct. When walking several leaves of the same
+struct, release only after the last of them, or each leaf re-reads the struct.
 
 A released column still appears in a
 [`print_stat`](#printing-reader-statistics-with-parquet_close_reader-print_stattrue) report, with
@@ -174,8 +156,7 @@ its value-derived cells marked `released`.
 
 `parquet_get_column_names(reader, names)` hands back every top-level column name in schema order,
 in an allocatable `character` array sized to the longest name and blank-padded — so `trim()` is
-how
-you use them, the same convention `parquet_get_metadata_items` follows:
+how you use them, the same convention `parquet_get_metadata_items` follows:
 
 ```fortran
 character(len=:), allocatable :: names(:)
@@ -193,50 +174,50 @@ rather than as one entry per leaf.
 
 ## Random access: row mode and element mode
 
-`parquet_read_array_row_mode` and `parquet_read_array_element_mode` read a **vector** (`col_size >
-1`) column without materializing the whole thing — the random-access counterparts to
+`parquet_read_array_row_mode` and `parquet_read_array_element_mode` read a **vector**
+(`col_size > 1`) column without materializing the whole thing — the random-access counterparts to
 `parquet_read_column`, for when you only need one row, or one fixed element position across every
 row, out of a column that may be far larger. (In the call forms written out below, an argument in
 square brackets is optional; brackets are notation for this page, never something you type.)
 
-- **Row mode** — `parquet_read_array_row_mode(reader, name, values, row_index [, null_value] [,
-  is_valid])` reads one row's entire element vector. `values` is a 1D array of length `col_size`;
-  `row_index` is 1-based (`integer(int32)` or `integer(int64)` — the latter only needed for a file
-  with more rows than `huge(1_int32)`).
+- **Row mode** —
+  `parquet_read_array_row_mode(reader, name, values, row_index [, null_value] [, is_valid])` reads
+  one row's entire element vector. `values` is a 1D array of length `col_size`; `row_index` is
+  1-based (`integer(int32)` or `integer(int64)` — the latter only needed for a file with more rows
+  than `huge(1_int32)`).
 
-  ```fortran
-  type(parquet_reader) :: reader
-  integer(int32) :: row3(4)   ! col_size = 4
+```fortran
+type(parquet_reader) :: reader
+integer(int32) :: row3(4)   ! col_size = 4
 
-  call parquet_open_reader(reader, "data.parquet")
-  call parquet_read_array_row_mode(reader, "vec", row3, row_index=3_int64)
-  call parquet_close_reader(reader)
-  ```
+call parquet_open_reader(reader, "data.parquet")
+call parquet_read_array_row_mode(reader, "vec", row3, row_index=3_int64)
+call parquet_close_reader(reader)
+```
 
-- **Element mode** — `parquet_read_array_element_mode(reader, name, values, elem_index [,
-  null_value] [, is_valid])` reads the same element position from **every** row instead. `values`
-  is a 1D array of length `nrows` (the table's whole row count, not `col_size`); `elem_index` is
-  1-based, in `[1, col_size]`.
+- **Element mode** —
+  `parquet_read_array_element_mode(reader, name, values, elem_index [, null_value] [, is_valid])`
+  reads the same element position from **every** row instead. `values` is a 1D array of length
+  `nrows` (the table's whole row count, not `col_size`); `elem_index` is 1-based, in
+  `[1, col_size]`.
 
-  ```fortran
-  type(parquet_reader) :: reader
-  integer(int64) :: nrows
-  integer(int32), allocatable :: first_elem(:)
+```fortran
+type(parquet_reader) :: reader
+integer(int64) :: nrows
+integer(int32), allocatable :: first_elem(:)
 
-  call parquet_open_reader(reader, "data.parquet", nrows=nrows)
-  allocate(first_elem(nrows))
-  call parquet_read_array_element_mode(reader, "vec", first_elem, elem_index=1_int64)
-  call parquet_close_reader(reader)
-  ```
+call parquet_open_reader(reader, "data.parquet", nrows=nrows)
+allocate(first_elem(nrows))
+call parquet_read_array_element_mode(reader, "vec", first_elem, elem_index=1_int64)
+call parquet_close_reader(reader)
+```
 
 Both take the same `null_value=`/`is_valid=` pair as `parquet_read_column` (see
-[Null values](../types/supported-data-types.html#null-values) ), both dispatch on `values`'
-declared
-type/kind exactly like `parquet_read_column` does (including the
+[Null values](../types/supported-data-types.html#null-values)), both dispatch on `values`'
+declared type/kind exactly like `parquet_read_column` does (including the
 [widened-numeric-kind](../types/supported-data-types.html#reading-a-column-into-a-different-numeric-kind)
 conversions), and both accept a struct-nested dotted `name` (see
-[Reading a nested struct field](../types/supported-data-types.html#reading-a-nested-struct-field)
-).
+[Reading a nested struct field](../types/supported-data-types.html#reading-a-nested-struct-field)).
 
 **When to prefer these over `parquet_read_column`:** row mode is the right tool when you need a
 handful of specific rows out of a huge vector column and don't want to allocate/read the whole
@@ -246,11 +227,11 @@ row) across the whole file, without allocating the full 2D array.
 
 **I/O behavior** (see
 [Reading only touches the columns you ask for](#reading-only-touches-the-columns-you-ask-for)
-above for the full explanation): row mode
-reads only the one row group the requested row falls in; element mode streams the file row group
-by row group, so neither ever materializes the whole column in a single internal call. A row
-filter and/or `sample_fraction` doesn't change that — `row_index`/`elem_index` then address the
-filtered result, resolved against each row group's surviving row count. A
+above for the full explanation): row mode reads only the one row group the requested row falls in;
+element mode streams the file row group by row group, so neither ever materializes the whole
+column in a single internal call. A row filter and/or `sample_fraction` doesn't change that —
+`row_index`/`elem_index` then address the filtered result, resolved against each row group's
+surviving row count. A
 [`sort_by=`](filter-sort-sample.html#reading-rows-in-sorted-order-with-parquet_sortkey) does:
 sorted row `i` belongs to no single row group, so both modes fall back to reading the whole
 column. Neither is single-row I/O in the strictest sense (both still decode a full row group's
@@ -274,8 +255,7 @@ Three procedures answer questions about a column's shape:
 The first two normally answer straight from the file's schema/footer and read no column data at
 all. The exception is a column stored as a plain variable-length `list`/`large_list` (which this
 library never writes, but another producer may): its width is a property of the data rather than
-of
-the schema, so measuring it has to read the column. Even then it is bounded — each row group is
+of the schema, so measuring it has to read the column. Even then it is bounded — each row group is
 screened from the footer first, and only a surviving candidate is proved by reading, one row group
 at a time, so peak memory is one row group rather than the whole column.
 
@@ -295,11 +275,10 @@ rather than just take its answer:
   `list`/`large_list` column — i.e. it tells you in advance whether asking for the width will read
   anything at all.
 - **`parquet_measure_list_width(reader, name, row_group_lo, row_group_hi, proven, width)`**
-  measures
-  over an inclusive 1-based row-group range (`row_group_lo <= 0` means every row group), with
-  `proven=.false.` for the footer screen alone (free, and its answer is a candidate that may be
-  wrong) and `proven=.true.` to confirm it by reading. A column with no rows measures `0`, and a
-  genuinely ragged one measures `1`.
+  measures over an inclusive 1-based row-group range (`row_group_lo <= 0` means every row group),
+  with `proven=.false.` for the footer screen alone (free, and its answer is a candidate that may
+  be wrong) and `proven=.true.` to confirm it by reading. A column with no rows measures `0`, and
+  a genuinely ragged one measures `1`.
 
 ```fortran
 type(parquet_reader) :: reader
@@ -314,63 +293,117 @@ call parquet_close_reader(reader)
 ```
 
 All three accept a struct-nested dotted `name` (see
-[Reading a nested struct field](../types/supported-data-types.html#reading-a-nested-struct-field)
-) and fail immediately
-with `error stop` if `name` doesn't exist.
+[Reading a nested struct field](../types/supported-data-types.html#reading-a-nested-struct-field))
+and fail immediately with `error stop` if `name` doesn't exist.
+
+**`parquet_column_has_nulls(reader, name, row_group_lo, row_group_hi)`** answers the one remaining
+shape question — whether a column contains any Null — from the per-column-chunk null counts Parquet
+records in the footer, so it reads no column data either. It is a `logical` **function**, and unlike
+the queries above its row-group bounds are required arguments: they restrict the question to an
+inclusive 1-based range, with `row_group_lo <= 0` meaning every row group, as in
+`parquet_measure_list_width` above.
+
+```fortran
+if (parquet_column_has_nulls(reader, "flux", 0, 0)) then   ! 0, 0 -- ask about the whole file
+    call parquet_read_column(reader, "flux", flux, is_valid=valid)
+else
+    call parquet_read_column(reader, "flux", flux)         ! no mask needed, and measurably cheaper
+end if
+```
+
+That is what the query is for: requesting `is_valid=` costs an extra buffer, a `LOGICAL` array four
+times its size, a conversion pass and a scan, so asking first and omitting the argument on a
+null-free column is worth the footer lookup.
+
+Two properties are worth knowing before relying on it. Its uncertain answer is **`.true.`**
+("might have nulls"), since statistics are optional in the format and claiming a column is clean
+when it is not would make the read abort on the first Null. And it **declines a dotted struct path**
+the same way, because a struct leaf's validity is combined with every ancestor struct's and the
+leaf's own footer count does not describe the result.
 
 ## Checking column existence and type
 
 `parquet_column_exists(reader, name, [types])` returns `.true.`/`.false.` for whether `name` (a
 top-level or dotted
-[struct-leaf path](../types/supported-data-types.html#reading-a-nested-struct-field) , same as
-everywhere else)
-exists in an open reader's schema:
+[struct-leaf path](../types/supported-data-types.html#reading-a-nested-struct-field), same as
+everywhere else) exists in an open reader's schema:
 ```fortran
 if (parquet_column_exists(reader, "ra")) then
     ...
 end if
 ```
-Pass `types` (optional) to also require the column's physical type to match — a comma-separated
-list of tokens: any of the nine canonical single types (`int32`/`int64`/`float32`/`float64`/
-`boolean`/`string`/`date`/`time`/`timestamp`), and/or the group aliases `int` (`int32` or
-`int64`), `float` (`float32` or `float64`), and `temporal` (`date`, `time`, or `timestamp`).
+Pass `types` (optional) to also require that the column can be **read as** one of the given types —
+a comma-separated list of tokens: any of the nine canonical single types (`int32`/`int64`/`float32`/
+`float64`/`boolean`/`string`/`date`/`time`/`timestamp`), and/or the group aliases `int` (any integer
+column), `float` (any column readable into a float) and `temporal` (`date`, `time`, or `timestamp`).
 Matching is case-insensitive and tokens can be combined:
 ```fortran
-if (parquet_column_exists(reader, "ra", types="float")) then      ! float32 or float64
-if (parquet_column_exists(reader, "flag", types="int, boolean")) ! int32, int64, or boolean
+if (parquet_column_exists(reader, "ra", types="float")) then     ! any numeric column
+if (parquet_column_exists(reader, "flag", types="int, boolean")) ! any integer column, or boolean
 ```
 Omitting `types` checks existence regardless of type; passing an *empty* or all-blank `types` is
 treated as a mistake rather than as that shortcut, and fails immediately with `error stop`. An
-unrecognized token in `types` (e.g. a
-typo) fails immediately with `error stop`, naming the valid tokens — this check happens before the
-existence check itself, so a malformed filter is reported even for a column that doesn't exist. A
-column whose physical type isn't one of the nine canonical tokens (e.g. an `int8`/`uint32`/
-`decimal` column from another tool — see
-[Reading a column into a different numeric kind](../types/supported-data-types.html#reading-a-column-into-a-different-numeric-kind)
-)
-never matches a `types` filter, but is still found by a plain (no `types`) existence check.
+unrecognized token in `types` (e.g. a typo) fails immediately with `error stop`, naming the valid
+tokens — this check happens before the existence check itself, so a malformed filter is reported
+even for a column that doesn't exist. A column this library cannot read at all (a `map`, say) never
+matches a `types` filter, but is still found by a plain (no `types`) existence check.
 
-`parquet_get_column_type(reader, name, type_name)` resolves an *existing* column's canonical
-physical type directly into an allocatable `character`:
+`parquet_get_column_type(reader, name, type_name)` answers the same question the other way round —
+**what Fortran type an existing column is read into** — directly into an allocatable `character`:
 ```fortran
 character(len=:), allocatable :: type_name
 call parquet_get_column_type(reader, "ra", type_name)   ! e.g. "float64"
 ```
+
+### What a column is read as
+
+Both procedures are driven from one mapping: the **narrowest lossless** Fortran kind for the
+column's physical type. That is not the same as the physical type's own name — all four numeric
+targets accept the same fifteen physical types, so which kind a read actually uses is chosen by your
+declaration, not by the file (see
+[Reading a column into a different numeric kind](../types/supported-data-types.html#reading-a-column-into-a-different-numeric-kind)).
+What these two queries report is the kind to declare if you want the file's values back intact.
+
+| stored physical type | reported as |
+|---|---|
+| `int8`, `int16`, `int32`, `uint8`, `uint16` | `int32` |
+| `int64`, `uint32` | `int64` |
+| `uint64` | `int64` — **lossy**, deliberately |
+| `half_float`, `float` | `float32` |
+| `double` | `float64` |
+| `decimal32`, `decimal64`, `decimal128`, `decimal256` | `float64` — **lossy**, deliberately |
+| `bool` | `boolean` |
+| `string`, `large_string` | `string` |
+| `date32`, `date64` | `date` |
+| `time32`, `time64` | `time` |
+| `timestamp` | `timestamp` |
+| anything else | `unknown` |
+
+The two lossy rows return the conventional target rather than `unknown` on purpose: no Fortran kind
+covers `uint64`'s full range or a decimal's exact value, but reporting them as unreadable would be
+less useful than naming the kind the library will actually use. A `uint64` value above
+`huge(1_int64)` still aborts when the column is read. The mapping reads the type ID alone, with no
+precision or scale awareness, so `decimal(9,0)` reports `float64` like every other decimal rather
+than `int32`.
+
+**An alias is not the union of its member tokens, and that is intended.** `types="float"` matches an
+`int32` column — an integer *is* readable into a float array — while `types="float64"` does not,
+because that column's target kind is `int32`. The two ask different questions: *can I read this as a
+float at all?* against *is `float64` the right declaration?* Both are useful, so neither was made to
+imply the other.
+
 A vector (`FIXED_SIZE_LIST`) column reports its element type (an `int32` vector column reports
-`"int32"` — see `parquet_get_col_size` for its element count). Unlike `parquet_column_exists`,
-this procedure's whole contract is "give me the type", so it cannot answer silently: it fails with
-`error stop` if `name` doesn't exist, or if its physical type falls outside the nine canonical
-tokens — use `parquet_column_exists` with no `types` filter first if the column's existence or
-type isn't already guaranteed.
+`"int32"` — see `parquet_get_col_size` for its element count). `parquet_get_column_type` fails with
+`error stop` only if `name` doesn't exist — that is a caller mistake, and `parquet_column_exists` is
+the query for it. A type it cannot read is an answer (`"unknown"`), not an error.
 
 ## Prefetching multiple columns at once with `parquet_prefetch_columns`
 
 `parquet_prefetch_columns(reader, names)` reads several named columns in one call, filling the
 same per-column cache `parquet_read_column` otherwise populates lazily. Because this library keeps
 Arrow's `use_threads` on (see
-[Thread-pool tuning](../operating/thread-safety.html#thread-pool-tuning) ), decoding them together
-lets Arrow
-use its thread pool concurrently instead of one column at a time — purely a throughput
+[Thread-pool tuning](../operating/thread-safety.html#thread-pool-tuning)), decoding them together
+lets Arrow use its thread pool concurrently instead of one column at a time — purely a throughput
 optimization, never a requirement: a column you don't prefetch still works via the normal lazy
 path. Every name is validated against the file's schema first; an unknown column fails immediately
 with `error stop`, naming it. Calling it more than once is safe and efficient — already-cached
@@ -441,8 +474,7 @@ The summary has two parts:
   stays exact where the per-column `filter` cell below cannot), `sort:` (the keys, in the order
   they were added) and `screened:` (how many row groups the
   [statistics pre-screen](filter-sort-sample.html#row-groups-a-filter-cannot-match-are-never-read)
-  skipped),
-  each printed only when it applies.
+  skipped), each printed only when it applies.
 - One row per column that was either prefetched (`parquet_prefetch_columns`) or actually read
   (`parquet_read_column`/`parquet_read_array_row_mode`/`parquet_read_array_element_mode`) at some
   point during the reader's lifetime — a column never touched at all is left out of the list
@@ -486,41 +518,36 @@ everything on this page then behaves as if the file only ever contained the surv
 
 ## Quality control
 
-Reading also has its own side of quality control — checking column values against `qc:
-min:`/`max:`/`miss:` bounds declared in a MAML file, independent of the write-side checks — plus
-two ways to build a qc-maml directly in code without a `.maml` file on disk. See
+Reading also has its own side of quality control — checking column values against
+`qc: min:`/`max:`/`miss:` bounds declared in a MAML file, independent of the write-side checks —
+plus two ways to build a qc-maml directly in code without a `.maml` file on disk. See
 [Quality control](../schema/quality-control.html) for the full picture (both sides, plus the
-in-code
-builders); the read side is `parquet_open_reader(reader, filename, schema=..., qc=...,
-qc_soft=...)`, which by default hard-aborts on a violation (`qc_soft=.true.` instead warns and
-continues).
+in-code builders); the read side is
+`parquet_open_reader(reader, filename, schema=..., qc=..., qc_soft=...)`, which by default
+hard-aborts on a violation (`qc_soft=.true.` instead warns and continues).
 
 ## Reading table metadata with `parquet_get_metadata`
 
 `parquet_get_metadata(reader, key, value [, default] [, warn])` reads one table-level metadata
 entry back out of a file — the read-side counterpart to the writer's `schema%add_metadata` (see
-[Runtime table metadata](../schema/building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata)
-).
+[Runtime table metadata](../schema/building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata)).
 It is generic: the declared type/kind of `value` (a scalar or 1D array of any
-[supported type](../types/supported-data-types.html) ) selects the variant and how the stored text
-is parsed
-back, since all metadata is stored as strings in the file. Table metadata is read once, at
-`parquet_open_reader` time, and cached, so each call only scans that in-memory copy. Any key
+[supported type](../types/supported-data-types.html)) selects the variant and how the stored text
+is parsed back, since all metadata is stored as strings in the file. Table metadata is read once,
+at `parquet_open_reader` time, and cached, so each call only scans that in-memory copy. Any key
 present in the file works, including the reserved/internal ones the writer emits (`DATE`, `name`,
 per-column `column.<name>.*`, per-keyword `<KEY>.datatype`, ...), not just keys added via
 `add_metadata` — see
 [How table-level keys become metadata entries](../schema/maml-format.html#how-table-level-keys-become-metadata-entries)
-for which MAML
-keys produce which entries.
+for which MAML keys produce which entries.
 
 A **Fortran reader never needs the `<KEY>.datatype` entries.** They record what a typed
 `schema%add_metadata` call stored (see
-[A typed value records its own type](../schema/building-schema-in-code.html#a-typed-value-records-its-own-type)
-), and here the
-declared type of `value` already selects the parse, so `parquet_get_metadata` neither consults
-them nor checks itself against them. They exist for readers in languages where a value's type
-cannot be declared at the call site, and they are readable like any other key: `call
-parquet_get_metadata(reader, "NSIDE.datatype", token)`.
+[A typed value records its own type](../schema/building-schema-in-code.html#a-typed-value-records-its-own-type)),
+and here the declared type of `value` already selects the parse, so `parquet_get_metadata` neither
+consults them nor checks itself against them. They exist for readers in languages where a value's
+type cannot be declared at the call site, and they are readable like any other key:
+`call parquet_get_metadata(reader, "NSIDE.datatype", token)`.
 
 - A **missing** `key` triggers `error stop`, unless the optional `default` (same type/kind as
   `value`) is given, in which case `value` is set to it.
@@ -551,8 +578,7 @@ Each array is allocated to its own longest entry and blank-padded, so `trim()` i
 no metadata. Like `parquet_get_metadata` it reads nothing: the answer comes from the copy made
 when the reader was opened. This is what copying metadata from one file to another is built on —
 see
-[`parquet_write_table`'s `copy_metadata=`](../tables/table-write.html#carrying-the-source-files-metadata-to-the-output)
-.
+[`parquet_write_table`'s `copy_metadata=`](../tables/table-write.html#carrying-the-source-files-metadata-to-the-output).
 
 ## Streaming/chunked reads
 
@@ -560,7 +586,7 @@ see
 for a column too large to hold in memory that way. `parquet_read_column_chunk` reads such a column
 one Parquet row group at a time instead, so peak memory is bounded by a row group's worth of data
 rather than the whole column — the read-side mirror of
-[streaming/chunked writes](writing.html#streamingchunked-writes) :
+[streaming/chunked writes](writing.html#streamingchunked-writes):
 
 ```fortran
 type(parquet_reader) :: reader
@@ -599,20 +625,23 @@ more row groups than `huge(1_int32)`).
 to track — call `parquet_read_column_chunk` with any `row_group`, in any order, as many times as
 you like, for any column, independent of any other chunked read on the same reader.
 
-**Type matching:** like `parquet_write_column_chunk` (and unlike
-`parquet_write_column`/`parquet_read_column`), there is no cross-numeric-type conversion on this
-path — `values`' own kind must match the column's actual stored type exactly.
+**Type matching:** a chunked read converts between numeric kinds exactly as `parquet_read_column`
+does — same rules, same helpers — so a `float64` column can be chunk-read into a `real32` array, an
+`int32` column into an `integer(int64)` or a `real64` one, and so on. See
+[Reading a column into a different numeric kind](../types/supported-data-types.html#reading-a-column-into-a-different-numeric-kind)
+for what is permitted and where an out-of-range or non-integral value aborts. `logical` and
+`character` chunk reads are the exception: those require the stored column to actually be boolean or
+string, and fail with `error stop` naming both types otherwise. (This paragraph previously claimed
+the opposite for every type — that the kinds had to match exactly on this path. They never did.)
 
 **Compact string columns:** a scalar `string` column can also be chunk-read into a
 `type(parquet_string_column)` (`values` is cleared, then filled with just that row group's rows) —
 see
-[Reading and writing compact string columns](../types/string-columns.html#reading-and-writing-compact-string-columns)
-.
+[Reading and writing compact string columns](../types/string-columns.html#reading-and-writing-compact-string-columns).
 
 **Works on a filtered or sampled reader, but not on a sorted one** (see
-[what a sort disallows](filter-sort-sample.html#what-a-sort-disallows) ). A chunked read on a
-reader opened with
-[`filter=`](filter-sort-sample.html#row-filtering-with-parquet_filter) and/or
+[what a sort disallows](filter-sort-sample.html#what-a-sort-disallows)). A chunked read on a
+reader opened with [`filter=`](filter-sort-sample.html#row-filtering-with-parquet_filter) and/or
 [`sample_fraction=`](filter-sort-sample.html#random-downsampling-with-sample_fraction) hands back
 that row group's *surviving* rows, and `parquet_get_chunk_size` reports that same count — so the
 sizes still sum to `parquet_get_nrows`, and a chunked loop needs no separate bookkeeping:
@@ -633,25 +662,52 @@ A row group whose rows were all filtered away yields **zero** rows — the norma
 selective filter, not an error: `parquet_get_chunk_size` returns 0 and the read is a no-op. It
 still counts as read for `check_complete` below.
 
-**Memory-bounded filtering with a row-group scope.** By default, applying a filter reads each
-filter column whole-file (in one batched, thread-parallel pass) and keeps it decoded, which is
-fastest but costs one full copy of those columns.
-`parquet_reader_set_filter(reader, filt, row_group_lo, row_group_hi)` instead evaluates the
-expression one row group at a time over that inclusive 1-based range, releasing each chunk before
-reading the next — peak memory is one row group's worth of the filter columns rather than the
-whole
-file. Rows outside the range never match, and nothing is left cached, so a filter column read
-afterwards is read again.
+**Chunked reads do not accumulate memory.** Each `parquet_read_column_chunk` call reads that one
+row group, hands the values over, and frees the Arrow array before returning — nothing is added to
+the reader's column cache, so a loop over a thousand row groups holds no more than a loop over one,
+and calling `parquet_release_column` after each chunk would have nothing to release. This is what
+makes the pattern usable on a file far larger than memory. Measured with Arrow's own pool counter
+over a 400,000-row file in 20 row groups: the pool stays flat at well under a kilobyte across the
+whole loop, where one `parquet_read_column` of the same column retains 3.5 MB for the reader's
+lifetime. (Resident set size cannot show this — Arrow does not return freed pages to the OS — which
+is why the figure comes from the pool counter.) The one bounded exception is reading into a
+[`parquet_string_column`](../types/string-columns.html#reading-and-writing-compact-string-columns):
+that path pins the current chunk's buffers until the next chunk is read or the reader is closed, so
+exactly one chunk stays alive. Bounded, not accumulating.
+
+**Memory-bounded filtering with a row-group scope.** Applying a filter has two engines, and
+**which one runs is decided by whether you name row groups at all, not by which rows you name**:
+
+| call | engine | filter columns afterwards |
+|---|---|---|
+| `parquet_open_reader(..., filter=filt)` | whole file, one batched pass | **cached** — reading one later is free |
+| `parquet_reader_set_filter(reader, filt)` | same as open-time | **cached** |
+| `parquet_reader_set_filter(reader, filt, 0, 0)` | row group at a time, all row groups | **not cached** — only the mask is kept |
+| `parquet_reader_set_filter(reader, filt, 5, 8)` | row group at a time, row groups 5..8 | **not cached** |
+
+So the row-group arguments are **not** required. Without them the filter behaves exactly as an
+open-time `filter=` does: every filter column is read whole-file in one batched, thread-parallel
+pass and left decoded, which is fastest and is the right default, at the cost of one full copy of
+those columns. With them, the expression is evaluated one row group at a time over that inclusive
+1-based range, each chunk being released before the next is read, so peak memory is one row group's
+worth of the filter columns rather than the whole file; rows outside the range never match, and
+nothing is left cached, so a filter column read afterwards is read again.
+
+`row_group_lo = 0` means **every** row group — the bounded-memory engine over the whole file,
+without having to ask `parquet_get_num_row_groups` how many there are first. `row_group_hi` is
+ignored in that case. (A non-positive lower bound reads the same way in `parquet_measure_list_width`
+and `parquet_column_has_nulls`.) Put the other way round: to store the filtered columns, filter
+while opening; to store only the mask, filter afterwards with row-group arguments.
 
 `parquet_reader_set_filter` **refuses**, with `error stop`, if the reader already has a filter
 (compose the clauses into one `parquet_filter` instead — several `%add` calls are AND-combined) or
 if **any column has already been decoded** on this reader, since data already handed back could
-not
-then be aligned with anything read afterwards. That second condition is easy to meet by accident
-here: a `parquet_read_column_chunk` call before the `set_filter` gets the ordering wrong. Set the
-filter first, then loop. See
-[Applying a filter after the reader is open](filter-sort-sample.html#applying-a-filter-after-the-reader-is-open)
-.
+not then be aligned with anything read afterwards. A filter passed to `parquet_open_reader` counts
+as an active filter for the first of those, so opening with `filter=` and then calling
+`parquet_reader_set_filter` aborts as surely as calling it twice does. The second condition is easy
+to meet by accident here: a `parquet_read_column_chunk` call before the `set_filter` gets the
+ordering wrong. Set the filter first, then loop. See
+[Applying a filter after the reader is open](filter-sort-sample.html#applying-a-filter-after-the-reader-is-open).
 
 Pair it with a chunked loop over the same row groups to filter a file larger than memory:
 
@@ -660,18 +716,30 @@ call parquet_open_reader(reader, "huge.parquet")
 call parquet_reader_set_filter(reader, filt, 5, 8)   ! only row groups 5..8 are examined
 ```
 
+**A scoped filter scopes the whole reader, not just the loop.** Everything the reader hands back
+afterwards is restricted to the chosen row groups — a whole-column `parquet_read_column` returns the
+survivors of row groups 5..8 and nothing else, and `parquet_get_nrows` reports that same count. That
+is the scope working as intended, not a filter that failed to match the rest of the file; rows
+outside the range have no mask bits at all, so there is nothing for a later read to return. If you
+want the whole file examined with bounded memory, that is what `row_group_lo = 0` above is for.
+
 **Narrowing to an exact row range.** A row-group range can only ever begin and end on a row-group
 boundary, so a caller interested in an arbitrary row range would get back every survivor of the
 *covering* row groups with no way to trim them — only the mask knows which physical rows those
-are. A four-argument form adds the row range itself: `parquet_reader_set_filter(reader, filt,
-row_group_lo, row_group_hi, row_lo, row_hi)`, where `row_lo`/`row_hi` are 1-based, inclusive,
-physical file rows. Rows outside them never match, so `parquet_get_nrows` afterwards is that
-range's own surviving count:
+are. A four-argument form adds the row range itself:
+`parquet_reader_set_filter(reader, filt, row_group_lo, row_group_hi, row_lo, row_hi)`, where
+`row_lo`/`row_hi` are 1-based, inclusive, physical file rows. Rows outside them never match, so
+`parquet_get_nrows` afterwards is that range's own surviving count:
 
 ```fortran
-call parquet_reader_set_filter(reader, filt, 2, 3, 5, 8)   ! rows 5..8, which lie inside row
-groups 2..3
+call parquet_reader_set_filter(reader, filt, 2, 3, 5, 8)   ! rows 5..8, inside row groups 2..3
 ```
+
+The row range must lie **inside** the rows its row groups span, or the call fails with `error stop`
+naming both ranges and the span. The two ranges are otherwise individually plausible — each is
+checked against the file's own row-group count and row count — and a disjoint pair would quietly
+yield their intersection, which is frequently empty and therefore indistinguishable from a filter
+that matched nothing.
 
 The filter may hold no rules at all in this form, in which case the range alone decides which rows
 match — that is how a row scope is installed for its own sake, with no expression to hang it on.
@@ -681,10 +749,11 @@ Both integer kinds are accepted, as for the row-group bounds.
 [`qc=.true.`](../schema/quality-control.html#read-side-enforcement), each
 `parquet_read_column_chunk` call runs the usual `qc: min:`/`max:`/`miss:` checks against just that
 row group's own data, not the whole column. In hard mode (`qc_soft=.false.`, the default), a
-violation aborts immediately, naming the offending row group (`qc violation for column 'name [row
-group N]'...`). In soft mode (`qc_soft=.true.`), a violation prints a `WARNING` — still at most
-once per column for the reader's whole lifetime (the same throttling `parquet_read_column` already
-uses), so reading many violating row groups in soft mode doesn't spam one warning per chunk.
+violation aborts immediately, naming the offending row group
+(`qc violation for column 'name [row group N]'...`). In soft mode (`qc_soft=.true.`), a violation
+prints a `WARNING` — still at most once per column for the reader's whole lifetime (the same
+throttling `parquet_read_column` already uses), so reading many violating row groups in soft mode
+doesn't spam one warning per chunk.
 
 **Completeness checks:** pass `check_complete=.true.` to `parquet_close_reader` to verify that
 every column you read via `parquet_read_column_chunk` had *every* one of the file's row groups
@@ -703,7 +772,7 @@ included in this check, even if the reader also chunk-read other columns.
 
 **Threading:** `parquet_read_column_chunk` calls on the *same* `parquet_reader` are bound by the
 same "one thread at a time" rule as every other call into a shared reader (see
-[Thread safety](../operating/thread-safety.html#rules-at-a-glance) ) — but since chunked reads are
+[Thread safety](../operating/thread-safety.html#rules-at-a-glance)) — but since chunked reads are
 stateless/random-access, splitting the row-group loop itself across threads works cleanly as long
 as each thread uses its *own* `parquet_reader` instance opened on the same file (independent
 readers on the same file are always safe to use concurrently), rather than sharing one reader

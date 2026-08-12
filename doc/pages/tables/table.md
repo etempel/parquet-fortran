@@ -104,22 +104,25 @@ Four things to know about `%col`:
   call. Fortran cannot detect a stale pointer and neither can this library, but `%generation()`
   can tell you whether anything structural happened:
 
-  ```fortran
-  g = t%generation()
-  call some_procedure(t)          ! might mutate it
-  if (t%generation() /= g) call t%col("flux", p)   ! re-fetch; the old p may be stale
-  ```
+```fortran
+g = t%generation()
+call some_procedure(t)          ! might mutate it
+if (t%generation() /= g) call t%col("flux", p)   ! re-fetch; the old p may be stale
+```
 
-  The counter is deliberately conservative — every column- and row-structural call bumps it,
-  whether or not it actually moved anything — so a change in it means "re-fetch", not "definitely
-  invalidated". A call that changes nothing does not bump it.
+The counter is deliberately conservative — every column- and row-structural call bumps it,
+whether or not it actually moved anything — so a change in it means "re-fetch", not "definitely
+invalidated". A call that changes nothing does not bump it.
 
-  One bump is worth knowing about because the call does not look structural:
-  [`parquet_write_table`](table-write.html#writer-options) advances the counter when it gives back a column it had
-  to read (its default). Nothing you can hold a pointer to is ever given back — taking a pointer
-  materializes the column, and only columns the write itself materialized are released — so after
-  a write the counter may have moved while every pointer you hold is still good. Re-fetch or
-  ignore it; do not read the advance as evidence of damage.
+One bump is worth knowing about because the call does not look structural:
+[`parquet_write_table`](table-write.html#writer-options) advances the counter when it gives back a
+column it had to read (its default). Nothing you can hold a pointer to is ever given back — taking
+a pointer materializes the column, and only columns the write itself materialized are released —
+so after a write the counter may have moved while every pointer you hold is still good. Re-fetch
+or ignore it; do not read the advance as evidence of damage.
+
+Two more rules for a pointer you are holding:
+
 - **A string column has no *array* pointer form, but it does have one.** `PK_STRING`/
   `PK_STRING_VEC` are stored as a packed variable-length buffer, so there are no fixed row slots
   for a Fortran array to alias — but `%col` will hand back a `type(parquet_string_column),
@@ -682,13 +685,14 @@ Four things follow from strings having no fixed-width storage:
   `character(len=:), allocatable` comes back sized to the longest real value rather than to the
   width you put in:
 
-  ```fortran
-  character(len=32) :: src(3) = ["ab", "cde", "f"]
-  character(len=:), allocatable :: back(:)
+```fortran
+character(len=32) :: src(3) = ["ab", "cde", "f"]
+character(len=:), allocatable :: back(:)
 
-  call t%add_column("tag", src)
-  call t%get("tag", back)        ! len(back) == 3, not 32
-  ```
+call t%add_column("tag", src)
+call t%get("tag", back)        ! len(back) == 3, not 32
+```
+
 - **`%get_slice` offers all three** — `parquet_string_column`, `character(:)` and the
   `(element, row)` rank-2 form — and a row handle's `%get` hands back a
   `character(len=:), allocatable` scalar for a `PK_STRING` column, or a rank-1 array of them for a
@@ -698,15 +702,15 @@ Four things follow from strings having no fixed-width storage:
   `"ok  "` comes back as `"ok"` blank-padded to the array's width, which is indistinguishable from
   the value `"ok"`:
 
-  ```fortran
-  character(len=:), allocatable :: tags(:,:)    ! (element, row)
-  call t%get("tags", tags)                      ! width 3, say
-  print *, "[", tags(1, 1), "]"                 ! [ok      ] -- padded to the widest value
-  print *, "[", trim(tags(1, 1)), "]"           ! [ok]       -- any trailing blanks are gone
-  ```
+```fortran
+character(len=:), allocatable :: tags(:,:)    ! (element, row)
+call t%get("tags", tags)                      ! width 3, say
+print *, "[", tags(1, 1), "]"                 ! [ok      ] -- padded to the widest value
+print *, "[", trim(tags(1, 1)), "]"           ! [ok]       -- any trailing blanks are gone
+```
 
-  Scalar string columns do not have this problem when read into a `parquet_string_column`, which
-  keeps each value's own length; there is no such path for a vector one.
+Scalar string columns do not have this problem when read into a `parquet_string_column`, which
+keeps each value's own length; there is no such path for a vector one.
 
 See [Compact string columns with `parquet_string_column`](../types/string-columns.html) for the type itself.
 

@@ -60,6 +60,8 @@ contains
                 "row group", test_read_column_chunk_all_types_roundtrip), &
             new_unittest("chunked read: int64 row_group kind, parquet_get_num_row_groups, " // &
                 "parquet_get_chunk_size(reader,...)", test_read_column_chunk_int64_row_group), &
+            new_unittest("chunked read: numeric kinds convert exactly as on the whole-column path", &
+                test_read_column_chunk_numeric_conversion), &
             new_unittest("chunked read: parquet_close_reader(check_complete=.true.) passes when every row " // &
                 "group was read", test_read_column_chunk_check_complete_pass), &
             new_unittest("chunked read: parquet_close_reader(check_complete=.true., check_hard=.false.) " // &
@@ -111,6 +113,10 @@ contains
             new_unittest("parquet_column_exists/parquet_get_column_type: all 9 canonical types, group aliases, " // &
                 "case-insensitivity, missing columns, struct-leaf paths, and a foreign-typed column", &
                 test_column_exists_and_get_column_type), &
+            new_unittest("parquet_get_column_type reports the narrowest lossless Fortran kind", &
+                test_column_type_narrowest_lossless_mapping), &
+            new_unittest("parquet_column_exists(types=) asks 'can I read it as this?'", &
+                test_column_exists_types_alias_asymmetry), &
             new_unittest("parquet_get_column_names lists every column, expanding nested structs " // &
                 "into dotted leaf paths", &
                 test_get_column_names), &
@@ -1798,6 +1804,62 @@ contains
         call check(error, ok, "int64 row_group-kind chunked read did not round-trip correctly")
     end subroutine test_read_column_chunk_int64_row_group
 
+    !> A chunked read converts between numeric kinds exactly as a whole-column read does.
+    !>
+    !> Nothing asserted this in either direction, and the guide claimed the opposite -- that
+    !> `values`' kind had to match the stored type exactly on this path. It does not: the four
+    !> numeric chunk readers in parquet_wrapper.cpp call the same convert_values_to_* helpers the
+    !> whole-column path uses, and the Fortran side adds no type check.
+    !>
+    !> Boolean and string chunk reads are the exception and DO check strictly. That half cannot be
+    !> asserted here because it aborts; the negative control is the out-of-process scenario
+    !> `chunk_read_bool_type_mismatch` (`test/error_scenarios.f90`), which shows the chunk path
+    !> still rejects a genuine type error rather than converting everything. The logical arm below
+    !> only confirms a bool column round-trips as itself.
+    subroutine test_read_column_chunk_numeric_conversion(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_read_chunk_numeric_conversion.parquet"
+        real(real64) :: dvals(4)
+        integer(int32) :: ivals(4)
+        real(real32) :: narrowed(2)
+        integer(int64) :: widened(2)
+        real(real64) :: widened_real(2)
+        logical :: flags(4), flags_back(2)
+
+        dvals = [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64]
+        ivals = [10_int32, 20_int32, 30_int32, 40_int32]
+        flags = [.true., .false., .true., .false.]
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "d", dvals)
+        call parquet_write_column(writer, "i", ivals)
+        call parquet_write_column(writer, "b", flags)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        ! Stored float64, read into real32: narrowing, and the values chosen are exact in both.
+        call parquet_read_column_chunk(reader, "d", 2_int64, narrowed)
+        call check(error, all(narrowed == [3.5_real32, 4.5_real32]), &
+            "a float64 column's chunk did not convert into a real32 array")
+        if (allocated(error)) return
+        ! Stored int32, read into int64: widening.
+        call parquet_read_column_chunk(reader, "i", 1_int64, widened)
+        call check(error, all(widened == [10_int64, 20_int64]), &
+            "an int32 column's chunk did not convert into an int64 array")
+        if (allocated(error)) return
+        ! Stored int32, read into float64: across families, as the whole-column path also allows.
+        call parquet_read_column_chunk(reader, "i", 2_int64, widened_real)
+        call check(error, all(widened_real == [30.0_real64, 40.0_real64]), &
+            "an int32 column's chunk did not convert into a real64 array")
+        if (allocated(error)) return
+        ! The negative control: boolean stays exact-match, and reads back as itself.
+        call parquet_read_column_chunk(reader, "b", 1_int64, flags_back)
+        call check(error, all(flags_back .eqv. [.true., .false.]), &
+            "a logical column's chunk did not round-trip")
+        call parquet_close_reader(reader)
+    end subroutine test_read_column_chunk_numeric_conversion
+
     !> parquet_close_reader(check_complete=.true.) must not warn/abort when every row group of
     !> every chunk-read column was actually read.
     subroutine test_read_column_chunk_check_complete_pass(error)
@@ -3101,19 +3163,131 @@ contains
 
         call parquet_close_reader(reader)
 
-        ! A column of a physical type outside the 9 canonical tokens (test/fixtures/
-        ! extended_types.parquet's v_uint32) still exists (no filter), but never matches a
-        ! types= filter.
+        ! A column whose physical type is not itself one of the 9 tokens (test/fixtures/
+        ! extended_types.parquet's v_uint32) exists with no filter, and MATCHES a types= filter
+        ! naming the kind it is read into -- types= asks "can I read this as that?", not "is the
+        ! stored type literally that?". The full mapping is exercised by
+        ! test_column_type_narrowest_lossless_mapping below.
         call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
         call check(error, parquet_column_exists(reader, "v_uint32"), &
             "v_uint32 should exist when checked with no types= filter")
         if (allocated(error)) return
-        call check(error, .not. parquet_column_exists(reader, "v_uint32", types="int"), &
-            "v_uint32 (a foreign uint32 column) should never match a types= filter")
+        call check(error, parquet_column_exists(reader, "v_uint32", types="int"), &
+            "v_uint32 is an integer column, so the int alias should match it")
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "v_uint32", types="int64"), &
+            "v_uint32's narrowest lossless target is int64, so int64 should match it")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "v_uint32", types="int32"), &
+            "v_uint32 does not fit int32, so int32 should not match it")
         if (allocated(error)) return
 
         call parquet_close_reader(reader)
     end subroutine test_column_exists_and_get_column_type
+
+    !> Every row of parquet_get_column_type's narrowest-lossless mapping, including the two
+    !> deliberately LOSSY rows (uint64 and the decimals) and the "unknown" fallthrough.
+    !>
+    !> The mapping answers "what do I declare?", which is not the same as the column's physical
+    !> type: all four numeric targets accept the same 15 physical types, so which kind a read uses
+    !> is chosen by the caller's declaration. Pinning every row here is what stops the table in the
+    !> doc-comment and the switch in parquet_wrapper.cpp drifting apart -- nothing else compares
+    !> them.
+    subroutine test_column_type_narrowest_lossless_mapping(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        character(len=:), allocatable :: type_name
+        integer :: i
+        character(len=20), parameter :: cols(*) = [character(len=20) :: &
+            "id", "v_int8", "v_int16", "v_uint8", "v_uint16", &
+            "v_uint32", "v_uint64", &
+            "v_half_float", &
+            "v_decimal32", "v_decimal64", "v_decimal128", "v_decimal256", "v_decimal_scaled", &
+            "v_double_fractional"]
+        character(len=10), parameter :: want(*) = [character(len=10) :: &
+            "int32", "int32", "int32", "int32", "int32", &
+            "int64", "int64", &
+            "float32", &
+            "float64", "float64", "float64", "float64", "float64", &
+            "float64"]
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+        do i = 1, size(cols)
+            call parquet_get_column_type(reader, trim(cols(i)), type_name)
+            call check(error, trim(type_name) == trim(want(i)), &
+                "column " // trim(cols(i)) // " should read into " // trim(want(i)) // &
+                ", got " // trim(type_name))
+            if (allocated(error)) return
+        end do
+        call parquet_close_reader(reader)
+
+        ! The fallthrough: a MAP is not readable by this library at all, so the answer is
+        ! "unknown" -- and, crucially, the call RETURNS rather than aborting. That is the whole
+        ! point of the query: a caller asks it to find out whether a column can be read.
+        call parquet_open_reader(reader, "test/fixtures/map_list_types.parquet")
+        call parquet_get_column_type(reader, "map_col", type_name)
+        call check(error, trim(type_name) == "unknown", &
+            "a MAP column should report 'unknown' rather than aborting, got " // trim(type_name))
+        if (allocated(error)) return
+        call check(error, parquet_column_exists(reader, "map_col"), &
+            "a MAP column still exists when checked with no types= filter")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "map_col", types="int, float, string"), &
+            "an unreadable column should match no types= token")
+        call parquet_close_reader(reader)
+    end subroutine test_column_type_narrowest_lossless_mapping
+
+    !> types= means "can this column be read as one of these?", and the alias/member asymmetry
+    !> that follows from it.
+    !>
+    !> `float` matches an integer column, because an integer IS readable into a float array;
+    !> `float64` does not match that same column, because its narrowest lossless target is int32.
+    !> An alias is therefore NOT the union of its member tokens. The two ask different questions
+    !> and both are useful, so this test pins the asymmetry deliberately -- someone reading only
+    !> the code would take it for a bug and "fix" it.
+    subroutine test_column_exists_types_alias_asymmetry(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+
+        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
+
+        ! The asymmetry itself, on one column: id is int32.
+        call check(error, parquet_column_exists(reader, "id", types="float"), &
+            "the float alias should match an int32 column -- an integer is readable as a float")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "id", types="float64"), &
+            "the float64 token should NOT match an int32 column: its target kind is int32")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "id", types="float32"), &
+            "the float32 token should NOT match an int32 column either")
+        if (allocated(error)) return
+
+        ! `int` covers every integer physical type, narrow and unsigned alike.
+        call check(error, parquet_column_exists(reader, "v_int8", types="int") .and. &
+            parquet_column_exists(reader, "v_uint8", types="int") .and. &
+            parquet_column_exists(reader, "v_uint16", types="int") .and. &
+            parquet_column_exists(reader, "v_uint32", types="int") .and. &
+            parquet_column_exists(reader, "v_uint64", types="int"), &
+            "the int alias should match every integer physical type")
+        if (allocated(error)) return
+
+        ! `float` covers every numeric column, decimals included, since all of them convert to
+        ! float64 -- while `int` must not be dragged along with them.
+        call check(error, parquet_column_exists(reader, "v_decimal128", types="float") .and. &
+            parquet_column_exists(reader, "v_half_float", types="float") .and. &
+            parquet_column_exists(reader, "v_uint64", types="float"), &
+            "the float alias should match decimal, half_float and uint64 columns")
+        if (allocated(error)) return
+        call check(error, .not. parquet_column_exists(reader, "v_decimal128", types="int"), &
+            "a decimal column reads into float64, so the int alias must not match it")
+        if (allocated(error)) return
+
+        ! A narrow integer's target really is int32, not its own width.
+        call check(error, parquet_column_exists(reader, "v_int8", types="int32") .and. &
+            .not. parquet_column_exists(reader, "v_int8", types="int64"), &
+            "v_int8's target is int32 exactly, not int64")
+        call parquet_close_reader(reader)
+    end subroutine test_column_exists_types_alias_asymmetry
     !
     !> parquet_get_column_names lists every column in schema order, expanding a nested STRUCT
     !> into one dotted leaf path per leaf (to any depth) and never emitting the bare struct

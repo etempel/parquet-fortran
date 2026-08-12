@@ -105,6 +105,13 @@ That is what makes them worth a static check rather than a test:
      of that -- eight hand-synced pairs in all, none visible to any compiler or test. Both sides
      of every comparison are derived from the filesystem, never from a hardcoded page list.
 
+ 15. No doc/pages code fence is indented.
+     python-markdown -- the engine FORD drives -- does not recognise a ``` fence carrying any
+     leading whitespace: the fence is emitted literally inside a `<p>` and the example is published
+     as running prose. Indenting an example under the bullet it belongs to is what every other
+     markdown renderer wants, FORD exits 0, and nothing reads the generated HTML, so the only
+     evidence is the published page. Six blocks across three pages had shipped that way.
+
 The numbered notes above are the ones whose rationale needs more than a line; they are NOT the
 complete list, and deliberately carry no count, because a hardcoded one drifts silently every time a
 check is added (this docstring said "twelve" while CHECKS held fifteen). `--list` prints all of them.
@@ -575,10 +582,27 @@ def check_print_stat_columns_documented():
         return ["%s: could not find print_stat's `headers` vector -- this check needs updating"
                 % cpp.relative_to(REPO_ROOT)]
     code_columns = re.findall(r'"([^"]+)"', match.group(1))
-    # The documented set: the first cell of every row of the column table, which spells each name
-    # in backticks and pairs two of them (`min` / `max`) on one row.
+    # The documented set: the first cell of every row of print_stat's OWN column table, which
+    # spells each name in backticks and pairs two of them (`min` / `max`) on one row.
+    #
+    # Anchored on that table's `| column | meaning |` header rather than on the row shape alone.
+    # The shape is not distinctive -- any two-column table whose first cell is one backticked word
+    # matches it -- so an unanchored scan reads unrelated tables on the same page as if they were
+    # this one, and reports their rows as columns print_stat has stopped printing. That happened as
+    # soon as the page gained a physical-type mapping table.
+    lines = doc.read_text().split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*\|\s*column\s*\|\s*meaning\s*\|\s*$", line):
+            start = i + 1
+            break
+    if start is None:
+        return ["doc/pages/io/reading.md: could not find print_stat's `| column | meaning |` table "
+                "header -- the documentation moved and this check has gone blind on it"]
     documented = set()
-    for line in doc.read_text().split("\n"):
+    for line in lines[start:]:
+        if not line.strip().startswith("|"):
+            break
         row = re.match(r"^\s*\|\s*((?:`\w+`\s*/?\s*)+)\|", line)
         if row:
             documented.update(re.findall(r"`(\w+)`", row.group(1)))
@@ -1343,6 +1367,48 @@ def check_doc_page_index_consistency():
     return problems
 
 
+def check_no_indented_code_fence():
+    """A fenced code block in doc/pages/ must start at column 0 or it is not rendered as code.
+
+    python-markdown -- the engine FORD drives -- does not recognise a ``` fence that carries any
+    leading whitespace. The fence is emitted LITERALLY inside a `<p>`, the enclosing list is closed
+    before it, and because the block has become prose a blank line inside the example splits it into
+    two paragraphs. The published page shows the code lines run together as running text with a
+    stray ``` in them. Measured against python-markdown 3.3.4 and 3.4.4 with the extensions
+    fpm.toml's [extra.ford] configures: 2 spaces broken, 4 spaces broken (an indented code block
+    CONTAINING the ``` line), column 0 correct.
+
+    Nothing catches this anywhere else. The source looks right -- indenting an example under the
+    bullet it belongs to is what every other markdown renderer wants -- FORD exits 0, and no test
+    reads the generated HTML. Six blocks across three pages were published this way.
+
+    The scan is by shape rather than by a page list, and an empty scan FAILS: no pages found almost
+    certainly means the guide moved, not that the guide has no pages (CLAUDE.md, "A static check
+    that enumerates names goes stale silently"). Fences already at column 0 are tracked so that a
+    ``` shown INSIDE an example is not mistaken for a real one.
+    """
+    problems = []
+    pages = sorted((REPO_ROOT / "doc" / "pages").glob("**/*.md"))
+    if not pages:
+        return ["doc/pages/: no .md pages found -- this check has gone blind on the guide"]
+    for page in pages:
+        rel = page.relative_to(REPO_ROOT)
+        in_fence = False
+        for lineno, line in enumerate(page.read_text().split("\n"), start=1):
+            if re.match(r"^```", line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            if re.match(r"^\s+```", line):
+                problems.append(
+                    "%s:%d: indented code fence -- python-markdown renders it as PROSE, ``` and "
+                    "all. Put the fence and its content at column 0 (the list closes before it), "
+                    "or restructure the bullet into a subheading." % (rel, lineno)
+                )
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
@@ -1362,6 +1428,7 @@ CHECKS = (
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
+    ("no doc/pages code fence is indented", check_no_indented_code_fence),
 )
 
 

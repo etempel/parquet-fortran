@@ -466,6 +466,12 @@ program error_scenarios
         call scenario_filter_scope_out_of_range()
     case ("filter_scope_reversed")
         call scenario_filter_scope_reversed()
+    case ("chunk_read_bool_type_mismatch")
+        call scenario_chunk_read_bool_type_mismatch()
+    case ("filter_row_range_outside_row_groups")
+        call scenario_filter_row_range_outside_row_groups()
+    case ("filter_all_row_groups_bounded")
+        call scenario_filter_all_row_groups_bounded()
     case ("filter_row_range_out_of_range")
         call scenario_filter_row_range_out_of_range()
     case ("filter_row_element_mode_no_whole_column_read")
@@ -1218,8 +1224,6 @@ program error_scenarios
         call scenario_column_exists_bad_type_token_missing_column()
     case ("column_exists_empty_type_filter")
         call scenario_column_exists_empty_type_filter()
-    case ("get_column_type_unsupported")
-        call scenario_get_column_type_unsupported()
     case ("col_size_malformed_value")
         call scenario_col_size_malformed_value()
     case ("array_size_malformed_value")
@@ -6202,6 +6206,174 @@ contains
         print '(a)', "unexpectedly applied a filter with a reversed row-group range"
     end subroutine scenario_filter_scope_reversed
 
+    !> The chunked read path converts freely between NUMERIC kinds -- it shares the whole-column
+    !> path's convert_values_to_* helpers -- but a boolean chunk read is strict: it requires the
+    !> stored column to actually be BOOL. This is the negative control for
+    !> `test_read_column_chunk_numeric_conversion` (`test/test_reading.f90`), which asserts the
+    !> converting half; without it that test would pass equally against a chunk path that had no
+    !> type checking left at all.
+    subroutine scenario_chunk_read_bool_type_mismatch()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(4) = [1, 2, 3, 4]
+        logical :: flags(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_chunk_bool_mismatch.parquet"
+
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column_chunk(reader, "v", 1_int64, flags)
+        print '(a)', "unexpectedly chunk-read an int32 column into a logical array"
+    end subroutine scenario_chunk_read_bool_type_mismatch
+
+    !> Writes a 12-row file with two rows per row group, i.e. six row groups whose spans are
+    !> 1..2, 3..4, 5..6, 7..8, 9..10, 11..12. Both containment scenarios below need a layout whose
+    !> row-group boundaries are known exactly; taking the filename as an argument is what keeps
+    !> two scenarios running concurrently under xargs -P from truncating each other's fixture.
+    subroutine write_row_group_layout_fixture(out_file)
+        character(len=*), intent(in) :: out_file !! parquet file to (re)create.
+        type(parquet_writer) :: writer
+        integer(int32) :: v(12), i
+
+        v = [(i, i = 1, 12)]
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+    end subroutine write_row_group_layout_fixture
+
+    !> The row-BOUNDED form's containment check: the physical row range must lie INSIDE the rows
+    !> its row-group range spans. Both ranges can be individually valid and still describe
+    !> disjoint parts of the file, in which case the caller used to receive their intersection --
+    !> possibly empty, and an empty result is indistinguishable from a selective filter that
+    !> matched nothing, so the mistake reported as data rather than as an error
+    !> (feature_risks.md Risk-81).
+    !>
+    !> Negative control first: row groups 2..4 span rows 3..8, which DOES contain rows 5..8, so a
+    !> guard that fired unconditionally would fail here instead of passing.
+    subroutine scenario_filter_row_range_outside_row_groups()
+        type(parquet_reader) :: reader, reader2
+        type(parquet_filter) :: filt
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_row_range_span.parquet"
+
+        call write_row_group_layout_fixture(out_file)
+        call filt%add("v > 0")
+        call parquet_open_reader(reader2, out_file)
+        call parquet_reader_set_filter(reader2, filt, 2_int64, 4_int64, 5_int64, 8_int64)
+        print '(a)', "a filter whose row range lies inside its row groups was accepted"
+        ! Row groups 2..3 span rows 3..6, so rows 5..8 run past their last row. This is the
+        ! maintainer's own example (2, 3, 5, 8), and the fixture's two-rows-per-row-group layout
+        ! is what makes those literal numbers non-contained.
+        call parquet_open_reader(reader, out_file)
+        call parquet_reader_set_filter(reader, filt, 2_int64, 3_int64, 5_int64, 8_int64)
+        print '(a)', "unexpectedly applied a filter whose row range runs outside its row groups"
+    end subroutine scenario_filter_row_range_outside_row_groups
+
+    !> `row_group_lo = 0` means "all row groups" on the memory-bounded engine, and the engine is
+    !> chosen by whether the row-group arguments were supplied at all rather than by their value.
+    !> Asserts both halves of that, since either alone passes against the wrong implementation:
+    !>
+    !>  - the two forms agree on the ANSWER (same surviving row count over the same file), and
+    !>  - they differ in what they leave CACHED, which is the whole point of the distinction.
+    !>
+    !> The observable is parquet_debug_get_physical_column_read_count around a READ of the filter
+    !> column after the filter is installed: cached, that read is served from column_cache and the
+    !> counter does not move; uncached, it is a genuine whole-column read and the counter reaches 1.
+    !> Measuring at the set_filter call instead does not work -- the whole-file engine reads its
+    !> filter columns through its own batched, thread-parallel path rather than through
+    !> get_single_chunk_array, so both forms read 0 there and the difference is invisible.
+    !>
+    !> Out-of-process rather than a test-drive test because that counter is process-global and
+    !> test-drive runs a suite's tests concurrently. Expected to exit cleanly
+    !> (expect_abort=0 in tools/run_error_scenarios.sh), so reaching an error stop is the failure.
+    subroutine scenario_filter_all_row_groups_bounded()
+        interface
+            function parquet_debug_get_physical_column_read_count() result(n) &
+                bind(C, name="parquet_debug_get_physical_column_read_count")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: n
+            end function parquet_debug_get_physical_column_read_count
+
+            subroutine parquet_debug_reset_physical_column_read_count() &
+                bind(C, name="parquet_debug_reset_physical_column_read_count")
+            end subroutine parquet_debug_reset_physical_column_read_count
+        end interface
+
+        type(parquet_reader) :: reader_all, reader_base, reader_open
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows_all, nrows_base, nrows_open, reads_all, reads_base, reads_open
+        integer(int32), allocatable :: v_all(:), v_base(:), v_open(:)
+        character(len=64) :: buf
+        character(len=*), parameter :: out_file = "test_run/error_scenario_filter_all_row_groups.parquet"
+
+        call write_row_group_layout_fixture(out_file)
+        call filt%add("v > 8")
+
+        ! (0, 0): all row groups, one at a time, nothing cached -- so reading the filter column
+        ! afterwards is a genuine whole-column read.
+        call parquet_open_reader(reader_all, out_file)
+        call parquet_reader_set_filter(reader_all, filt, 0_int64, 0_int64)
+        call parquet_get_nrows(reader_all, nrows_all)
+        allocate(v_all(nrows_all))
+        call parquet_debug_reset_physical_column_read_count()
+        call parquet_read_column(reader_all, "v", v_all)
+        reads_all = parquet_debug_get_physical_column_read_count()
+        call parquet_close_reader(reader_all)
+
+        ! The negative control: no row-group arguments at all, so the whole-file engine, which
+        ! leaves the filter column decoded -- the same read costs no disk read at all.
+        call parquet_open_reader(reader_base, out_file)
+        call parquet_reader_set_filter(reader_base, filt)
+        call parquet_get_nrows(reader_base, nrows_base)
+        allocate(v_base(nrows_base))
+        call parquet_debug_reset_physical_column_read_count()
+        call parquet_read_column(reader_base, "v", v_base)
+        reads_base = parquet_debug_get_physical_column_read_count()
+        call parquet_close_reader(reader_base)
+
+        ! The third arm exists because the sentinel travels through a SECOND call site: an
+        ! open-time filter= shares parquet_apply_filter with the post-open form, so a 0 passed
+        ! there instead of no_row_group_scope silently moves every open-time filter onto the
+        ! bounded engine. That changes no answer anywhere -- only what stays cached -- and was
+        ! confirmed to be caught by no test in the suite before this arm was added.
+        call parquet_open_reader(reader_open, out_file, filter=filt)
+        call parquet_get_nrows(reader_open, nrows_open)
+        allocate(v_open(nrows_open))
+        call parquet_debug_reset_physical_column_read_count()
+        call parquet_read_column(reader_open, "v", v_open)
+        reads_open = parquet_debug_get_physical_column_read_count()
+        call parquet_close_reader(reader_open)
+
+        if (nrows_open /= 4_int64 .or. .not. all(v_open == v_all)) then
+            error stop "scenario_filter_all_row_groups_bounded: an open-time filter= must select the same rows"
+        end if
+        if (reads_open /= 0_int64) then
+            write(buf, '(i0)') reads_open
+            error stop "scenario_filter_all_row_groups_bounded: an open-time filter= must leave the filter " // &
+                "column cached, but reading it cost " // trim(buf) // " whole-column read(s)"
+        end if
+
+        if (nrows_all /= 4_int64 .or. nrows_base /= nrows_all) then
+            write(buf, '(i0,a,i0)') nrows_all, " vs ", nrows_base
+            error stop "scenario_filter_all_row_groups_bounded: expected 4 surviving rows from both forms, got " // &
+                trim(buf)
+        end if
+        if (.not. all(v_all == [9_int32, 10_int32, 11_int32, 12_int32]) .or. .not. all(v_base == v_all)) then
+            error stop "scenario_filter_all_row_groups_bounded: the two forms must select the same rows (9..12)"
+        end if
+        if (reads_all /= 1_int64) then
+            write(buf, '(i0)') reads_all
+            error stop "scenario_filter_all_row_groups_bounded: (0,0) must cache nothing, so reading the filter " // &
+                "column should cost exactly 1 whole-column read, got " // trim(buf)
+        end if
+        if (reads_base /= 0_int64) then
+            write(buf, '(i0)') reads_base
+            error stop "scenario_filter_all_row_groups_bounded: the two-argument form must leave the filter " // &
+                "column cached, but reading it cost " // trim(buf) // " whole-column read(s)"
+        end if
+    end subroutine scenario_filter_all_row_groups_bounded
+
     !> parquet_open_reader's sample_fraction < 0.0 aborts immediately -- see
     !> parquet_open_reader_base's NaN/negative checks (parquet_read.f90).
     subroutine scenario_sample_negative_fraction()
@@ -10078,20 +10250,6 @@ contains
         print '(a)', "unexpectedly accepted a blank types= filter without error"
     end subroutine scenario_column_exists_empty_type_filter
 
-    !> parquet_get_column_type error stops on a column whose physical type falls outside the nine
-    !> canonical tokens (valid_query_data_types) -- test/fixtures/extended_types.parquet's
-    !> v_uint32 is UINT32, not one of int32/int64/float32/float64/boolean/string/date/time/
-    !> timestamp. Unlike parquet_column_exists (which just reports .false. for this case, see
-    !> test_column_exists_and_get_column_type in test_reading.f90), this procedure's whole
-    !> contract is "give me the type", so it cannot return silently.
-    subroutine scenario_get_column_type_unsupported()
-        type(parquet_reader) :: reader
-        character(len=:), allocatable :: type_name
-
-        call parquet_open_reader(reader, "test/fixtures/extended_types.parquet")
-        call parquet_get_column_type(reader, "v_uint32", type_name)
-        print '(a)', "unexpectedly resolved a canonical type for a column outside the 9 recognized tokens"
-    end subroutine scenario_get_column_type_unsupported
 
     !> A MAML col_size: value that is neither blank, "auto", nor a valid positive integer (a
     !> typo like "5O", letter-O for zero) must be rejected by parquet_validate_maml with a clear
@@ -11495,8 +11653,8 @@ contains
     subroutine scenario_table_unsupported_column_read()
         type(parquet_table) :: t
         integer(int32), allocatable :: v(:)
-        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
-        call t%get("v_uint32", v)   ! foreign uint32 column -> aborts
+        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
+        call t%get("map_col", v)   ! a MAP column, unreadable -> aborts
         print '(a,i0)', "unexpectedly read an unsupported column, size=", size(v)
     end subroutine scenario_table_unsupported_column_read
 
@@ -11516,8 +11674,8 @@ contains
     !! regardless of found=.
     subroutine scenario_table_prefetch_unsupported_column()
         type(parquet_table) :: t
-        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
-        call t%prefetch("v_uint32")   ! foreign uint32 column -> aborts
+        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
+        call t%prefetch("map_col")   ! a MAP column, unreadable -> aborts
         print '(a)', "unexpectedly prefetched an unsupported column"
     end subroutine scenario_table_prefetch_unsupported_column
 
@@ -11651,9 +11809,9 @@ contains
     subroutine scenario_table_write_unsupported_column()
         type(parquet_table) :: t
         type(parquet_schema) :: s
-        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
+        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
         call s%init("wunsupported")
-        call s%add_field("v_uint32", "int32")
+        call s%add_field("map_col", "int32")
         call parquet_parse_maml(s)
         call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table's unsupported column"
@@ -11966,9 +12124,9 @@ contains
         type(parquet_table) :: t
         type(parquet_table_row) :: r
         integer(int32) :: v
-        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
+        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
         r = t%row(1)
-        call r%get("v_uint32", v)   ! foreign uint32 column -> aborts
+        call r%get("map_col", v)   ! a MAP column, unreadable -> aborts
         print '(a,i0)', "unexpectedly read an unsupported column through a row handle, v=", v
     end subroutine scenario_table_row_unsupported_column
 
@@ -12782,8 +12940,8 @@ contains
     !! order by, and silently treating every row as equal would be worse than saying so.
     subroutine scenario_table_mutate_unsupported_column()
         type(parquet_table) :: t
-        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
-        call t%sort_by(["v_uint32"])   ! a foreign uint32 column -> aborts
+        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
+        call t%sort_by(["map_col"])   ! a MAP column, unreadable -> aborts
         print '(a,i0)', "unexpectedly sorted by an unsupported column, nrows=", t%nrows()
     end subroutine scenario_table_mutate_unsupported_column
 
@@ -13444,8 +13602,8 @@ contains
     !! the deferred path can decide before any read happens.
     subroutine scenario_table_cast_unsupported_column()
         type(parquet_table) :: t
-        call parquet_open_table(t, "test/fixtures/extended_types.parquet")
-        call t%cast("v_uint32", PK_FLOAT64)   ! -> aborts
+        call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
+        call t%cast("map_col", PK_FLOAT64)   ! -> aborts
         print '(a,i0)', "unexpectedly cast an unsupported column, ncols=", t%ncols()
     end subroutine scenario_table_cast_unsupported_column
 

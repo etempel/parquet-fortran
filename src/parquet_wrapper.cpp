@@ -6207,8 +6207,19 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 
-		// rg_lo/rg_hi = 0 means "whole file"; otherwise the filter is SCOPED to that inclusive,
-		// 1-based row-group range, and the two paths differ in more than which rows they look at:
+		// rg_lo = -1 means "the caller named no row-group range at all" -- the SENTINEL the Fortran
+		// side passes from parquet_open_reader(..., filter=) and from the two-argument
+		// parquet_reader_set_filter(reader, filter). Any other value scopes the filter to an
+		// inclusive, 1-based row-group range, with rg_lo <= 0 meaning "all row groups" (and rg_hi
+		// then ignored), matching parquet_measure_list_width and parquet_column_has_nulls, whose
+		// row-group arguments have always read a non-positive lower bound that way.
+		//
+		// So it is the PRESENCE of the arguments that picks the engine and their VALUE that picks
+		// the row groups -- which is the whole reason for the sentinel. Inferring "unscoped" from
+		// the value 0, as this did before, made parquet_reader_set_filter(reader, filt, 0, 0)
+		// impossible to express: it is a bounded-memory filter over the whole file, and it used to
+		// be indistinguishable from the caching whole-file form. The two paths differ in more than
+		// which rows they look at:
 		//
 		//   unscoped -- every filter column is read in one batched, thread-parallel call (issued
 		//     here, further below) covering the LIVE row groups, and left decoded in column_cache,
@@ -6230,10 +6241,19 @@ extern "C"
 		// INSIDE a row group express itself as a filter: without it the reader would hand back the
 		// whole covering row groups' survivors, and the table's own physical-row arithmetic and the
 		// reader's post-filter chunks would be in two different coordinate systems.
-		bool scoped = (rg_lo > 0 || rg_hi > 0);
+		bool scoped = (rg_lo != -1);
 		if (scoped)
 		{
-			if (rg_lo < 1 || rg_hi < rg_lo || rg_hi > reader_handle->num_row_groups)
+			if (rg_lo <= 0)
+			{
+				// "All row groups", bounded-memory engine. rg_hi is deliberately ignored rather
+				// than validated: a caller who has not looked up the row-group count has nothing
+				// sensible to put there, and requiring parquet_get_num_row_groups first is exactly
+				// the friction this form removes.
+				rg_lo = 1;
+				rg_hi = reader_handle->num_row_groups;
+			}
+			else if (rg_lo < 1 || rg_hi < rg_lo || rg_hi > reader_handle->num_row_groups)
 			{
 				std::snprintf(err_out, static_cast<size_t>(err_cap),
 					"filter row-group range %lld..%lld is out of range (file has %lld row group(s))",
@@ -6252,6 +6272,27 @@ extern "C"
 					static_cast<long long>(row_lo), static_cast<long long>(row_hi),
 					static_cast<long long>(reader_handle->total_nrows));
 				return 1;
+			}
+			// The row range must lie INSIDE the rows the chosen row groups span. Without this the
+			// caller silently receives the intersection of the two, which for a disjoint pair is
+			// empty -- and an empty result is indistinguishable from a selective filter that
+			// matched nothing, so the mistake reports as data rather than as an error. Checked
+			// after the resolution above, so "all row groups" spans the whole file and can never
+			// fail it. (feature_risks.md Risk-81)
+			if (scoped)
+			{
+				int64_t span_lo = reader_handle->row_group_offsets[static_cast<size_t>(rg_lo - 1)] + 1;
+				int64_t span_hi = reader_handle->row_group_offsets[static_cast<size_t>(rg_hi)];
+				if (row_lo < span_lo || row_hi > span_hi)
+				{
+					std::snprintf(err_out, static_cast<size_t>(err_cap),
+						"filter row range %lld..%lld is not contained in row groups %lld..%lld, "
+						"which span rows %lld..%lld",
+						static_cast<long long>(row_lo), static_cast<long long>(row_hi),
+						static_cast<long long>(rg_lo), static_cast<long long>(rg_hi),
+						static_cast<long long>(span_lo), static_cast<long long>(span_hi));
+					return 1;
+				}
 			}
 		}
 		// With no clauses AND nothing to scope to, there is simply nothing to install. With no
@@ -7416,8 +7457,29 @@ extern "C"
 		std::string token;
 		switch (type->id())
 		{
+		// Every integer physical type narrower than int64 is exactly representable in int32 or
+		// int64, so the narrowest LOSSLESS Fortran kind is what it maps to. Note UINT32 needs
+		// int64, not int32: its top half does not fit a signed 32-bit integer.
+		case arrow::Type::INT8: token = "int32"; break;
+		case arrow::Type::INT16: token = "int32"; break;
 		case arrow::Type::INT32: token = "int32"; break;
+		case arrow::Type::UINT8: token = "int32"; break;
+		case arrow::Type::UINT16: token = "int32"; break;
 		case arrow::Type::INT64: token = "int64"; break;
+		case arrow::Type::UINT32: token = "int64"; break;
+		// UINT64 and the decimals have no lossless Fortran kind at all, and answer with the
+		// CONVENTIONAL LOSSY target rather than "unknown": a caller asking "what do I declare?" is
+		// better served by the kind this library will actually read the column into than by being
+		// told a readable column is unreadable. A uint64 value above huge(int64) aborts on read,
+		// and a decimal is read through double.
+		case arrow::Type::UINT64: token = "int64"; break;
+		// Mapped on the type ID alone -- deliberately no precision/scale awareness, so
+		// decimal(9,0) answers float64 like every other decimal rather than int32.
+		case arrow::Type::DECIMAL32: token = "float64"; break;
+		case arrow::Type::DECIMAL64: token = "float64"; break;
+		case arrow::Type::DECIMAL128: token = "float64"; break;
+		case arrow::Type::DECIMAL256: token = "float64"; break;
+		case arrow::Type::HALF_FLOAT: token = "float32"; break;
 		case arrow::Type::FLOAT: token = "float32"; break;
 		case arrow::Type::DOUBLE: token = "float64"; break;
 		case arrow::Type::BOOL: token = "boolean"; break;
@@ -7429,7 +7491,12 @@ extern "C"
 		case arrow::Type::TIME64: token = "time"; break;
 		case arrow::Type::TIMESTAMP: token = "timestamp"; break;
 		default:
-			copy_string_with_padding(buf, buf_len, type->ToString());
+			// Not readable by this library at all (a MAP, a nested STRUCT reached as a whole, an
+			// unsupported binary type, ...). Answering "unknown" rather than the raw Arrow type
+			// name is what lets parquet_get_column_type report it instead of aborting: the query
+			// exists to tell a caller whether a column can be read, so a type it cannot read is an
+			// answer, not an error.
+			copy_string_with_padding(buf, buf_len, std::string("unknown"));
 			return 0;
 		}
 		copy_string_with_padding(buf, buf_len, token);

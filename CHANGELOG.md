@@ -593,6 +593,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`parquet_get_column_type` and `parquet_column_exists(types=)` now answer "can I read this
+  column, and as what?" instead of "is its physical type one of nine names?"** Both are driven
+  from one published **narrowest-lossless** mapping from a column's physical type to the Fortran
+  kind this library reads it into: `int8`/`int16`/`int32`/`uint8`/`uint16` → `int32`;
+  `int64`/`uint32` → `int64`; `half_float`/`float` → `float32`; `double` → `float64`;
+  `bool`/`string`/`date`/`time`/`timestamp` as before. `uint64` → `int64` and every `decimal` →
+  `float64` are **deliberately lossy**: a caller asking what to declare is better served by the
+  kind the library will actually use than by being told a readable column is unreadable (a
+  `uint64` value above `huge(int64)` still aborts on read). The mapping reads the type ID alone,
+  so `decimal(9,0)` answers `float64` like every other decimal. Three consequences:
+
+  - **`parquet_get_column_type` no longer aborts on a column it cannot read** — it returns
+    `"unknown"`. It still aborts on a name that does not exist, which is a caller mistake.
+    Previously it aborted for both, so no working call changes behavior.
+  - **`types=` matches against that target kind**, so `types="int64"` now finds a `uint32` column.
+    The group alias `int` covers every integer physical type and `float` covers everything
+    readable into a float — which, since every numeric type converts to `float64`, means every
+    numeric column, decimals included. An alias is therefore **not** the union of its member
+    tokens: `types="float"` matches an `int32` column while `types="float64"` does not, because
+    the two ask different questions ("can I read this as a float at all?" against "is `float64`
+    the right declaration?"). Both are useful and the asymmetry is intended.
+  - **`parquet_table` inherits this**, since it classifies each column with the same query: a
+    file's unsigned, narrow-integer, half-float or decimal columns are now materialized into the
+    mapped kind rather than being marked unsupported and skipped.
+
+- **`parquet_reader_set_filter` accepts `row_group_lo = 0` to mean "every row group", giving the
+  memory-bounded filter engine over a whole file.** The procedure has always had two engines, and
+  which one runs is decided by whether the row-group arguments are supplied at all:
+  `parquet_reader_set_filter(reader, filt)` — like an open-time `filter=` — reads every filter
+  column in one batched pass and leaves it decoded, so reading that column afterwards is free,
+  while any form naming row groups evaluates a row group at a time and keeps only the mask, which
+  is what makes a filtered read possible on a file larger than memory. Until now the second engine
+  could only be asked for by naming an explicit range, so filtering a whole large file that way
+  meant calling `parquet_get_num_row_groups` first and passing `1, n`; `0` now says the same thing
+  directly, and `row_group_hi` is ignored when it is given. A non-positive lower bound already
+  meant "all row groups" in `parquet_measure_list_width` and `parquet_column_has_nulls`, so the
+  three now agree. Calls that previously aborted (a zero lower bound was rejected as out of range)
+  now succeed; no working call changes behavior.
+
 - **The user guide is reorganised into a two-layer structure**, six groups of pages instead of one
   flat list, so every published page URL changed from `page/<name>.html` to
   `page/<group>/<name>.html` (e.g. `page/io/reading.html`). Two oversized pages were split in the
@@ -912,6 +951,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   argument, and every other column type is unaffected.
 
 ### Fixed
+
+- **`parquet_reader_set_filter`'s six-argument form now rejects a row range that lies outside the
+  row groups it was given**, instead of silently returning their intersection. Both ranges were
+  validated individually — against the file's row-group count and its row count — but never
+  against each other, so a call like `parquet_reader_set_filter(reader, filt, 2, 3, 5, 8)` on a
+  file whose row groups 2..3 hold rows 3..6 was accepted and quietly narrowed to rows 5..6, or to
+  nothing at all when the two ranges were disjoint. An empty result is indistinguishable from a
+  selective filter that matched nothing, so the mistake reported as data rather than as an error.
+  The call now fails with `error stop`, naming both ranges and the rows the row groups actually
+  span.
 
 - **`parquet_get_column_total_elements` no longer decodes a whole column to answer a size query on
   a plain `LIST`/`LARGE_LIST` column.** For a scalar or `fixed_size_list` column it already read

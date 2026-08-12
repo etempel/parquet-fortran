@@ -1191,6 +1191,13 @@ module parquet_core
     !> than memory, or when only part of it is of interest -- typically alongside chunked reads
     !> over the same row groups.
     !>
+    !> It is the PRESENCE of the row-group arguments that selects between those two engines, not
+    !> their value: `row_group_lo = 0` means "all row groups" on the memory-bounded engine (and
+    !> row_group_hi is then ignored), which is how a whole file larger than memory is filtered
+    !> without first asking parquet_get_num_row_groups how many there are. A non-positive lower
+    !> bound reads as "all row groups" here exactly as it already does in
+    !> parquet_measure_list_width and parquet_column_has_nulls.
+    !>
     !> A third form takes a physical ROW range as well (four numeric arguments rather than two):
     !> only rows row_lo..row_hi, 1-based and inclusive, may match. It exists because a row-group
     !> range can only ever start and end on a row-group boundary, so a caller working over an
@@ -1198,7 +1205,10 @@ module parquet_core
     !> whole covering row groups' survivors and have no way to trim them, the mask being the only
     !> thing that knows which rows those are. With this form the filter answers for exactly the
     !> requested rows, and parquet_get_nrows afterwards is that range's own surviving count. The
-    !> filter may hold no rules at all in this form, which installs the range by itself.
+    !> filter may hold no rules at all in this form, which installs the range by itself. The row
+    !> range must lie inside the rows its row groups span, or the call fails with error stop rather
+    !> than quietly handing back the intersection of the two -- which for a disjoint pair is empty,
+    !> and an empty result is indistinguishable from a filter that matched nothing.
     interface parquet_reader_set_filter
         module procedure parquet_reader_set_filter_base
         module procedure parquet_reader_set_filter_scoped_int32
@@ -2377,6 +2387,16 @@ module parquet_core
         !> A reader opened with sample_fraction= is fine: the filter combines
         !> with the sample draw, the same way passing both to
         !> parquet_open_reader does.
+        !>
+        !> **Whether the row-group arguments are PRESENT chooses the engine;
+        !> their value chooses the row groups.** This two-argument form (and an
+        !> open-time `filter=`) reads every filter column in one batched pass
+        !> and leaves it decoded, so reading that column afterwards is free --
+        !> the fast default, at one copy of each filter column in memory. Any
+        !> form that names row groups evaluates a row group at a time and keeps
+        !> only the mask, which is what makes a filtered read possible on a file
+        !> larger than memory; pass `row_group_lo = 0` for that engine over the
+        !> whole file, without having to call parquet_get_num_row_groups first.
         module subroutine parquet_reader_set_filter_base(reader, filter)
             type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
             type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
@@ -2385,14 +2405,16 @@ module parquet_core
         module subroutine parquet_reader_set_filter_scoped_int32(reader, filter, row_group_lo, row_group_hi)
             type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
             type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
-            integer(int32), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
+            integer(int32), intent(in) :: row_group_lo !! first row group to evaluate over (1-based), or 0
+            !! for all of them, in which case row_group_hi is ignored.
             integer(int32), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
         end subroutine parquet_reader_set_filter_scoped_int32
         !> Row-group-scoped form, int64 bounds -- see the generic interface above.
         module subroutine parquet_reader_set_filter_scoped_int64(reader, filter, row_group_lo, row_group_hi)
             type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
             type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
-            integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
+            integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over (1-based), or 0
+            !! for all of them, in which case row_group_hi is ignored.
             integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
         end subroutine parquet_reader_set_filter_scoped_int64
         !> Row-BOUNDED form, int32 bounds -- see the generic interface above. Narrows the
@@ -2404,7 +2426,8 @@ module parquet_core
             type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
             type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied;
             !! may hold no rules at all, in which case the row range alone decides which rows match.
-            integer(int32), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
+            integer(int32), intent(in) :: row_group_lo !! first row group to evaluate over (1-based), or 0
+            !! for all of them, in which case row_group_hi is ignored.
             integer(int32), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
             integer(int32), intent(in) :: row_lo !! first physical row that may match (1-based).
             integer(int32), intent(in) :: row_hi !! last physical row that may match (inclusive).
@@ -2415,7 +2438,8 @@ module parquet_core
             type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
             type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied;
             !! may hold no rules at all, in which case the row range alone decides which rows match.
-            integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over (1-based).
+            integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over (1-based), or 0
+            !! for all of them, in which case row_group_hi is ignored.
             integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over (inclusive).
             integer(int64), intent(in) :: row_lo !! first physical row that may match (1-based).
             integer(int64), intent(in) :: row_hi !! last physical row that may match (inclusive).
@@ -2707,30 +2731,68 @@ module parquet_core
         !> Returns .true. if column `name` (a top-level or dotted struct-leaf path, same
         !> convention as every other column-name argument) exists in `reader`'s schema,
         !> optionally restricted to a set of allowed data types via `types`. `types` is a
-        !> comma-separated list of tokens: any of valid_query_data_types's nine single types
-        !> ("int32"/"int64"/"float32"/"float64"/"string"/"boolean"/"date"/"time"/"timestamp"),
-        !> and/or the group aliases "int" (int32 or int64), "float" (float32 or float64), and
-        !> "temporal" (date, time, or timestamp) -- e.g. types="int, float" matches any of the
-        !> four numeric types. Comparison is case-insensitive. Omit `types` to check existence
-        !> regardless of type. error stops if `types` contains an unrecognized token (checked
-        !> before the existence check, so a malformed filter is reported even for a column that
-        !> doesn't exist). A column whose physical type isn't one of the nine recognized tokens
-        !> (e.g. a foreign decimal/uint32 column -- see parquet_get_column_type) never matches
-        !> a `types` filter, but is still found by a plain (no `types`) existence check.
+        !> optionally restricted to a set of allowed data types via `types`.
+        !>
+        !> **`types` asks "can I read this column as one of these?", not "is its physical type
+        !> literally one of these?"** Each token is compared against the column's target -- the
+        !> Fortran kind this library reads it into, which is the same narrowest-lossless mapping
+        !> parquet_get_column_type reports (see its doc-comment below for the full table). So
+        !> types="int32" matches an `int8` or `uint16` column, and types="int64" matches a `uint32`
+        !> one, because those are the kinds those columns are read into.
+        !>
+        !> `types` is a comma-separated list of tokens: any of valid_query_data_types's nine single
+        !> types ("int32"/"int64"/"float32"/"float64"/"string"/"boolean"/"date"/"time"/"timestamp"),
+        !> and/or the group aliases "int" (any integer column), "float" (any column readable into a
+        !> float -- which, since every numeric physical type converts to float64, means every
+        !> numeric column, integers and decimals included), and "temporal" (date, time, or
+        !> timestamp). Comparison is case-insensitive. Omit `types` to check existence regardless
+        !> of type. error stops if `types` contains an unrecognized token (checked before the
+        !> existence check, so a malformed filter is reported even for a column that doesn't
+        !> exist).
+        !>
+        !> **An alias is therefore NOT the union of its member tokens, and that is deliberate.**
+        !> types="float" matches an `int32` column (an integer is readable as a float) while
+        !> types="float64" does not (that column's target kind is int32). The two ask different
+        !> questions -- "can I read this as a float at all?" against "is float64 the right
+        !> declaration?" -- and both are useful.
+        !>
+        !> A column this library cannot read at all (a MAP, say) has the target "unknown" and
+        !> matches no token, but is still found by a plain (no `types`) existence check.
         module function parquet_column_exists(reader, name, types) result(exists)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! column name (dotted struct-leaf path allowed).
             character(len=*), intent(in), optional :: types !! comma-separated type tokens/group aliases.
             logical :: exists !! .true. if the column exists and (if types given) matches one of its tokens.
         end function parquet_column_exists
-        !> Returns existing column `name`'s canonical physical data type in `type_name`: one of
+        !> Returns the Fortran type existing column `name` is READ INTO, in `type_name`: one of
         !> valid_query_data_types's nine tokens ("int32"/"int64"/"float32"/"float64"/"string"/
-        !> "boolean"/"date"/"time"/"timestamp"). A vector (FIXED_SIZE_LIST) column reports its
-        !> element type, e.g. an int32 vector column reports "int32" (see parquet_get_col_size
-        !> for its element count). error stops if `name` doesn't exist, or if its physical type
-        !> falls outside those nine tokens (e.g. a foreign decimal/uint32 column written by a
-        !> different tool -- use parquet_column_exists with no `types` filter to check existence
-        !> without requiring a recognized type).
+        !> "boolean"/"date"/"time"/"timestamp"), or "unknown" for a column this library cannot
+        !> read at all. A vector (FIXED_SIZE_LIST) column reports its element type, e.g. an int32
+        !> vector column reports "int32" (see parquet_get_col_size for its element count).
+        !>
+        !> The question it answers is "what do I declare?", so the answer is the **narrowest
+        !> lossless** Fortran kind for the column's physical type, not the physical type's own
+        !> name -- all four numeric targets accept the same 15 physical types, so which one a read
+        !> actually uses is chosen by the caller's declaration rather than by the file:
+        !>
+        !>  - int8, int16, int32, uint8, uint16 -> "int32"
+        !>  - int64, uint32 -> "int64"
+        !>  - uint64 -> "int64", **lossy**: no Fortran kind covers its range, and a value above
+        !>    huge(int64) aborts on read
+        !>  - half_float, float -> "float32"; double -> "double" is "float64"
+        !>  - decimal32/64/128/256 -> "float64", **lossy**, mapped on the type ID alone: no
+        !>    precision/scale awareness, so decimal(9,0) answers "float64" like every other decimal
+        !>  - bool -> "boolean"; string/large_string -> "string"
+        !>  - date32/date64 -> "date"; time32/time64 -> "time"; timestamp -> "timestamp"
+        !>  - anything else -> "unknown"
+        !>
+        !> The two lossy rows return the conventional target rather than "unknown" on purpose: a
+        !> caller asking what to declare is better served by the kind the library will actually
+        !> use than by being told a readable column is unreadable.
+        !>
+        !> error stops only if `name` doesn't exist -- that is a caller mistake, and
+        !> parquet_column_exists is the query for it. An unreadable type is an answer ("unknown"),
+        !> not an error.
         module subroutine parquet_get_column_type(reader, name, type_name)
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).

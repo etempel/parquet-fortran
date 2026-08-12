@@ -38,6 +38,18 @@ submodule (parquet_core) parquet_read
     !> parquet_read_sort, so the parser and the packer cannot disagree about it.
     integer, parameter :: sort_key_name_len = 64
 
+    !> The `row_group_lo` value meaning "the caller named no row-group range at all", passed by
+    !> parquet_open_reader(..., filter=) and by the two-argument parquet_reader_set_filter.
+    !!
+    !! Part of the bind(C) contract: parquet_reader_set_filter in parquet_wrapper.cpp tests
+    !! `rg_lo != -1` to choose between the whole-file engine (filter columns decoded once, in one
+    !! batched pass, and left in the column cache) and the bounded-memory engine (row group at a
+    !! time, nothing cached). The distinction cannot be made from the VALUE of a row-group range,
+    !! because 0 is a legitimate one: it means "all row groups", the bounded-memory engine over the
+    !! whole file. Every caller that does supply a range goes through clamp_row_group_lo, so this
+    !! value can only ever originate here.
+    integer(int64), parameter :: no_row_group_scope = -1_int64
+
     ! ---- Sort key parsing (parquet_read_sort) ----
     interface
         !> Re-renders the whole parsed key list in canonical form ("ra asc, dec desc"), for
@@ -401,8 +413,8 @@ contains
         type(parquet_reader), intent(inout) :: reader !! open reader the filter is applied to.
         type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
         character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
-        integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over, or 0 for the whole file.
-        integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over, or 0 for the whole file.
+        integer(int64), intent(in) :: row_group_lo !! first row group, 0 for all of them, or no_row_group_scope.
+        integer(int64), intent(in) :: row_group_hi !! last row group; ignored when row_group_lo is 0.
         integer(int64), intent(in) :: row_lo !! first physical row that may match, or 0 for no row bound.
         integer(int64), intent(in) :: row_hi !! last physical row that may match, or 0 for no row bound.
         integer(int8), allocatable :: node_kind(:), leaf_is_string(:)
@@ -440,7 +452,9 @@ contains
         ! A rule-less filter still has something to install when a row-group scope or a physical
         ! row range was given: an all-true-within-range mask, which is how a slice-regime table
         ! carrying only sample_fraction= expresses its own bounds. With no rules AND no bounds
-        ! there is genuinely nothing to do.
+        ! there is genuinely nothing to do. `row_group_lo <= 0` covers both no_row_group_scope
+        ! (-1, no range named) and 0 (all row groups): with no clauses, "every row of every row
+        ! group" is what an absent filter already gives, whichever engine would have run.
         if (nleaves == 0 .and. row_group_lo <= 0 .and. row_group_hi <= 0 .and. &
                 row_lo <= 0 .and. row_hi <= 0) return
 
@@ -749,8 +763,12 @@ contains
         if (present(qc_soft)) qc_soft_value = qc_soft
         if (present(schema) .and. qc_effective) call parquet_apply_qc(reader, schema%maml, qc_soft_value)
 
+        ! no_row_group_scope, not 0: an open-time filter names no row-group range, so it takes the
+        ! whole-file engine and leaves its columns cached. A 0 here would ask for the
+        ! bounded-memory, nothing-cached engine over all row groups instead -- see
+        ! no_row_group_scope's own comment.
         if (filter_will_apply) call parquet_apply_filter(reader, filter, "parquet_open_reader", &
-            0_int64, 0_int64, 0_int64, 0_int64)
+            no_row_group_scope, no_row_group_scope, 0_int64, 0_int64)
 
         ! Strictly after the filter: the sort orders the SURVIVING rows, so every key column has
         ! to arrive already masked (see parquet_apply_sort). Before the prefetch below, so a
@@ -786,31 +804,51 @@ contains
     !> A reader opened with sample_fraction= is accepted: the sample mask is already installed, and
     !> these clauses AND onto it exactly as they would have at open time.
     module procedure parquet_reader_set_filter_base
-        call parquet_reader_set_filter_impl(reader, filter, 0_int64, 0_int64, 0_int64, 0_int64)
+        call parquet_reader_set_filter_impl(reader, filter, no_row_group_scope, no_row_group_scope, 0_int64, 0_int64)
     end procedure parquet_reader_set_filter_base
     module procedure parquet_reader_set_filter_scoped_int32
-        call parquet_reader_set_filter_impl(reader, filter, int(row_group_lo, int64), int(row_group_hi, int64), &
-            0_int64, 0_int64)
+        call parquet_reader_set_filter_impl(reader, filter, clamp_row_group_lo(int(row_group_lo, int64)), &
+            int(row_group_hi, int64), 0_int64, 0_int64)
     end procedure parquet_reader_set_filter_scoped_int32
     module procedure parquet_reader_set_filter_scoped_int64
-        call parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi, 0_int64, 0_int64)
+        call parquet_reader_set_filter_impl(reader, filter, clamp_row_group_lo(row_group_lo), row_group_hi, &
+            0_int64, 0_int64)
     end procedure parquet_reader_set_filter_scoped_int64
     module procedure parquet_reader_set_filter_rows_int32
-        call parquet_reader_set_filter_impl(reader, filter, int(row_group_lo, int64), int(row_group_hi, int64), &
-            int(row_lo, int64), int(row_hi, int64))
+        call parquet_reader_set_filter_impl(reader, filter, clamp_row_group_lo(int(row_group_lo, int64)), &
+            int(row_group_hi, int64), int(row_lo, int64), int(row_hi, int64))
     end procedure parquet_reader_set_filter_rows_int32
     module procedure parquet_reader_set_filter_rows_int64
-        call parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi, row_lo, row_hi)
+        call parquet_reader_set_filter_impl(reader, filter, clamp_row_group_lo(row_group_lo), row_group_hi, &
+            row_lo, row_hi)
     end procedure parquet_reader_set_filter_rows_int64
-    !> The one implementation behind every parquet_reader_set_filter form. row_group_lo/hi are 0
-    !> for the whole-file form and an inclusive 1-based range otherwise; row_lo/hi likewise bound
-    !> the PHYSICAL rows that may match, or are 0 for no row bound. Both ranges are validated
-    !> C++-side, against the file's own row-group and row counts.
+    !> Maps any non-positive row-group lower bound onto 0 ("all row groups"), keeping the
+    !> `no_row_group_scope` sentinel private to the forms that take no row-group arguments.
+    !!
+    !! This clamp is what makes the sentinel safe. Without it a caller passing -1 explicitly to the
+    !! four-argument form would land on the *unscoped* path -- the whole-file, column-caching engine
+    !! -- which is not what any negative bound means anywhere else in this library: every sibling
+    !! procedure that takes a row-group range (parquet_measure_list_width, parquet_column_has_nulls)
+    !! reads a non-positive lower bound as "all row groups". Here that answer is "all row groups,
+    !! bounded-memory engine", because the arguments were supplied.
+    pure function clamp_row_group_lo(row_group_lo) result(resolved)
+        integer(int64), intent(in) :: row_group_lo !! caller's lower bound, possibly non-positive.
+        integer(int64) :: resolved !! `row_group_lo`, or 0 when it was non-positive.
+
+        resolved = row_group_lo
+        if (resolved < 0_int64) resolved = 0_int64
+    end function clamp_row_group_lo
+    !> The one implementation behind every parquet_reader_set_filter form. row_group_lo/hi are
+    !> `no_row_group_scope` when the caller named no row-group range (the whole-file, caching
+    !> engine), 0 for "all row groups" on the bounded-memory engine, and an inclusive 1-based range
+    !> otherwise; row_lo/hi likewise bound the PHYSICAL rows that may match, or are 0 for no row
+    !> bound. Every range is validated C++-side against the file's own row-group and row counts,
+    !> including that a row range lies inside the rows its row groups span.
     subroutine parquet_reader_set_filter_impl(reader, filter, row_group_lo, row_group_hi, row_lo, row_hi)
         type(parquet_reader), intent(inout) :: reader !! open, unfiltered reader with no column decoded yet.
         type(parquet_filter), intent(in) :: filter !! filter whose rules are parsed, validated, and applied.
-        integer(int64), intent(in) :: row_group_lo !! first row group to evaluate over, or 0 for the whole file.
-        integer(int64), intent(in) :: row_group_hi !! last row group to evaluate over, or 0 for the whole file.
+        integer(int64), intent(in) :: row_group_lo !! first row group, 0 for all of them, or no_row_group_scope.
+        integer(int64), intent(in) :: row_group_hi !! last row group; ignored when row_group_lo is 0.
         integer(int64), intent(in) :: row_lo !! first physical row that may match, or 0 for no row bound.
         integer(int64), intent(in) :: row_hi !! last physical row that may match, or 0 for no row bound.
         character(len=:), allocatable :: name_suffix
@@ -1268,7 +1306,14 @@ contains
         case ("int")
             matches = trim(resolved_type) == "int32" .or. trim(resolved_type) == "int64"
         case ("float")
-            matches = trim(resolved_type) == "float32" .or. trim(resolved_type) == "float64"
+            ! Every numeric column, integers included -- an integer column IS readable into a
+            ! float array, which is the question this alias asks. That makes an alias deliberately
+            ! NOT the union of its member tokens: `float` matches an int32 column while `float64`
+            ! does not, because the two ask different things ("can I read this as a float at all?"
+            ! against "is float64 the right declaration?"). Both are useful; see this procedure's
+            ! own doc-comment in parquet_core.f90.
+            matches = trim(resolved_type) == "float32" .or. trim(resolved_type) == "float64" .or. &
+                trim(resolved_type) == "int32" .or. trim(resolved_type) == "int64"
         case ("temporal")
             matches = trim(resolved_type) == "date" .or. trim(resolved_type) == "time" .or. &
                 trim(resolved_type) == "timestamp"
@@ -1316,17 +1361,14 @@ contains
     end procedure parquet_column_exists
     module procedure parquet_get_column_type
         logical :: recognized
-        character(len=:), allocatable :: name_suffix
 
         call check_reader_open(reader, "parquet_get_column_type")
+        ! Still aborts on a name that does not exist -- that is a caller mistake, and
+        ! parquet_column_exists is the query for "is it there?". An unreadable TYPE is not a
+        ! mistake, though: answering "unknown" is the whole point of asking, so `recognized` is
+        ! deliberately unused beyond documenting that resolve_column_type already wrote the token.
         call check_column_exists(reader, name, "parquet_get_column_type")
         call resolve_column_type(reader, name, type_name, recognized)
-        if (.not. recognized) then
-            call reader_filename_suffix(reader, name_suffix)
-            error stop "parquet_get_column_type: column '" // trim(name) // "' has an unsupported data " // &
-                "type for this query (" // type_name // "); expected one of: int32, int64, float32, " // &
-                "float64, boolean, string, date, time, timestamp" // name_suffix
-        end if
     end procedure parquet_get_column_type
     module procedure parquet_get_column_names
         integer(c_int32_t) :: ncols, i

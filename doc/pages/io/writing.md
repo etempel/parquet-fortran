@@ -66,10 +66,10 @@ Notes:
 - Close the writer with `parquet_close_writer` to flush data and finalize the file.
 - By default, `parquet_open_writer` silently truncates an existing file at `filename` (Fortran's usual `OPEN`/replace behavior). Pass `overwrite=.false.` to instead fail immediately with `error stop`, naming the file, if it already exists — useful when accidentally clobbering a previous run's output would otherwise go unnoticed:
 
-  ```fortran
-  call parquet_open_writer(writer, "data.parquet", overwrite=.false.)
-  ! aborts if data.parquet already exists, instead of silently truncating it
-  ```
+```fortran
+call parquet_open_writer(writer, "data.parquet", overwrite=.false.)
+! aborts if data.parquet already exists, instead of silently truncating it
+```
 
 ## Writer options
 

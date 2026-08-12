@@ -561,6 +561,12 @@ contains
                 test_filter_scope_reversed_aborts), &
             new_unittest("filter: a row range past the last row aborts", &
                 test_filter_row_range_out_of_range_aborts), &
+            new_unittest("chunked read: a bool read of a non-bool column aborts", &
+                test_chunk_read_bool_type_mismatch_aborts), &
+            new_unittest("filter: a row range outside its own row groups aborts", &
+                test_filter_row_range_outside_row_groups_aborts), &
+            new_unittest("filter: row_group_lo=0 filters every row group without caching", &
+                test_filter_all_row_groups_bounded), &
             new_unittest("sample_fraction: negative value aborts", &
                 test_sample_negative_fraction_aborts), &
             new_unittest("sample_fraction: NaN value aborts", &
@@ -1291,9 +1297,7 @@ contains
             new_unittest("parquet_column_exists validates types= before checking the column exists", &
                 test_column_exists_bad_type_token_missing_column_aborts), &
             new_unittest("parquet_column_exists with a blank types= filter aborts", &
-                test_column_exists_empty_type_filter_aborts), &
-            new_unittest("parquet_get_column_type on a column outside the 9 canonical types aborts", &
-                test_get_column_type_unsupported_aborts) &
+                test_column_exists_empty_type_filter_aborts) &
             ]
     end subroutine collect_tests_parquet_errors
 
@@ -4912,6 +4916,45 @@ contains
             required_stderr="filter row range 1..999999 is out of range (file has 3 row(s))")
     end subroutine test_filter_row_range_out_of_range_aborts
 
+    !> The strict half of the chunked read path's type handling: numeric kinds convert freely
+    !! (asserted by test_read_column_chunk_numeric_conversion in test/test_reading.f90), but a
+    !! boolean read still requires a genuinely BOOL column. Without this the converting test would
+    !! pass just as happily against a chunk path with no type checking at all.
+    subroutine test_chunk_read_bool_type_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "chunk_read_bool_type_mismatch", &
+            expect_abort=.true., &
+            failure_message="chunk-reading an int32 column into a logical array was expected to abort", &
+            required_stderr="type mismatch for column: v (expected bool, got int32)")
+    end subroutine test_chunk_read_bool_type_mismatch_aborts
+
+    !> A physical row range that is individually valid but lies outside the rows its own row-group
+    !! range spans. The required text names both ranges and the span, because the two
+    !! individually-valid ranges are exactly what makes this mistake hard to see -- an error saying
+    !! only "out of range" would be indistinguishable from the two checks above it, both of which
+    !! this call passes. Asserting the span (3..6) also pins the fixture's row-group layout, which
+    !! is what makes the chosen numbers non-contained in the first place.
+    subroutine test_filter_row_range_outside_row_groups_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "filter_row_range_outside_row_groups", &
+            expect_abort=.true., &
+            failure_message="a filter row range outside its own row groups was expected to abort", &
+            required_stderr="filter row range 5..8 is not contained in row groups 2..3, which span rows 3..6")
+    end subroutine test_filter_row_range_outside_row_groups_aborts
+
+    !> parquet_reader_set_filter(reader, filt, 0, 0) -- "all row groups" on the memory-bounded
+    !! engine. The scenario asserts both that it agrees with the two-argument form's answer and
+    !! that it leaves nothing cached where that form caches the filter column, and error stops on
+    !! either, so it is expected to exit cleanly here.
+    subroutine test_filter_all_row_groups_bounded(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "filter_all_row_groups_bounded", expect_abort=.false., &
+            failure_message="row_group_lo=0 should filter every row group without caching the filter column")
+    end subroutine test_filter_all_row_groups_bounded
+
     !> parquet_open_reader's sample_fraction < 0.0 aborts immediately.
     subroutine test_sample_negative_fraction_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -6607,12 +6650,6 @@ contains
             required_stderr="parquet_column_exists: types= must not be empty")
     end subroutine test_column_exists_empty_type_filter_aborts
 
-    subroutine test_get_column_type_unsupported_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "get_column_type_unsupported", expect_abort=.true., &
-            failure_message="parquet_get_column_type on a column outside the 9 canonical types was expected to abort", &
-            required_stderr="parquet_get_column_type: column 'v_uint32' has an unsupported data type for this query")
-    end subroutine test_get_column_type_unsupported_aborts
 
     subroutine test_mask_row_mask_after_write_started_aborts(error)
         type(error_type), allocatable, intent(out) :: error

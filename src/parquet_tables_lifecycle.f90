@@ -439,6 +439,12 @@ contains
         ! deliberate rather than a missing branch: a rule-less filter carrying a row range installs
         ! an all-true-within-range mask, which is exactly what that case needs, and folds the
         ! already-installed sample draw into it.
+        ! rg_covering_range answers 0/0 when the slice covers no row group at all (every candidate
+        ! row group empty), and 0 means "all row groups" to parquet_reader_set_filter -- so that
+        ! degenerate case takes the memory-bounded engine over the whole file instead of the
+        ! caching one. Harmless: a slice covering no row group has no rows to read either way, and
+        ! the row range below still restricts the mask to exactly [slice_row_lo, slice_row_hi].
+        ! Every real slice yields rg_lo >= 1 and is unaffected.
         call rg_covering_range(cache%rg_bounds_physical, cache%slice_row_lo, &
             cache%slice_row_hi, rg_lo, rg_hi)
         block

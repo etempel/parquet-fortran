@@ -126,6 +126,8 @@ contains
                 test_parallel_private_slices), &
             new_unittest("a column this library cannot read does not stop the file opening", &
                 test_unsupported_column), &
+            new_unittest("a widened-type column (uint32, int8, half_float, decimal) is readable", &
+                test_widened_types_are_readable), &
             new_unittest("nested struct leaves become dotted columns", test_struct_leaves), &
             new_unittest("prefetch(struct) reads every leaf, evict_column gives them back", &
                 test_prefetch_prefix_and_evict), &
@@ -1960,45 +1962,93 @@ contains
         integer(int64), allocatable :: ids(:)
         integer :: i
         logical :: saw_uint32, ok
-        character(len=*), parameter :: f = "test/fixtures/extended_types.parquet"
+        character(len=*), parameter :: f = "test/fixtures/map_list_types.parquet"
         !
-        ! extended_types.parquet carries a uint32 column, whose physical type falls outside the
-        ! nine types this library reads. Opening the file must still work: the column gets a
-        ! slot, appears in the listing, and is simply marked unreadable.
+        ! map_list_types.parquet carries a MAP column, which this library cannot read at all.
+        ! Opening the file must still work: the column gets a slot, appears in the listing, and is
+        ! simply marked unreadable.
+        !
+        ! This test used extended_types.parquet's v_uint32 as its unreadable column until
+        ! parquet_get_column_type gained the narrowest-lossless mapping, which made every column in
+        ! that file readable -- see test_widened_types_are_readable below, which pins the other
+        ! side of the same change.
         call parquet_open_table(t, f)
         call check(error, t%nrows() > 0, "a file with a foreign column should still open")
         if (allocated(error)) return
         call t%column_names(names)
         saw_uint32 = .false.
         do i = 1, size(names)
-            if (trim(names(i)) == "v_uint32") saw_uint32 = .true.
+            if (trim(names(i)) == "map_col") saw_uint32 = .true.
         end do
         call check(error, saw_uint32, "an unsupported column should still be listed")
         if (allocated(error)) return
-        call check(error, .not. t%is_supported("v_uint32"), &
-            "a uint32 column should report as unsupported")
+        call check(error, .not. t%is_supported("map_col"), &
+            "a MAP column should report as unsupported")
         if (allocated(error)) return
-        call check(error, t%kind("v_uint32") == PK_NONE, &
+        call check(error, t%kind("map_col") == PK_NONE, &
             "an unsupported column should have no PK_* kind")
         if (allocated(error)) return
-        call check(error, t%residency("v_uint32") == RES_EMPTY, &
+        call check(error, t%residency("map_col") == RES_EMPTY, &
             "an unsupported column should hold no values")
         if (allocated(error)) return
         ! A supported column in the same file still works normally.
-        call check(error, t%is_supported("id"), &
+        call check(error, t%is_supported("list_col"), &
             "a supported column in the same file should still be readable")
         if (allocated(error)) return
-        call check(error, t%residency("id") == RES_EMPTY, &
+        call check(error, t%residency("list_col") == RES_EMPTY, &
             "a supported column starts empty like any other")
         if (allocated(error)) return
-        call t%get("id", ids)
-        call check(error, t%residency("id") == RES_FULL, &
+        call t%get("list_col", ids)
+        call check(error, t%residency("list_col") == RES_FULL, &
             "a supported column should still be readable despite an unsupported sibling")
         if (allocated(error)) return
         ! And a soft-failing read of the unsupported column reports rather than aborts.
-        call t%get("v_uint32", names, found=ok)
+        call t%get("map_col", names, found=ok)
         call check(error, .not. ok, "a soft-failing read of an unsupported column should report .false.")
     end subroutine test_unsupported_column
+    !
+    !> The table layer inherits parquet_get_column_type's narrowest-lossless mapping, so a column
+    !! whose physical type is not itself one of the nine tokens is now READ rather than skipped.
+    !!
+    !! table_classify probes each column with parquet_column_exists(types=...), so widening what
+    !! that answers widened what a table will open — an unsigned, narrow-integer, half-float or
+    !! decimal column used to be marked unsupported and is now materialized into the kind the
+    !! mapping names. Worth pinning explicitly: nothing else in the table suite would notice, and
+    !! the change reaches users who never call parquet_get_column_type at all.
+    !!
+    !! The uint64 rows are the deliberately lossy ones — a value above huge(int64) aborts on read,
+    !! which is why the fixture's plain v_uint64 (small values) is what is read here.
+    subroutine test_widened_types_are_readable(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        integer(int64), allocatable :: iv(:)
+        real(real64), allocatable :: dv(:)
+        character(len=*), parameter :: f = "test/fixtures/extended_types.parquet"
+        !
+        call parquet_open_table(t, f)
+        call check(error, t%is_supported("v_uint32") .and. t%kind("v_uint32") == PK_INT64, &
+            "a uint32 column should now be supported, as int64")
+        if (allocated(error)) return
+        call check(error, t%is_supported("v_int8") .and. t%kind("v_int8") == PK_INT32, &
+            "an int8 column should now be supported, as int32")
+        if (allocated(error)) return
+        call check(error, t%is_supported("v_half_float") .and. t%kind("v_half_float") == PK_FLOAT32, &
+            "a half_float column should now be supported, as float32")
+        if (allocated(error)) return
+        call check(error, t%is_supported("v_decimal128") .and. t%kind("v_decimal128") == PK_FLOAT64, &
+            "a decimal column should now be supported, as float64")
+        if (allocated(error)) return
+        call check(error, t%is_supported("v_uint64") .and. t%kind("v_uint64") == PK_INT64, &
+            "a uint64 column should now be supported, as int64 (lossy by design)")
+        if (allocated(error)) return
+        ! And the values really arrive, not just the classification.
+        call t%get("v_uint32", iv)
+        call check(error, size(iv) == t%nrows() .and. iv(1) == 1000_int64, &
+            "a uint32 column should read into int64 with its values intact")
+        if (allocated(error)) return
+        call t%get("v_decimal128", dv)
+        call check(error, size(dv) == t%nrows(), "a decimal column should read into float64")
+    end subroutine test_widened_types_are_readable
     !
     !> %prefetch("main") reads every leaf of a struct in one pass, and %evict_column gives a
     !! column's memory back without losing the column.

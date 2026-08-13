@@ -2,10 +2,11 @@
 title: Filtering, sorting and sampling rows
 ---
 
-A reader can be restricted to a subset of a file's rows — by value (`filter=`), in a chosen order
-(`sort_by=`), or by random draw (`sample_fraction=`) — and everything documented in [Reading
-parquet files](reading.html) then behaves as if the file only ever contained the surviving rows,
-in the requested order. This page is the reference for those three options and how they compose.
+A reader can be restricted to a subset of a file's rows — by value (`filter=`) or by random draw
+(`sample_fraction=`) — and can return them in a chosen order (`sort_by=`). Everything documented in
+[Reading parquet files](reading.html) then behaves as if the file only ever contained the surviving
+rows, in the requested order. This page is the reference for those three options and how they
+compose.
 
 ## Row filtering with `parquet_filter`
 

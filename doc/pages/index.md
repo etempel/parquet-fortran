@@ -29,7 +29,7 @@ ceremony, skip straight to [Whole tables in memory](tables/index.html) — it is
 point in the library.
 
 - [Reading and writing files](io/index.html) — read columns into arrays, write arrays out, and
-  restrict a read by filter, sort order or random sample.
+  choose which rows a read returns and in what order (filter, sort, random sample).
 - [Data types](types/index.html) — what a column can hold: the supported types, date/time/
   timestamp elements, and compact string columns.
 - [Schemas, metadata and quality control](schema/index.html) — declare a file's contents in MAML

@@ -10,8 +10,8 @@ when each one is read.
 
 If what you actually want is *the whole file* — every column available by name, read only when you
 touch it — start at [Whole tables in memory](../tables/index.html) instead: one
-`parquet_open_table` call replaces most of this page. Restricting a read to a subset of the *rows*
-is [Filtering, sorting and sampling rows](filter-sort-sample.html).
+`parquet_open_table` call replaces most of this page. Choosing which *rows* a read returns, and in
+what order, is [Filtering, sorting and sampling rows](filter-sort-sample.html).
 
 To use this library in another Fortran project, add it as an FPM dependency — see
 [Minimal setup to depend on this library](../../index.html#minimal-setup-to-depend-on-this-library)
@@ -510,10 +510,11 @@ projects automatically, so no action is normally needed.
 ## Filtering, sorting and sampling rows
 
 A reader can also be restricted to a subset of the file's rows — matching a
-[`parquet_filter`](filter-sort-sample.html#row-filtering-with-parquet_filter), in
-[sorted order](filter-sort-sample.html#reading-rows-in-sorted-order-with-parquet_sortkey), or
-[randomly downsampled](filter-sort-sample.html#random-downsampling-with-sample_fraction) — and
-everything on this page then behaves as if the file only ever contained the surviving rows. See
+[`parquet_filter`](filter-sort-sample.html#row-filtering-with-parquet_filter), or
+[randomly downsampled](filter-sort-sample.html#random-downsampling-with-sample_fraction) — and can
+return them in
+[sorted order](filter-sort-sample.html#reading-rows-in-sorted-order-with-parquet_sortkey).
+Everything on this page then behaves as if the file only ever contained the surviving rows. See
 [Filtering, sorting and sampling rows](filter-sort-sample.html) for the full reference.
 
 ## Quality control

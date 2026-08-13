@@ -403,7 +403,12 @@ extern "C"
 		bool has_max = false;
 		std::string max_op;
 		std::string max_raw;
-		bool null_values_allowed = false; // true only if the maml's qc: miss: was Null/NA (case-insensitive)
+		// Whether Nulls are expected for this field: true for a qc: miss: Null/NA AND for a field
+		// declaring no qc: miss: at all (an undeclared miss: says nothing about Nulls), false only
+		// for an explicit, EMPTY qc: miss:, which is how a maml asks for Null validation. Fortran
+		// resolves this and pushes it per rule (parquet_reader_set_qc), so the initializer below is
+		// documentation rather than policy -- but keep it matching parquet_qc_rule's own default.
+		bool null_values_allowed = true;
 	};
 
 	// Deliberately does NOT hold a materialized arrow::Table: opening a file
@@ -2385,8 +2390,11 @@ extern "C"
 	// Read-time QC (see the QcRule struct and parquet_reader_set_qc further
 	// below): checks `array` (already the filtered version, if a filter is
 	// set -- see apply_row_transform) against `rule`'s declared Null policy.
-	// Fires (returns true, filling `out_message`) only if Nulls are found
-	// and the maml's qc: miss: did NOT declare Null/NA for this field --
+	// Fires (returns true, filling `out_message`) only if Nulls are found AND
+	// the maml declares an explicit, EMPTY qc: miss: for this field -- the one
+	// form that asks for Null validation. A field declaring qc: miss: Null/NA,
+	// and a field declaring no qc: miss: at all, both allow Nulls and are never
+	// reported here (see QcRule::null_values_allowed) --
 	// independent of whether the caller passed null_value=/is_valid=, and
 	// regardless of whether reading would go on to abort for that same
 	// reason (see check_or_report_nulls/report_nulls_list_*): this is a
@@ -2402,7 +2410,7 @@ extern "C"
 		// prefix) -- run_qc_checks adds whichever is appropriate for the
 		// soft (WARNING to stdout) vs hard (report_fatal_error) mode.
 		out_message = "qc violation for column '" + colname + "' (based on incomplete column information): " +
-			std::to_string(nulls) + " unexpected Null value(s) found (qc: miss: does not declare Null/NA for this field)";
+			std::to_string(nulls) + " unexpected Null value(s) found (qc: miss: is declared empty, so Nulls are not expected here)";
 		return true;
 	}
 

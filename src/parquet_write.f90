@@ -1029,12 +1029,13 @@ contains
                 "' is protected (extra: protected_cols:) and cannot contain Null values"
         end if
     end subroutine parquet_check_protected
-    !> If writer%qc is set and the column's declared qc: miss: does NOT allow Null (the default,
-    !! including when no qc: block at all was declared -- see parquet_column_type%qc_allow_null),
-    !! prints a WARNING naming the column and how many of its elements are Null in this write
-    !! call. Never errors -- writing proceeds regardless, and qc_min/qc_max are unaffected (they
-    !! already only ever look at valid elements). No-op for a schema-less writer, an undeclared
-    !! column, or a column whose qc: miss: allows Null.
+    !> If writer%qc is set and the column declares an EXPLICIT, EMPTY qc: miss: -- the one form that
+    !! asks for Null validation, see parquet_column_type%qc_allow_null -- prints a WARNING naming the
+    !! column and how many of its elements are Null in this write call. Never errors: writing proceeds
+    !! regardless, which is a deliberate write-side design choice (the read side escalates per
+    !! qc_soft), and qc_min/qc_max are unaffected (they already only ever look at valid elements).
+    !! No-op for a schema-less writer, an undeclared column, a column whose qc: miss: says Null/NA, and
+    !! -- the common case -- a column declaring no qc: miss: at all.
     subroutine parquet_check_qc_miss(writer, name, is_valid_flat)
         type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
         character(len=*), intent(in) :: name !! column name.
@@ -1056,7 +1057,7 @@ contains
         call parquet_qc_format_int(n_null, fmt_int)
         call parquet_qc_format_int(n_total, fmt_int2)
         call parquet_emit_warning("qc violation for column '" // trim(name) // "': " // fmt_int // " of " // &
-            fmt_int2 // " element(s) are Null (qc: miss: not declared)")
+            fmt_int2 // " element(s) are Null (qc: miss: is declared empty, so Nulls are not expected here)")
     end subroutine parquet_check_qc_miss
     !> Builds the int8 validity buffer and c_ptr passed down to the C++
     !> append_* functions from a caller's flattened `is_valid` mask (1 =

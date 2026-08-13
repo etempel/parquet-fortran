@@ -448,13 +448,20 @@ contains
         if (present(protected)) want = protected
 
         idx = this%get_column_index(name)
-        ! Relaxing a protection the MAML declared is permitted but never silent: someone wrote
-        ! protected_cols: on purpose, and a program overriding that should say so in its own
-        ! output. A warning, not an abort -- see the interface's doc-comment in parquet_core.f90.
+        ! Relaxing an existing protection is permitted but never silent: something declared this
+        ! column Null-free on purpose, and a program overriding that should say so in its own output.
+        ! A warning, not an abort -- see the interface's doc-comment in parquet_core.f90.
+        !
+        ! The message deliberately does NOT name a MAML: the ORIGIN of the protection is not
+        ! recorded, so it may equally have come from an earlier set_protected call in code, on a
+        ! schema that has no .maml file anywhere. An earlier version of this message asserted
+        ! "declared protected by its MAML (extra: protected_cols:)" unconditionally, which sent a
+        ! reader looking for a section that need not exist. Keep the wording to what the condition
+        ! below actually tests.
         if (this%col(idx)%is_protected .and. .not. want) then
             call parquet_emit_warning("set_protected: column '" // trim(name) // &
-                "' was declared protected by its MAML (extra: protected_cols:) and is being " // &
-                "unprotected in code; it may now be written with Null values")
+                "' is currently protected and is being unprotected in code; it may now be " // &
+                "written with Null values")
         end if
         this%col(idx)%is_protected = want
     end procedure set_protected

@@ -459,6 +459,20 @@ Working rules:
   any signature you write or edit, and retrofit a whole page the next time that page is touched
   for another reason (`doc/pages/tables/table.md` is retrofitted; the others are not yet). The first
   bracketed signature on a page should carry a one-line note saying what the brackets mean.
+- **A reference bullet carrying more than about three distinct claims becomes its own `###`
+  subsection.** Most `doc/pages/` reference pages are shaped as a bullet list with one bullet per
+  procedure, and a bullet in that shape grows without anything pushing back: `schema/building-schema-in-code.md`'s
+  `%add_field` bullet reached **1779 characters carrying nine claims** before anyone noticed, with
+  `%init` at 1349 and `%get_field` at 1334 beside it. Wrapping such a bullet at the page's margin
+  makes it *diffable* and leaves it just as unreadable; splitting it is the actual fix. Keep the
+  procedure's call form as the subsection's opening line, in the same bold-and-brackets style the
+  bullet used, then one paragraph per claim. Two mechanics decide whether it renders: a bullet's
+  continuation *paragraph* needs **4-space** indentation (2 spaces silently ends the list — see
+  below), which is exactly why promoting to a heading usually beats indenting; and the promotion
+  changes the page's heading set, so re-run `tools/check_doc_anchors.py` afterwards, which resolves
+  inbound `#anchor` links from README.md, CONTRIBUTING.md, CHANGELOG.md, this file and every
+  root-level `*.md` as well as from `doc/pages/`. Leave the short bullets alone — this is a rule
+  about essays that have grown inside a list, not a ban on lists.
 - **A fenced code block is NEVER indented, not even to sit under the bullet it belongs to.**
   python-markdown — the engine FORD drives — does not recognise a ``` fence carrying any leading
   whitespace: the fence is emitted literally inside a `<p>`, the enclosing list is closed before it,

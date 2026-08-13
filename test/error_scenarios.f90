@@ -718,6 +718,8 @@ program error_scenarios
         call scenario_chunk_mask_added_after_first_row_group()
     case ("set_protected_unknown_column")
         call scenario_set_protected_unknown_column()
+    case ("set_protected_unprotect_warns")
+        call scenario_set_protected_unprotect_warns()
     case ("validate_qc_min_not_numeric")
         call scenario_validate_qc_min_not_numeric()
     case ("validate_qc_max_not_numeric")
@@ -774,6 +776,8 @@ program error_scenarios
         call scenario_qc_silently_ignored_for_boolean()
     case ("qc_miss_default_active_numeric_warns")
         call scenario_qc_miss_default_active_numeric_warns()
+    case ("qc_miss_absent_no_warning")
+        call scenario_qc_miss_absent_no_warning()
     case ("qc_miss_declared_null_no_warning")
         call scenario_qc_miss_declared_null_no_warning()
     case ("qc_miss_string_warns")
@@ -6987,15 +6991,15 @@ contains
         call parquet_close_reader(reader)
     end subroutine scenario_qc_maml_stray_no_colon_line
 
-    !> A column with a genuine Parquet Null, read with is_valid= (so the
-    !> read itself doesn't abort), against a qc-maml field with a bare
-    !> "miss:" key (present but no value after the colon) must behave
-    !> exactly like omitting miss: entirely -- Nulls still unexpected by
-    !> default -- and print exactly one aggregate Null-presence WARNING with
-    !> qc_soft=.true. (The default, qc_soft=.false., aborts instead -- see
-    !> scenario_qc_null_violation_hard_aborts.) The bare "miss:" line
-    !> exercises parquet_parse_qc_maml's empty-value branch specifically
-    !> (src/parquet_metadata.f90), distinct from miss: being absent.
+    !> A column with a genuine Parquet Null, read with is_valid= (so the read itself doesn't
+    !> abort), against a qc-maml field with a bare "miss:" key (present but no value after the
+    !> colon) must print exactly one aggregate Null-presence WARNING with qc_soft=.true. (The
+    !> default, qc_soft=.false., aborts instead -- see scenario_qc_null_violation_hard_aborts.)
+    !>
+    !> The bare "miss:" line is what asks for the check: it exercises parquet_parse_qc_maml's
+    !> empty-value branch, which is the ONLY branch that sets null_values_allowed = .false.
+    !> Omitting miss: entirely is a different case with the opposite outcome -- nothing is checked
+    !> -- so the two must not be conflated here.
     subroutine scenario_qc_null_violation_warns()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -7131,9 +7135,13 @@ contains
         print '(a)', "unexpectedly read an out-of-range float value without aborting in hard qc mode"
     end subroutine scenario_qc_range_violation_float_hard_aborts
 
-    !> Default (qc_soft=.false., hard): an unexpected Null (miss: not
-    !> Null/NA) with qc active aborts the process, even when is_valid= was
-    !> passed so the read itself would otherwise succeed.
+    !> Default (qc_soft=.false., hard): an unexpected Null with qc active aborts the process, even
+    !> when is_valid= was passed so the read itself would otherwise succeed. "Unexpected" means the
+    !> field declares an explicit, EMPTY qc: miss: -- the bare "miss:" line in the maml below is
+    !> load-bearing, not decoration. Drop it and this scenario stops aborting, because a field with
+    !> no miss: at all says nothing about Nulls and none are checked (see
+    !> parquet_column_type%qc_allow_null); scenario_qc_miss_absent_no_warning is that case, and is
+    !> this scenario's negative control on the read side.
     subroutine scenario_qc_null_violation_hard_aborts()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -7148,7 +7156,7 @@ contains
         call parquet_close_writer(writer)
 
         call write_text_file("test_run/qc_null_hard.maml", [character(len=32) :: &
-            "fields:", "- name: id", "  qc:", "    min: 0"])
+            "fields:", "- name: id", "  qc:", "    min: 0", "    miss:"])
 
         call parquet_open_reader(reader, "test_run/qc_null_hard.parquet", &
             schema=parquet_load_qc_maml_file("test_run/qc_null_hard.maml"))
@@ -8209,10 +8217,15 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_qc_silently_ignored_for_boolean
 
-    !> qc: miss: not declared (the default) means Nulls are NOT expected: writing a Null through
-    !! an is_valid= mask must print a WARNING naming the column -- checked here with NO explicit
-    !! qc= passed to parquet_open_writer at all, to prove qc now defaults to present(schema)
+    !> An EXPLICIT, EMPTY qc: miss: declares that Nulls are NOT expected: writing a Null through
+    !! an is_valid= mask must then print a WARNING naming the column -- checked here with NO
+    !! explicit qc= passed to parquet_open_writer at all, to prove qc defaults to present(schema)
     !! rather than needing an explicit qc=.true. (see parquet_open_writer's qc doc comment).
+    !!
+    !! qc_miss="" is what declares that, and the emptiness is the point: %add_field tests
+    !! present(qc_miss), not its length, precisely so this call is distinguishable from omitting
+    !! the argument. Omitting it means the schema says nothing about Nulls and NONE are checked --
+    !! that is scenario_qc_miss_absent_no_warning, this scenario's negative control.
     subroutine scenario_qc_miss_default_active_numeric_warns()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer
@@ -8220,13 +8233,68 @@ contains
         logical :: is_valid(3) = [.true., .false., .true.]
 
         call schema%init(table="qc_miss_table")
-        call schema%add_field("id", "int32")
+        call schema%add_field("id", "int32", qc_miss="")
         call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_default.parquet", schema)
         call parquet_write_column(writer, "id", values, is_valid=is_valid)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_miss_default_active_numeric_warns
+
+    !> Unprotecting a currently-protected column prints a WARNING and does NOT abort, whatever the
+    !! protection's origin -- the origin is not recorded, so the message must not claim one. Both
+    !! halves are exercised here on a schema with no .maml file anywhere: "p" is protected in code
+    !! and then unprotected (must warn), while "q" is never protected and is set protected=.false.
+    !! anyway (must stay silent).
+    !!
+    !! **"q" is the negative control and is what gives the scenario its teeth**: a guard that warned
+    !! on every set_protected(..., .false.) call, rather than only on a real relaxation, would pass a
+    !! test that only ever looked at "p". The wrapper asserts a clean exit plus the warning text, and
+    !! the absence of any second WARNING line is what "q" contributes.
+    subroutine scenario_set_protected_unprotect_warns()
+        type(parquet_schema) :: schema
+
+        call schema%init(table="protect_table")
+        call schema%add_field("p", "int32")
+        call schema%add_field("q", "int32")
+        call parquet_parse_maml(schema)
+
+        call schema%set_protected("q", .false.)  ! control: never protected -> silent
+        call schema%set_protected("p")           ! protect in code (no MAML involved at all)
+        call schema%set_protected("p", .false.)  ! -> the one WARNING this scenario expects
+    end subroutine scenario_set_protected_unprotect_warns
+
+    !> **The negative control for scenario_qc_miss_default_active_numeric_warns, and the test that
+    !! pins the rule rather than one side of it.** Identical in every respect except that qc_miss is
+    !! not passed at all: a field declaring no qc: miss: says nothing about Nulls, so writing one
+    !! must print NOTHING -- on either side. Without this, the whole "absent means allowed" rule is
+    !! asserted by no test, and a guard that warned unconditionally would still pass its sibling.
+    !!
+    !! Checked as an ABSENCE (required_stderr is not given; the wrapper asserts the WARNING does not
+    !! appear), which is why the write happens twice here: once with a Null through is_valid=, and
+    !! once through a parquet_string_column's own %append_null, so the two distinct paths into
+    !! parquet_check_qc_miss are both covered by the absence.
+    subroutine scenario_qc_miss_absent_no_warning()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        logical :: is_valid(3) = [.true., .false., .true.]
+        type(parquet_string_column) :: svalues
+
+        call schema%init(table="qc_miss_table")
+        call schema%add_field("id", "int32")     ! no qc_miss= -- the whole point
+        call schema%add_field("s", "string")     ! ditto
+        call parquet_parse_maml(schema)
+
+        call svalues%append_string("apple")
+        call svalues%append_null()
+        call svalues%append_string("cherry")
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_absent.parquet", schema)
+        call parquet_write_column(writer, "id", values, is_valid=is_valid)
+        call parquet_write_column(writer, "s", svalues)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_miss_absent_no_warning
 
     !> Same as scenario_qc_miss_default_active_numeric_warns, but the field declares
     !! qc: miss: Null -- Nulls are expected here, so no WARNING should print.
@@ -8245,7 +8313,7 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_qc_miss_declared_null_no_warning
 
-    !> Same miss-not-declared-warns shape as scenario_qc_miss_default_active_numeric_warns, but
+    !> Same empty-qc_miss-warns shape as scenario_qc_miss_default_active_numeric_warns, but
     !! for a compact (parquet_string_column) string write -- the write path that reaches
     !! parquet_check_qc_miss via parquet_write_string.f90's is_null()-derived is_valid_flat rather
     !! than a caller-supplied is_valid= mask.
@@ -8255,7 +8323,7 @@ contains
         type(parquet_string_column) :: values
 
         call schema%init(table="qc_miss_table")
-        call schema%add_field("s", "string")
+        call schema%add_field("s", "string", qc_miss="")
         call parquet_parse_maml(schema)
 
         call values%append_string("apple")
@@ -8267,7 +8335,7 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_qc_miss_string_warns
 
-    !> Same miss-not-declared-warns shape, for a parquet_date column -- the write path that
+    !> Same empty-qc_miss-warns shape, for a parquet_date column -- the write path that
     !! reaches parquet_check_qc_miss via parquet_write_temporal.f90's temporal_valid_ptr.
     subroutine scenario_qc_miss_temporal_warns()
         type(parquet_schema) :: schema
@@ -8279,7 +8347,7 @@ contains
         call values(3)%set(2024, 1, 3)
 
         call schema%init(table="qc_miss_table")
-        call schema%add_field("d", "date")
+        call schema%add_field("d", "date", qc_miss="")
         call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_temporal.parquet", schema)

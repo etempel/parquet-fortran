@@ -98,12 +98,15 @@ module parquet_core
         character(len=:), allocatable :: qc_min_raw !! The qc: min: bound text, operator prefix already stripped/
         !! trimmed; numeric for int32/int64/float32/float64, literal for string.
         character(len=:), allocatable :: qc_max_raw !! qc: max: bound text, same convention as qc_min_raw.
-        logical :: qc_allow_null = .false. !! true if qc: miss: Null/NA was declared for this field (Nulls are
-        !! an expected part of the output, so parquet_write_column/parquet_open_reader's qc: enforcement never
-        !! warns/errors about them); .false. (the default, including when no qc: block was declared at all)
-        !! means Nulls are NOT expected -- finding any at write or read time triggers a qc: violation. May be
-        !! set on any data_type, including one that cannot itself carry a Null today (e.g. int32/float64) --
-        !! harmless now, kept for forward compatibility with a future null-aware column type.
+        logical :: qc_allow_null = .true. !! Whether Nulls are an expected part of this field's output, in which
+        !! case parquet_write_column/parquet_open_reader's qc: enforcement never warns/errors about them.
+        !! .true. for a declared qc: miss: Null/NA AND -- this is what the default carries -- for a field that
+        !! declares no qc: miss: at all, since an undeclared miss: means the author said nothing about Nulls
+        !! and the library does not invent a restriction. Only an EXPLICIT, EMPTY qc: miss: sets this .false.,
+        !! which is how a schema asks for Null validation; finding a Null then triggers a qc: violation.
+        !! **The .true. default is load-bearing and is the only inverted default in this type**: the "no miss:
+        !! declared" case works by nothing ever assigning this, so flipping it back to .false. would silently
+        !! turn Null validation on for every column of every schema. May be set on any data_type.
         character(len=:), allocatable :: name      !! The name of the field [required]; always the internal/
         !! canonical name, i.e. what parquet_write_column/set_column_available/etc. use -- never affected by a
         !! col_map: rename (see output_name).
@@ -352,8 +355,8 @@ module parquet_core
         logical :: is_schema_enforced = .false. !! true when opened with a schema (vs. a schema-less writer).
         logical :: qc = .false. !! defaults to present(schema) (i.e. on whenever a schema is given), overridable
         !! via parquet_open_writer(..., qc=); when true, parquet_write_column checks each column's qc: min/max
-        !! (if declared) against its valid (is_valid) elements, and its qc: miss: (Null expectation, default
-        !! "not expected") against any Null elements, printing a WARNING (never an error) on violation.
+        !! (if declared) against its valid (is_valid) elements, and -- only for a column declaring an explicit,
+        !! empty qc: miss: -- its Null elements, printing a WARNING (never an error) on violation.
         !! No-op without a schema.
         integer(c_long_long) :: expected_nrows = -1 !! set by the first parquet_write_column call; every later
         !! call must supply this same row count (see parquet_check_row_count), since
@@ -631,7 +634,11 @@ module parquet_core
         logical :: has_max = .false. !! true if a qc: max: bound was declared.
         character(len=2) :: max_op = "<=" !! one of "<", "<=".
         character(len=256) :: max_text = "" !! qc: max: value, verbatim, operator prefix stripped.
-        logical :: null_values_allowed = .false. !! true only if this field's qc: miss: was Null/NA (case-insensitive).
+        logical :: null_values_allowed = .true. !! Whether Nulls are expected for this field, mirroring
+        !! parquet_column_type%qc_allow_null: .true. for a qc: miss: Null/NA and for a field declaring no
+        !! qc: miss: at all (the default -- an undeclared miss: says nothing about Nulls), .false. only for an
+        !! explicit, empty qc: miss:, which is how a qc-maml asks for Null validation. The .true. default is
+        !! load-bearing for the same reason it is on qc_allow_null; do not "normalize" it to .false.
     end type parquet_qc_rule
 
     !> Writes one column's values to an open parquet_writer (writer), under
@@ -1459,8 +1466,10 @@ module parquet_core
             integer, intent(in), optional :: col_size !! vector-column element count.
             character(len=*), intent(in), optional :: qc_min !! qc: min: bound (operator prefix allowed).
             character(len=*), intent(in), optional :: qc_max !! qc: max: bound (operator prefix allowed).
-            character(len=*), intent(in), optional :: qc_miss !! Sets qc: miss: (Null/NA, case-insensitive; absent or
-            !! empty means Nulls are NOT expected in this field's output -- see parquet_column_type%qc_allow_null).
+            character(len=*), intent(in), optional :: qc_miss !! Sets qc: miss:. Absent means no miss: is declared,
+            !! i.e. nothing is said about Nulls and none are checked. An explicit EMPTY string declares that
+            !! Nulls are NOT expected and turns Null validation on. "Null"/"NA" (case-insensitive) declares that
+            !! they are expected. Presence, not content, is what is tested -- see parquet_column_type%qc_allow_null.
         end subroutine schema_add_field
         !> Parses a (already lowercased) MAML data_type `token` into its temporal base type and
         !> unit/utc: recognizes `date`, `time[unit]`, `timestamp[unit(,utc)]` where unit is one
@@ -1496,13 +1505,13 @@ module parquet_core
             class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
             character(len=*), intent(in), optional :: name !! column to disable; every column if absent.
         end subroutine set_column_unavailable
-        !> Forwards to %cinfo%set_col_size.
         !> Forwards to %cinfo%set_protected.
         module subroutine schema_set_protected(this, name, protected)
             class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
             character(len=*), intent(in) :: name !! column to mark (internal name, as declared).
             logical, intent(in), optional :: protected !! .false. to unprotect; default .true.
         end subroutine schema_set_protected
+        !> Forwards to %cinfo%set_col_size.
         module subroutine schema_set_col_size(this, name, col_size, force)
             class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
             character(len=*), intent(in) :: name !! column to resolve.
@@ -1555,8 +1564,9 @@ module parquet_core
             !! empty if none was declared.
             character(len=:), allocatable, intent(out), optional :: qc_max !! Reconstructed qc: max: bound, operator-prefixed;
             !! empty if none was declared.
-            character(len=:), allocatable, intent(out), optional :: qc_miss !! Reconstructed as "Null" if qc: miss: allows Null,
-            !! else "".
+            character(len=:), allocatable, intent(out), optional :: qc_miss !! "Null" if this field allows Nulls
+            !! (declared miss: Null/NA, or no miss: at all), else "" for the explicit empty miss: that asks
+            !! for Null validation.
         end subroutine schema_get_field_by_name
         !> Forwards to %cinfo%get_field_by_index -- see get_field_by_name above for the full
         !> per-argument contract; the only difference is the lookup key (1-based MAML source
@@ -1577,8 +1587,9 @@ module parquet_core
             !! empty if none was declared.
             character(len=:), allocatable, intent(out), optional :: qc_max !! Reconstructed qc: max: bound, operator-prefixed;
             !! empty if none was declared.
-            character(len=:), allocatable, intent(out), optional :: qc_miss !! Reconstructed as "Null" if qc: miss: allows Null,
-            !! else "".
+            character(len=:), allocatable, intent(out), optional :: qc_miss !! "Null" if this field allows Nulls
+            !! (declared miss: Null/NA, or no miss: at all), else "" for the explicit empty miss: that asks
+            !! for Null validation.
         end subroutine schema_get_field_by_index
         !> Copies `name`'s full field definition from `source_schema` (via %get_field) and
         !> appends an equivalent field here via %add_field -- so two schemas can share a column
@@ -1821,8 +1832,9 @@ module parquet_core
             !! empty if none was declared.
             character(len=:), allocatable, intent(out), optional :: qc_max !! Reconstructed qc: max: bound, operator-prefixed;
             !! empty if none was declared.
-            character(len=:), allocatable, intent(out), optional :: qc_miss !! Reconstructed as "Null" if qc: miss: allows Null,
-            !! else "" (Nulls not expected -- see parquet_column_type%qc_allow_null).
+            character(len=:), allocatable, intent(out), optional :: qc_miss !! "Null" when this field allows Nulls
+            !! (a declared qc: miss: Null/NA, or no miss: declared at all -- both mean the same thing), else ""
+            !! for an explicit empty qc: miss:, which is the one form that asks for Null validation.
         end subroutine get_field_by_name
         !> Same as get_field_by_name, but looks the field up by its 1-based MAML source position
         !> (same order get_num_fields counts) instead of by name, additionally returning that
@@ -1844,8 +1856,9 @@ module parquet_core
             !! empty if none was declared.
             character(len=:), allocatable, intent(out), optional :: qc_max !! Reconstructed qc: max: bound, operator-prefixed;
             !! empty if none was declared.
-            character(len=:), allocatable, intent(out), optional :: qc_miss !! Reconstructed as "Null" if qc: miss: allows Null,
-            !! else "" (Nulls not expected -- see parquet_column_type%qc_allow_null).
+            character(len=:), allocatable, intent(out), optional :: qc_miss !! "Null" when this field allows Nulls
+            !! (a declared qc: miss: Null/NA, or no miss: declared at all -- both mean the same thing), else ""
+            !! for an explicit empty qc: miss:, which is the one form that asks for Null validation.
         end subroutine get_field_by_index
         !> Backs parquet_schema%set_column_unavailable (see set_column_unavailable
         !> in the parquet_schema block above); disables `name`, or every
@@ -1877,9 +1890,11 @@ module parquet_core
         !> .false. entry, on a null date/time/timestamp element, and on an %append_null() in a
         !> parquet_string_column, and the column's Arrow field is written non-nullable.
         !>
-        !> Unprotecting a column the MAML itself protected is allowed -- a program may have a good
+        !> Unprotecting a column that is currently protected is allowed -- a program may have a good
         !> reason to relax its own schema -- but emits a WARNING naming the column, since it
-        !> overrides a declaration someone wrote down deliberately. Never an abort.
+        !> overrides a declaration someone made deliberately. Never an abort. The warning does not
+        !> depend on where the protection came from: a MAML's extra: protected_cols: and an earlier
+        !> set_protected call in code are indistinguishable here, and both warn.
         !>
         !> Error stops if `name` is not found. Call it before parquet_open_writer: the writer
         !> takes its copy of the schema at open time, so a later change has no effect on a writer

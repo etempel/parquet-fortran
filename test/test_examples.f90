@@ -30,6 +30,8 @@ contains
             new_unittest("README minimal writer/reader example", test_readme_minimal_example), &
             new_unittest("README MAML-schema writer example", test_readme_maml_schema_writer_example), &
             new_unittest("doc/pages/schema/combined-example.md example", test_readme_combined_example), &
+            new_unittest("doc/pages/schema/building-schema-in-code.md build_schema example", &
+                test_build_schema_example), &
             new_unittest("maml_example2 writer produces a matching sidecar .maml", &
                 test_maml_example2_sidecar_keyarray), &
             new_unittest("doc/pages/types/date-time.md datetime_quickstart example", test_datetime_quickstart_example), &
@@ -298,6 +300,50 @@ contains
         call check(error, nrows == 3_int64 .and. all(id0_read == id0) .and. all(idarr_read == idarr), &
             "README combined example did not round-trip the 'id0'/'idarr' columns correctly")
     end subroutine test_readme_combined_example
+
+    !> Mirrors doc/pages/schema/building-schema-in-code.md's `build_schema` program: a schema built
+    !! entirely in code, in the call order that page presents as the thing to memorise. Asserts the
+    !! round trip AND the order itself -- %add_metadata's entry surviving to the file is what proves
+    !! it was added after parquet_parse_maml rather than before, which is the ordering mistake the
+    !! example exists to prevent.
+    subroutine test_build_schema_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(3) = [1_int32, 2_int32, 3_int32]
+        real(real64)   :: ra(3) = [10.0d0, 20.0d0, 30.0d0]
+        character(len=*), parameter :: out_file = "test_run/example_build_schema.parquet"
+        integer(int32) :: id_back(3), tile
+        real(real64) :: ra_back(3)
+
+        call schema%init(table="targets", author="me", description="A schema built in code")
+        call schema%add_field("id", "int32",   ucd="meta.id",   info="Object identifier")
+        call schema%add_field("ra", "float64", unit="deg", ucd="pos.eq.ra", info="Right ascension", &
+            qc_min=">= 0", qc_max="<= 360")
+
+        call parquet_parse_maml(schema)                   ! turns the text above into %cinfo/%metadata
+        call schema%add_metadata("SURVEY_TILE", 42_int32) ! only legal AFTER the parse
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "id", id_back)
+        call parquet_read_column(reader, "ra", ra_back)
+        call parquet_get_metadata(reader, "SURVEY_TILE", tile)
+        call parquet_close_reader(reader)
+
+        call check(error, all(id_back == id), "the in-code schema example did not round-trip its int32 column")
+        if (allocated(error)) return
+        call check(error, all(abs(ra_back - ra) < 1.0e-12_real64), &
+            "the in-code schema example did not round-trip its float64 column")
+        if (allocated(error)) return
+        call check(error, tile == 42_int32, &
+            "add_metadata after parquet_parse_maml should reach the written file")
+    end subroutine test_build_schema_example
     !
     !> doc/pages/types/date-time.md's "datetime_quickstart" example: writes a
     !> parquet_date column (with one null) and a parquet_timestamp column (set

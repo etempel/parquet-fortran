@@ -111,6 +111,8 @@ contains
                 test_target_row_group_bytes_int32), &
             new_unittest("statistics_prescreen prunes row groups without changing the answer", &
                 test_statistics_prescreen_effect), &
+            new_unittest("verbosity=silent makes print_schema_info a no-op, file and all", &
+                test_verbosity_silences_print_schema_info), &
             new_unittest("both integer kinds reach the same setting", test_both_integer_kinds), &
             new_unittest("every environment variable reaches its own knob", test_env_every_variable), &
             new_unittest("an absent variable leaves its knob alone", test_env_absent_leaves_knob), &
@@ -1394,6 +1396,73 @@ contains
         call check(error, all(on_rows == off_rows), &
             "pruning must not change WHICH rows a filter returns, element for element")
     end subroutine test_statistics_prescreen_effect
+
+    !> `verbosity="silent"` silences SOLICITED output, and `%print_schema_info` is solicited output,
+    !! so the call becomes a complete no-op -- not merely an empty file, but no file at all, because
+    !! the suppression check sits before the `open`. That placement is the part worth pinning: it is
+    !! what stops a silenced program from littering the filesystem with empty listings.
+    !!
+    !! **Negative control:** the identical call at `"normal"` must produce a file with content.
+    !! Without it this test passes just as happily against a `%print_schema_info` that never writes
+    !! anything at any verbosity.
+    !!
+    !! Lives in this suite rather than beside the other `print_schema_info` tests in
+    !! test_metadata.f90 because it writes a process-global setting, and `settings` is the suite
+    !! run_tester.f90 excludes from test-drive's per-test parallelism.
+    subroutine test_verbosity_silences_print_schema_info(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        character(len=*), parameter :: quiet_file = "test_run/settings_silent_schema_info.txt"
+        character(len=*), parameter :: loud_file = "test_run/settings_normal_schema_info.txt"
+        logical :: quiet_exists, loud_exists
+        integer :: u, ios, nlines
+        character(len=256) :: line
+
+        call parquet_reset_settings()
+        call schema%init(table="silent_probe")
+        call schema%add_field("id", "int32", ucd="meta.id", info="Object identifier")
+        call parquet_parse_maml(schema)
+
+        call delete_if_present(quiet_file)
+        call delete_if_present(loud_file)
+
+        call parquet_set_verbosity("silent")
+        call schema%print_schema_info(filename=quiet_file)
+        call parquet_set_verbosity("normal")
+        call schema%print_schema_info(filename=loud_file)
+        call parquet_reset_settings()
+
+        inquire(file=quiet_file, exist=quiet_exists)
+        inquire(file=loud_file, exist=loud_exists)
+        call check(error, .not. quiet_exists, &
+            "verbosity=silent must not even create the file print_schema_info would have written")
+        if (allocated(error)) return
+        call check(error, loud_exists, "the negative control at verbosity=normal should have written a file")
+        if (allocated(error)) return
+
+        nlines = 0
+        open(newunit=u, file=loud_file, status="old", action="read")
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            nlines = nlines + 1
+        end do
+        close(u)
+        call check(error, nlines > 0, "the negative control's file should not be empty")
+    end subroutine test_verbosity_silences_print_schema_info
+
+    !> Deletes `path` if it exists, so a test that asserts a file's ABSENCE cannot be fooled by one
+    !! an earlier run left behind.
+    subroutine delete_if_present(path)
+        character(len=*), intent(in) :: path !! file to remove if it is there.
+        logical :: exists
+        integer :: u
+
+        inquire(file=path, exist=exists)
+        if (.not. exists) return
+        open(newunit=u, file=path, status="old")
+        close(u, status="delete")
+    end subroutine delete_if_present
 
     !> The three numeric knobs are generic over int32 and int64 because none of them is bounded
     !> below huge(int32). A missing specific is a COMPILE error, so this test existing is most of

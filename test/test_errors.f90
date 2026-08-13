@@ -671,6 +671,8 @@ contains
                 test_chunk_mask_added_after_first_row_group_aborts), &
             new_unittest("schema%set_protected on an unknown column aborts", &
                 test_set_protected_unknown_column_aborts), &
+            new_unittest("unprotecting a protected column warns without naming a MAML, and " // &
+                "never warns for a column that was not protected", test_set_protected_unprotect_warns), &
             new_unittest("qc: min value that does not parse as a number aborts", &
                 test_validate_qc_min_not_numeric_aborts), &
             new_unittest("qc: max value that does not parse as a number aborts", &
@@ -5656,6 +5658,42 @@ contains
             failure_message="schema%set_protected on an unknown column was expected to abort", &
             required_stderr="no_such")
     end subroutine test_set_protected_unknown_column_aborts
+
+    !> Relaxing a protection warns and does not abort, and the message must not blame a MAML: the
+    !! scenario's schema is built entirely with %init/%add_field, so there is no .maml file for the
+    !! protection to have come from.
+    !!
+    !! **Both directions are asserted here, which is why this does not use
+    !! check_scenario_exit_status_and_stderr.** That helper only checks a string is PRESENT, and the
+    !! interesting half of this guard is the string that must be ABSENT: column 'q' was never
+    !! protected, so setting it protected=.false. must say nothing. A guard that warned on every
+    !! set_protected(..., .false.) call would satisfy the presence check alone.
+    subroutine test_set_protected_unprotect_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_p, warned_q, blamed_maml
+
+        call run_error_scenario("set_protected_unprotect_warns", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "unprotecting a protected column should warn, not abort")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'p' is currently protected", warned_p)
+        call check(error, warned_p, "unprotecting the protected column 'p' should have printed a WARNING")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'q'", warned_q)
+        call check(error, .not. warned_q, &
+            "column 'q' was never protected, so set_protected(q, .false.) must print nothing")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "protected_cols", blamed_maml)
+        call check(error, .not. blamed_maml, &
+            "the warning must not blame a MAML's extra: protected_cols: -- this schema has no MAML file")
+    end subroutine test_set_protected_unprotect_warns
 
     subroutine test_validate_qc_min_not_numeric_aborts(error)
         type(error_type), allocatable, intent(out) :: error

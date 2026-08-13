@@ -52,7 +52,7 @@ Both forms share the same input format and validation:
 
 - **`qc_input` is `"col_name, qc_min, qc_max, qc_miss"`** — at most four comma-separated fields, matched **positionally**. Only `col_name` (the first field) is required and must be non-empty; any of the last three may be empty or omitted (`"ra, >0"` sets just a min; `"ra, , <=10"` sets just a max; `"ra,,, Null"` sets just miss). The `fields:` header is created automatically on the first call.
 - **`qc_min`/`qc_max`** may carry a leading operator (`>=`/`>` for `min`, `<=`/`<` for `max`) or be a bare number (inclusive, i.e. `>=` for min and `<=` for max — same convention as the [write-side `qc:`](#write-side-enforcement) above). A reversed operator (e.g. a `<` on `min`), or an operator with no value after it, fails immediately with `error stop`.
-- **`qc_miss`** may only be empty, `Null`/`null`, or `NA`/`na`; anything else fails with `error stop`. (Meaning is exactly as for a file-based qc-maml: `Null`/`NA` ⇒ Nulls expected, empty ⇒ not expected.)
+- **`qc_miss`** may only be empty, `Null`/`null`, or `NA`/`na`; anything else fails with `error stop`. (Meaning is exactly as for a file-based qc-maml: `Null`/`NA` ⇒ Nulls expected, empty ⇒ not expected and therefore checked. Omitting the field entirely is the third state — nothing is said about Nulls, and none are checked.)
 - Adding a column already present in this maml, or supplying more than four fields, also fails immediately with `error stop` — invalid input is never partially applied.
 - An **empty (or all-blank) `qc_input` is a no-op**: `col_name` is returned as an empty string and nothing is added to the maml. This is distinct from a leading comma (e.g. `", >0"`), which does have content — an empty *first field* — and is the error above (a missing column name).
 
@@ -92,14 +92,17 @@ Active rule:                min: <empty>   max: 100        miss: <empty>
 
 The code's `min:` and `miss:` are **not** filled into the gaps the MAML left. "The file's own description wins the whole column if it says anything at all" is one rule to hold in your head; a bound-by-bound merge would need a rule for each of the eight present/absent combinations across three bounds from two sources, for a benefit nothing here asks for.
 
-An **empty** `qc:` block counts as saying something. `miss:` defaults to "Nulls are not expected", so a bare
+An **empty** `qc:` block still counts as the MAML saying something, so a bare
 
 ```yaml
 - name: column_x
   qc:
 ```
 
-already means "no Nulls in this column" — a real restriction the MAML's author stated, and it wins like any other.
+wins the whole column exactly like a populated one: the code's declarations for `column_x` are
+ignored. What it does *not* do is constrain anything itself — with no `min:`, no `max:` and no
+`miss:`, nothing about `column_x` is checked. To declare "no Nulls in this column" the block has to
+say so, with an explicit empty `miss:` (see the three-state table below).
 
 `composed` carries only the qc-bearing field entries: a MAML entry with no `qc:` key is not copied across. Nothing else is read from this schema — `parquet_open_reader` hands it to the qc parser and nowhere else — and it is what keeps the two sources from colliding over a column the MAML merely names.
 
@@ -113,14 +116,22 @@ call parquet_open_writer(writer, "data.parquet", schema, qc=.false.) ! explicitl
 With qc active, every `parquet_write_column` call runs two independent checks per column:
 
 - **Range** — if `min:`/`max:` is declared, every element for which `is_valid` is `.true.` (or every element, if `is_valid` wasn't passed at all — see [Null values](../types/supported-data-types.html#null-values)) is checked against the bound(s). String columns are compared lexicographically using Fortran's native string comparison. Vector columns are checked element-wise.
-- **Miss (Null expectation)** — applies to any column written with an `is_valid=`/null-carrying mask (numeric/logical `is_valid=`, a `parquet_string_column`'s own null tracking, or a `parquet_date`/`time`/`timestamp` element's null state). If `miss:` is `Null`/`NA`, Nulls are expected and never warned about. If `miss:` is absent or empty (**the default**), Nulls are NOT expected: finding any is a violation. `min:`/`max:` always run only over non-null elements regardless of `miss:`.
+- **Miss (Null expectation)** — applies to any column written with an `is_valid=`/null-carrying mask (numeric/logical `is_valid=`, a `parquet_string_column`'s own null tracking, or a `parquet_date`/`time`/`timestamp` element's null state). `miss:` has three states, and only one of them asks for a check:
+
+| `miss:` | what the column says | Nulls checked? |
+|---|---|---|
+| not declared at all | nothing about Nulls | no |
+| `Null` or `NA` (case-insensitive) | Nulls are an expected part of this column | no |
+| declared with an empty value | Nulls are **not** expected in this column | **yes** |
+
+  `min:`/`max:` always run only over non-null elements, whatever `miss:` says.
 
 Neither check ever stops the write — each prints its own one-line `WARNING` to stdout naming the column, e.g.:
 ```
 WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.5, 359.9], 3 of 1000 valid element(s) out of range
-WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: not declared)
+WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: is declared empty, so Nulls are not expected here)
 ```
-This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`); the range check only fires for columns that actually declare `qc: min:`/`max:`, and the miss check only fires for a column actually written with a null-carrying mask. `qc=.false.` skips both checks entirely.
+This only applies when writing against a MAML-derived schema (`parquet_open_writer(..., schema, ...)`); the range check only fires for columns that actually declare `qc: min:`/`max:`, and the miss check only fires for a column that declares an empty `qc: miss:` *and* is actually written with a null-carrying mask. `qc=.false.` skips both checks entirely.
 
 ### One precision limit worth knowing, on `int64` columns
 

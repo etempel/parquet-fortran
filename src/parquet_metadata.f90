@@ -513,8 +513,13 @@ contains
         if (present(qc_min)) have_qc_min = len_trim(qc_min) > 0
         have_qc_max = .false.
         if (present(qc_max)) have_qc_max = len_trim(qc_max) > 0
-        have_qc_miss = .false.
-        if (present(qc_miss)) have_qc_miss = len_trim(qc_miss) > 0
+        ! PRESENCE, not non-emptiness: an explicit qc_miss="" is how a caller asks for Null
+        ! validation (an empty qc: miss: is the only thing that turns it on -- see
+        ! parquet_column_type%qc_allow_null), so it must reach the MAML text as a bare "miss:"
+        ! line. Testing len_trim here instead would discard it, leaving the caller with a schema
+        ! that silently validates nothing; qc_min/qc_max keep the len_trim test, since an empty
+        ! bound is genuinely nothing to declare.
+        have_qc_miss = present(qc_miss)
 
         if (have_qc_min .or. have_qc_max .or. have_qc_miss) then
             call maml_push_line(this%maml, "  qc:")
@@ -527,8 +532,11 @@ contains
                     call maml_push_line(this%maml, "    max: '" // trim(adjustl(qc_max)) // "'")
             end if
             if (present(qc_miss)) then
-                if (len_trim(qc_miss) > 0) &
+                if (len_trim(qc_miss) > 0) then
                     call maml_push_line(this%maml, "    miss: " // trim(adjustl(qc_miss)))
+                else
+                    call maml_push_line(this%maml, "    miss:")
+                end if
             end if
         end if
 

@@ -1255,8 +1255,15 @@ contains
 
     !> schema%get_field(name=) reads back every attribute add_field accepted, including the
     !> qc_min/qc_max/qc_miss round trip (reconstructed as an operator-prefixed string / "Null").
-    !> Also checks a field with no qc: block at all reports empty qc_min/qc_max/qc_miss, and that
-    !> requesting only a subset of the optional outputs (a bare data_type query) works.
+    !> Also checks that requesting only a subset of the optional outputs (a bare data_type query)
+    !> works.
+    !>
+    !> **The three qc_miss states are all asserted here, and the mapping is not symmetric.** A
+    !> declared miss: Null and NO miss: at all both report "Null", because both mean the same
+    !> thing -- Nulls are allowed -- while only an explicit EMPTY miss: reports "", which is the
+    !> one form that asks for Null validation. That is what makes the result re-feedable into
+    !> %add_field without changing behaviour, and it is the property %add_field_from depends on
+    !> (see test_add_field_from_copies_field).
     subroutine test_get_field_by_name(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema
@@ -1267,6 +1274,7 @@ contains
         call schema%add_field("ra", "float64", unit="deg", info="Right ascension.", ucd="pos.eq.ra", &
             qc_min=">=0", qc_max="<360", qc_miss="Null")
         call schema%add_field("flag", "boolean")
+        call schema%add_field("checked", "int32", qc_miss="")
         call parquet_parse_maml(schema)
 
         call schema%get_field("ra", data_type=data_type, unit=unit, info=info, ucd=ucd, array_size=array_size, &
@@ -1278,8 +1286,13 @@ contains
         if (allocated(error)) return
 
         call schema%get_field("flag", qc_min=qc_min, qc_max=qc_max, qc_miss=qc_miss)
+        call check(error, qc_min == "" .and. qc_max == "" .and. qc_miss == "Null", &
+            "get_field(name='flag') should report no bounds and, for an undeclared miss:, ""Null""")
+        if (allocated(error)) return
+
+        call schema%get_field("checked", qc_min=qc_min, qc_max=qc_max, qc_miss=qc_miss)
         call check(error, qc_min == "" .and. qc_max == "" .and. qc_miss == "", &
-            "get_field(name='flag') was expected to report no qc: at all")
+            "get_field(name='checked') should report """" for an explicit empty qc: miss:")
         if (allocated(error)) return
 
         data_type = "unset"
@@ -1340,8 +1353,18 @@ contains
 
         call target%get_field("obj_id", data_type=data_type, unit=unit, qc_min=qc_min, qc_max=qc_max, qc_miss=qc_miss)
         call check(error, data_type == "int64" .and. unit == "count" .and. trim(qc_min) == ">= 0" .and. &
-            qc_max == "" .and. qc_miss == "", &
+            qc_max == "" .and. qc_miss == "Null", &
             "add_field_from's copied field did not match the source field's definition")
+        if (allocated(error)) return
+
+        ! The copy must inherit the source's Null POLICY, not just its text: the source declared no
+        ! qc: miss:, so neither schema checks Nulls, and the copy reports "Null" for the same reason
+        ! the source does. A copy that came back "" would have silently switched Null validation ON
+        ! for the derived table -- the one way this procedure can change behaviour while still
+        ! looking like it copied everything.
+        call source%get_field("obj_id", qc_miss=qc_miss)
+        call check(error, qc_miss == "Null", &
+            "the source field's own qc_miss should read back as ""Null"" for an undeclared miss:")
     end subroutine test_add_field_from_copies_field
 
     subroutine test_add_field_from_source_not_found_aborts(error)

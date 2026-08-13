@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`call schema%set_protected(name [, protected])`** marks a column Null-protected from code, the
   equivalent of listing it under a MAML's `extra: protected_cols:`; `protected` defaults to
-  `.true.` and `.false.` lifts protection. Unprotecting a column the MAML itself protected is
-  allowed but prints a `WARNING` naming it, never aborting. A protected column is now also written
+  `.true.` and `.false.` lifts protection. Unprotecting a column that is currently protected is
+  allowed but prints a `WARNING` naming it, never aborting — where the protection came from makes
+  no difference, since a MAML's `extra: protected_cols:` and an earlier `%set_protected` call in
+  code are indistinguishable once set. A protected column is now also written
   **non-nullable**, which is the only way to declare a *streamed* `date`/`time`/`timestamp` or
   `parquet_string_column` column null-free — those carry their null state inside the element, so a
   null-free first row group cannot speak for the rest of the file. Passing an all-`.true.`
@@ -627,6 +629,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type](doc/pages/schema/building-schema-in-code.md#a-typed-value-records-its-own-type).
 
 ### Changed
+
+- **`qc: miss:` now has three states, and an undeclared one no longer means "no Nulls allowed".**
+  A field that declares no `qc: miss:` says nothing about Nulls, and none are checked — on the
+  write side or the read side. `miss: Null`/`NA` says Nulls are expected, as before. The one form
+  that asks for Null validation is an **explicit, empty** `miss:`. Previously a column with no
+  `qc:` block at all warned on write when a Null was written through it, and a column declaring
+  only `qc: min:`/`max:` aborted on read, in both cases because "undeclared" and "declared empty"
+  were indistinguishable; a schema that never mentioned Nulls therefore enforced a rule its author
+  had not written down. From code, `schema%add_field(..., qc_miss="")` is how you ask for the
+  check — an empty string is now kept and emitted as a bare `miss:` line rather than discarded,
+  which is what makes the state reachable from the in-code builder at all. `schema%get_field`'s
+  `qc_miss` output reports `"Null"` for both allowing forms and `""` only for the checking one, so
+  feeding it back into `%add_field` (as `%add_field_from` does) reproduces the source's behaviour.
 
 - **A streamed column's nullability now comes from its first row group's `is_valid` mask, and every
   row group must agree.** `parquet_write_column_chunk` fixes a column's Arrow field when the first

@@ -56,6 +56,8 @@ contains
                 test_add_metadata_inserts_before_extra), &
             new_unittest("col_map: renamed column is written/read under its output name", &
                 test_col_map_write_renames_output_column), &
+            new_unittest("every supported data_type can carry a Null, and round-trips one", &
+                test_every_type_carries_a_null), &
             new_unittest("write scalar column with is_valid produces genuine Nulls", &
                 test_write_scalar_with_is_valid), &
             new_unittest("write matrix column with is_valid produces element-level Nulls", &
@@ -88,11 +90,13 @@ contains
                 test_qc_silently_ignored_for_boolean), &
             new_unittest("qc defaults to active whenever a schema is given (no explicit qc=), " // &
                 "warning on an unexpected Null", test_qc_miss_default_active_numeric_warns), &
+            new_unittest("qc: miss: absent means Nulls are allowed -- no WARNING printed", &
+                test_qc_miss_absent_no_warning), &
             new_unittest("qc: miss: Null allows Nulls -- no WARNING printed", &
                 test_qc_miss_declared_null_no_warning), &
-            new_unittest("qc: miss: not declared warns on a Null in a compact string write", &
+            new_unittest("an empty qc: miss: warns on a Null in a compact string write", &
                 test_qc_miss_string_warns), &
-            new_unittest("qc: miss: not declared warns on a Null in a parquet_date write", &
+            new_unittest("an empty qc: miss: warns on a Null in a parquet_date write", &
                 test_qc_miss_temporal_warns), &
             new_unittest("schema%add_field's own qc_min/qc_max drives real read-time enforcement", &
                 test_add_field_qc_drives_reader_enforcement), &
@@ -743,6 +747,124 @@ contains
     !> .false. entry produces a genuine Parquet Null there (not a sentinel
     !> value): confirmed by reading it back with is_valid, which must report
     !> that slot invalid and default it to 0 (no null_value requested).
+    !> **Every supported data_type can hold a Null.** The guide says so in as many words (it is why
+    !! `qc_miss` may be set on any type), and until this test that claim rested on the per-family
+    !! Null tests below happening to cover every type between them -- which is not the same thing,
+    !! and would not notice a type added later.
+    !!
+    !! One column per type in ONE file, each with its middle row Null, read back and checked. The
+    !! three mask-carrying families use `is_valid=`; `string` here is the padded `character` form;
+    !! `parquet_string_column` and the three temporal types carry their null state inside the
+    !! element instead, which is exactly why they are worth including -- they reach a different
+    !! write path (see CLAUDE.md, "A written column's nullability is a CONTRACT").
+    !!
+    !! **Negative control:** column `ctl` is written with no mask and no null element at all, and
+    !! must come back with every row valid. Without it a reader that reported everything as Null
+    !! would pass.
+    subroutine test_every_type_carries_a_null(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_every_type_null.parquet"
+        logical, parameter :: mask(3) = [.true., .false., .true.]
+        integer(int32) :: i32(3) = [1_int32, 2_int32, 3_int32], i32_b(3)
+        integer(int64) :: i64(3) = [1_int64, 2_int64, 3_int64], i64_b(3)
+        real(real32) :: r32(3) = [1.0_real32, 2.0_real32, 3.0_real32], r32_b(3)
+        real(real64) :: r64(3) = [1.0_real64, 2.0_real64, 3.0_real64], r64_b(3)
+        logical :: lg(3) = [.true., .true., .false.], lg_b(3)
+        character(len=8) :: st(3) = [character(len=8) :: "a", "b", "c"], st_b(3)
+        integer(int32) :: ctl(3) = [7_int32, 8_int32, 9_int32], ctl_b(3)
+        type(parquet_string_column) :: sc
+        type(parquet_date) :: dt(3)
+        type(parquet_time) :: tm(3)
+        type(parquet_timestamp) :: ts(3)
+        logical :: ctl_v(3)
+        type(parquet_string_column) :: sc_b
+        type(parquet_date) :: dt_b(3)
+        type(parquet_time) :: tm_b(3)
+        type(parquet_timestamp) :: ts_b(3)
+
+        ! Element-carried nulls: index 2 is left default-initialized, which IS null for these.
+        call dt(1)%set(2024, 1, 1);  call dt(3)%set(2024, 1, 3)
+        call tm(1)%set(1, 0, 0);     call tm(3)%set(3, 0, 0)
+        call ts(1)%set(2024, 1, 1, 1, 0, 0)
+        call ts(3)%set(2024, 1, 3, 3, 0, 0)
+        call sc%append_string("a")
+        call sc%append_null()
+        call sc%append_string("c")
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "c_int32",   i32, is_valid=mask)
+        call parquet_write_column(writer, "c_int64",   i64, is_valid=mask)
+        call parquet_write_column(writer, "c_float32", r32, is_valid=mask)
+        call parquet_write_column(writer, "c_float64", r64, is_valid=mask)
+        call parquet_write_column(writer, "c_boolean", lg,  is_valid=mask)
+        call parquet_write_column(writer, "c_string",  st,  is_valid=mask)
+        call parquet_write_column(writer, "c_strcol",  sc)
+        call parquet_write_column(writer, "c_date",    dt)
+        call parquet_write_column(writer, "c_time",    tm)
+        call parquet_write_column(writer, "c_stamp",   ts)
+        call parquet_write_column(writer, "ctl",       ctl)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call check_one("c_int32");   if (allocated(error)) return
+        call check_one("c_int64");   if (allocated(error)) return
+        call check_one("c_float32"); if (allocated(error)) return
+        call check_one("c_float64"); if (allocated(error)) return
+        call check_one("c_boolean"); if (allocated(error)) return
+        call check_one("c_string");  if (allocated(error)) return
+
+        call parquet_read_column(reader, "c_strcol", sc_b)
+        call check(error, sc_b%is_null(2) .and. .not. sc_b%is_null(1), &
+            "a parquet_string_column's %append_null did not read back as a Null")
+        if (allocated(error)) then
+            call parquet_close_reader(reader); return
+        end if
+        call parquet_read_column(reader, "c_date", dt_b)
+        call check(error, dt_b(2)%is_null() .and. .not. dt_b(1)%is_null(), "a null date did not round-trip")
+        if (allocated(error)) then
+            call parquet_close_reader(reader); return
+        end if
+        call parquet_read_column(reader, "c_time", tm_b)
+        call check(error, tm_b(2)%is_null() .and. .not. tm_b(1)%is_null(), "a null time did not round-trip")
+        if (allocated(error)) then
+            call parquet_close_reader(reader); return
+        end if
+        call parquet_read_column(reader, "c_stamp", ts_b)
+        call check(error, ts_b(2)%is_null() .and. .not. ts_b(1)%is_null(), "a null timestamp did not round-trip")
+        if (allocated(error)) then
+            call parquet_close_reader(reader); return
+        end if
+
+        ! Negative control: a column written with no Null anywhere must report none.
+        call parquet_read_column(reader, "ctl", ctl_b, is_valid=ctl_v)
+        call parquet_close_reader(reader)
+        call check(error, all(ctl_v), &
+            "the control column has no Nulls, so every row must read back valid")
+
+    contains
+
+        !> Reads `name` back with an is_valid mask and asserts row 2 alone is Null. Shares the
+        !! whole-file reader above, so each call is one more column of the same fixture.
+        subroutine check_one(name)
+            character(len=*), intent(in) :: name !! column to read back.
+            logical :: got(3)
+
+            select case (name)
+            case ("c_int32");   call parquet_read_column(reader, name, i32_b, is_valid=got)
+            case ("c_int64");   call parquet_read_column(reader, name, i64_b, is_valid=got)
+            case ("c_float32"); call parquet_read_column(reader, name, r32_b, is_valid=got)
+            case ("c_float64"); call parquet_read_column(reader, name, r64_b, is_valid=got)
+            case ("c_boolean"); call parquet_read_column(reader, name, lg_b,  is_valid=got)
+            case default;       call parquet_read_column(reader, name, st_b,  is_valid=got)
+            end select
+            call check(error, got(1) .and. (.not. got(2)) .and. got(3), &
+                "column " // name // " did not round-trip a Null in row 2")
+        end subroutine check_one
+
+    end subroutine test_every_type_carries_a_null
+
     subroutine test_write_scalar_with_is_valid(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
@@ -1175,6 +1297,20 @@ contains
             failure_message="a Null with qc: miss: not declared must warn, not abort, even with no explicit qc=", &
             required_stderr="WARNING: qc violation for column 'id'")
     end subroutine test_qc_miss_default_active_numeric_warns
+
+    !> The negative control for test_qc_miss_default_active_numeric_warns: a field declaring no
+    !! qc: miss: at all says nothing about Nulls, so writing one must print nothing. Asserted as an
+    !! absence, which is only meaningful because its sibling asserts the presence on an otherwise
+    !! identical schema -- the pair is what pins "empty declares, absent does not", and either test
+    !! alone passes against a check that fires always or never.
+    subroutine test_qc_miss_absent_no_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_no_output(error, "qc_miss_absent_no_warning", &
+            expect_abort=.false., &
+            failure_message="an absent qc: miss: must not make a Null a qc violation", &
+            forbidden_text="WARNING: qc violation")
+    end subroutine test_qc_miss_absent_no_warning
 
     subroutine test_qc_miss_declared_null_no_warning(error)
         type(error_type), allocatable, intent(out) :: error

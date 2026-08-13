@@ -619,6 +619,12 @@ contains
                 test_close_writer_missing_write_aborts), &
             new_unittest("closing a hand-built-schema writer with an unwritten enabled column " // &
                 "aborts with an unnamed-schema message", test_close_writer_missing_write_unnamed_schema_aborts), &
+            new_unittest("closing a writer with NO column written writes them empty and warns", &
+                test_close_writer_no_columns_written_warns), &
+            new_unittest("explicit zero-length writes produce no empty-close warning", &
+                test_close_writer_zero_length_writes_quiet), &
+            new_unittest("closing a writer with a row mask but no column written still aborts", &
+                test_close_writer_no_columns_with_mask_aborts), &
             new_unittest("reading an unknown column via parquet_read_column aborts", &
                 test_read_unknown_column_aborts), &
             new_unittest("reading a nested struct-field path with a mid-path typo aborts", &
@@ -5289,6 +5295,42 @@ contains
                 "was expected to abort", &
             required_stderr="parquet_close_writer: schema: (unnamed, built in-memory)")
     end subroutine test_close_writer_missing_write_unnamed_schema_aborts
+
+    !> A schema-enforced writer closed with NOTHING written no longer aborts -- it writes every
+    !> declared column with 0 rows and warns. These three are one group and only mean something
+    !> together: the first asserts the new behaviour and its warning, the second is the warning's
+    !> negative control (a caller who writes the zero-length arrays himself must get no warning at
+    !> all, or the first test would pass against an implementation that warned on every zero-row
+    !> close), and the third pins the one case that still aborts.
+    !>
+    !> Asserted by MESSAGE, not merely by exit status: exit 0 alone would pass against a close that
+    !> silently wrote nothing, which is the failure this whole path exists to avoid.
+    subroutine test_close_writer_no_columns_written_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "close_writer_no_columns_written", &
+            expect_abort=.false., &
+            failure_message="closing a writer with no column written was expected to succeed", &
+            required_stderr="parquet_close_writer: no column was written; writing every declared column with 0 rows")
+    end subroutine test_close_writer_no_columns_written_warns
+
+    subroutine test_close_writer_zero_length_writes_quiet(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_no_output(error, "close_writer_zero_length_writes_quiet", &
+            expect_abort=.false., &
+            failure_message="explicit zero-length writes were expected to close cleanly", &
+            forbidden_text="no column was written")
+    end subroutine test_close_writer_zero_length_writes_quiet
+
+    subroutine test_close_writer_no_columns_with_mask_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "close_writer_no_columns_with_mask", &
+            expect_abort=.true., &
+            failure_message="a masked writer closed with no column written was expected to abort", &
+            required_stderr="parquet_close_writer: missing write for enabled column: col_a")
+    end subroutine test_close_writer_no_columns_with_mask_aborts
 
     !> parquet_read_column now validates the column name against the file's
     !> schema and error stops, instead of letting the C++ side's uncaught

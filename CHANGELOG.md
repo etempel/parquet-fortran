@@ -599,6 +599,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Closing a schema-enforced writer that had nothing written to it now produces a valid file
+  instead of aborting.** Every declared column is written with zero rows, so the output carries the
+  full schema — the columns a reader expects, their `unit`/`info`/`ucd` and the table metadata —
+  and a `WARNING` names the file and says it happened. Previously this aborted with `missing write
+  for enabled column`, which made an analysis stage that legitimately produced no rows a failure
+  rather than an empty result, and left callers writing a zero-length array to every column by hand
+  to work around it. That workaround still behaves identically and warns about nothing, since the
+  library only steps in when the caller wrote nothing at all. An unresolved `col_size: auto` or
+  `array_size: auto` resolves to `1`, there being no data to measure. **Partial writes are
+  unchanged**: writing some declared columns and not others still aborts, naming the column that
+  was missed — as does closing with nothing written after `parquet_write_row_mask`, since a mask
+  says rows were expected, or after `parquet_new_row_group`.
+
+- **A zero-length `parquet_write_column` to a `string` column now registers the column** instead of
+  silently writing nothing and then failing at close with a C++-level `Missing column data before
+  close`. Both the scalar and the vector (rank-2) string forms returned early on an empty array
+  *after* recording the column as written on the Fortran side, so the two bookkeeping halves
+  disagreed and the diagnostic named the wrong problem. Every other type already appended an empty
+  array. This is what made the zero-length-array idiom above work on a numeric schema and fail on
+  any schema containing a string column.
+
 - **`parquet_write_column_chunk` now converts a chunk's values to the schema's declared numeric
   type, exactly as `parquet_write_column` always has.** Writing `int32` values into a column a
   schema declares `float64` — or any other pair `int32`/`int64`/`float32`/`float64` — previously

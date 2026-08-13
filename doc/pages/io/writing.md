@@ -137,6 +137,15 @@ Notes:
   call fixes the row count for the whole file; any later call with a different row count fails
   immediately with `error stop`, naming the column and both row counts.
 - Close the writer with `parquet_close_writer` to flush data and finalize the file.
+- **A schema-enforced writer that had nothing written to it still produces a valid file.** If your
+  analysis legitimately produced no rows, just close the writer: every declared column is written
+  with zero rows, so the file carries the full schema — the columns a reader expects, their units
+  and the table metadata — and a `WARNING` says it happened. This is what you would have got by
+  writing a zero-length array to every column yourself, which also still works and warns about
+  nothing. An unresolved `col_size: auto`/`array_size: auto` resolves to `1`, there being no data
+  to measure. Writing *some* columns and not others is unchanged: that still fails with
+  `error stop`, naming the column that was missed. So is closing with nothing written after
+  `parquet_write_row_mask` — a mask says rows were expected.
 - By default, `parquet_open_writer` silently truncates an existing file at `filename` (Fortran's
   usual `OPEN`/replace behavior). Pass `overwrite=.false.` to instead fail immediately with
   `error stop`, naming the file, if it already exists — useful when accidentally clobbering a

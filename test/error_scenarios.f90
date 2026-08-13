@@ -664,6 +664,12 @@ program error_scenarios
         call scenario_close_reader_before_open()
     case ("close_writer_before_open")
         call scenario_close_writer_before_open()
+    case ("close_writer_no_columns_written")
+        call scenario_close_writer_no_columns_written()
+    case ("close_writer_zero_length_writes_quiet")
+        call scenario_close_writer_zero_length_writes_quiet()
+    case ("close_writer_no_columns_with_mask")
+        call scenario_close_writer_no_columns_with_mask()
     case ("close_writer_missing_write")
         call scenario_close_writer_missing_write()
     case ("close_writer_missing_write_unnamed_schema")
@@ -2480,6 +2486,63 @@ contains
     !> -- checks the missing-write abort also prints the output filename and
     !> the schema's name, "internal:demo" here since %init/parquet_schema(...)
     !> name an in-memory schema "internal:<table>".
+    !> A schema-enforced writer closed with NOTHING written must not abort: it writes every declared
+    !! column with 0 rows and says so with a WARNING. Exits 0; the wrapper asserts the warning text.
+    !! This is the case an analysis stage that legitimately produced no rows lands in.
+    subroutine scenario_close_writer_no_columns_written()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+
+        schema = parquet_schema(table="empty_ok")
+        call schema%add_field("col_a", "int32")
+        call schema%add_field("col_b", "string", array_size=4)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_no_columns_written.parquet", schema)
+        call parquet_close_writer(writer)
+        print '(a)', "closed with no columns written, as expected"
+    end subroutine scenario_close_writer_no_columns_written
+
+    !> The NEGATIVE CONTROL for the warning above: a caller who writes the zero-length arrays
+    !! himself must get the same file and NO warning, since the library did not have to step in.
+    !! Without this, the warning test would pass against an implementation that warned on every
+    !! zero-row close. Exits 0; the wrapper asserts the warning text is ABSENT.
+    subroutine scenario_close_writer_zero_length_writes_quiet()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: no_ints(0)
+        character(len=4) :: no_strs(0)
+
+        schema = parquet_schema(table="empty_explicit")
+        call schema%add_field("col_a", "int32")
+        call schema%add_field("col_b", "string", array_size=4)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_zero_length_writes.parquet", schema)
+        call parquet_write_column(writer, "col_a", no_ints)
+        call parquet_write_column(writer, "col_b", no_strs)
+        call parquet_close_writer(writer)
+        print '(a)', "closed after explicit zero-length writes, as expected"
+    end subroutine scenario_close_writer_zero_length_writes_quiet
+
+    !> A row mask means rows were EXPECTED, so the empty-close path deliberately does not apply and
+    !! the missing-write abort stands. Keeps the mask's own contract intact: the mask must be fully
+    !! consumed by what is written, and writing nothing cannot consume it.
+    subroutine scenario_close_writer_no_columns_with_mask()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: mask(3) = [.true., .false., .true.]
+
+        schema = parquet_schema(table="empty_masked")
+        call schema%add_field("col_a", "int32")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_no_columns_masked.parquet", schema)
+        call parquet_write_row_mask(writer, mask)
+        call parquet_close_writer(writer)   ! -> aborts: a mask was set, so rows were expected
+        print '(a)', "unexpectedly closed a masked writer with no columns written"
+    end subroutine scenario_close_writer_no_columns_with_mask
+
     subroutine scenario_close_writer_missing_write()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer

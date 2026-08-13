@@ -390,14 +390,22 @@ contains
 
         asize = int(parquet_get_column_col_size(writer, name), kind=int64)
         nitems = size(values, kind=int64)
-        if (nitems <= 0) return
         call writer_context_suffix(writer, ctx)
         if (mod(nitems, asize) /= 0) error stop &
             "parquet_write_string_column: values size is not divisible by col_size for column " // &
             trim(name) // ctx
 
+        ! A zero-length write is NOT short-circuited here. It used to `return` at this point, which
+        ! left the two bookkeeping systems disagreeing: parquet_mark_column_written (above) had
+        ! already recorded the column on the Fortran side, so parquet_close_writer's own
+        ! missing-write check passed, while the C++ side never received an array and threw
+        ! "Missing column data before close" instead -- an uncaught exception naming the wrong
+        ! problem. Every other type's whole-column path appends an empty array here, and so does
+        ! this one now; the C++ builders handle nrows == 0 by construction (their append loops run
+        ! zero times and Finish() yields an empty array).
         if (writer%is_schema_enforced) then
-            call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1)))
+            ! len(values), not len(values(1)): the element does not exist for a zero-length array.
+            call parquet_resolve_or_check_array_size(writer, name, idx, len(values))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
             if (any_item_too_long(values, nitems, max_string_len)) then
                 error stop "parquet_write_string_column: string length exceeds declared array_size for column: " // trim(name)
@@ -440,7 +448,8 @@ contains
             if (.not. writer%all_columns(idx)%is_set) return
             call parquet_resolve_or_check_col_size(writer, name, idx, asize, "parquet_write_column")
 
-            call parquet_resolve_or_check_array_size(writer, name, idx, len(values(1, 1)))
+            ! len(values), not len(values(1, 1)): neither element exists for a zero-sized array.
+            call parquet_resolve_or_check_array_size(writer, name, idx, len(values))
             max_string_len = max(1, writer%all_columns(idx)%array_size)
             if (any_item_too_long(values, size(values, kind=int64), max_string_len)) then
                 error stop "parquet_write_string_matrix_column: string length exceeds declared array_size for column: " &
@@ -454,7 +463,8 @@ contains
         call parquet_mark_column_written(writer, name)
 
         nitems = size(values, kind=int64)
-        if (nitems <= 0) return
+        ! No zero-length short-circuit here either -- see parquet_write_string_column above for why
+        ! returning at this point left the Fortran and C++ bookkeeping disagreeing.
 
         call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
         if (masked) then

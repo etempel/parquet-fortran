@@ -1206,6 +1206,100 @@ contains
         call lk%claim(writer)
         chunk_size = parquet_writer_get_chunk_size(writer%handle)
     end procedure parquet_get_chunk_size_writer_int64
+    !> Writes every enabled column as a ZERO-ROW column when parquet_close_writer finds that a
+    !> schema-enforced writer had nothing written to it at all -- an analysis stage that legitimately
+    !> produced no rows, which used to abort with "missing write for enabled column".
+    !>
+    !> The point of doing it HERE, through the ordinary write specifics, is that no guard has to
+    !> learn an exception: parquet_mark_column_written increments write_counts and the C++ side
+    !> receives a real (empty) array, so parquet_close_writer's own missing-write check and
+    !> close_parquet_writer's "Missing column data before close" both pass on their existing terms.
+    !> Synthesizing empty arrays anywhere else would mean a second implementation of "append a
+    !> column of type T", which could drift from the real one.
+    !>
+    !> The resulting file carries the schema in full -- every declared column, its unit/info/ucd and
+    !> the table metadata -- with 0 rows, so a reader finds the columns it expects rather than the
+    !> 0-column file a schema-less writer produces. That is exactly what a caller writing zero-length
+    !> arrays by hand already got, which is why this is expressed as "as if they had".
+    !>
+    !> Deliberately does NOTHING in four cases, each meaning rows were expected or none were
+    !> promised: any write already happened (`write_started`, which parquet_new_row_group sets too,
+    !> so an opened row group counts); a row mask was set; the writer is schema-less; or no column
+    !> is enabled. The last two already produce a valid 0-column file.
+    subroutine parquet_write_empty_columns_if_none_written(writer)
+        type(parquet_writer), intent(inout) :: writer !! writer being closed with nothing written.
+        integer :: i, ncols
+        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
+        character(len=:), allocatable :: cname !! this column's name, copied out of `writer`.
+        character(len=:), allocatable :: dtype !! this column's declared data_type.
+        !> Zero-sized actuals, one per declared type. A rank-1 zero-length array serves a vector
+        !! column too: the specifics check `mod(size(values), col_size) == 0`, which 0 satisfies for
+        !! any width, and derive nrows = 0 from it.
+        integer(int32) :: empty_i32(0)
+        integer(int64) :: empty_i64(0)
+        real(real32) :: empty_f32(0)
+        real(real64) :: empty_f64(0)
+        logical :: empty_bool(0)
+        character(len=1) :: empty_str(0)
+        type(parquet_date) :: empty_date(0)
+        type(parquet_time) :: empty_time(0)
+        type(parquet_timestamp) :: empty_ts(0)
+
+        if (.not. writer%is_schema_enforced) return
+        if (writer%write_started) return
+        if (.not. allocated(writer%enabled_columns)) return
+        if (allocated(writer%file_mask)) return
+
+        ! An unresolved col_size:/array_size: auto has no data to be resolved from, and every value
+        ! is vacuously consistent with a width when there are no values -- so resolve to 1, which is
+        ! also the only choice that keeps a write_maml=.true. sidecar valid (parquet_validate_maml
+        ! requires a positive integer, and schema%set_col_size refuses anything below 1).
+        do i = 1, size(writer%enabled_columns)
+            if (writer%enabled_columns(i)%col_size == parquet_size_auto) writer%enabled_columns(i)%col_size = 1
+            if (writer%enabled_columns(i)%array_size == parquet_size_auto) writer%enabled_columns(i)%array_size = 1
+        end do
+        do i = 1, size(writer%all_columns)
+            if (writer%all_columns(i)%col_size == parquet_size_auto) writer%all_columns(i)%col_size = 1
+            if (writer%all_columns(i)%array_size == parquet_size_auto) writer%all_columns(i)%array_size = 1
+        end do
+
+        call writer_context_suffix(writer, ctx)
+        call parquet_emit_warning("parquet_close_writer: no column was written; writing every declared " // &
+            "column with 0 rows" // ctx)
+
+        ncols = size(writer%enabled_columns)
+        do i = 1, ncols
+            ! Copied out first: `writer` and a component of `writer` may not both be actual
+            ! arguments of one call, since the callee defines `writer` (F2018 15.5.2.13).
+            cname = trim(writer%enabled_columns(i)%name)
+            dtype = trim(writer%enabled_columns(i)%data_type)
+            select case (dtype)
+            case ("int32")
+                call parquet_write_int32_column(writer, cname, empty_i32)
+            case ("int64")
+                call parquet_write_int64_column(writer, cname, empty_i64)
+            case ("float32")
+                call parquet_write_float32_column(writer, cname, empty_f32)
+            case ("float64")
+                call parquet_write_float64_column(writer, cname, empty_f64)
+            case ("boolean", "bool8")
+                call parquet_write_logical_column(writer, cname, empty_bool)
+            case ("string")
+                call parquet_write_string_column(writer, cname, empty_str)
+            case ("date")
+                call parquet_write_date_column(writer, cname, empty_date)
+            case ("time")
+                call parquet_write_time_column(writer, cname, empty_time)
+            case ("timestamp")
+                call parquet_write_timestamp_column(writer, cname, empty_ts)
+            case default
+                ! Unreachable through the public API: parquet_validate_maml rejects any other
+                ! data_type before a schema can reach a writer. GCOVR_EXCL_LINE
+                error stop "parquet_close_writer: cannot write an empty column of data_type '" // &
+                    dtype // "' for column " // cname // ctx ! GCOVR_EXCL_LINE
+            end select
+        end do
+    end subroutine parquet_write_empty_columns_if_none_written
     module procedure parquet_close_writer
         integer :: i
         character(len=32) :: cursor_str, mask_str
@@ -1214,6 +1308,8 @@ contains
         if (.not. c_associated(writer%handle)) then
             error stop "parquet_close_writer: writer has not been opened, or was already closed"
         end if
+
+        call parquet_write_empty_columns_if_none_written(writer)
 
         ! Nested rather than one `.and.`: Fortran does not guarantee short-circuit evaluation, so a
         ! single combined condition references size(writer%file_mask) even when no mask was ever

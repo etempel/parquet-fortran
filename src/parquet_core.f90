@@ -2102,8 +2102,15 @@ module parquet_core
             type(parquet_writer), intent(inout) :: writer !! open writer.
             integer(int64), intent(out) :: chunk_size !! writer's resolved/authoritative row-group size.
         end subroutine parquet_get_chunk_size_writer_int64
-        !> Flushes and closes `writer`; error stops if any declared/enabled
-        !> column was never written (schema-enforced writer only).
+        !> Flushes and closes `writer`; error stops if SOME (but not all) of a schema-enforced
+        !> writer's declared/enabled columns were written -- naming the column that was missed.
+        !>
+        !> A writer that had NOTHING written to it is not an error: every enabled column is written
+        !> with zero rows and a WARNING says so, so an analysis that legitimately produced no rows
+        !> still yields a valid file carrying the whole schema (see
+        !> parquet_write_empty_columns_if_none_written). Writing a zero-length array to every column
+        !> by hand produces the same file and no warning. Two cases are excluded and keep the abort:
+        !> a row mask was set (rows were expected), and a row group was opened.
         module subroutine parquet_close_writer(writer)
             type(parquet_writer), intent(inout) :: writer !! writer to close.
         end subroutine parquet_close_writer

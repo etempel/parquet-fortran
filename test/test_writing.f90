@@ -213,6 +213,10 @@ contains
                 "by streaming", test_streaming_get_chunk_size), &
             new_unittest("streaming row-group write: a chunk is converted to the schema's declared numeric " // &
                 "type, exactly as a whole-column write is", test_streaming_chunk_converts_to_schema_type), &
+            new_unittest("closing a writer with nothing written keeps the schema and writes 0 rows", &
+                test_close_writer_no_columns_written), &
+            new_unittest("a zero-length write registers its column for every declared type", &
+                test_zero_length_write_every_type), &
             new_unittest("auto row-group sizing: the 1000-row floor still applies when it only moderately " // &
                 "overshoots the byte target", test_chunk_size_floor_overshoot_ok), &
             new_unittest("auto row-group sizing: a row group smaller than the 1000-row floor is used when " // &
@@ -2859,6 +2863,129 @@ contains
     !> parquet_finish_row_group. Verifies both columns round-trip correctly, exercising the
     !> whole-column-sliced-per-row-group path (for "id") alongside the freshly-built-per-chunk
     !> path (for "big_vec").
+    !> Closing a schema-enforced writer that had NOTHING written writes every enabled column with
+    !> zero rows, rather than aborting with "missing write for enabled column". The file keeps the
+    !> whole schema -- so a reader finds the columns it expects, with 0 rows, instead of the
+    !> 0-column file a schema-less writer produces.
+    !!
+    !! The assertions are about the FILE, not about the close succeeding: `ncols` proves the columns
+    !! were written rather than skipped, and the unit proves the schema's metadata survived. An
+    !! `auto` col_size resolves to 1 (there are no elements for any width to describe, and it is the
+    !! only value that keeps a write_maml sidecar valid, since MAML requires a positive integer).
+    !!
+    !! The warning this path emits, and its absence when the caller writes the zero-length arrays
+    !! himself, are asserted out of process by close_writer_no_columns_written /
+    !! close_writer_zero_length_writes_quiet -- a warning goes to a stream this suite cannot read.
+    subroutine test_close_writer_no_columns_written(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_close_no_columns_written.parquet"
+        integer(int64) :: nrows
+        integer :: col_size
+        character(len=:), allocatable :: names(:), unit
+        integer(int32), allocatable :: back(:)
+
+        call schema%init(table="empty_close")
+        call schema%add_field("id", "int32")
+        call schema%add_field("mass", "float64", unit="Msun")
+        call schema%add_field("tag", "string", array_size=6)
+        call schema%add_field("when", "timestamp[us]")
+        call schema%add_field("vec", "int32", col_size=3)
+        call schema%add_field("auto_vec", "int32", col_size=parquet_size_auto)
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_close_writer(writer)          ! nothing written at all
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_get_column_names(reader, names)
+        call parquet_get_metadata(reader, "column.mass.unit", unit)
+        call parquet_get_col_size(reader, "auto_vec", col_size)
+        allocate(back(0))
+        call parquet_read_column(reader, "id", back)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 0_int64, "a writer closed with nothing written must produce a 0-row file")
+        if (allocated(error)) return
+        call check(error, size(names) == 6, &
+            "every declared column must still be present -- not the 0-column file a schema-less writer gives")
+        if (allocated(error)) return
+        call check(error, unit == "Msun", "the schema's column metadata must survive an empty close")
+        if (allocated(error)) return
+        call check(error, col_size == 1, "an unresolved col_size: auto must resolve to 1 on an empty close")
+        if (allocated(error)) return
+        call check(error, size(back) == 0, "reading a column of the empty file must give zero rows")
+    end subroutine test_close_writer_no_columns_written
+
+    !> A zero-length write must register the column, for EVERY type. `string` used to return early
+    !> after parquet_mark_column_written had already recorded it, so Fortran's own missing-write
+    !> check passed while the C++ side never received an array and threw "Missing column data before
+    !> close" -- an uncaught exception naming the wrong problem. That made the documented workaround
+    !> for an empty result (write zero-length arrays yourself) work on a numeric schema and fail on
+    !> any schema containing a string column.
+    !!
+    !! Covers both string specifics, since the rank-1 and rank-2 forms had the defect independently,
+    !! and pins the other types alongside them so a future early return in any of them is caught
+    !! here rather than by a user.
+    subroutine test_zero_length_write_every_type(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/test_zero_length_every_type.parquet"
+        integer(int64) :: nrows
+        character(len=:), allocatable :: names(:)
+        integer(int32) :: no_i32(0)
+        integer(int64) :: no_i64(0)
+        real(real32) :: no_f32(0)
+        real(real64) :: no_f64(0)
+        logical :: no_bool(0)
+        character(len=6) :: no_str(0)
+        character(len=6) :: no_str_mat(2, 0)
+        type(parquet_date) :: no_date(0)
+        type(parquet_time) :: no_time(0)
+        type(parquet_timestamp) :: no_ts(0)
+
+        call schema%init(table="zero_len")
+        call schema%add_field("c_i32", "int32")
+        call schema%add_field("c_i64", "int64")
+        call schema%add_field("c_f32", "float32")
+        call schema%add_field("c_f64", "float64")
+        call schema%add_field("c_bool", "boolean")
+        call schema%add_field("c_str", "string", array_size=6)
+        call schema%add_field("c_strvec", "string", array_size=6, col_size=2)
+        call schema%add_field("c_date", "date")
+        call schema%add_field("c_time", "time[ms]")
+        call schema%add_field("c_ts", "timestamp[us]")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "c_i32", no_i32)
+        call parquet_write_column(writer, "c_i64", no_i64)
+        call parquet_write_column(writer, "c_f32", no_f32)
+        call parquet_write_column(writer, "c_f64", no_f64)
+        call parquet_write_column(writer, "c_bool", no_bool)
+        call parquet_write_column(writer, "c_str", no_str)
+        call parquet_write_column(writer, "c_strvec", no_str_mat)
+        call parquet_write_column(writer, "c_date", no_date)
+        call parquet_write_column(writer, "c_time", no_time)
+        call parquet_write_column(writer, "c_ts", no_ts)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_get_column_names(reader, names)
+        call parquet_close_reader(reader)
+
+        call check(error, nrows == 0_int64, "explicit zero-length writes must produce a 0-row file")
+        if (allocated(error)) return
+        call check(error, size(names) == 10, &
+            "every zero-length write must register its column, string and string-vector included")
+    end subroutine test_zero_length_write_every_type
+
     !> parquet_write_column_chunk converts a chunk's values to the schema's declared numeric type,
     !> exactly as parquet_write_column does for a whole column. Until this was implemented the
     !> chunked path required an EXACT type match, so swapping parquet_write_column for the streaming

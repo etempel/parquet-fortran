@@ -24,7 +24,14 @@ module parquet_strings
     ! library's: its two print procedures are solicited output, and verbosity="silent"
     ! governs those exactly as it governs %print_stat -- and, since threading arrived, the
     ! string-column thread cap, which is a setting for the same reason every other thread cap is.
-    use parquet_settings, only : parquet_output_is_suppressed, parquet_get_string_threads
+    !
+    ! It imports parquet_settings_BASE rather than parquet_settings, and that is load-bearing
+    ! rather than tidiness: parquet_settings imports parquet_bindings to mirror the C++-side knobs,
+    ! so importing it here would make a program whose only import is `use parquet_strings` fail to
+    ! link without the whole Arrow/Parquet C++ stack -- which is exactly the independence this
+    ! module exists to offer. The base module is a leaf. Enforced by
+    ! check_parquet_strings_stays_leaf (tools/check_source_conventions.py).
+    use parquet_settings_base, only : parquet_output_is_suppressed, parquet_get_string_threads
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads, omp_in_parallel
 #endif

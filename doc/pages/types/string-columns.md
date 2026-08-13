@@ -7,9 +7,13 @@ variable-length strings compactly, in the same Arrow-like layout Parquet uses fo
 `BYTE_ARRAY`/`STRING` columns. It is designed for tens to hundreds of millions of rows and
 multi-gigabyte payloads, with a minimal allocation count and good cache locality.
 
-It is an **independent module** at its core — `use parquet_strings` depends only on
-`iso_fortran_env` and `iso_c_binding`, nothing else in this library — but its `parquet_string_column`
-type is also wired directly into `parquet_read_column`/`parquet_write_column`/`parquet_read_column_chunk`/
+It is an **independent module** at its core — a program whose only import is `use parquet_strings`
+links without the Arrow/Parquet C++ stack. Beyond `iso_fortran_env` and `iso_c_binding` it reaches
+only `parquet_settings_base` (a leaf holding the two settings it honours: the `verbosity` its print
+procedures obey, and the thread cap described under
+[Threading inside one column](#threading-inside-one-column)) and `omp_lib` under `-fopenmp`. Its
+`parquet_string_column` type is also wired directly into
+`parquet_read_column`/`parquet_write_column`/`parquet_read_column_chunk`/
 `parquet_write_column_chunk` as an alternative to a padded `character(len=...)` array; see
 [Reading and writing compact string columns](#reading-and-writing-compact-string-columns) below.
 
@@ -20,8 +24,8 @@ both types (`parquet_string_column` and `parquet_string`) are re-exported from t
 every feature below (`find`/`contains`, the interop hooks, everything) is reachable through the
 types themselves once you have them in scope. A separate `use parquet_strings` is only needed if
 you want this module *without* the rest of the library — e.g. a project that wants compact string
-storage but not the Arrow/Parquet C++ dependency `parquet` (via `parquet_bindings`) pulls in;
-`parquet_strings` on its own depends on nothing but `iso_fortran_env`/`iso_c_binding`.
+storage but not the Arrow/Parquet C++ dependency `parquet` (via `parquet_bindings`) pulls in. That
+build really does link without Arrow, and a lint check keeps it that way.
 
 ## Why not an array of allocatable strings?
 
@@ -196,7 +200,8 @@ do i = 1, size(table)
 end do
 ```
 
-Handles are cheap (~16 bytes each) and, because they resolve lazily, they survive the column
+Handles are cheap (24 bytes each — a column pointer plus an index) and, because they resolve
+lazily, they survive the column
 growing/reallocating during the build loop. See
 [Handle lifetime rules](#handle-lifetime-rules) for exactly when a handle becomes invalid.
 
@@ -269,8 +274,9 @@ call col%build_from(values, is_null=mask)    ! mask entries become zero-width nu
 `values` is a `character(len=*)` array, so each element's trailing blanks are dropped — matching
 what `parquet_column%set_all`/`%append_values` on a string column have always done, and what they
 now use internally. Prefer these over a loop of `append_string` whenever the whole array is in
-hand: filling a 1 M-row column measured **65.2 ms → 10.6 ms**, because the per-element form
-re-derives the trim, re-checks capacity, and copies the payload through a temporary each time.
+hand: filling a million-row column this way measured **about six times faster**, because the
+per-element form re-derives the trim, re-checks capacity, and copies the payload through a
+temporary each time.
 `build_from` replaces the column's whole contents; `append_values` leaves what is already there
 alone. Both take an optional `is_null` mask of the same length as `values`. To trim a whole column that is already built, use `strip_all()` (both
 ends) or `trim_all()` (trailing only) — both operate in place and skip null elements:
@@ -378,6 +384,36 @@ This is the intended way to neutralize a handle before it goes stale (e.g. befor
 shifts indices, or before gathering it with `build_from` below) — see
 [Gathering handles into a column: build_from](#gathering-handles-into-a-column-build_from).
 
+## Bulk row-set operations
+
+`set`/`set_null`/`erase` above act on one element. Four operations act on the whole row set at
+once, each rebuilding the column in a single pass rather than repeating a per-element shift:
+
+```fortran
+call col%reindex(perm)          ! reorder: result element k is the old element perm(k)
+call col%delete_by_mask(keep)   ! keep only elements whose mask entry is .true., in order
+call col%gather(idx)            ! keep the listed elements, in the listed order; repeats allowed
+call col%append_nulls(n)        ! append n null elements, growing capacity once
+```
+
+**Prefer these to a loop.** `delete_by_mask` is the bulk counterpart of `erase`: deleting `m`
+elements one at a time costs O(m × nchars), this costs O(nchars) once. `append_nulls(n)` is
+`append_null` n times with one capacity growth instead of n.
+
+`reindex` validates `perm` completely before touching a buffer — length, range and no duplicates —
+so a bad permutation aborts with the column unchanged. `gather` checks only the range, deliberately:
+refusing repeats would need a seen-set sized by the column on every call, which is the cost this
+primitive exists to avoid. So `idx` may name an element more than once, and the result may be
+shorter than, as long as, or longer than the column it replaces. `append_nulls(0)` is a no-op; a
+negative count aborts.
+
+**All three of `reindex`, `delete_by_mask` and `gather` invalidate every outstanding handle** —
+see [Handle lifetime rules](#handle-lifetime-rules). All three are threaded on a large enough
+column, along with `build_from`, `strip_all`/`trim_all`, `to_character` and `statistics` — see
+[Threading inside one column](#threading-inside-one-column).
+
+`%empty()` is the obvious companion query: `.true.` when the column holds no rows.
+
 ## Ownership: clone, move, swap
 
 ```fortran
@@ -465,39 +501,10 @@ order) that is:
 
 That validation pass also **sizes** the result, so the destination is allocated once rather than
 grown per element, and each element's bytes are then copied straight out of its own source column.
-The whole call is one pass over the handles plus one over the gathered bytes; gathering 4 M handles
-runs at roughly 2.1 GB/s of gathered payload on an M1 Pro. An element gathered twice is copied
+The whole call is one pass over the handles plus one over the gathered bytes, so it runs at
+roughly memory-copy speed for the payload it gathers. An element gathered twice is copied
 twice — this is a gather, not a permutation, so the result may be shorter than, as long as, or
 longer than any of its sources.
-
-## Threading inside one column
-
-`%reindex` and `%reindex_trusted` split their work across threads when the column is large enough to
-be worth it. Nothing needs to be asked for — `parquet_string_threads()` reports what an operation
-would use here, and `parquet_set_string_threads(n)` caps it (see
-[Settings](../operating/settings.html#threads-inside-one-string-column)).
-
-Four things decide how many threads an operation uses, and the first three all decline toward serial:
-
-- **Inside your own OpenMP parallel region it stays serial**, deliberately — `T` threads each asking
-  for `T` more is slower than not threading at all, and a nested region is your business, not the
-  library's. This is the same rule sorting follows.
-- **A small payload stays serial.** The floor is measured in bytes of payload rather than rows,
-  because that is what has to be copied.
-- **Below four threads it stays serial**, which is less obvious and worth knowing: making a rebuild
-  splittable costs a restructure that is about 1.7x slower than the single pass it replaces, so two
-  or three threads cannot pay for themselves. The library declines rather than running the slower
-  shape.
-
-- **The automatic count is capped well below what OpenMP offers.** Past a certain thread count this
-  work stops scaling and starts losing ground — on a 384-logical-thread dual-socket machine, taking
-  the full count measured 18–40 % *worse* than the best available. If your machine wants more,
-  `parquet_set_string_threads(n)` is honoured above the default, bounded only by what OpenMP offers.
-
-**The result is byte-identical whatever the thread count** — same values, same offsets, same nulls.
-Threading here is purely a wall-clock control, never a change of answer. For calibration: roughly
-1.15x on an 8-core laptop, 1.6–2.7x on an 8-core desktop and 3.4–4.5x on a 192-core server, with
-larger columns gaining more than smaller ones on the same hardware.
 
 ## Capacity management
 
@@ -530,7 +537,7 @@ each element blank-padded to the longest element's length. It is a convenience e
 handing data to code that expects plain Fortran strings — **the memory cost is the point to watch,
 not the speed**: every row is widened to the longest element, so a column with one long outlier
 becomes far larger than the packed buffer it came from. The copy itself reads straight out of that
-buffer, at roughly 1.9 GB/s of source payload on an M1 Pro. A null element error stops unless you
+buffer at roughly memory-copy speed. A null element error stops unless you
 pass `null_value`:
 
 ```fortran
@@ -551,11 +558,47 @@ lazily, most column operations do **not** invalidate outstanding handles:
 | `set(i, …)` / `set_null(i)` | No (content of `i` changes; the handle to `i` stays valid) |
 | `get`, `view`, `view_slice`, comparisons, `find`, size queries, `print` | No (read-only) |
 | `erase(j)` | Handles at index `>= j` (the element is gone/shifted) |
+| `reindex(perm)` / `delete_by_mask(keep)` / `gather(idx)` | **Yes**, every handle — each rebuilds the whole column |
 | `clear` | **Yes** (the column is now empty) |
 | `move_from` / `swap` | **Yes** for handles into the emptied/swapped column |
 | `slice(first, last, dest)` | **Yes** for handles into `dest` (cleared first); handles into the source column are unaffected |
 | `build_from(handles)` (called as `self%build_from(...)`) | **Yes** for handles into `self` (cleared first) — and calling it with a handle that itself aliases `self` aborts rather than silently corrupting it, see [Gathering handles into a column: build_from](#gathering-handles-into-a-column-build_from) |
 | the column going out of scope / being finalized | **Yes** (dangling) |
+
+## Threading inside one column
+
+Seven operations split their work across threads when the column is large enough to be worth it —
+`%reindex`, `%gather`, `%delete_by_mask`, `%build_from`, `%strip_all`/`%trim_all`, `%to_character`
+and `%statistics`. Nothing needs to be asked for. `parquet_string_threads()` reports the ceiling
+your machine and settings allow — not what a given call will use, since an individual operation
+narrows that further by the rules below — and `parquet_set_string_threads(n)` caps it (see
+[Settings](../operating/settings.html#threads-inside-one-string-column)).
+
+Five things decide how many threads an operation uses, and the first four all decline toward serial:
+
+- **Inside your own OpenMP parallel region it stays serial**, deliberately — `T` threads each asking
+  for `T` more is slower than not threading at all, and a nested region is your business, not the
+  library's. This is the same rule sorting follows.
+- **A small payload stays serial.** The floor is measured in bytes of payload rather than rows,
+  because that is what has to be copied.
+- **Below four threads it stays serial**, which is less obvious and worth knowing: making a rebuild
+  splittable costs a restructure that is about 1.7x slower than the single pass it replaces, so two
+  or three threads cannot pay for themselves. The library declines rather than running the slower
+  shape.
+- **At most one thread per eight rows.** The validity bitmap packs eight rows to a byte, and thread
+  boundaries have to fall on byte boundaries so that no two threads ever read-modify-write the same
+  one. This is a correctness constraint rather than a tuning choice — it is what stops a split from
+  silently losing a null — and on a short column it is what makes the answer serial.
+
+- **The automatic count is capped well below what OpenMP offers.** Past a certain thread count this
+  work stops scaling and starts losing ground — on a 384-logical-thread dual-socket machine, taking
+  the full count measured 18–40 % *worse* than the best available. If your machine wants more,
+  `parquet_set_string_threads(n)` is honoured above the default, bounded only by what OpenMP offers.
+
+**The result is byte-identical whatever the thread count** — same values, same offsets, same nulls.
+Threading here is purely a wall-clock control, never a change of answer. For calibration: roughly
+1.15x on an 8-core laptop, 1.6–2.7x on an 8-core desktop and 3.4–4.5x on a 192-core server, with
+larger columns gaining more than smaller ones on the same hardware.
 
 ## Thread safety
 
@@ -586,6 +629,10 @@ same type's accessors, but not specific to it — is covered in the main
 | `append_from(src, i)` | amortized O(length), no allocation |
 | `find` | O(rows × avg length) |
 | `set` (different length), `set_null`, `erase`, `strip_all`, `trim_all`, `clone`, `to_character`, `shrink_to_fit` | O(N) |
+| `reindex(perm)`, `delete_by_mask(keep)` | O(nchars), one pass |
+| `gather(idx)` | O(selected chars), rebuilt into fresh buffers |
+| `append_nulls(n)` | amortized O(n), one capacity growth |
+| `empty` | O(1) |
 | `slice(first, last, dest)` | O(range length + range chars) |
 | `build_from(handles)` | O(sum of gathered elements' lengths) |
 | `move_from`, `swap`, `clear` | O(1) |

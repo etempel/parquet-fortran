@@ -52,6 +52,8 @@ contains
                 test_compact_threaded_equals_serial), &
             new_unittest("threaded delete_by_mask equals the serial delete_by_mask", &
                 test_delete_by_mask_threaded_equals_serial), &
+            new_unittest("threaded statistics equals the serial statistics", &
+                test_statistics_threaded_equals_serial), &
             new_unittest("the thread floor declines below its break-even", test_thread_break_even) &
             ]
     end subroutine collect_tests_string_parallel
@@ -150,6 +152,114 @@ contains
         call check(error, ever_threaded, &
             "negative control: at least one arm must actually have threaded, or this compares serial with serial")
     end subroutine test_reindex_threaded_equals_serial
+    !
+    !> **`%statistics` is threaded too, and it is the one whose wrong answer is quietest.**
+    !!
+    !! The other six threaded operations rebuild a column, so a bad split shows up as wrong bytes or
+    !! a wrong row count. This one only computes `min_len`/`max_len`, via an OpenMP `reduction` over
+    !! `thread_row_ranges` — so a mis-seeded `lo`/`hi` sentinel, or a range split that skipped a row,
+    !! returns a plausible number and corrupts nothing. Nothing downstream would notice.
+    !!
+    !! Same shape as its six siblings: one arm forced serial, one with the payload floor lowered so
+    !! it really threads, and `ever_threaded` as the **negative control** — without it a gate that
+    !! silently declined would make this compare the serial path against itself.
+    !!
+    !! **The fixture is the whole test, and the obvious one is worthless.** `build`'s lengths cycle
+    !! through a small set, so every length occurs hundreds of times and the extremes survive any
+    !! number of dropped rows — a deliberate "each thread skips its last row" mutation passed
+    !! against exactly that fixture. So this test instead gives the column a UNIQUE longest and a
+    !! UNIQUE shortest element and parks each one on a thread-range boundary, asking
+    !! `parquet_debug_string_row_ranges` where those boundaries actually fall rather than guessing.
+    !! Losing either row then changes the answer, and only in the threaded arm.
+    !!
+    !! Nulls are included, at a stride coprime with 8 so they land at every bit position within a
+    !! validity byte: the loop reads `bit_valid` per row and skips nulls, so a split that lost a row
+    !! would most easily lose it at a byte boundary. The two planted extremes are kept non-null.
+    subroutine test_statistics_threaded_equals_serial(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        integer(int64) :: n, s_min, s_max, p_min, p_max, s_rows, p_rows, s_nulls, p_nulls
+        integer(int64) :: stride, k
+        integer(int64), allocatable :: rlo(:), rhi(:)
+        integer :: threaded_n, t
+        logical :: ever_threaded
+        !
+        ever_threaded = .false.
+        do stride = 3_int64, 7_int64, 2_int64
+            do n = 1000_int64, 1005_int64
+                call build(col, n, stride)
+                !
+                ! Where would the threaded arm split this column? Plant the unique extremes on
+                ! those boundaries, so a range that runs one row short loses one of them.
+                call parquet_set_string_threads(0)
+                call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                threaded_n = parquet_debug_string_bulk_threads(col)
+                if (threaded_n > 1) then
+                    ever_threaded = .true.
+                    call parquet_debug_string_row_ranges(n, threaded_n, rlo, rhi)
+                    do t = 1, threaded_n
+                        if (rlo(t) > rhi(t)) cycle          ! a trailing thread may get no rows
+                        if (t == 1) then
+                            call col%set(rhi(t), repeat("z", 97))   ! unique longest, at a boundary
+                        else if (t == 2) then
+                            call col%set(rhi(t), "")                ! unique shortest, at the next
+                        end if
+                    end do
+                    ! Both planted rows must be readable, not null, or they cannot be the extremes.
+                    do t = 1, min(2, threaded_n)
+                        if (rlo(t) <= rhi(t)) then
+                            if (col%is_null(rhi(t))) call col%set(rhi(t), "q")
+                        end if
+                    end do
+                end if
+                !
+                call parquet_debug_set_string_min_bytes(0_int64)
+                call parquet_set_string_threads(1)
+                call col%statistics(nrows=s_rows, n_null=s_nulls, min_len=s_min, max_len=s_max)
+                !
+                call parquet_set_string_threads(0)
+                call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+                call col%statistics(nrows=p_rows, n_null=p_nulls, min_len=p_min, max_len=p_max)
+                !
+                call parquet_debug_set_string_min_bytes(0_int64)
+                call check(error, s_min == p_min .and. s_max == p_max, &
+                    "threaded statistics must report the same min_len/max_len as the serial one")
+                if (allocated(error)) return
+                call check(error, s_rows == p_rows .and. s_nulls == p_nulls, &
+                    "threaded statistics must report the same row and null counts as the serial one")
+                if (allocated(error)) return
+                ! The planted maximum must actually be the maximum, or the fixture has stopped
+                ! doing its job and the comparison above proves nothing.
+                if (threaded_n > 1) then
+                    call check(error, s_max == 97_int64, &
+                        "fixture check: the planted unique longest element must be the column maximum")
+                    if (allocated(error)) return
+                end if
+                k = 0_int64
+            end do
+        end do
+        call check(error, ever_threaded, &
+            "negative control: at least one arm must actually have threaded, or this compares serial with serial")
+        if (allocated(error)) return
+        !
+        ! An ALL-NULL column is the one input where the reduction's `hi = -1` seed is load-bearing:
+        ! no element is ever visited, so the post-loop `hi < 0` branch is the only thing that turns
+        ! the untouched `lo = huge(int64)` into 0. Found by mutation — re-seeding `hi` to 0 leaves
+        ! every other case identical and makes min_len report huge(int64) here.
+        call col%clear()
+        do k = 1_int64, 1000_int64
+            call col%append_null()
+        end do
+        call parquet_debug_set_string_min_bytes(TINY_FLOOR)
+        call parquet_set_string_threads(0)
+        call col%statistics(nrows=p_rows, n_null=p_nulls, min_len=p_min, max_len=p_max)
+        call parquet_debug_set_string_min_bytes(0_int64)
+        call check(error, p_min == 0_int64 .and. p_max == 0_int64, &
+            "an all-null column must report min_len/max_len of 0, not the reduction's seed")
+        if (allocated(error)) return
+        call check(error, p_rows == 1000_int64 .and. p_nulls == 1000_int64, &
+            "an all-null column must still report its row and null counts")
+    end subroutine test_statistics_threaded_equals_serial
     !
     !> **The validity bitmap is the one thing a wrong split corrupts silently.**
     !!

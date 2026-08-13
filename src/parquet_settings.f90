@@ -35,6 +35,11 @@ module parquet_settings
     use iso_c_binding, only: c_int, c_int64_t
     use parquet_bindings, only: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity, &
         parquet_push_output_settings, parquet_push_performance_settings
+    ! The two knobs a no-C++-dependency module has to read live in this leaf module rather than
+    ! here, so that reading them does not import parquet_bindings transitively. See its header.
+    use parquet_settings_base, only: cfg_verbosity, cfg_string_threads, &
+        verb_normal, verb_silent, verb_errors_only, &
+        parquet_output_is_suppressed, parquet_get_string_threads
     implicit none
     private
     !
@@ -104,12 +109,12 @@ module parquet_settings
     character(len=12), parameter :: parquet_valid_compressions(6) = [character(len=12) :: &
         "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4"]
     !
-    !> The verbosity levels, ordered by how much they suppress. Internal codes: the public surface
-    !! spells them as the tokens "normal"/"silent"/"errors_only", following the same convention as
-    !! `compression=` and `pf_rank(..., method=)`.
-    integer, parameter :: verb_normal = 0      !! everything prints (the factory default).
-    integer, parameter :: verb_silent = 1      !! informational and solicited output goes quiet.
-    integer, parameter :: verb_errors_only = 2 !! warnings go quiet too; only errors survive.
+    !> The verbosity levels and `cfg_verbosity`/`cfg_string_threads` themselves live in
+    !! `parquet_settings_base` (imported above), not here. That module is a leaf with no
+    !! `parquet_bindings` import, which is what lets `parquet_strings` read those two values without
+    !! dragging the Arrow/Parquet C++ stack into a program that only wanted compact string storage.
+    !! Everything else about them is unchanged: this module owns their public setters and getters,
+    !! writes them directly, and is still the single writer. See that module's own header.
     !
     !> The accepted tokens for the two enum knobs, as DATA rather than as a literal inside each
     !! error message.
@@ -174,11 +179,8 @@ module parquet_settings
     !! many as OpenMP offers, never more than the table has columns). Read only in
     !! src/parquet_tables_parallel.f90, which owns the table layer's OpenMP plumbing.
     integer, save :: cfg_table_threads = 0
-    !> Cap on the threads one `parquet_string_column` bulk operation may use internally. `0` means
-    !! "auto" (as many as OpenMP offers). Read only by `parquet_string_threads`
-    !! (src/parquet_strings.f90), deliberately, for the same reason cfg_sort_threads has a single
-    !! reader: one question asked in one place cannot give two answers (feature_risks.md Risk-40).
-    integer, save :: cfg_string_threads = 0
+    !> (`cfg_string_threads` lives in parquet_settings_base -- see the note at the verbosity levels
+    !! above. It is written by parquet_set_string_threads below and read by parquet_string_threads.)
     !> Default compression codec for parquet_open_writer. Empty means "never set", which is what
     !! distinguishes a factory default from a deliberate choice of "zstd" -- see
     !! parquet_resolve_writer_compression for why that distinction is load-bearing.
@@ -187,9 +189,7 @@ module parquet_settings
     integer, save :: cfg_default_compression_level = level_codec_default
     !> Default for parquet_open_writer/parquet_open_reader's `use_threads=`.
     logical, save :: cfg_default_use_threads = .true.
-    !> How much the library prints. Read only by the three emit channels below and by
-    !! parquet_output_is_suppressed, which is what the solicited printers ask.
-    integer, save :: cfg_verbosity = verb_normal
+    !> (`cfg_verbosity` lives in parquet_settings_base too, for the same reason.)
     !> Which stream the library's own messages go to. Read only by the emit channels.
     integer, save :: cfg_message_stream = stream_stdout
     !
@@ -326,14 +326,11 @@ contains
         cfg_string_threads = n
     end subroutine parquet_set_string_threads
 
-    !> Reports the string-column thread cap, or 0 if left automatic. This is the raw setting, not the
-    !> resolved count -- ask `parquet_string_threads()` for the number a bulk operation would
-    !> actually use here, which additionally accounts for the OpenMP environment and for being
-    !> inside a parallel region.
-    integer function parquet_get_string_threads() result(n)
-
-        n = cfg_string_threads
-    end function parquet_get_string_threads
+    ! parquet_get_string_threads is defined in parquet_settings_base and re-exported by the
+    ! `public ::` line above. It reports the raw setting (0 if left automatic), not the resolved
+    ! count -- ask `parquet_string_threads()` for the number a bulk operation would actually use
+    ! here, which additionally accounts for the OpenMP environment and for being inside a parallel
+    ! region.
 
     !> Sets the cap on how many threads a `parquet_table`'s row-structural mutation may use to
     !> rewrite its columns concurrently -- `%sort_by`, `%filter_rows`, `%top_n`, and `%delete_rows`
@@ -763,16 +760,11 @@ contains
         enabled = cfg_statistics_prescreen
     end function parquet_get_statistics_prescreen
 
-    !> Whether output a caller explicitly asked for should be skipped -- what every solicited print
-    !> procedure (`%print_stat`, `%print_schema_info`, `parquet_string_column`'s printers) asks
-    !> before writing anything.
-    !>
-    !> Kept separate from the emit channels below because those procedures format their own output
-    !> over many lines and to a caller-chosen unit; all they need from this module is the yes/no.
-    logical function parquet_output_is_suppressed() result(quiet)
-
-        quiet = cfg_verbosity >= verb_silent
-    end function parquet_output_is_suppressed
+    ! parquet_output_is_suppressed is defined in parquet_settings_base and re-exported by the
+    ! `public ::` line above -- what every solicited print procedure (`%print_stat`,
+    ! `%print_schema_info`, `parquet_string_column`'s printers) asks before writing anything. It
+    ! lives there rather than here so that parquet_strings can ask it without importing
+    ! parquet_bindings; see that module's header.
 
     !> Emits one informational remark -- something worth mentioning that is not a warning about the
     !> data. Suppressed from "silent" downward.

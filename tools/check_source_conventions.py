@@ -896,6 +896,61 @@ def check_single_cpp_translation_unit():
     ]
 
 
+def check_parquet_strings_stays_leaf():
+    """`parquet_strings` must not reach `parquet_bindings`, however indirectly.
+
+    The module is documented (doc/pages/types/string-columns.md) as usable without the
+    Arrow/Parquet C++ stack: a project that wants compact string storage and nothing else can
+    depend on it alone. That promise is a property of the `use` GRAPH, not of this file's own
+    imports, and it has already been broken once by a one-line import that looked harmless --
+    `use parquet_settings` (for the verbosity flag and the thread cap), where `parquet_settings`
+    imports `parquet_bindings` in order to mirror the C++-side knobs.
+
+    **Nothing catches that.** It compiles cleanly, every test passes, and the whole library links
+    because the library obviously has Arrow. The failure appears only in a downstream project that
+    depends on this module alone, as an undefined-symbol wall naming `create_parquet_reader` and
+    the rest of parquet_wrapper.cpp -- which reads as a build misconfiguration rather than as a
+    dependency defect, so it is unlikely to be reported back as one.
+
+    So: walk the `use` graph from src/parquet_strings.f90 and fail if parquet_bindings is
+    reachable. The fix, if this fires, is not to delete the import but to move whatever is needed
+    into `parquet_settings_base` (a leaf holding the settings state that a no-C++ module may read)
+    and import that instead -- see its header.
+    """
+    use_re = re.compile(r"^\s*use\s*(?:,\s*intrinsic\s*)?(?:::)?\s*([A-Za-z_]\w*)", re.M)
+    seen, queue, edges = set(), ["parquet_strings"], {}
+    while queue:
+        mod = queue.pop()
+        if mod in seen:
+            continue
+        seen.add(mod)
+        path = SRC / (mod + ".f90")          # filename == unit name is enforced elsewhere
+        if not path.is_file():
+            continue                          # intrinsic or external module: nothing to walk
+        for used in use_re.findall(path.read_text()):
+            used = used.lower()
+            edges.setdefault(mod, set()).add(used)
+            queue.append(used)
+    if "parquet_bindings" not in seen:
+        return []
+    # Reconstruct one shortest path for the message -- "it is reachable" is not actionable on its
+    # own, and the offending edge is usually several modules away from parquet_strings.
+    trail, frontier = {"parquet_strings": ["parquet_strings"]}, ["parquet_strings"]
+    while frontier:
+        mod = frontier.pop(0)
+        for used in sorted(edges.get(mod, ())):
+            if used not in trail:
+                trail[used] = trail[mod] + [used]
+                frontier.append(used)
+    chain = " -> ".join(trail.get("parquet_bindings", ["parquet_strings", "parquet_bindings"]))
+    return [
+        "src/parquet_strings.f90: reaches parquet_bindings through %s, so a program whose only "
+        "import is `use parquet_strings` can no longer link without the Arrow/Parquet C++ stack -- "
+        "the independence doc/pages/types/string-columns.md promises. Move whatever is needed into "
+        "parquet_settings_base (a leaf) and import that instead" % chain
+    ]
+
+
 def check_no_per_element_shared_ptr():
     """A per-ELEMENT helper in parquet_wrapper.cpp must take `const arrow::Array *`, never a
     `const std::shared_ptr<arrow::Array> &`.
@@ -1423,6 +1478,7 @@ CHECKS = (
     ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
     ("every setting has an environment variable", check_env_covers_every_setting),
+    ("parquet_strings does not reach parquet_bindings", check_parquet_strings_stays_leaf),
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),

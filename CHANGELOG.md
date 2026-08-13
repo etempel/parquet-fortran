@@ -172,8 +172,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PARQUET_FORTRAN_STRING_THREADS` reaches it from the environment. **What currently uses it:**
   `%reindex`/`%reindex_trusted` — and so `parquet_column`'s string reindex and
   `parquet_table%sort_by` on a string column — plus `%to_character`, `%build_from`, `%gather`,
-  `%delete_by_mask` and `%trim_all`/`%strip_all`, in each case only when not already inside a
-  parallel region. On an 8-core M1 Pro, at 4 M elements: `%to_character` **3.9x**,
+  `%delete_by_mask`, `%trim_all`/`%strip_all` and `%statistics`, in each case only when not already
+  inside a parallel region. On an 8-core M1 Pro, at 4 M elements: `%to_character` **3.9x**,
   `%delete_by_mask` **3.5x**, `%trim_all` **1.9x**, `%build_from` **1.4x**, `%gather` **1.3x**.
   **The gain scales with both the machine and the column**, measured for `%reindex` on three:
   **1.15x** on that M1 Pro, **1.6-2.7x** on an 8-core i7, and **3.4-4.5x** on a 192-core
@@ -182,7 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing is slower than before whatever the setting. Left alone, the automatic count is capped
   rather than taken as `omp_get_max_threads()`: past a certain point this work stops scaling and
   starts losing ground, and on a 384-logical-thread machine the uncapped answer was 18-40 % *worse*
-  than the best available. Setting it explicitly overrides that ceiling.
+  than the best available. Setting it explicitly overrides that ceiling. **Honouring the cap costs
+  `parquet_strings` none of its independence**: the two settings it reads (this one and `verbosity`)
+  live in a leaf `parquet_settings_base` module that imports nothing of the library's, so a program
+  whose only import is `use parquet_strings` still links without the Arrow/Parquet C++ stack —
+  taking them from `parquet_settings` itself would not, since that module mirrors knobs to C++.
 - **`parquet_reader_adopt_transform(reader, source)`** gives one reader the read-time transform
   another has already worked out — its `filter=`/`sample_fraction=` row mask and its `sort_by=`
   permutation — instead of making it derive the same thing from the same file again. This is for the

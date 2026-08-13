@@ -599,6 +599,17 @@ contains
                         schema%cinfo%col(i)%data_type, &
                         schema%cinfo%col(i)%array_size, &
                         schema%cinfo%col(i)%col_size )
+                    ! A protected column may hold no Null at all (parquet_check_protected), so
+                    ! its Arrow field is written NON-nullable. The C++ side is told here, once,
+                    ! rather than at each write: for the mask-carrying kinds an all-.true. mask is
+                    ! erased before the append anyway, but a temporal column and a
+                    ! parquet_string_column carry their null state inside the element with no mask
+                    ! to erase, and protection is the only signal that can make their fields
+                    ! non-nullable. Registered under the OUTPUT name, like every other C++-side
+                    ! column registration above.
+                    if (schema%cinfo%col(i)%is_protected) then
+                        call parquet_writer_set_protected_column(writer%handle, trim(col_out_name)//char(0))
+                    end if
                 end if
             end do
 
@@ -935,18 +946,30 @@ contains
         text = trim(adjustl(buf))
     end subroutine parquet_qc_format_int
     !> Errors out if `name`'s column is listed under extra: protected_cols:
-    !> (see parquet_parse_protected_cols) and `is_valid_flat` contains any
-    !> .false. entry. A no-op for a schema-less writer or an unlisted column.
-    subroutine parquet_check_protected(writer, name, is_valid_flat)
+    !> (see parquet_parse_protected_cols, or schema%set_protected) and `is_valid_flat` contains
+    !> any .false. entry. A no-op for a schema-less writer or an unlisted column.
+    !>
+    !> Also reports, in the optional `protected`, whether this column is protected at all --
+    !> which callers use to ERASE an all-.true. mask before writing. A protected column may hold
+    !> no Null, so a mask that survived the check above says nothing; dropping it means no
+    !> validity buffer is built and the column's Arrow field comes out non-nullable through the
+    !> ordinary mask-presence rule, instead of needing a precedence rule between "protected" and
+    !> "a mask was passed". Passing an all-.true. mask for a protected column is explicitly
+    !> allowed -- declaring a column protected must not make the is_valid keyword unusable.
+    subroutine parquet_check_protected(writer, name, is_valid_flat, protected)
         type(parquet_writer), intent(in) :: writer !! open (schema-enforced) writer.
         character(len=*), intent(in) :: name !! column name.
         logical, intent(in) :: is_valid_flat(:) !! flattened validity mask for this write call.
+        logical, intent(out), optional :: protected !! .true. if this column is protected (mask may be erased).
         integer :: idx
 
+        if (present(protected)) protected = .false.
         if (.not. writer%is_schema_enforced) return
         idx = parquet_get_defined_column_index(writer, name)
         if (idx == 0) return
-        if (writer%all_columns(idx)%is_protected .and. .not. all(is_valid_flat)) then
+        if (.not. writer%all_columns(idx)%is_protected) return
+        if (present(protected)) protected = .true.
+        if (.not. all(is_valid_flat)) then
             error stop "parquet_write_column: column '" // trim(name) // &
                 "' is protected (extra: protected_cols:) and cannot contain Null values"
         end if

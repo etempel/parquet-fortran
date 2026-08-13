@@ -440,6 +440,25 @@ contains
         this%col(idx)%col_size = col_size
     end procedure set_col_size
 
+    module procedure set_protected
+        integer :: idx
+        logical :: want
+
+        want = .true.
+        if (present(protected)) want = protected
+
+        idx = this%get_column_index(name)
+        ! Relaxing a protection the MAML declared is permitted but never silent: someone wrote
+        ! protected_cols: on purpose, and a program overriding that should say so in its own
+        ! output. A warning, not an abort -- see the interface's doc-comment in parquet_core.f90.
+        if (this%col(idx)%is_protected .and. .not. want) then
+            call parquet_emit_warning("set_protected: column '" // trim(name) // &
+                "' was declared protected by its MAML (extra: protected_cols:) and is being " // &
+                "unprotected in code; it may now be written with Null values")
+        end if
+        this%col(idx)%is_protected = want
+    end procedure set_protected
+
     module procedure set_array_size
         integer :: idx
         logical :: do_force

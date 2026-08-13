@@ -56,7 +56,8 @@ module parquet_bindings
     public :: parquet_reader_get_column_count, parquet_reader_get_column_name_length
     public :: parquet_reader_get_column_name, parquet_reader_release_column
     public :: parquet_reader_prefetch_columns, parquet_reader_prefetch_all_columns, parquet_reader_has_column
-    public :: parquet_reader_get_column_type_name
+    public :: parquet_reader_get_column_type_name, parquet_reader_get_column_nullable
+    public :: parquet_writer_set_protected_column
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
     public :: parquet_reader_has_chunk_reads
     public :: c_reader_set_sort, parquet_reader_has_sort
@@ -592,6 +593,28 @@ module parquet_bindings
             character(kind=c_char) :: buf(*)
             integer(c_long_long), value :: buf_len
             integer(c_long_long) :: recognized
+        end function
+
+        !> Declares `name` (a column's OUTPUT name) protected on this writer, so its
+        !> Arrow field is built non-nullable on every write path. Pushed once per
+        !> protected column by parquet_open_writer, before any write.
+        subroutine parquet_writer_set_protected_column(writer, name) &
+                bind(C, name="parquet_writer_set_protected_column")
+            import
+            type(c_ptr), value :: writer !! opaque writer handle.
+            character(kind=c_char) :: name(*) !! null-terminated output column name.
+        end subroutine
+
+        !> Returns 1 if `name`'s stored Arrow field is declared nullable, 0 if not.
+        !> Schema-only (reads no column data). A vector column reports its CHILD
+        !> element field's flag, not the outer list field's (which is always
+        !> non-nullable); a dotted struct path reports the leaf's own flag.
+        function parquet_reader_get_column_nullable(reader, name) &
+                bind(C, name="parquet_reader_get_column_nullable") result(nullable)
+            import
+            type(c_ptr), value :: reader !! opaque reader handle.
+            character(kind=c_char) :: name(*) !! null-terminated column name (may be a dotted struct path).
+            integer(c_long_long) :: nullable !! 1 if the field is nullable, 0 if not.
         end function
 
         !> Validates and applies a packed row filter to `reader`; returns

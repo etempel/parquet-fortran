@@ -659,6 +659,12 @@ contains
                 test_write_protected_temporal_null_aborts), &
             new_unittest("an %append_null in a protected parquet_string_column aborts", &
                 test_write_protected_string_column_null_aborts), &
+            new_unittest("dropping an is_valid mask after the first row group aborts", &
+                test_chunk_mask_dropped_after_first_row_group_aborts), &
+            new_unittest("adding an is_valid mask after an unmasked first row group aborts", &
+                test_chunk_mask_added_after_first_row_group_aborts), &
+            new_unittest("schema%set_protected on an unknown column aborts", &
+                test_set_protected_unknown_column_aborts), &
             new_unittest("qc: min value that does not parse as a number aborts", &
                 test_validate_qc_min_not_numeric_aborts), &
             new_unittest("qc: max value that does not parse as a number aborts", &
@@ -1149,8 +1155,8 @@ contains
                 test_compact_string_write_requires_scalar_column_aborts), &
             new_unittest("compact string chunk write into a vector (col_size>1) schema column aborts", &
                 test_compact_string_write_chunk_requires_scalar_column_aborts), &
-            new_unittest("reading a STRING_VIEW column into a compact parquet_string_column aborts", &
-                test_string_view_compact_read_unsupported_aborts), &
+            new_unittest("a STRING_VIEW column reads into a compact parquet_string_column", &
+                test_string_view_compact_read), &
             new_unittest("parquet_date set with an invalid month aborts", &
                 test_temporal_date_set_invalid_month_aborts), &
             new_unittest("parquet_date set with an invalid day aborts", &
@@ -2554,13 +2560,19 @@ contains
             required_stderr="a parquet_string_column write requires a scalar (col_size=1) column")
     end subroutine test_compact_string_write_chunk_requires_scalar_column_aborts
 
-    subroutine test_string_view_compact_read_unsupported_aborts(error)
+    !> A STRING_VIEW column read into a compact parquet_string_column round-trips: values, the
+    !> null, and the row count. This test asserted the OPPOSITE until the compact path learned to
+    !> convert a view array to large_utf8 first -- so it is converted rather than deleted, which is
+    !> what its own former doc-comment could not tell anyone to do, since the rule requiring a
+    !> refusal test to say what replaces it post-dated it.
+    !>
+    !> The scenario asserts by error stop, so a wrong value shows up here as a non-zero exit.
+    subroutine test_string_view_compact_read(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "string_view_compact_read_unsupported", &
-            expect_abort=.true., &
-            failure_message="reading a STRING_VIEW column into a compact parquet_string_column was expected to abort", &
-            required_stderr="STRING_VIEW columns are not supported by this compact buffer read")
-    end subroutine test_string_view_compact_read_unsupported_aborts
+
+        call check_scenario_exit_status(error, "string_view_compact_read", expect_abort=.false., &
+            failure_message="a STRING_VIEW column did not round-trip into a compact parquet_string_column")
+    end subroutine test_string_view_compact_read
 
     subroutine test_ok_scenario_exits_cleanly(error)
         type(error_type), allocatable, intent(out) :: error
@@ -5527,6 +5539,39 @@ contains
             failure_message="an %append_null in a protected parquet_string_column was expected to error stop", &
             required_stderr="is protected (extra: protected_cols:) and cannot contain Null values")
     end subroutine test_write_protected_string_column_null_aborts
+
+    !> A streamed column's nullability is fixed by its first row group, so the masked/unmasked
+    !> form must not change afterwards. The two directions get separate scenarios and separate
+    !> stderr assertions because they fail for different reasons and the messages say so --
+    !> asserting only the exit status would let one implementation satisfy both while handling
+    !> only one.
+    subroutine test_chunk_mask_dropped_after_first_row_group_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "chunk_mask_dropped_after_first_row_group", &
+            expect_abort=.true., &
+            failure_message="dropping an is_valid mask after the first row group was expected to abort", &
+            required_stderr="this row group passes no is_valid mask, but the first row group did")
+    end subroutine test_chunk_mask_dropped_after_first_row_group_aborts
+
+    !> The direction that would otherwise write a Null into a field declared non-nullable.
+    subroutine test_chunk_mask_added_after_first_row_group_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "chunk_mask_added_after_first_row_group", &
+            expect_abort=.true., &
+            failure_message="adding an is_valid mask after an unmasked first row group was expected to abort", &
+            required_stderr="this row group passes an is_valid mask, but the first row group did not")
+    end subroutine test_chunk_mask_added_after_first_row_group_aborts
+
+    !> A typo in schema%set_protected must not silently protect nothing.
+    subroutine test_set_protected_unknown_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "set_protected_unknown_column", expect_abort=.true., &
+            failure_message="schema%set_protected on an unknown column was expected to abort", &
+            required_stderr="no_such")
+    end subroutine test_set_protected_unknown_column_aborts
 
     subroutine test_validate_qc_min_not_numeric_aborts(error)
         type(error_type), allocatable, intent(out) :: error

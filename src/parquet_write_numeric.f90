@@ -811,12 +811,14 @@ contains
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         integer(int32), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: nkeep
         logical :: masked
 
         call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -834,8 +836,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
@@ -856,12 +862,14 @@ contains
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         integer(int64), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: nkeep
         logical :: masked
 
         call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -879,8 +887,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
@@ -901,12 +913,14 @@ contains
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         real(real32), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: nkeep
         logical :: masked
 
         call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -924,8 +938,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
@@ -946,12 +964,14 @@ contains
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         real(real64), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: nkeep
         logical :: masked
 
         call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -969,8 +989,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
@@ -996,6 +1020,7 @@ contains
         logical, allocatable :: row_mask(:), elem_mask(:)
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
@@ -1003,6 +1028,7 @@ contains
         logical :: masked
 
         call parquet_writer_whole_column_mask(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -1028,8 +1054,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
         call parquet_check_row_count(writer, name, nkeep)
@@ -1055,12 +1085,14 @@ contains
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         integer(int32), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: nkeep
         logical :: masked
 
         call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -1078,8 +1110,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
@@ -1102,12 +1138,14 @@ contains
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         integer(int64), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: nkeep
         logical :: masked
 
         call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -1125,8 +1163,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
@@ -1149,12 +1191,14 @@ contains
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         real(real32), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: nkeep
         logical :: masked
 
         call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -1172,8 +1216,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
@@ -1196,12 +1244,14 @@ contains
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         real(real64), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         integer(int64) :: nkeep
         logical :: masked
 
         call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -1219,8 +1269,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         if (writer%qc .and. writer%is_schema_enforced) call parquet_check_qc_numeric(writer, name, vals, vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
@@ -1242,6 +1296,7 @@ contains
         logical, allocatable :: row_mask(:), elem_mask(:)
         logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
+        logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
@@ -1249,6 +1304,7 @@ contains
         logical :: masked
 
         call parquet_check_row_group_row_count(writer, name, nrows, row_mask, masked)
+        protected = .false.
         nullify(vmask)
         if (masked) then
             elem_mask = parquet_mask_expand_block(row_mask, asize)
@@ -1274,8 +1330,12 @@ contains
         end if
 
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
+            ! A protected column's mask is all-.true. by the check above, so it carries no
+            ! information -- drop it, and the write proceeds exactly as an unmasked one (no
+            ! validity buffer built, field non-nullable). See parquet_check_protected.
+            if (protected) nullify(vmask)
         end if
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
         call parquet_chunk_mark_written_if_first(writer, name)

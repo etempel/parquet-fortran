@@ -370,6 +370,23 @@ extern "C"
 		// Cleared by parquet_new_row_group, consumed and cleared again by
 		// parquet_finish_row_group.
 		std::unordered_map<int, std::shared_ptr<arrow::Array>> pending_chunk_arrays;
+
+		// --- Nullability state for the streaming path (see resolve_chunk_nullability) ---
+		//
+		// A streamed column's Arrow field is fixed when the first row group locks the file's
+		// schema, so its nullability has to be decided from that first chunk alone. The rule is
+		// PRESENCE, not values: the field is nullable iff the first chunk carried an is_valid
+		// mask, whatever that mask said. This map records that answer per column index, and every
+		// later chunk for the same column is checked against it (Rule 2).
+		std::unordered_map<size_t, bool> chunk_mask_present;
+		// Output names of the columns this writer's schema declares protected
+		// (extra: protected_cols:, or schema%set_protected). Pushed once by
+		// parquet_writer_set_protected_column at open time, before any write. A protected column
+		// may hold no Null at all -- enforced Fortran-side, before any of this -- so its field is
+		// built NON-nullable on every path, including the two whose nulls live in the element
+		// rather than in a mask (temporal, and a parquet_string_column) and which are otherwise
+		// unconditionally nullable.
+		std::unordered_set<std::string> protected_columns;
 	};
 
 	// One column's read-time QC declaration, parsed on the Fortran side
@@ -1298,9 +1315,20 @@ extern "C"
 		});
 	}
 
-	// arrow::compute::Filter (Arrow 24) has no "array_filter" kernel for arrow::Type::STRING_VIEW
+	// Casts a STRING_VIEW array to arrow::large_utf8(), returning every other type unchanged.
+	// Two callers need it, for the same underlying reason -- a view array's values are inlined or
+	// spread across a variable number of data buffers, so it exposes neither a single offsets
+	// array nor a single contiguous data buffer:
+	//
+	//   the row filter, because arrow::compute::Filter (Arrow 24) has no "array_filter" kernel for
+	//   arrow::Type::STRING_VIEW
 	// at all -- confirmed via NotImplementedError ("Function 'array_filter' has no kernel
-	// matching input types (string_view, bool)"). Since every read-side call site already treats
+	// matching input types (string_view, bool)");
+	//
+	//   and the compact parquet_string_column read, whose whole point is handing those two buffers
+	//   straight to Fortran (see extract_string_buffers/is_offset_string_type).
+	//
+	// Since every read-side call site already treats
 	// STRING_VIEW identically to STRING/LARGE_STRING via is_string_like_type/
 	// make_string_like_accessor, working around this Arrow gap by casting to arrow::large_utf8()
 	// first (rather than teaching every filter call site about STRING_VIEW specifically) is
@@ -1311,11 +1339,42 @@ extern "C"
 	// the cell became "large_string" once a filter was active; that was wrong, and was checked by
 	// running print_stat on a filtered STRING_VIEW fixture. Returns `array` unchanged for every
 	// other type.
-	static arrow::Result<std::shared_ptr<arrow::Array>> coerce_for_filter_kernel(const std::shared_ptr<arrow::Array> &array)
+	static arrow::Result<std::shared_ptr<arrow::Array>> coerce_string_view_to_offset_string(const std::shared_ptr<arrow::Array> &array)
 	{
 		if (array->type_id() != arrow::Type::STRING_VIEW) return array;
 		ARROW_ASSIGN_OR_RAISE(auto cast_datum, arrow::compute::Cast(array, arrow::large_utf8()));
 		return cast_datum.make_array();
+	}
+
+	// Whole-column half of the STRING_VIEW conversion: casts if needed, and REPLACES the cached
+	// array with the result so a second compact read of the same column pays nothing. Safe against
+	// every other cache consumer -- they reach a string column through make_string_like_accessor,
+	// which handles LARGE_STRING identically, and the footer-based null screen does not read the
+	// cache at all. parquet_get_column_type is unaffected either way: it resolves against the
+	// file's own schema, so it still answers "string".
+	//
+	// Returns `array` untouched for every other type, and for a dotted struct path, whose array is
+	// freshly built by unwrap_struct_path and deliberately not in the cache (see
+	// get_single_chunk_array) -- there the caller's own pin is what keeps it alive.
+	static std::shared_ptr<arrow::Array> recache_coerced_string_view(ParquetReaderHandle *reader_handle,
+		const char *name, const std::shared_ptr<arrow::Array> &array, const char *context)
+	{
+		if (array->type_id() != arrow::Type::STRING_VIEW) return array;
+		ensure_compute_initialized();
+		auto coerced = coerce_string_view_to_offset_string(array);
+		if (!coerced.ok())
+		{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on an already-decoded array.
+			report_fatal_error(context, std::string("failed to convert a string_view column for reading: ") + name);
+		}
+		// GCOVR_EXCL_STOP
+		auto result = coerced.ValueOrDie();
+		auto idx = reader_handle->schema->GetFieldIndex(name);
+		if (idx >= 0)
+		{
+			auto it = reader_handle->column_cache.find(idx);
+			if (it != reader_handle->column_cache.end() && it->second == array) it->second = result;
+		}
+		return result;
 	}
 
 	// Reads `leaf_indices` (Parquet's flat leaf-schema indices, the convention ReadTable/
@@ -1360,7 +1419,7 @@ extern "C"
 	{
 		if (!reader_handle->live_mask && !reader_handle->sort_perm) return array;
 		ensure_compute_initialized();
-		auto coerced = coerce_for_filter_kernel(array);
+		auto coerced = coerce_string_view_to_offset_string(array);
 		if (!coerced.ok())
 		{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on already-validated input
 			throw std::runtime_error(coerced.status().ToString());
@@ -3259,16 +3318,55 @@ extern "C"
 		return xml.str();
 	}
 
-	// `nullable` only affects the scalar (col_size <= 1) case: the outer
-	// field there is the only place a Null can ever land for a scalar
-	// column, so it must say so in the schema whenever the caller actually
-	// wrote one (see has_any_null). For array/vector columns (col_size >
-	// 1), nulls are always element-level (never a whole missing row -- by
-	// design, see parquet_append_*_column's valid_in handling below), and
-	// arrow::fixed_size_list(value_type, size)'s convenience constructor
-	// already builds its inner child field with nullable=true unconditionally
-	// (confirmed empirically), so the outer list field itself stays
-	// nullable=false always: a row's vector is never itself missing.
+	// `nullable` says whether a NULL CAN LAND in this column's values, and it is applied at
+	// whichever level can actually hold one -- which differs between a scalar and a vector column:
+	//
+	//   scalar (col_size <= 1): the outer field itself, the only place a Null can be.
+	//   vector (col_size >  1): the CHILD ("item") field. Nulls in a vector column are always
+	//                           element-level; a row's vector is never itself missing, by design
+	//                           (see parquet_append_*_column's valid_in handling below), so the
+	//                           outer list field stays nullable=false always.
+	//
+	// The child field is built EXPLICITLY rather than through
+	// arrow::fixed_size_list(value_type, size), whose convenience constructor hard-codes a
+	// nullable=true child (arrow/type.h's FixedSizeListType(DataType) constructor) and so ignored
+	// this argument entirely until now -- meaning every vector column was written with a nullable
+	// child however it was produced. Two things about that hand-built child are load-bearing:
+	// its name must stay "item", which is the name that same Arrow constructor supplies (renaming
+	// it changes the Parquet schema's leaf paths, e.g. "vec.list.item"), and passing `nullable`
+	// through is what makes a mask-free vector write produce a genuinely non-nullable element
+	// field.
+	//
+	// SAFETY INVARIANT, and it is the one that makes this whole scheme correct rather than a
+	// silent-corruption hazard: a field declared non-nullable must NEVER receive an array that
+	// contains nulls. It holds by construction -- an absent is_valid mask reaches the builder as a
+	// null valid_bytes, which cannot produce a null -- and the two column kinds whose nulls come
+	// from somewhere other than a mask (temporal, and a parquet_string_column) are excluded from
+	// the presence rule for exactly that reason (see resolve_chunk_nullability). Break it and
+	// Parquet emits definition levels that disagree with the schema it wrote.
+	// Restamps `array`'s own type with `field`'s, when the two differ only in metadata Arrow still
+	// validates. This exists for exactly one case, and it is not optional: a FIXED_SIZE_LIST array
+	// comes out of arrow::FixedSizeListBuilder carrying a type whose child field is *nullable*
+	// (the builder derives its type from the value builder, which has no say in the matter), while
+	// build_field may now declare that child non-nullable. arrow::Table::Validate() compares the
+	// two and rejects the write with "Column data for field N ... is inconsistent with schema",
+	// which is an abort at close time, far from the cause.
+	//
+	// Restamping is safe because the difference is pure metadata: the buffers, the child data and
+	// the null counts are identical, and only the child field's `nullable` flag differs. It is
+	// deliberately a no-op when the types already match, so every non-vector path pays nothing.
+	// The SAFETY INVARIANT in build_field's comment is what makes it correct to restamp rather
+	// than to widen the field: a non-nullable field only ever reaches here with a null-free array.
+	static std::shared_ptr<arrow::Array> align_array_to_field(
+		const std::shared_ptr<arrow::Field> &field,
+		const std::shared_ptr<arrow::Array> &array)
+	{
+		if (!array || !field || array->type()->Equals(*field->type())) return array;
+		auto data = array->data()->Copy();
+		data->type = field->type();
+		return arrow::MakeArray(data);
+	}
+
 	static std::shared_ptr<arrow::Field> build_field(
 		const std::string &name,
 		const std::shared_ptr<arrow::DataType> &value_type,
@@ -3277,7 +3375,8 @@ extern "C"
 	{
 		if (col_size > 1)
 		{
-			return arrow::field(name, arrow::fixed_size_list(value_type, static_cast<int32_t>(col_size)), false);
+			auto item = arrow::field("item", value_type, nullable);
+			return arrow::field(name, arrow::fixed_size_list(item, static_cast<int32_t>(col_size)), false);
 		}
 		return arrow::field(name, value_type, nullable);
 	}
@@ -3343,13 +3442,13 @@ extern "C"
 			// GCOVR_EXCL_STOP
 
 			writer_handle->fields[idx] = field;
-			writer_handle->arrays[idx] = array;
+			writer_handle->arrays[idx] = align_array_to_field(field, array);
 			return;
 		}
 
 		check_column_count_fits_arrow_limit(writer_handle->fields.size(), name, "parquet_append_column");
 		writer_handle->fields.push_back(field);
-		writer_handle->arrays.push_back(array);
+		writer_handle->arrays.push_back(align_array_to_field(field, array));
 	}
 
 	// Builds the flat key-value file metadata: the VOTable XML sidecar (if any columns are
@@ -3685,6 +3784,22 @@ extern "C"
 		writer_handle->compression_level = compression_level;
 		writer_handle->chunk_size = chunk_size;
 		writer_handle->use_threads = (use_threads != 0);
+	}
+
+	// Declares `name` (the column's OUTPUT name, i.e. what reaches the file) as protected on this
+	// writer. Pushed once per protected column by parquet_open_writer, before any write, from the
+	// schema's own is_protected flags -- extra: protected_cols: or schema%set_protected.
+	//
+	// A protected column may hold no Null at all, which parquet_check_protected enforces
+	// Fortran-side with a message naming the column. This side needs to know only so that the
+	// column's Arrow field can be built NON-nullable: for the mask-carrying kinds Fortran already
+	// erases an all-.true. mask, but a temporal column and a parquet_string_column carry their
+	// null state inside the element with no mask to erase, so protection is the only signal that
+	// can make their fields non-nullable. See resolve_chunk_nullability.
+	void parquet_writer_set_protected_column(void *handle, const char *name)
+	{
+		auto writer_handle = as_handle(handle);
+		writer_handle->protected_columns.insert(std::string(name));
 	}
 
 	// Resizes Arrow's global CPU thread pool -- the single pool shared by
@@ -6691,7 +6806,7 @@ extern "C"
 		{
 			auto it = reader_handle->column_cache.find(idx);
 			if (it == reader_handle->column_cache.end()) continue;
-			auto coerced = coerce_for_filter_kernel(it->second);
+			auto coerced = coerce_string_view_to_offset_string(it->second);
 			if (!coerced.ok())
 			{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on already-validated input
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply filter: %s", coerced.status().ToString().c_str());
@@ -7524,6 +7639,36 @@ extern "C"
 		}
 		copy_string_with_padding(buf, buf_len, token);
 		return 1;
+	}
+
+	// Returns 1 if `name`'s stored Arrow field is declared nullable, 0 if not -- the schema flag
+	// only, reading no column data at all. Assumes `name` already resolves, same as
+	// parquet_reader_get_column_type_name above (parquet_get_column_nullable in parquet_read.f90
+	// probes existence first via check_column_exists).
+	//
+	// For a VECTOR column this deliberately reports the CHILD ("item") field's flag, not the outer
+	// FIXED_SIZE_LIST/LIST field's. The outer one is a constant -- build_field always writes it
+	// non-nullable, because a row's vector is never itself missing -- so answering it would make
+	// the query useless for exactly the columns whose element nullability is interesting. A dotted
+	// struct path reports the leaf's own flag, matching the rule
+	// parquet_reader_get_column_type_name already follows.
+	//
+	// An unreadable column type is an ANSWER, not an error: the flag is a property of the stored
+	// schema and is meaningful whether or not this library can decode the values, so a MAP or a
+	// decimal column reports its flag rather than aborting -- the same precedent
+	// parquet_reader_get_column_type_name sets with "unknown".
+	int64_t parquet_reader_get_column_nullable(void *handle, const char *name)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		auto resolved = resolve_struct_path(reader_handle->schema, name);
+		auto field = resolved.leaf_field;
+		auto type_id = field->type()->id();
+		if (type_id == arrow::Type::FIXED_SIZE_LIST || type_id == arrow::Type::LIST ||
+			type_id == arrow::Type::LARGE_LIST)
+		{
+			field = field->type()->field(0);
+		}
+		return field->nullable() ? 1 : 0;
 	}
 
 	// Returns the declared vector-column element count of `name` (1 for a scalar column),
@@ -9361,17 +9506,74 @@ static std::shared_ptr<arrow::Array> build_timestamp_array(const int64_t *values
 // Stashes a streamed temporal row-group `array` into pending_chunk_arrays for `name`, building
 // its field (always nullable, for the same reason append_typed_column_chunk documents) on the
 // column's first chunk. Shared by the temporal parquet_write_*_column_chunk entry points.
+// Decides what nullability a STREAMED column's Arrow field is built with, and enforces that every
+// row group agrees about it. Called from every parquet_write_*_column_chunk site, once per chunk.
+//
+// Three rules, in this order:
+//
+//   PROTECTED wins, and short-circuits everything else. A protected column may hold no Null at all
+//   (enforced Fortran-side by parquet_check_protected, which runs BEFORE this and aborts with a
+//   message naming the column), so its field is non-nullable whatever any mask says. Note this also
+//   means Rule 2 below never fires for a protected column: Fortran erases an all-.true. mask for
+//   one, so both the first chunk and every later chunk look unmasked here. That is deliberate --
+//   for a protected column the mask carries no information about nullability, protection having
+//   already settled it -- and it is why the guidance ("use the same masked/unmasked form in every
+//   row group") is uniform while the enforcement is not.
+//
+//   ALWAYS-NULLABLE kinds (`always_nullable`): temporal columns and a parquet_string_column carry
+//   their null state inside the element rather than in a caller-supplied mask, so "was a mask
+//   passed" says nothing about whether a LATER row group will contain a Null. Fixing such a field
+//   non-nullable from a null-free first chunk would have Parquet reject a genuine Null in row
+//   group 7, so they stay nullable unless protected.
+//
+//   Otherwise RULE 1 (presence) and RULE 2 (consistency). The field is nullable iff the FIRST
+//   chunk carried an is_valid mask -- regardless of that mask's values, since the first row group
+//   cannot know what later ones will hold. Every later chunk must then match: masked stays masked,
+//   unmasked stays unmasked, and a mismatch is a hard error rather than a silently ignored mask or
+//   a Null that cannot be written.
+static bool resolve_chunk_nullability(ParquetWriterHandle *writer_handle, const char *name, size_t idx,
+	bool first_chunk_ever, bool mask_present, bool always_nullable = false)
+{
+	if (writer_handle->protected_columns.count(name) != 0) return false;
+	if (always_nullable) return true;
+
+	if (first_chunk_ever)
+	{
+		writer_handle->chunk_mask_present[idx] = mask_present;
+		return mask_present;
+	}
+
+	auto it = writer_handle->chunk_mask_present.find(idx);
+	if (it == writer_handle->chunk_mask_present.end()) return mask_present; // GCOVR_EXCL_LINE
+	if (it->second != mask_present)
+	{
+		report_fatal_error("parquet_write_column_chunk", "column '" + std::string(name) + "': " +
+			(mask_present
+				? "this row group passes an is_valid mask, but the first row group did not -- a "
+				  "streamed column's nullability is fixed by its first row group, so pass an "
+				  "all-.true. is_valid mask there too if any later row group may contain a Null"
+				: "this row group passes no is_valid mask, but the first row group did -- every row "
+				  "group of a streamed column must use the same masked or unmasked form")); // GCOVR_EXCL_LINE
+	}
+	return it->second;
+}
+
 static void stash_temporal_column_chunk(ParquetWriterHandle *writer_handle, const char *name, size_t idx,
 	bool first_chunk_ever, const std::shared_ptr<arrow::Array> &array,
 	const std::shared_ptr<arrow::DataType> &value_type, int64_t col_size)
 {
+	// always_nullable: a temporal element carries its own null state, so this chunk having no
+	// null says nothing about row group 7. Nullable unless the column is protected, which is the
+	// only way a caller can declare a temporal column null-free -- see resolve_chunk_nullability.
+	bool nullable = resolve_chunk_nullability(writer_handle, name, idx, first_chunk_ever,
+		/*mask_present=*/true, /*always_nullable=*/true);
 	if (first_chunk_ever)
 	{
 		if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
-		writer_handle->fields[idx] = build_field(name, value_type, col_size, /*nullable=*/true);
+		writer_handle->fields[idx] = build_field(name, value_type, col_size, nullable);
 	}
 	if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
-	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = align_array_to_field(writer_handle->fields[idx], array);
 }
 
 // Resolves `name` to its leaf temporal value type (unwrapping a FIXED_SIZE_LIST vector column),
@@ -9593,13 +9795,14 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_single_chunk_array(reader_handle, name);
+		// A STRING_VIEW column has no offsets/data pair to hand over, so it is converted to one
+		// rather than refused: the cast result REPLACES the cache entry (see
+		// recache_coerced_string_view), so a second compact read of the same column is free.
+		array = recache_coerced_string_view(reader_handle, name, array, "parquet_read_column");
 		if (!is_offset_string_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_column", std::string("type mismatch for column: ") + name +
-				" (expected string, got " + array->type()->ToString() + // GCOVR_EXCL_LINE
-				(array->type_id() == arrow::Type::STRING_VIEW ? // GCOVR_EXCL_LINE
-					" -- STRING_VIEW columns are not supported by this compact buffer read; " // GCOVR_EXCL_LINE
-					"use a fixed-width parquet_read_column instead" : "") + ")"); // GCOVR_EXCL_LINE
+				" (expected string, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		reader_handle->last_whole_column_buffers_array = array;
 		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out,
@@ -10139,7 +10342,7 @@ extern "C"
 		if (segment)
 		{
 			ensure_compute_initialized();
-			auto coerced = coerce_for_filter_kernel(array);
+			auto coerced = coerce_string_view_to_offset_string(array);
 			if (!coerced.ok())
 			{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on an already-decoded array.
 				report_fatal_error(context, std::string("failed to filter row group for column: ") + name);
@@ -10288,13 +10491,25 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		auto array = get_row_group_chunk_array(reader_handle, name, row_group, "parquet_read_column_chunk");
+		// Same conversion as the whole-column compact read above, but NOT cached: a row-group
+		// chunk is not what column_cache holds, so there is nothing to replace -- the pin below
+		// is what keeps the freshly cast array alive across the return to Fortran.
+		if (array->type_id() == arrow::Type::STRING_VIEW)
+		{
+			ensure_compute_initialized();
+			auto coerced = coerce_string_view_to_offset_string(array);
+			if (!coerced.ok())
+			{ // GCOVR_EXCL_START -- Cast-kernel Status backstop on an already-decoded array.
+				report_fatal_error("parquet_read_column_chunk",
+					std::string("failed to convert a string_view column for reading: ") + name);
+			}
+			// GCOVR_EXCL_STOP
+			array = coerced.ValueOrDie();
+		}
 		if (!is_offset_string_type(array->type_id()))
 		{
 			report_fatal_error("parquet_read_column_chunk", std::string("type mismatch for column: ") + name +
-				" (expected string, got " + array->type()->ToString() + // GCOVR_EXCL_LINE
-				(array->type_id() == arrow::Type::STRING_VIEW ? // GCOVR_EXCL_LINE
-					" -- STRING_VIEW columns are not supported by this compact buffer read; " // GCOVR_EXCL_LINE
-					"use a fixed-width parquet_read_column instead" : "") + ")"); // GCOVR_EXCL_LINE
+				" (expected string, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
 		}
 		reader_handle->last_chunk_buffers_array = array;
 		extract_string_buffers(array, nrows_out, nchars_out, offsets_out, data_out, validity_out, offsets_int32_out,
@@ -10623,7 +10838,7 @@ static size_t check_column_chunk_write_preconditions(ParquetWriterHandle *writer
 // pending_chunk_arrays, consumed and cleared by parquet_finish_row_group.
 template <typename BuilderType, typename ValueType>
 static void append_typed_column_chunk(void *handle, const char *name, const ValueType *data, int64_t col_size,
-	const int8_t *valid_in, const std::shared_ptr<arrow::DataType> &value_type)
+	const int8_t *valid_in, const std::shared_ptr<arrow::DataType> &value_type, bool always_nullable = false)
 {
 	auto writer_handle = as_handle(handle);
 	bool first_chunk_ever;
@@ -10665,20 +10880,19 @@ static void append_typed_column_chunk(void *handle, const char *name, const Valu
 			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 	}
 
+	// Presence, not values: nullable iff this column's FIRST chunk carried an is_valid mask.
+	// Checked on every chunk, not only the first, because Rule 2 (every row group must use the
+	// same masked/unmasked form) is what stops a later row group's Null meeting a field that
+	// cannot hold one. See resolve_chunk_nullability.
+	bool nullable = resolve_chunk_nullability(writer_handle, name, idx, first_chunk_ever, valid_in != nullptr,
+		always_nullable);
 	if (first_chunk_ever)
 	{
 		if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
-		// Always nullable, unlike append_typed_column's has_any_null-based decision: this
-		// field is fixed the moment the first row group locks the schema (see
-		// check_column_chunk_write_preconditions), long before every row group's data -- and
-		// thus every possible null -- has been seen. Fixing nullable=false from a null-free
-		// first chunk would make a *later* row group's genuine null rejected by Arrow, so this
-		// always allows it instead (col_size > 1's build_field ignores this argument anyway --
-		// see its own comment).
-		writer_handle->fields[idx] = build_field(name, value_type, col_size, /*nullable=*/true);
+		writer_handle->fields[idx] = build_field(name, value_type, col_size, nullable);
 	}
 	if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
-	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+	writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = align_array_to_field(writer_handle->fields[idx], array);
 }
 
 extern "C"
@@ -10849,7 +11063,13 @@ extern "C"
 			? build(std::make_shared<arrow::LargeStringBuilder>())
 			: build(std::make_shared<arrow::StringBuilder>());
 
-		append_column(writer_handle, name, build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), col_size), array);
+		// has_any_null, not the default: this call used to omit the argument entirely, which was
+		// harmless only because build_field ignored it for col_size > 1. Now that build_field
+		// applies it to the child field, omitting it would declare the elements non-nullable while
+		// the loop above happily appends nulls into them -- the exact invariant break build_field's
+		// own comment warns about. Matches its scalar sibling and the temporal columns.
+		append_column(writer_handle, name, build_field(name, use_large ? arrow::large_utf8() : arrow::utf8(), col_size,
+			has_any_null(valid_in, nrows * col_size)), array);
 	}
 
 	// Appends one scalar string column straight from a parquet_string_column's own raw buffers
@@ -10966,7 +11186,13 @@ extern "C"
 	//     array (nrows = current_row_group_nrows) and stash it via stash_temporal_column_chunk. ---
 	void parquet_write_date_column_chunk(void *handle, const char *name, const int32_t *data, int64_t col_size, const int8_t *valid_in)
 	{
-		append_typed_column_chunk<arrow::Date32Builder>(handle, name, data, col_size, valid_in, arrow::date32());
+		// always_nullable, like every other temporal kind: a parquet_date carries its own null
+		// state, so `valid_in` here reflects THIS chunk's elements rather than a caller's choice
+		// to pass a mask, and a null-free first row group says nothing about row group 7. A date
+		// column reaches the generic template rather than stash_temporal_column_chunk only
+		// because it is int32-backed -- see resolve_chunk_nullability.
+		append_typed_column_chunk<arrow::Date32Builder>(handle, name, data, col_size, valid_in, arrow::date32(),
+			/*always_nullable=*/true);
 	}
 
 	void parquet_write_time_column_chunk(void *handle, const char *name, const int64_t *data, int64_t col_size, int32_t unit, const int8_t *valid_in)
@@ -11041,13 +11267,14 @@ extern "C"
 		if (!status.ok())
 			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
+		bool nullable = resolve_chunk_nullability(writer_handle, name, idx, first_chunk_ever, valid_in != nullptr);
 		if (first_chunk_ever)
 		{
 			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
-			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), 1, /*nullable=*/true);
+			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), 1, nullable);
 		}
 		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
-		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = align_array_to_field(writer_handle->fields[idx], array);
 	}
 
 	// Vector-string counterpart to parquet_write_string_column_chunk, above -- same
@@ -11092,13 +11319,14 @@ extern "C"
 		if (!status.ok())
 			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
+		bool nullable = resolve_chunk_nullability(writer_handle, name, idx, first_chunk_ever, valid_in != nullptr);
 		if (first_chunk_ever)
 		{
 			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
-			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), col_size);
+			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), col_size, nullable);
 		}
 		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
-		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = align_array_to_field(writer_handle->fields[idx], array);
 	}
 
 	// Streaming counterpart to parquet_append_string_column_buffers: builds this row group's
@@ -11144,13 +11372,18 @@ extern "C"
 		if (!status.ok())
 			throw std::runtime_error(status.ToString()); // GCOVR_EXCL_LINE
 
+		// always_nullable: a parquet_string_column's nulls live in the container, not in a mask,
+		// so "was a mask passed" cannot predict whether a later row group holds one. Nullable
+		// unless the column is protected -- see resolve_chunk_nullability.
+		bool nullable = resolve_chunk_nullability(writer_handle, name, idx, first_chunk_ever,
+			/*mask_present=*/true, /*always_nullable=*/true);
 		if (first_chunk_ever)
 		{
 			if (writer_handle->fields.size() <= idx) writer_handle->fields.resize(idx + 1);
-			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), 1, /*nullable=*/true);
+			writer_handle->fields[idx] = build_field(name, arrow::large_utf8(), 1, nullable);
 		}
 		if (writer_handle->arrays.size() <= idx) writer_handle->arrays.resize(idx + 1);
-		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = array;
+		writer_handle->pending_chunk_arrays[static_cast<int>(idx)] = align_array_to_field(writer_handle->fields[idx], array);
 	}
 
 	// Ends the currently-open row group: verifies every column known so far has data for it

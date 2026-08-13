@@ -53,6 +53,7 @@ working rules).
   - [The row-group statistics screen: every uncertainty must DECLINE](#the-row-group-statistics-screen-every-uncertainty-must-decline)
   - [Guard mutating public procedures against being called twice](#guard-mutating-public-procedures-against-being-called-twice)
   - [Implicit finalizers must never route through a path that can throw/abort](#implicit-finalizers-must-never-route-through-a-path-that-can-throwabort)
+  - [A written column's nullability is a CONTRACT with the array beside it](#a-written-columns-nullability-is-a-contract-with-the-array-beside-it)
   - [Automatic BYTE_STREAM_SPLIT for float columns in the writer](#automatic-byte_stream_split-for-float-columns-in-the-writer)
   - [A character ARRAY is trimmed on the way into a column; a character SCALAR is not](#a-character-array-is-trimmed-on-the-way-into-a-column-a-character-scalar-is-not)
   - [Validity is per ELEMENT, and a vector row is not one bit](#validity-is-per-element-and-a-vector-row-is-not-one-bit)
@@ -224,6 +225,19 @@ structural damage to a file nothing validates. Both were found only by cross-che
 - **After any scripted edit to a structured document, re-derive its structure and compare** —
   `grep "^#" file | sort | uniq -d` catches a duplicated heading instantly, and a ToC-versus-headings
   cross-check catches a deleted one. Both take one command and both would have caught these.
+
+**A script that validates SEVERAL replacements and writes ONCE at the end is the same hazard wearing
+different clothes: a late failure silently discards the earlier edits.** The natural shape —
+`assert s.count(old_i) == 1` per edit, then a single `write()` at the bottom — leaves the first two
+replacements applied *in memory only* when the third assertion fails. The file is untouched, the
+traceback scrolls away, and every check still passes, because a document missing two paragraphs is
+still a valid document. Confirmed on `doc/pages/types/supported-data-types.md`, where two paragraphs
+went unwritten and were found only by rendering the page afterwards. Either write after each
+replacement, or verify afterwards — and for a `doc/pages/` page, **verifying means rendering it**:
+`ford docs.md`, then grep `ford-doc/page/<group>/<name>.html` for one distinctive phrase per edit,
+with whitespace collapsed on both sides (a source line break survives into the rendered `<p>`, so a
+search string spanning one reports a correct paragraph as missing). That is the only check that sees
+a lost edit; `fpm test`, `check_doc_anchors.py` and `check_source_conventions.py` cannot.
 
 **A `feature_*.md` file has NO recovery path** — it is git-ignored, so there is no `git checkout` and
 no history. The only copy of a damaged section is whatever a session transcript happens to hold
@@ -1209,6 +1223,68 @@ finalizer its own dedicated "abandon" entry point that skips them entirely — s
 pattern — rather than trying to have the finalizer conditionally decide when it's "safe" to call
 the real close. Apply the same pattern to any future finalizable type (e.g. a `parquet_reader`-side
 completeness check, if one is ever added).
+
+### A written column's nullability is a CONTRACT with the array beside it
+
+Whether a column's Arrow field says `nullable` is decided in one place, `build_field`
+(`parquet_wrapper.cpp`), and the rule differs by write path. Getting it wrong is not a cosmetic
+metadata slip: it is `feature_risks.md` **Risk-82**, whose failure mode is a file whose definition
+levels disagree with its own schema — which this library's own reader cannot see, because it answers
+from the data's null count rather than the flag.
+
+**Where the flag comes from.**
+
+- **A whole-column write decides from the VALUES** (`has_any_null`): it has seen every one before it
+  writes anything, so a column containing no Null is written non-nullable whether or not a mask was
+  passed. Note `has_any_null` answers `false` for a null pointer, so "no mask at all" lands here too.
+- **A streamed write decides from mask PRESENCE on the FIRST row group** (`resolve_chunk_nullability`)
+  — nullable iff that row group passed an `is_valid` mask, whatever its entries were. It cannot use
+  values: the field is fixed when the first row group locks the file's schema, long before the later
+  row groups exist. Every later row group must then use the same masked/unmasked form, and a
+  mismatch is a hard error in both directions.
+- **A protected column is always non-nullable**, on every path. That is the only way to declare a
+  *streamed* column of the always-nullable kinds null-free, and it is why C++ has a per-writer
+  `protected_columns` registry at all — Fortran erases an all-`.true.` mask for the mask-carrying
+  kinds, but temporal and `parquet_string_column` have no mask to erase.
+
+**The always-nullable kinds are `date`, `time`, `timestamp` and `parquet_string_column`, and `date`
+is the one a new rule will miss.** Their nulls live inside the element rather than in a caller's
+mask, so "was a mask passed" cannot predict whether row group 7 holds a Null; they stay nullable
+when streamed unless protected. **`date` does not reach `stash_temporal_column_chunk`** — it is
+int32-backed, so `parquet_write_date_column_chunk` goes through the generic
+`append_typed_column_chunk` and needs its `always_nullable` argument set explicitly. A rule written
+for "temporal columns" that only touches the temporal helper silently excludes dates.
+There are **five** chunk-write sites in total (`append_typed_column_chunk`,
+`parquet_write_string_column_chunk`, `parquet_write_string_array_column_chunk`,
+`parquet_write_string_column_chunk_buffers`, `stash_temporal_column_chunk`); a new one must call
+`resolve_chunk_nullability` or it silently reverts to whatever default it passes.
+
+**The safety invariant, and it is the whole reason the scheme is sound: a field declared
+non-nullable must NEVER receive an array containing nulls.** It holds by construction — an absent
+mask reaches the builder as a null `valid_bytes`, which cannot produce a null — and that is exactly
+what the always-nullable exceptions protect.
+
+**A field and its array must AGREE, and Arrow enforces it at close time from far away.**
+`FixedSizeListBuilder` stamps its finished array with a type whose child field is nullable (it
+derives the type from the value builder, which has no say), so declaring the child non-nullable in
+`build_field` makes `arrow::Table::Validate()` reject the write with *"Column data for field N … is
+inconsistent with schema"* — at `parquet_close_writer`, naming a field index rather than the call
+that caused it. `align_array_to_field` restamps the array's type from the field's; it must be
+applied **wherever a field and an array are stored together**, which is `append_column`'s two
+branches plus every chunk site's `pending_chunk_arrays` assignment. Restamping is safe because the
+difference is pure metadata, and it is a deliberate no-op when the types already match.
+
+**The child field's name must stay `item`.** That is what Arrow's own
+`FixedSizeListType(DataType)` constructor supplies (`arrow/type.h`), and it appears in the Parquet
+schema's leaf paths — renaming it changes how every other tool addresses the column.
+
+**And the general lesson, which is not about Arrow at all: when a parameter STOPS being ignored,
+every call site that omitted it becomes a suspect.** `build_field`'s `nullable` argument was
+discarded for vector columns for as long as the function existed, so
+`parquet_append_string_array_column` simply never passed one — correct, until it wasn't. The moment
+the argument became live, that call would have declared a non-nullable element field for a loop that
+appends nulls. Grep every call site of a parameter whose meaning you have just changed, and check
+what the defaulted ones now mean.
 
 ### Automatic BYTE_STREAM_SPLIT for float columns in the writer
 

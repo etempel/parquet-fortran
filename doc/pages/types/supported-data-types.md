@@ -68,11 +68,16 @@ function, exactly like `string`/`large_string` above, including `qc:` range chec
 reports the file's own stored schema, which nothing on the read side rewrites. Filtering does cast
 the column to `large_utf8` internally first, because Arrow's row-filter compute kernel has no
 `string_view` support to call directly, but the cast is invisible: it changes no read result and no
-diagnostic. The one
-exception is the compact `parquet_string_column` (see [String columns](string-columns.html)) read
-path: its buffer-handoff fast path only understands `string`/`large_string`'s offset-based layout,
-so reading a `string_view` column that way aborts with a clear error — read it through a fixed-width
-`character` array instead.
+diagnostic.
+
+The compact `parquet_string_column` (see [String columns](string-columns.html)) read path applies
+that same cast for its own reason. Its buffer handoff needs the offsets-plus-payload layout that
+only `string`/`large_string` have — a view array's values are inlined or spread across several data
+buffers — so a `string_view` column is converted to `large_utf8` first and then handed over. It
+costs one pass over the column's bytes, and the result replaces the cached column, so reading it a
+second time pays nothing. Values, nulls and reported types are unchanged either way. This used to be
+refused outright, with the advice to read through a fixed-width `character` array instead; that is
+no longer necessary, and the conversion is cheaper than that workaround was.
 
 ## Vector-column width (`col_size`) limit
 
@@ -276,14 +281,40 @@ be Null, only individual elements within it. A column only becomes nullable in t
 `is_valid` is actually passed and contains at least one `.false.` entry; omitting `is_valid` (or
 passing an all-`.true.` mask) writes exactly as before, keeping the column non-nullable.
 
-**A streamed column is nullable regardless.** `parquet_write_column_chunk` fixes the column's Arrow
-field the moment the *first* row group locks the file's schema, and at that point no later row
-group's mask has been seen — nor is it known whether a later row group will pass one at all. So the
-field is marked nullable there and then, whether or not that first chunk carried an `is_valid` mask
-and whatever its entries were. Fixing it non-nullable from a null-free first chunk would make a
-genuine Null in row group 7 rejected outright, which is the failure this trades a schema flag for.
-Nothing about the values written changes either way; only the schema's nullability flag differs
-from what the whole-column path would have produced.
+**A streamed column's nullability comes from its FIRST row group, and from whether you passed a
+mask — not from what the mask said.** `parquet_write_column_chunk` fixes the column's Arrow field the
+moment the first row group locks the file's schema, long before any later row group exists. So the
+question it can answer is *"did the caller pass an `is_valid` mask?"*, and the column is nullable
+exactly when the answer is yes — an all-`.true.` mask still makes it nullable, because you have said
+that Nulls are possible for this column even if this chunk holds none.
+
+**Every later row group must then use the same form**, and mixing them is a hard error rather than a
+silently ignored mask:
+
+```fortran
+call parquet_new_row_group(writer, 3)
+call parquet_write_column_chunk(writer, "flux", a, is_valid=mask)   ! nullable from here on
+call parquet_finish_row_group(writer)
+
+call parquet_new_row_group(writer, 3)
+call parquet_write_column_chunk(writer, "flux", b)                  ! aborts: the mask was dropped
+```
+
+In practice this costs nothing, because a chunked write is normally one loop body: the mask is
+either there on every call or on none. If you cannot know in advance whether a Null will turn up,
+pass an all-`.true.` mask in the first row group and the column stays nullable for the rest of the
+file.
+
+Two exceptions, for the same reason in both: `date`/`time`/`timestamp` columns and a
+`parquet_string_column` carry their null state *inside the element*, with no mask to pass, so a
+null-free first row group would say nothing about the seventh. Both are written nullable when
+streamed — unless the column is protected, which is how you declare one of them null-free (see
+[Null values](#null-values) below).
+
+This differs from a whole-column `parquet_write_column`, which sees every value before it writes
+anything and so decides from the values themselves: a column with no Null in it is written
+non-nullable whether or not a mask was passed. `call parquet_get_column_nullable(reader, name,
+is_nullable)` reports what a file actually ended up with, for either path.
 
 To forbid Nulls in specific columns even when a caller passes `is_valid`, list them under a MAML
 schema's `extra:` section as `protected_cols:`, either as a semicolon-separated scalar or a
@@ -314,6 +345,23 @@ a `parquet_string_column` containing an `%append_null()`, even though neither of
 `is_valid` argument at all. The rule is about the values reaching the file, not about which argument
 carried them. This only applies when writing against a MAML-derived schema
 (`parquet_open_writer(..., schema, ...)`); a schema-less writer has no `protected_cols:` to enforce.
+
+**A protected column is written non-nullable**, on every path — which is also the only way to
+declare a *streamed* `date`/`time`/`timestamp` or `parquet_string_column` column null-free, since
+those carry their nulls in the element and are otherwise nullable whenever they are streamed.
+Passing an all-`.true.` `is_valid` mask for a protected column is fine and changes nothing: it is
+checked and then discarded, so declaring a column protected never makes the `is_valid` keyword
+unusable. Because the mask is discarded before the same-form rule above is applied, a protected
+column is also exempt from that rule — a mask cannot say anything its protection has not already
+settled. Keep the form uniform anyway; nothing enforces it there.
+
+**You can protect a column from code as well as from a MAML**, with
+`call schema%set_protected(name [, protected])` — `protected` defaults to `.true.`, and `.false.`
+lifts protection. Call it before `parquet_open_writer`, since the writer takes its own copy of the
+schema at open time. Unprotecting a column the MAML itself declared protected is allowed but prints
+a warning naming it: someone wrote that declaration down deliberately, and overriding it in code
+should be visible in the program's output. See
+[Building a schema in code](../schema/building-schema-in-code.html).
 
 ## Reading a nested struct field
 

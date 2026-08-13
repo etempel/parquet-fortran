@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`call parquet_get_column_nullable(reader, name, is_nullable)`** reports whether a column's
+  stored Arrow field is declared nullable — a schema-only query that reads no column data, and a
+  different question from `parquet_column_has_nulls`, which answers whether the column actually
+  *contains* one. A vector column reports its element (child) field's flag, the outer list field
+  being non-nullable by construction; a dotted struct path reports the leaf's own flag. A column
+  this library cannot read still has a meaningful flag, so an unreadable type is an answer rather
+  than an error — it aborts only on a name that does not exist.
+
+- **`call schema%set_protected(name [, protected])`** marks a column Null-protected from code, the
+  equivalent of listing it under a MAML's `extra: protected_cols:`; `protected` defaults to
+  `.true.` and `.false.` lifts protection. Unprotecting a column the MAML itself protected is
+  allowed but prints a `WARNING` naming it, never aborting. A protected column is now also written
+  **non-nullable**, which is the only way to declare a *streamed* `date`/`time`/`timestamp` or
+  `parquet_string_column` column null-free — those carry their null state inside the element, so a
+  null-free first row group cannot speak for the rest of the file. Passing an all-`.true.`
+  `is_valid` mask for a protected column stays legal and is simply discarded once checked:
+  declaring a column protected does not make the `is_valid` keyword unusable.
+
+- **A `string_view` column can now be read straight into a `parquet_string_column`**, where the
+  compact buffer path previously refused it and the guide told you to read through a fixed-width
+  `character` array instead. Such a column only ever comes from a file written by another
+  Arrow-based tool. It is converted to `large_utf8` first — the same conversion the row filter has
+  always applied for its own Arrow-kernel gap — and the converted column replaces the cached one,
+  so a second read costs nothing. The conversion is cheaper than the workaround it removes.
+
 - **`parquet_table` gains a memory-safety guarantee for derived columns, plus several ergonomic
   forms of calls it already had.**
 
@@ -598,6 +623,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type](doc/pages/schema/building-schema-in-code.md#a-typed-value-records-its-own-type).
 
 ### Changed
+
+- **A streamed column's nullability now comes from its first row group's `is_valid` mask, and every
+  row group must agree.** `parquet_write_column_chunk` fixes a column's Arrow field when the first
+  row group locks the file's schema, so the only question it can answer is whether the caller
+  passed a mask — and the column is now nullable exactly when the first row group did, whatever
+  that mask's entries were. Previously every streamed column was written nullable, so a file
+  carried validity information for columns whose writer never asked for any. **Changing the form
+  afterwards is a hard error**: a mask dropped after the first row group would silently discard a
+  stated intent to allow Nulls, and one added after an unmasked first row group would put a Null
+  into a field whose schema forbids it. In practice a chunked write is one loop body, so the form
+  is uniform anyway; if you cannot know in advance whether a Null will appear, pass an all-`.true.`
+  mask in the first row group. `date`/`time`/`timestamp` columns and a `parquet_string_column` are
+  exempt and stay nullable when streamed, since their nulls live in the element rather than in a
+  mask — unless the column is protected.
+
+- **A vector column's element field is now written non-nullable when nothing can put a Null in it.**
+  Arrow's convenience constructor for `fixed_size_list` hard-codes a nullable child, so until now
+  *every* vector column was written with a nullable element field however it was produced. The
+  element field now follows the same rule as a scalar column's: for a whole-column write, whether
+  the values contain a Null; for a streamed one, whether the first row group passed a mask. Nothing
+  about the values changes and no round trip is affected — a Null still round-trips through a
+  column written with a mask that has one — but a file's schema is more accurate about what its
+  vector columns can hold.
 
 - **Closing a schema-enforced writer that had nothing written to it now produces a valid file
   instead of aborting.** Every declared column is written with zero rows, so the output carries the

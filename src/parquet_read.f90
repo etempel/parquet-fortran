@@ -1397,6 +1397,14 @@ contains
         call check_column_exists(reader, name, "parquet_get_column_type")
         call resolve_column_type(reader, name, type_name, recognized)
     end procedure parquet_get_column_type
+    module procedure parquet_get_column_nullable
+        call check_reader_open(reader, "parquet_get_column_nullable")
+        ! Same rule as parquet_get_column_type: a missing name is a caller mistake and aborts,
+        ! while a column whose TYPE this library cannot read still has a meaningful flag and
+        ! gets an answer.
+        call check_column_exists(reader, name, "parquet_get_column_nullable")
+        is_nullable = parquet_reader_get_column_nullable(reader%handle, trim(name)//char(0)) /= 0_c_long_long
+    end procedure parquet_get_column_nullable
     module procedure parquet_get_column_names
         integer(c_int32_t) :: ncols, i
         integer(c_long_long) :: name_len, max_len

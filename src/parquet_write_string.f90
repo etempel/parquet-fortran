@@ -239,6 +239,7 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        logical :: protected !! .true. if protected, so the mask is erased after the checks.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         integer :: item_len
 
@@ -246,13 +247,18 @@ contains
 
         item_len = len(flat)
 
+        protected = .false.
         nullify(vmask)
         if (present(valid)) vmask => valid(1:nitems)
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
         end if
         call parquet_check_qc_string(writer, name, flat(1:nitems), vmask)
+        ! Erased only AFTER qc has seen it: the mask still tells parquet_check_qc_string which
+        ! elements are real, and only its effect on the written field is redundant here. See
+        ! parquet_check_protected.
+        if (protected) nullify(vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
 
         call parquet_resolve_output_name(writer, name, outname)
@@ -278,18 +284,24 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
+        logical :: protected !! .true. if protected, so the mask is erased after the checks.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         integer :: item_len
 
         item_len = len(flat)
 
+        protected = .false.
         nullify(vmask)
         if (present(valid)) vmask => valid(1:nitems)
         if (associated(vmask)) then
-            call parquet_check_protected(writer, name, vmask)
+            call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
         end if
         call parquet_check_qc_string(writer, name, flat(1:nitems), vmask)
+        ! Erased only AFTER qc has seen it: the mask still tells parquet_check_qc_string which
+        ! elements are real, and only its effect on the written field is redundant here. See
+        ! parquet_check_protected.
+        if (protected) nullify(vmask)
         call parquet_make_valid_buf_write(vmask, valid_buf, valid_ptr)
         call parquet_chunk_mark_written_if_first(writer, name)
 

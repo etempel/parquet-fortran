@@ -147,6 +147,12 @@ contains
                 "correctly", test_string_view_column_roundtrip), &
             new_unittest("a streamed string column is stored as large_utf8 however small it is, while the " // &
                 "same strings written whole stay plain utf8", test_streamed_string_is_always_large_utf8), &
+            new_unittest("a streamed column is nullable iff its FIRST row group carried an is_valid mask", &
+                test_streamed_nullability_follows_first_mask), &
+            new_unittest("a vector column's element field is non-nullable when no mask is written", &
+                test_vector_element_nullability_follows_mask), &
+            new_unittest("a protected column is written non-nullable, even a temporal one", &
+                test_protected_column_is_non_nullable), &
             new_unittest("a vector column whose auto-sized row-group size is clamped for the int32 " // &
                 "list-element-count limit still round-trips, split across multiple row groups", &
                 test_list_element_count_auto_multi_row_group_roundtrip), &
@@ -1939,6 +1945,163 @@ contains
             failure_message="a STRING_VIEW column did not round-trip correctly")
     end subroutine test_string_view_column_roundtrip
 
+    !> A STREAMED column's Arrow field is nullable iff its FIRST row group passed an is_valid
+    !> mask -- presence, not values. The first row group locks the file's schema, so it cannot
+    !> know what later row groups hold; asking "was a mask passed" is the only question it can
+    !> answer, and the caller answers it by choosing whether to pass one.
+    !>
+    !> The two columns are each other's control, written into the SAME file by the same loop: one
+    !> is masked in every row group with an all-.true. mask, the other is never masked. Both are
+    !> null-free, so a values-based rule (which is what the whole-column path uses, deliberately)
+    !> would call both non-nullable and the test would fail on the masked one. That is the
+    !> distinction being pinned, and one column alone cannot pin it.
+    subroutine test_streamed_nullability_follows_first_mask(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/streamed_nullability_first_mask.parquet"
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        logical :: all_true(3) = [.true., .true., .true.]
+        logical :: masked_nullable, bare_nullable
+        integer :: rg
+
+        call parquet_open_writer(writer, out_file)
+        do rg = 1, 2
+            call parquet_new_row_group(writer, 3)
+            call parquet_write_column_chunk(writer, "masked", v, is_valid=all_true)
+            call parquet_write_column_chunk(writer, "bare", v)
+            call parquet_finish_row_group(writer)
+        end do
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_column_nullable(reader, "masked", masked_nullable)
+        call parquet_get_column_nullable(reader, "bare", bare_nullable)
+        call parquet_close_reader(reader)
+
+        call check(error, masked_nullable, &
+            "a streamed column whose first row group passed an is_valid mask must be nullable, " // &
+            "even though that mask was all .true.")
+        if (allocated(error)) return
+        call check(error, .not. bare_nullable, &
+            "a streamed column that never passed an is_valid mask must be non-nullable -- " // &
+            "otherwise the file carries validity information the caller never asked for")
+    end subroutine test_streamed_nullability_follows_first_mask
+
+    !> A vector column's nullability lives on its CHILD ("item") field, not the outer
+    !> fixed_size_list field, and it follows the mask like any other column. Arrow's convenience
+    !> fixed_size_list(type, size) constructor hard-codes a nullable child, so this was previously
+    !> true of every vector column ever written, whatever the caller passed.
+    !>
+    !> The masked column is the control, and it is the half that would catch the dangerous
+    !> mistake: if the child were declared non-nullable while the array still carried nulls,
+    !> Arrow's own Table::Validate() would reject the write at close time. So this test failing on
+    !> the second assertion means a wrong answer; failing on the first means a corrupt file was
+    !> narrowly avoided.
+    subroutine test_vector_element_nullability_follows_mask(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/vector_element_nullability.parquet"
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(2, 3), back(2, 3)
+        logical :: mask(2, 3)
+        logical :: bare_nullable, masked_nullable
+
+        v = reshape([1_int32, 2_int32, 3_int32, 4_int32, 5_int32, 6_int32], [2, 3])
+        mask = .true.
+        mask(2, 2) = .false.
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "bare", v)
+        call parquet_write_column(writer, "masked", v, is_valid=mask)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_column_nullable(reader, "bare", bare_nullable)
+        call parquet_get_column_nullable(reader, "masked", masked_nullable)
+        call parquet_read_column(reader, "masked", back, null_value=-1_int32)
+        call parquet_close_reader(reader)
+
+        call check(error, .not. bare_nullable, &
+            "a vector column written with no is_valid mask must have a non-nullable element field")
+        if (allocated(error)) return
+        call check(error, masked_nullable, &
+            "a vector column written with a mask containing a Null must have a nullable element field")
+        if (allocated(error)) return
+        ! The Null still round-trips: the field being nullable is not merely a flag, it is what
+        ! lets the value come back as missing.
+        call check(error, back(2, 2) == -1_int32 .and. back(1, 1) == 1_int32, &
+            "a vector column's null element did not round-trip through the nullable element field")
+    end subroutine test_vector_element_nullability_follows_mask
+
+    !> A protected column is written NON-nullable, on every path -- including the two whose nulls
+    !> live inside the element rather than in a mask (temporal, and a parquet_string_column),
+    !> which are otherwise unconditionally nullable when streamed because a null-free first row
+    !> group says nothing about row group 7. Protection is what lets a caller declare that
+    !> question settled, and is the only way to do so for those two kinds.
+    !>
+    !> The unprotected timestamp column is the control, and it is the one that makes this test
+    !> mean anything: it goes through the identical streaming path in the same file and must come
+    !> back NULLABLE. Without it, an implementation that had simply stopped making temporal
+    !> columns nullable at all would pass.
+    subroutine test_protected_column_is_non_nullable(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/protected_non_nullable.parquet"
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_timestamp) :: ts(3)
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        logical :: all_true(3) = [.true., .true., .true.]
+        logical :: prot_ts, open_ts, prot_int
+
+        schema%maml%name = "protected_nullable.maml"
+        schema%maml%lines = [character(len=48) :: &
+            "table: protected_nullable_table", &
+            "extra:", &
+            "  protected_cols: pts;pint", &
+            "fields:", &
+            "- name: pts", &
+            "  data_type: timestamp[us]", &
+            "- name: ots", &
+            "  data_type: timestamp[us]", &
+            "- name: pint", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+
+        call ts(1)%set(2024, 1, 31, 12, 0, 0)
+        call ts(2)%set(2024, 2, 1, 12, 0, 0)
+        call ts(3)%set(2024, 2, 2, 12, 0, 0)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "pts", ts)
+        call parquet_write_column_chunk(writer, "ots", ts)
+        ! An all-.true. mask on a protected column is explicitly allowed, and erased: declaring a
+        ! column protected must not make the is_valid keyword unusable.
+        call parquet_write_column_chunk(writer, "pint", v, is_valid=all_true)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_column_nullable(reader, "pts", prot_ts)
+        call parquet_get_column_nullable(reader, "ots", open_ts)
+        call parquet_get_column_nullable(reader, "pint", prot_int)
+        call parquet_close_reader(reader)
+
+        call check(error, .not. prot_ts, &
+            "a protected timestamp column must be written non-nullable -- protection is the only " // &
+            "way to declare a streamed temporal column null-free")
+        if (allocated(error)) return
+        call check(error, open_ts, &
+            "an UNPROTECTED streamed timestamp column must stay nullable: its first row group " // &
+            "cannot know whether a later one holds a null element")
+        if (allocated(error)) return
+        call check(error, .not. prot_int, &
+            "a protected column given an all-.true. is_valid mask must still be non-nullable -- " // &
+            "the mask is erased once the protection check has passed")
+    end subroutine test_protected_column_is_non_nullable
+
     !> doc/pages/types/supported-data-types.md's "Large string columns" says the utf8/large_utf8
     !> choice is made from the column's byte payload -- but only on the whole-column path. A
     !> STREAMED column takes large_utf8 unconditionally, because its Arrow field is fixed when the
@@ -3536,8 +3699,8 @@ contains
     !! qc-enabled writer: int32/int64/float32/float64 scalar+matrix, logical scalar+matrix, and
     !! string scalar+matrix -- including the schema-enforced branch of logical-scalar/string
     !! chunk writes (only ever exercised schema-less elsewhere, by
-    !! test_streaming_write_string_logical_roundtrip) and the is_valid-present/absent branches
-    !! (row group 1 passes is_valid=, row group 2 omits it) under qc=.true.. Two uneven row
+    !! test_streaming_write_string_logical_roundtrip) under qc=.true.. Every row group passes
+    !! is_valid=, which a streamed column now requires once its first row group did. Two uneven row
     !! groups (3 rows, then 1) so every chunked column also exercises a real multi-row-group
     !! split, not just a single chunk.
     subroutine test_streaming_write_all_types_roundtrip(error)
@@ -3608,19 +3771,25 @@ contains
         call parquet_write_column_chunk(writer, "strv", strv(:, 1:3), is_valid=valid_m(:, 1:3))
         call parquet_finish_row_group(writer)
 
+        ! Row group 2 passes is_valid= for every column too, because it must: a streamed
+        ! column's nullability is fixed by its FIRST row group, so once row group 1 has passed a
+        ! mask, omitting it later is a hard error (resolve_chunk_nullability, parquet_wrapper.cpp).
+        ! This block deliberately omitted the masks until that rule existed, to exercise both
+        ! branches -- see test_streamed_nullability_follows_first_mask for the rule itself, and
+        ! test_streaming_write_schemaless_roundtrip for a genuinely mask-free streamed column.
         call parquet_new_row_group(writer, 1_int64)
-        call parquet_write_column_chunk(writer, "i32s", i32s(4:4))
-        call parquet_write_column_chunk(writer, "i32v", i32v(:, 4:4))
-        call parquet_write_column_chunk(writer, "i64s", i64s(4:4))
-        call parquet_write_column_chunk(writer, "i64v", i64v(:, 4:4))
-        call parquet_write_column_chunk(writer, "f32s", f32s(4:4))
-        call parquet_write_column_chunk(writer, "f32v", f32v(:, 4:4))
-        call parquet_write_column_chunk(writer, "f64s", f64s(4:4))
-        call parquet_write_column_chunk(writer, "f64v", f64v(:, 4:4))
-        call parquet_write_column_chunk(writer, "logv", logv(:, 4:4))
-        call parquet_write_column_chunk(writer, "logs", logs(4:4))
-        call parquet_write_column_chunk(writer, "strs", strs(4:4))
-        call parquet_write_column_chunk(writer, "strv", strv(:, 4:4))
+        call parquet_write_column_chunk(writer, "i32s", i32s(4:4), is_valid=valid_s(4:4))
+        call parquet_write_column_chunk(writer, "i32v", i32v(:, 4:4), is_valid=valid_m(:, 4:4))
+        call parquet_write_column_chunk(writer, "i64s", i64s(4:4), is_valid=valid_s(4:4))
+        call parquet_write_column_chunk(writer, "i64v", i64v(:, 4:4), is_valid=valid_m(:, 4:4))
+        call parquet_write_column_chunk(writer, "f32s", f32s(4:4), is_valid=valid_s(4:4))
+        call parquet_write_column_chunk(writer, "f32v", f32v(:, 4:4), is_valid=valid_m(:, 4:4))
+        call parquet_write_column_chunk(writer, "f64s", f64s(4:4), is_valid=valid_s(4:4))
+        call parquet_write_column_chunk(writer, "f64v", f64v(:, 4:4), is_valid=valid_m(:, 4:4))
+        call parquet_write_column_chunk(writer, "logv", logv(:, 4:4), is_valid=valid_m(:, 4:4))
+        call parquet_write_column_chunk(writer, "logs", logs(4:4), is_valid=valid_s(4:4))
+        call parquet_write_column_chunk(writer, "strs", strs(4:4), is_valid=valid_s(4:4))
+        call parquet_write_column_chunk(writer, "strv", strv(:, 4:4), is_valid=valid_m(:, 4:4))
         call parquet_finish_row_group(writer)
 
         call parquet_close_writer(writer)

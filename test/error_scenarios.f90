@@ -66,8 +66,8 @@ program error_scenarios
         call scenario_whole_string_is_plain_utf8()
     case ("string_view_roundtrip")
         call scenario_string_view_roundtrip()
-    case ("string_view_compact_read_unsupported")
-        call scenario_string_view_compact_read_unsupported()
+    case ("string_view_compact_read")
+        call scenario_string_view_compact_read()
     case ("col_size_overflow")
         call scenario_col_size_overflow()
     case ("col_size_and_row_mode_avoid_whole_column_read")
@@ -712,6 +712,12 @@ program error_scenarios
         call scenario_write_protected_temporal_null()
     case ("write_protected_string_column_null")
         call scenario_write_protected_string_column_null()
+    case ("chunk_mask_dropped_after_first_row_group")
+        call scenario_chunk_mask_dropped_after_first_row_group()
+    case ("chunk_mask_added_after_first_row_group")
+        call scenario_chunk_mask_added_after_first_row_group()
+    case ("set_protected_unknown_column")
+        call scenario_set_protected_unknown_column()
     case ("validate_qc_min_not_numeric")
         call scenario_validate_qc_min_not_numeric()
     case ("validate_qc_max_not_numeric")
@@ -7778,6 +7784,70 @@ contains
         print '(a)', "unexpectedly wrote a null into a protected parquet_string_column"
     end subroutine scenario_write_protected_string_column_null
 
+    !> A streamed column's nullability is fixed by its FIRST row group, so every later row group
+    !> must use the same masked or unmasked form. Here row group 1 passes an is_valid mask and row
+    !> group 2 omits it -- which would silently discard the caller's stated intent to allow Nulls.
+    !>
+    !> The CONTROL is inside the scenario: row group 1's masked write must succeed. Without it a
+    !> guard that rejected every masked chunk write would pass this scenario too.
+    subroutine scenario_chunk_mask_dropped_after_first_row_group()
+        type(parquet_writer) :: writer
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        logical :: mask(3) = [.true., .true., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_mask_dropped.parquet")
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "c", v, is_valid=mask)   ! control: must succeed
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "c", v)                  ! mask dropped -> aborts
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly dropped an is_valid mask after the first row group"
+    end subroutine scenario_chunk_mask_dropped_after_first_row_group
+
+    !> The other direction, and the one that would otherwise corrupt rather than merely surprise:
+    !> row group 1 passes no mask, so the column's field is fixed NON-nullable, and row group 2
+    !> then passes one. Were this allowed, a .false. entry in that later mask would be a Null
+    !> written into a field whose schema forbids it.
+    !>
+    !> Control, again inside the scenario: row group 1's unmasked write must succeed first.
+    subroutine scenario_chunk_mask_added_after_first_row_group()
+        type(parquet_writer) :: writer
+        integer(int32) :: v(3) = [1_int32, 2_int32, 3_int32]
+        logical :: mask(3) = [.true., .false., .true.]
+
+        call parquet_open_writer(writer, "test_run/error_scenario_chunk_mask_added.parquet")
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "c", v)                  ! control: must succeed
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "c", v, is_valid=mask)   ! mask added -> aborts
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly added an is_valid mask after an unmasked first row group"
+    end subroutine scenario_chunk_mask_added_after_first_row_group
+
+    !> schema%set_protected on a column the schema does not declare aborts, rather than silently
+    !> protecting nothing -- a typo there would otherwise leave the caller believing a column is
+    !> Null-protected when it is not.
+    !>
+    !> The control is the successful call on a real column immediately before it.
+    subroutine scenario_set_protected_unknown_column()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "set_protected_unknown.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: sp_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+        call parquet_parse_maml(schema)
+        call schema%set_protected("a")          ! control: a real column, must succeed
+        call schema%set_protected("no_such")    ! -> aborts
+        print '(a)', "unexpectedly accepted set_protected on an unknown column"
+    end subroutine scenario_set_protected_unknown_column
+
     subroutine scenario_validate_qc_min_not_numeric()
         type(parquet_maml_file) :: maml
 
@@ -9431,14 +9501,21 @@ contains
         print '(a)', "unexpectedly wrote a compact string column chunk into a vector (col_size>1) schema field"
     end subroutine scenario_compact_string_write_chunk_requires_scalar_column
 
-    !> parquet_read_string_column_buffers/parquet_read_string_column_chunk_buffers (the compact
-    !> buffer-handoff path behind reading a STRING_VIEW column into a parquet_string_column) only
-    !> understand the two offset-based string representations (STRING/LARGE_STRING) -- a
-    !> STRING_VIEW array has no offsets buffer at all, so is_offset_string_type in
-    !> parquet_wrapper.cpp rejects it with a clear error rather than misreading it (see that
-    !> function's own comment). Proves that error fires cleanly instead of the fixed-width
-    !> parquet_read_column path used by scenario_string_view_roundtrip, above.
-    subroutine scenario_string_view_compact_read_unsupported()
+    !> A STRING_VIEW column reads into a compact parquet_string_column correctly -- values, nulls
+    !> and lengths all intact.
+    !>
+    !> This USED to assert the opposite. The compact path hands Fortran an offsets/data/validity
+    !> triple straight from the Arrow array (extract_string_buffers), and a view array has neither
+    !> a single offsets array nor a single contiguous data buffer, so it was refused outright. It
+    !> is now converted to arrow::large_utf8() first (recache_coerced_string_view), which is the
+    !> same cast the row filter has always applied for its own Arrow-kernel gap -- so the refusal
+    !> is gone and this scenario asserts the round trip instead of the error.
+    !>
+    !> Out of process only because the fixture needs parquet_debug_write_string_view_fixture, a
+    !> test-only C++ hook (this library's own writer can never produce a STRING_VIEW column).
+    !> Expected exit status is 0; assertions are by error stop, the usual convention for a
+    !> non-aborting scenario.
+    subroutine scenario_string_view_compact_read()
         interface
             subroutine parquet_debug_write_string_view_fixture(path, column_name) &
                 bind(C, name="parquet_debug_write_string_view_fixture")
@@ -9450,15 +9527,38 @@ contains
 
         type(parquet_reader) :: reader
         type(parquet_string_column) :: col
+        character(len=:), allocatable :: text
         character(len=*), parameter :: out_file = "test_run/error_scenario_string_view_compact.parquet"
 
         call parquet_debug_write_string_view_fixture(out_file//char(0), "sv"//char(0))
 
         call parquet_open_reader(reader, out_file)
         call parquet_read_column(reader, "sv", col)
+        ! Read a second time: the cast REPLACES the cache entry, so this one finds a
+        ! LARGE_STRING array already there and must give the identical answer.
+        call parquet_read_column(reader, "sv", col)
         call parquet_close_reader(reader)
-        print '(a)', "unexpectedly read a STRING_VIEW column into a compact parquet_string_column"
-    end subroutine scenario_string_view_compact_read_unsupported
+
+        ! The fixture is "short", "", Null, a 39-byte value, then "exactly12chr" -- deliberately
+        ! spanning both view representations, since a value of 12 bytes or fewer is stored INLINE
+        ! in the view struct while a longer one lives in a separate data buffer. A conversion that
+        ! mishandled either kind would show up here as a wrong value rather than a crash.
+        if (col%size() /= 5_int64) error stop "string_view compact read: wrong row count"
+        call col%get(1, text)
+        if (text /= "short") error stop "string_view compact read: row 1 wrong"
+        call col%get(2, text)
+        if (text /= "") error stop "string_view compact read: row 2 (empty string) wrong"
+        ! The null must survive as a null, not as an empty string -- the two are different, and
+        ! the validity bitmap is the buffer most likely to be misaligned by a bad conversion.
+        if (.not. col%is_null(3)) error stop "string_view compact read: row 3 lost its null"
+        if (col%is_null(2)) error stop "string_view compact read: an empty string became a null"
+        call col%get(4, text)
+        if (text /= "this value exceeds twelve bytes for sure") &
+            error stop "string_view compact read: row 4 (non-inline value) wrong"
+        call col%get(5, text)
+        if (text /= "exactly12chr") error stop "string_view compact read: row 5 (inline boundary) wrong"
+        if (col%null_count() /= 1_int64) error stop "string_view compact read: wrong null count"
+    end subroutine scenario_string_view_compact_read
 
     !> parquet_date: set with a month outside 1..12 aborts.
     subroutine scenario_temporal_date_set_invalid_month()

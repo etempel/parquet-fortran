@@ -145,6 +145,7 @@ module parquet_core
         procedure :: set_column_unavailable => set_unavailable !! Disables a column, or every column if no name is given.
         procedure :: set_column_available => set_available !! Enables a column, or every column if no name is given.
         procedure :: set_col_size !! Resolves a column's col_size (only if currently "auto" unless force=.true.).
+        procedure :: set_protected !! Marks/unmarks a column Null-protected (extra: protected_cols:).
         procedure :: set_array_size !! Resolves a string column's array_size (only if currently "auto" unless force=.true.).
     end type parquet_column_info
 
@@ -237,6 +238,7 @@ module parquet_core
         procedure :: set_column_available !! Enables a column, or every column if no name is given.
         procedure :: set_column_unavailable !! Disables a column, or every column if no name is given.
         procedure :: set_col_size => schema_set_col_size !! Resolves a column's col_size before parquet_open_writer.
+        procedure :: set_protected => schema_set_protected !! Marks/unmarks a column Null-protected.
         procedure :: set_array_size => schema_set_array_size !! Resolves a string column's array_size before
         !! parquet_open_writer.
         procedure :: get_column_index => schema_get_column_index !! 1-based index of a column by
@@ -1238,6 +1240,7 @@ module parquet_core
     public :: parquet_get_string_length
     public :: parquet_column_exists
     public :: parquet_get_column_type
+    public :: parquet_get_column_nullable
     public :: parquet_get_column_names
     public :: parquet_release_column
     public :: parquet_get_metadata
@@ -1479,6 +1482,12 @@ module parquet_core
             character(len=*), intent(in), optional :: name !! column to disable; every column if absent.
         end subroutine set_column_unavailable
         !> Forwards to %cinfo%set_col_size.
+        !> Forwards to %cinfo%set_protected.
+        module subroutine schema_set_protected(this, name, protected)
+            class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
+            character(len=*), intent(in) :: name !! column to mark (internal name, as declared).
+            logical, intent(in), optional :: protected !! .false. to unprotect; default .true.
+        end subroutine schema_set_protected
         module subroutine schema_set_col_size(this, name, col_size, force)
             class(parquet_schema), intent(inout) :: this !! schema whose cinfo is updated.
             character(len=*), intent(in) :: name !! column to resolve.
@@ -1847,6 +1856,24 @@ module parquet_core
             integer, intent(in) :: col_size !! new col_size (must be a positive integer).
             logical, intent(in), optional :: force !! .true. allows overriding a non-"auto" col_size (default .false.).
         end subroutine set_col_size
+        !> Marks `name` Null-protected, or (protected=.false.) unmarks it -- the code-level
+        !> equivalent of listing it under a MAML's extra: protected_cols:. A protected column may
+        !> hold no Null at all: parquet_write_column error stops on an is_valid mask with any
+        !> .false. entry, on a null date/time/timestamp element, and on an %append_null() in a
+        !> parquet_string_column, and the column's Arrow field is written non-nullable.
+        !>
+        !> Unprotecting a column the MAML itself protected is allowed -- a program may have a good
+        !> reason to relax its own schema -- but emits a WARNING naming the column, since it
+        !> overrides a declaration someone wrote down deliberately. Never an abort.
+        !>
+        !> Error stops if `name` is not found. Call it before parquet_open_writer: the writer
+        !> takes its copy of the schema at open time, so a later change has no effect on a writer
+        !> that is already open.
+        module subroutine set_protected(this, name, protected)
+            class(parquet_column_info), intent(inout) :: this !! column_info being updated.
+            character(len=*), intent(in) :: name !! column to mark (internal name, as declared).
+            logical, intent(in), optional :: protected !! .false. to unprotect; default .true.
+        end subroutine set_protected
         !> Resolves `name`'s array_size to `array_size`. Error stops if array_size < 1, if `name`
         !> is not found, if `name`'s data_type is not "string" (array_size only applies to string
         !> columns), or if `name`'s array_size is not currently "auto" and force is absent/.false.
@@ -2828,6 +2855,29 @@ module parquet_core
             character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
             character(len=:), allocatable, intent(out) :: type_name !! resolved canonical type token.
         end subroutine parquet_get_column_type
+        !> Reports whether existing column `name` is declared NULLABLE in `reader`'s file schema,
+        !> in `is_nullable`. A schema-only query -- it reads no column data, and says nothing about
+        !> whether the column actually contains any Null (parquet_column_has_nulls answers that,
+        !> from the footer's own null counts).
+        !>
+        !> The two are genuinely different questions. A nullable column may hold no Null at all,
+        !> which is the normal state of a column written through the streaming API with an
+        !> all-.true. is_valid mask; a non-nullable one cannot hold a Null even in principle,
+        !> because the file's own schema forbids it.
+        !>
+        !> For a VECTOR column this reports the ELEMENT (child) field's flag, not the outer
+        !> list field's -- the outer one is non-nullable by construction here, since a row's
+        !> vector is never itself missing, so reporting it would answer a constant. A dotted
+        !> struct path reports the leaf's own flag, the same rule parquet_get_column_type follows.
+        !>
+        !> error stops only if `name` doesn't exist. A column this library cannot READ still has
+        !> a perfectly meaningful nullability flag, so an unreadable type is an answer here too,
+        !> exactly as it is for parquet_get_column_type.
+        module subroutine parquet_get_column_nullable(reader, name, is_nullable)
+            type(parquet_reader), intent(in) :: reader !! open reader.
+            character(len=*), intent(in) :: name !! existing column name (dotted struct-leaf path allowed).
+            logical, intent(out) :: is_nullable !! .true. if the stored field is declared nullable.
+        end subroutine parquet_get_column_nullable
         !> Returns every column `reader`'s file contains, in schema order, as the same
         !> (possibly dotted) names every other column-name argument in this module accepts:
         !> a nested STRUCT field contributes one entry per leaf beneath it ("addr.city"), never

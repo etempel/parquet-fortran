@@ -33,7 +33,7 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-82` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-83` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
@@ -145,6 +145,7 @@ something a reader is expected to have.
 | [Risk-78](#risk-78--a-temporal-columns-null-cache-is-invalidated-by-the-writer-not-by-the-reader) | A temporal column's null cache is invalidated by the writer, not by the reader | 4 — covered |
 | [Risk-79](#risk-79--the-no-relocation-guarantee-rests-on-one-conditional-and-nothing-else) | The no-relocation guarantee rests on one conditional and nothing else | 4 — covered |
 | [Risk-80](#risk-80--a-metadata-only-query-quietly-decodes-a-whole-column-and-the-answer-is-still-right) | A metadata-only query quietly decodes a whole column, and the answer is still right | 4 — covered |
+| [Risk-82](#risk-82--a-non-nullable-field-that-receives-a-null-writes-definition-levels-that-disagree-with-its-schema) | A non-nullable field that receives a Null writes definition levels that disagree with its schema | 4 — covered |
 | [Risk-81](#risk-81--two-individually-valid-ranges-that-describe-different-parts-of-the-file) | Two individually valid ranges that describe different parts of the file | 4 — covered |
 
 ---
@@ -153,7 +154,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-82**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-83**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -774,6 +775,55 @@ The branch body is `GCOVR_EXCL`'d with that reasoning recorded beside it.
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
+
+### Risk-82 — A non-nullable field that receives a Null writes definition levels that disagree with its schema
+
+`build_field` (`src/parquet_wrapper.cpp`) now applies its `nullable` argument to a **vector** column's
+child `item` field, where it was previously ignored — Arrow's `fixed_size_list(value_type, size)`
+convenience constructor hard-codes a nullable child, so until this change every vector column was
+written with a nullable element field whatever the caller passed. The rule that decides the flag is
+`resolve_chunk_nullability` for a streamed column (nullable iff the first row group passed an
+`is_valid` mask) and `has_any_null` for a whole-column write.
+
+**The invariant the whole scheme rests on is one sentence: a field declared non-nullable must never
+receive an array containing nulls.** It holds by construction today — an absent mask reaches the
+builder as a null `valid_bytes`, which cannot produce a null, and the kinds whose nulls come from
+somewhere other than a mask (`date`/`time`/`timestamp`, and a `parquet_string_column`) are excluded
+from the presence rule for exactly that reason.
+
+**Why the failure is silent.** Break it and Parquet writes definition levels describing Nulls into a
+schema that says the column has none. Nothing aborts on the write path: this library's own reader
+answers from the data's own null count rather than the schema flag, so the file round-trips through
+it perfectly. A *different* Arrow-based reader, trusting the schema, may skip reading definition
+levels for a required field and return the wrong values — or Arrow's own `Table::Validate()` may
+reject the write at close time with "Column data for field N ... is inconsistent with schema", which
+is an abort thousands of rows away from the call that caused it. Which of the two you get depends on
+where the mismatch enters, and neither names the write that introduced it.
+
+**Test.** `test_vector_element_nullability_follows_mask` and
+`test_streamed_nullability_follows_first_mask` (`test/test_writing.f90`) pin the flag in both
+directions through `parquet_get_column_nullable`, and the vector one additionally round-trips a Null
+through the masked column — so the two halves fail differently: a wrong flag fails the assertion, a
+mismatched array/field pair fails by aborting inside Arrow.
+`test_protected_column_is_non_nullable` covers the protected case, including an unprotected
+timestamp control. The two consistency aborts have their own scenarios
+(`chunk_mask_dropped_after_first_row_group`, `chunk_mask_added_after_first_row_group`).
+
+**What this still forbids.**
+
+- **Every `build_field` call site must pass a `nullable` argument that reflects the array it is
+  paired with.** Omitting it now means `false`, and omitting it is exactly what
+  `parquet_append_string_array_column` did — harmlessly, while the argument was ignored for vector
+  columns, and as a live invariant break the moment it stopped being. Audit the call sites, not just
+  the rule.
+- **`align_array_to_field` must keep being applied wherever a field and an array are stored
+  together.** A `FixedSizeListBuilder` stamps its own type on the array it finishes, with a nullable
+  child, and Arrow compares that type against the schema field. The helper restamps it; without it
+  a correct flag still aborts the write.
+- **A new column kind whose nulls do not come from an `is_valid` mask must be added to the
+  always-nullable set**, or its first null-free row group will declare a field that a later row
+  group cannot fill. `date` was nearly missed here precisely because it is int32-backed and reaches
+  the generic template rather than the temporal one.
 
 ### Risk-81 — Two individually valid ranges that describe different parts of the file
 

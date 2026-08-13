@@ -741,6 +741,10 @@ contains
         call this%cinfo%set_column_unavailable(name)
     end procedure set_column_unavailable
 
+    module procedure schema_set_protected
+        call this%cinfo%set_protected(name, protected)
+    end procedure schema_set_protected
+
     module procedure schema_set_col_size
         call this%cinfo%set_col_size(name, col_size, force)
     end procedure schema_set_col_size

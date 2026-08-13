@@ -651,6 +651,14 @@ contains
                 test_write_protected_column_with_null_aborts), &
             new_unittest("a null element of a protected vector column aborts", &
                 test_write_protected_vector_element_null_aborts), &
+            new_unittest("protected_cols: matches a column's OUTPUT name under a col_map: rename", &
+                test_protected_col_map_output_name_aborts), &
+            new_unittest("protected_cols: naming the INTERNAL name of a col_map:-renamed column is rejected", &
+                test_protected_col_map_internal_name_rejected), &
+            new_unittest("a null element of a protected timestamp column aborts, with no is_valid in sight", &
+                test_write_protected_temporal_null_aborts), &
+            new_unittest("an %append_null in a protected parquet_string_column aborts", &
+                test_write_protected_string_column_null_aborts), &
             new_unittest("qc: min value that does not parse as a number aborts", &
                 test_validate_qc_min_not_numeric_aborts), &
             new_unittest("qc: max value that does not parse as a number aborts", &
@@ -5470,6 +5478,55 @@ contains
         call check_scenario_exit_status(error, "write_protected_vector_element_null", expect_abort=.true., &
             failure_message="one Null ELEMENT of a protected vector column was expected to error stop")
     end subroutine test_write_protected_vector_element_null_aborts
+
+    !> protected_cols: is matched against a column's OUTPUT name -- the name that reaches the file
+    !> -- not the internal name Fortran code writes with. Under a col_map: rename the two differ,
+    !> which is the only situation where the distinction is observable at all.
+    subroutine test_protected_col_map_output_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "protected_col_map_output_name", expect_abort=.true., &
+            failure_message="a Null written into a column protected under its col_map: output name " // &
+                "was expected to error stop", &
+            required_stderr="is protected (extra: protected_cols:) and cannot contain Null values")
+    end subroutine test_protected_col_map_output_name_aborts
+
+    !> The negative control for the above, and the more interesting half: listing the INTERNAL
+    !> name does not quietly leave the column unprotected -- parquet_validate_maml rejects it,
+    !> because every protected_cols: entry must match one of the MAML's own declared output names.
+    !> The distinct stderr is what tells the two apart; asserting only the exit status would let a
+    !> build that aborted for any reason at all pass both scenarios.
+    subroutine test_protected_col_map_internal_name_rejected(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "protected_col_map_internal_name_rejected", &
+            expect_abort=.true., &
+            failure_message="protected_cols: naming a col_map:-renamed column's internal name was " // &
+                "expected to fail validation", &
+            required_stderr="protected_cols: unknown column 'internal'")
+    end subroutine test_protected_col_map_internal_name_rejected
+
+    !> A protected column may hold no Null however the Null was expressed. A timestamp column
+    !> takes no is_valid= at all, and is still covered -- the scenario's null-free control write
+    !> runs first, so this cannot pass against a guard that refuses every temporal write.
+    subroutine test_write_protected_temporal_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_protected_temporal_null", expect_abort=.true., &
+            failure_message="a null element of a protected timestamp column was expected to error stop", &
+            required_stderr="is protected (extra: protected_cols:) and cannot contain Null values")
+    end subroutine test_write_protected_temporal_null_aborts
+
+    !> The parquet_string_column half of the same rule: a null reaching the file as %append_null,
+    !> with no mask argument anywhere. Same control-first shape as the temporal scenario.
+    subroutine test_write_protected_string_column_null_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "write_protected_string_column_null", &
+            expect_abort=.true., &
+            failure_message="an %append_null in a protected parquet_string_column was expected to error stop", &
+            required_stderr="is protected (extra: protected_cols:) and cannot contain Null values")
+    end subroutine test_write_protected_string_column_null_aborts
 
     subroutine test_validate_qc_min_not_numeric_aborts(error)
         type(error_type), allocatable, intent(out) :: error

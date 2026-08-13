@@ -145,6 +145,8 @@ contains
                 test_large_string_column_roundtrip), &
             new_unittest("a STRING_VIEW column (from a file written by another Arrow-based tool) round-trips " // &
                 "correctly", test_string_view_column_roundtrip), &
+            new_unittest("a streamed string column is stored as large_utf8 however small it is, while the " // &
+                "same strings written whole stay plain utf8", test_streamed_string_is_always_large_utf8), &
             new_unittest("a vector column whose auto-sized row-group size is clamped for the int32 " // &
                 "list-element-count limit still round-trips, split across multiple row groups", &
                 test_list_element_count_auto_multi_row_group_roundtrip), &
@@ -1936,6 +1938,57 @@ contains
         call check_scenario_exit_status(error, "string_view_roundtrip", expect_abort=.false., &
             failure_message="a STRING_VIEW column did not round-trip correctly")
     end subroutine test_string_view_column_roundtrip
+
+    !> doc/pages/types/supported-data-types.md's "Large string columns" says the utf8/large_utf8
+    !> choice is made from the column's byte payload -- but only on the whole-column path. A
+    !> STREAMED column takes large_utf8 unconditionally, because its Arrow field is fixed when the
+    !> first row group locks the schema, before the later row groups' bytes exist
+    !> (parquet_write_string_column_chunk, parquet_wrapper.cpp).
+    !>
+    !> The only observable is print_stat's `parquet_type` column on stdout, which test-drive cannot
+    !> capture -- so both halves run out of process (scenario_streamed_string_is_large_utf8 and
+    !> scenario_whole_string_is_plain_utf8 in error_scenarios.f90), same pattern as
+    !> test_large_string_column_roundtrip above.
+    !>
+    !> The second scenario is the NEGATIVE CONTROL and is what makes the first mean anything: it
+    !> writes the identical six short strings whole, and its capture must contain `string` but not
+    !> `large_string`. Asserting only the streamed half would pass equally against a build that had
+    !> started promoting every string column to large_utf8. They are two scenarios rather than one
+    !> because scenario_capture_contains searches the whole capture for a substring, and "string"
+    !> is a substring of "large_string" -- one capture holding both tables could not be told apart.
+    subroutine test_streamed_string_is_always_large_utf8(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: streamed_is_large, whole_is_large, whole_is_string
+
+        call run_error_scenario("streamed_string_is_large_utf8", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "streaming a small string column must not abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "large_string", streamed_is_large)
+        call check(error, streamed_is_large, &
+            "a streamed string column must be stored as large_utf8 even when tiny -- print_stat " // &
+            "reported no large_string column")
+        if (allocated(error)) return
+
+        ! Negative control: the same strings, written whole, must NOT be promoted.
+        call run_error_scenario("whole_string_is_plain_utf8", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "writing a small string column whole must not abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "large_string", whole_is_large)
+        call check(error, .not. whole_is_large, &
+            "a small string column written whole must stay plain utf8 -- print_stat reported " // &
+            "large_string, so the size-based choice is not being made at all")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "string", whole_is_string)
+        call check(error, whole_is_string, &
+            "print_stat reported no string column at all for the whole-column control, so the " // &
+            "control proves nothing")
+    end subroutine test_streamed_string_is_always_large_utf8
 
     !> A vector column's flattened element count (nrows * col_size) is capped at 2^31-1 *per row
     !> group*, not per file -- close_parquet_writer's auto-sizing path silently clamps its own

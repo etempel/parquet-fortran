@@ -60,6 +60,10 @@ program error_scenarios
         call scenario_print_stat_screened_rows()
     case ("large_string_roundtrip")
         call scenario_large_string_roundtrip()
+    case ("streamed_string_is_large_utf8")
+        call scenario_streamed_string_is_large_utf8()
+    case ("whole_string_is_plain_utf8")
+        call scenario_whole_string_is_plain_utf8()
     case ("string_view_roundtrip")
         call scenario_string_view_roundtrip()
     case ("string_view_compact_read_unsupported")
@@ -700,6 +704,14 @@ program error_scenarios
         call scenario_write_protected_column_with_null()
     case ("write_protected_vector_element_null")
         call scenario_write_protected_vector_element_null()
+    case ("protected_col_map_output_name")
+        call scenario_protected_col_map_output_name()
+    case ("protected_col_map_internal_name_rejected")
+        call scenario_protected_col_map_internal_name_rejected()
+    case ("write_protected_temporal_null")
+        call scenario_write_protected_temporal_null()
+    case ("write_protected_string_column_null")
+        call scenario_write_protected_string_column_null()
     case ("validate_qc_min_not_numeric")
         call scenario_validate_qc_min_not_numeric()
     case ("validate_qc_max_not_numeric")
@@ -3615,6 +3627,69 @@ contains
         call parquet_close_reader(reader, print_stat=.true.)
         print '(a)', "print_stat covered the 'screened: N of M row groups skipped' branch"
     end subroutine scenario_print_stat_screened_rows
+
+    !> A STREAMED string column is stored as arrow::large_utf8() however small it is, unlike the
+    !> whole-column write, which picks utf8/large_utf8 from the column's own byte payload -- see
+    !> doc/pages/types/supported-data-types.md's "Large string columns", and
+    !> parquet_write_string_column_chunk's own comment in parquet_wrapper.cpp for why (the field is
+    !> fixed when the first row group locks the schema, long before every row group's bytes have
+    !> been seen, so it takes the 64-bit form rather than risk rejecting a later row group).
+    !>
+    !> Runs out of process because the only observable is parquet_close_reader(print_stat=.true.)'s
+    !> `parquet_type` column on stdout, which an in-process test-drive test cannot capture. Exits 0:
+    !> nothing here aborts. Its NEGATIVE CONTROL is a separate scenario,
+    !> whole_string_is_plain_utf8, which writes the very same six strings through
+    !> parquet_write_column and must report a plain `string` -- kept separate rather than combined
+    !> into one scenario (as this test was first sketched) because scenario_capture_contains does a
+    !> plain substring search over the whole capture, and "string" occurs inside "large_string", so
+    !> two tables in one capture cannot be told apart.
+    subroutine scenario_streamed_string_is_large_utf8()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/error_scenario_streamed_string_large.parquet"
+        character(len=8) :: s_values(6) = [character(len=8) :: &
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
+        character(len=8) :: s_back(6)
+
+        ! Six short strings: ~40 bytes of payload, nowhere near the real ~2GiB offset limit, so a
+        ! whole-column write of these same values stays on plain utf8 (see the control scenario).
+        call parquet_open_writer(writer, out_file)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "streamed", s_values(1:3))
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 3)
+        call parquet_write_column_chunk(writer, "streamed", s_values(4:6))
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "streamed", s_back)
+        if (any(s_back /= s_values)) error stop "streamed string column did not round-trip"
+        ! print_stat's parquet_type column is what carries the answer to stdout.
+        call parquet_close_reader(reader, print_stat=.true.)
+    end subroutine scenario_streamed_string_is_large_utf8
+
+    !> The negative control for scenario_streamed_string_is_large_utf8, above: the same six short
+    !> strings written whole rather than streamed must be stored as plain utf8, so print_stat
+    !> reports `string` and NOT `large_string`. Without this half, the streamed assertion would
+    !> pass just as happily against a build that had started promoting every string column.
+    subroutine scenario_whole_string_is_plain_utf8()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/error_scenario_whole_string_plain.parquet"
+        character(len=8) :: s_values(6) = [character(len=8) :: &
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
+        character(len=8) :: s_back(6)
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "whole", s_values)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "whole", s_back)
+        if (any(s_back /= s_values)) error stop "whole-column string did not round-trip"
+        call parquet_close_reader(reader, print_stat=.true.)
+    end subroutine scenario_whole_string_is_plain_utf8
 
     !> Proves the arrow::large_utf8() write/read path (added for a string/string-vector column
     !> whose byte payload would overflow Arrow's real int32 STRING-offset limit, ~2GiB -- see
@@ -7556,6 +7631,152 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a Null element into a protected vector column"
     end subroutine scenario_write_protected_vector_element_null
+
+    !> `extra: protected_cols:` is matched against a column's OUTPUT name -- the name written to
+    !> the file -- so under a `col_map:` rename the list must carry the renamed name, not the
+    !> stable internal one Fortran code calls parquet_write_column with. See
+    !> doc/pages/types/supported-data-types.md's "Null values", and the output_name comparison in
+    !> parquet_validate_maml_internal (parquet_metadata_maml.f90).
+    !>
+    !> Here `internal` is written under the output name `published`, `protected_cols:` lists
+    !> `published`, and a .false. mask entry must abort. Its NEGATIVE CONTROL is the separate
+    !> scenario protected_col_map_internal_name_rejected below, which lists `internal` instead --
+    !> without it, this scenario would pass equally against an implementation that protected every
+    !> column, or that matched on either name.
+    subroutine scenario_protected_col_map_output_name()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: values(3) = [1_int32, 2_int32, 3_int32]
+        logical :: is_valid(3) = [.true., .false., .true.]
+
+        schema%maml%name = "protected_col_map.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: protected_map_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - internal: published", &
+            "  protected_cols: published", &
+            "fields:", &
+            "- name: published", &
+            "  data_type: int32" ]
+
+        call parquet_parse_maml(schema)
+
+        ! The write uses the INTERNAL name; the protection was declared under the output name.
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_col_map.parquet", schema)
+        call parquet_write_column(writer, "internal", values, is_valid=is_valid)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a Null into a column protected under its output name"
+    end subroutine scenario_protected_col_map_output_name
+
+    !> The negative control for scenario_protected_col_map_output_name, above: the same MAML with
+    !> `protected_cols:` listing the INTERNAL name instead of the output name.
+    !>
+    !> The interesting part is that this does not merely fail to protect the column -- it fails
+    !> validation outright, because parquet_validate_maml requires every protected_cols: entry to
+    !> match one of this MAML's own declared output names. So getting the name wrong is LOUD, not
+    !> silent, which is why no feature_risks.md entry is proposed for it. The two scenarios
+    !> together pin the matching rule in both directions: the output name protects, and the
+    !> internal name is rejected rather than quietly ignored.
+    subroutine scenario_protected_col_map_internal_name_rejected()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "protected_col_map_internal.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: protected_map_table", &
+            "extra:", &
+            "  col_map:", &
+            "  - internal: published", &
+            "  protected_cols: internal", &
+            "fields:", &
+            "- name: published", &
+            "  data_type: int32" ]
+
+        call parquet_parse_maml(schema)
+        print '(a)', "unexpectedly accepted a protected_cols: entry naming an internal column name"
+    end subroutine scenario_protected_col_map_internal_name_rejected
+
+    !> A protected column may hold no Null WHATEVER ARGUMENT EXPRESSED IT. A date/time/timestamp
+    !> column takes no is_valid= at all -- its null state lives in the element -- and it is still
+    !> covered, because parquet_check_protected is reached from the temporal write path too
+    !> (temporal_valid_ptr, parquet_write_temporal.f90). Documented in
+    !> doc/pages/types/supported-data-types.md's "Null values".
+    !>
+    !> The CONTROL runs first, in the same process: an all-set timestamp column written to its own
+    !> file must succeed. Without it, a guard that refused every temporal write into a protected
+    !> column would pass this scenario just as well.
+    subroutine scenario_write_protected_temporal_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_timestamp) :: ts(3)
+
+        schema%maml%name = "protected_temporal.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: protected_ts_table", &
+            "extra:", &
+            "  protected_cols: t", &
+            "fields:", &
+            "- name: t", &
+            "  data_type: timestamp[us]" ]
+
+        call parquet_parse_maml(schema)
+
+        ! Control: every element set, so the column carries no null and the write must succeed.
+        call ts(1)%set(2024, 1, 31, 12, 0, 0)
+        call ts(2)%set(2024, 2, 1, 12, 0, 0)
+        call ts(3)%set(2024, 2, 2, 12, 0, 0)
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_ts_ok.parquet", schema)
+        call parquet_write_column(writer, "t", ts)
+        call parquet_close_writer(writer)
+
+        ! Now the same column with element 2 left default-initialized, i.e. null.
+        call ts(2)%set_null()
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_ts_null.parquet", schema)
+        call parquet_write_column(writer, "t", ts)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a null timestamp element into a protected column"
+    end subroutine scenario_write_protected_temporal_null
+
+    !> The parquet_string_column half of the same rule: that container carries its own per-element
+    !> null state and takes no is_valid= either, and a protected column must still refuse an
+    !> %append_null(). Reached via write_string_compact_tail's own parquet_check_protected call
+    !> (parquet_write_string.f90), which derives the mask from %is_null.
+    !>
+    !> Same shape as the temporal scenario above: the null-free control writes first and must
+    !> succeed, so this cannot pass against a guard that refuses every compact string write.
+    subroutine scenario_write_protected_string_column_null()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: names
+
+        schema%maml%name = "protected_strcol.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: protected_str_table", &
+            "extra:", &
+            "  protected_cols: s", &
+            "fields:", &
+            "- name: s", &
+            "  data_type: string", &
+            "  array_size: 8" ]
+
+        call parquet_parse_maml(schema)
+
+        ! Control: no nulls in the container, so the write must succeed.
+        call names%append_string("alpha")
+        call names%append_string("bravo")
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_strcol_ok.parquet", schema)
+        call parquet_write_column(writer, "s", names)
+        call parquet_close_writer(writer)
+
+        ! One genuine null in the container, expressed by %append_null rather than by any mask.
+        call names%clear()
+        call names%append_string("alpha")
+        call names%append_null()
+        call parquet_open_writer(writer, "test_run/error_scenario_protected_strcol_null.parquet", schema)
+        call parquet_write_column(writer, "s", names)
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a null into a protected parquet_string_column"
+    end subroutine scenario_write_protected_string_column_null
 
     subroutine scenario_validate_qc_min_not_numeric()
         type(parquet_maml_file) :: maml

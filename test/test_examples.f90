@@ -34,6 +34,8 @@ contains
                 test_maml_example2_sidecar_keyarray), &
             new_unittest("doc/pages/types/date-time.md datetime_quickstart example", test_datetime_quickstart_example), &
             new_unittest("doc/pages/operating/performance.md write_parquet_qc_example", test_performance_qc_example), &
+            new_unittest("doc/pages/types/supported-data-types.md null_values_example", &
+                test_null_values_example), &
             new_unittest("doc/pages/types/string-columns.md strings_quickstart example", &
                 test_strings_quickstart_example), &
             new_unittest("doc/pages/types/string-columns.md token_column example", test_token_column_example), &
@@ -355,6 +357,62 @@ contains
         call check(error, taken_at(3)%to_unix(parquet_unit_seconds) == 1721260800_8, &
             "datetime_quickstart example: 'taken_at' row 3 (set_unix) did not round-trip correctly")
     end subroutine test_datetime_quickstart_example
+    !
+    !> doc/pages/types/supported-data-types.md's "null_values_example" (the "Null values"
+    !> section): writes a float64 column with two genuine Parquet Nulls via is_valid=, then
+    !> reads it back twice -- once with is_valid= alone and once with null_value= alone --
+    !> and asserts the two documented outcomes differ in exactly the way the page states.
+    !>
+    !> The two read-backs are each other's control: the SAME column, from the same file, must
+    !> yield 0.0 in the Null slots under is_valid= and -99.0 under null_value=. A build that
+    !> ignored null_value= entirely, or one that filled every Null with the same constant
+    !> whichever argument was passed, fails here -- where asserting only the is_valid= half
+    !> would pass against both. The valid rows are asserted on both paths too, so a build
+    !> that substituted the sentinel everywhere rather than only at the Nulls is caught.
+    !>
+    !> Deliberately NOT asserted: the strict (neither-argument) read the page mentions last,
+    !> which aborts the process -- see error_scenarios.f90's read_column_with_nulls for that
+    !> half, which cannot live in an in-process test.
+    subroutine test_null_values_example(error)
+        use iso_fortran_env, only: real64
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/doc_null_values_example.parquet"
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        real(real64) :: flux(5), got(5), filled(5)
+        logical :: written(5), present_rows(5)
+
+        flux = [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64, 5.5_real64]
+        written = [.true., .true., .false., .true., .false.]
+
+        ! Rows 3 and 5 are written as genuine Parquet Nulls; flux(3)/flux(5) are ignored.
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "flux", flux, is_valid=written)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "flux", got, is_valid=present_rows)
+        call parquet_read_column(reader, "flux", filled, null_value=-99.0_real64)
+        call parquet_close_reader(reader)
+
+        call check(error, all(present_rows .eqv. written), &
+            "null_values_example: is_valid did not report rows 3 and 5 as the Null ones")
+        if (allocated(error)) return
+        ! is_valid= alone: Null slots take the type's own safe default, not the written value.
+        call check(error, got(3) == 0.0_real64 .and. got(5) == 0.0_real64, &
+            "null_values_example: is_valid-only read did not default the two Null slots to 0")
+        if (allocated(error)) return
+        ! null_value= instead: the SAME two slots take the sentinel -- the control for the above.
+        call check(error, filled(3) == -99.0_real64 .and. filled(5) == -99.0_real64, &
+            "null_values_example: null_value= read did not substitute -99.0 in the two Null slots")
+        if (allocated(error)) return
+        ! Valid rows are untouched on both paths, so a build substituting everywhere is caught.
+        call check(error, got(1) == 1.5_real64 .and. got(2) == 2.5_real64 .and. got(4) == 4.5_real64, &
+            "null_values_example: is_valid-only read did not round-trip the three non-Null values")
+        if (allocated(error)) return
+        call check(error, filled(1) == 1.5_real64 .and. filled(2) == 2.5_real64 .and. filled(4) == 4.5_real64, &
+            "null_values_example: null_value= read did not round-trip the three non-Null values")
+    end subroutine test_null_values_example
     !
     !> doc/pages/operating/performance.md's "write_parquet_qc_example": builds a qc-maml
     !> directly via schema%maml%name/schema%maml%lines (rather than a file or

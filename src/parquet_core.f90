@@ -963,8 +963,10 @@ module parquet_core
     !> is_valid (optional) reports which elements were actually present.
     !>
     !> Two restrictions not shared with parquet_read_column: disallowed (error stop) on a reader
-    !> opened with an active filter= (a row-group-scoped read has no coherent way to apply a
-    !> filter mask that is inherently sized to the whole unfiltered file); and, when the reader
+    !> with an active sort (a permutation destroys row-group locality, so there is no coherent
+    !> "row group N of the sorted output" to serve -- see check_reader_no_sort; a filter= or
+    !> sample_fraction= mask only ever REMOVES rows, so a chunked read works under one and hands
+    !> back that row group's surviving rows); and, when the reader
     !> was opened with qc=.true., every chunk read runs the usual qc: min/max/miss checks scoped
     !> to just that one row group's own data (not the whole column) -- a hard-mode
     !> (qc_soft=.false.) violation error stops naming the offending row group; a soft-mode

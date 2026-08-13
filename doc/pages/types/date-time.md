@@ -283,9 +283,11 @@ The same `schema%add_field` call used for any other type works for these tokens:
 call schema%add_field("ev", "timestamp[ns,utc]", info="event time")
 ```
 
-`qc:` bounds and `parquet_filter` rules are not supported for `date`/`time`/`timestamp` columns
-yet — `parquet_validate_maml` rejects a `qc:` block declared on one of these fields with a clear
-message, rather than silently ignoring it.
+`qc:` bounds are not supported for `date`/`time`/`timestamp` columns yet —
+`parquet_validate_maml` rejects a `qc:` block declared on one of these fields with a clear
+message, rather than silently ignoring it. `parquet_filter` rules on these columns *are*
+supported, comparing against a double-quoted ISO-8601 literal — see
+[Filtering `date`, `time` and `timestamp` columns](../io/filter-sort-sample.html#filtering-date-time-and-timestamp-columns).
 
 ### Querying a column's stored unit and timezone
 
@@ -344,9 +346,11 @@ above.
 
 ## Not yet supported
 
-- `qc:` range checks and `parquet_filter` rules on `date`/`time`/`timestamp` columns (deferred;
-  rejected at validation rather than silently ignored — see
+- `qc:` range checks on `date`/`time`/`timestamp` columns (deferred; rejected at validation rather
+  than silently ignored — see
   [Units and schema-declared columns](#units-and-schema-declared-columns) above).
+  `parquet_filter` rules on these columns are *not* on this list — they are implemented, see
+  [Filtering `date`, `time` and `timestamp` columns](../io/filter-sort-sample.html#filtering-date-time-and-timestamp-columns).
 - `INTERVAL`/duration values — a deliberately dropped non-goal, not a pending gap: Parquet's
   legacy `INTERVAL` converted type was never migrated to Parquet's modern `LogicalType` union and
   has no mainstream write path in Arrow/pyarrow/Hive/Trino either, and Arrow's separate

@@ -74,6 +74,8 @@ contains
             new_unittest("read extended source types (int8/16, uint8/16/32/64, half_float, decimal32/64/128/256)", &
                 test_read_extended_types), &
             new_unittest("read a real32 column as real64", test_read_float32_column_as_float64), &
+            new_unittest("integer-to-real reads are NOT checked for precision loss", &
+                test_int_to_real_precision_is_unchecked), &
             new_unittest("row filter on an extended (int8) source type column", &
                 test_filter_extended_type), &
             new_unittest("row filter passing-comparison on a half_float column", &
@@ -1957,6 +1959,71 @@ contains
     !> note and doc/pages/types/supported-data-types.md): INT8/16, UINT8/16/32/64,
     !> HALF_FLOAT, and DECIMAL32/64/128/256, all converted via
     !> convert_values_to_int32/int64/float32/float64 in parquet_wrapper.cpp.
+    !> doc/pages/types/supported-data-types.md's "Reading a column into a different numeric kind"
+    !> states that integer-to-real conversions are **not** checked for precision loss, unlike the
+    !> real-to-integer direction, which aborts on a fractional or out-of-range value. That is a
+    !> documented ABSENCE of a check, so nothing about it fails on its own: if someone later added
+    !> a precision guard to convert_values_to_float32/float64 (src/parquet_wrapper.cpp), every
+    !> existing extended-type test would stay green -- their fixture values are all small -- while
+    !> the page silently became wrong. This pins it with values chosen to be exactly on the edge.
+    !>
+    !> Each half carries its own negative control, and the control is the SAME column read into a
+    !> second kind. int64 2**53+1 read as real64 must come back rounded to 2**53, while read as
+    !> int64 it must come back exact -- so the fixture demonstrably holds the odd value and the
+    !> difference is the conversion rather than the write. Likewise int32 2**24+1 as real32 (rounds
+    !> to 2**24) against the same column as int32 (exact). Without the control halves, a test that
+    !> merely read a small value into a real array would pass against a build that had started
+    !> rejecting the lossy read outright, since it would never reach one.
+    subroutine test_int_to_real_precision_is_unchecked(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = "test_run/precision_loss_unchecked.parquet"
+        ! 2**53 + 1 is the smallest positive integer real64 cannot represent; 2**24 + 1 is the
+        ! smallest real32 cannot. Both round DOWN to the power of two immediately below them.
+        integer(int64), parameter :: big64 = 9007199254740993_int64      ! 2**53 + 1
+        integer(int64), parameter :: big64_rounded = 9007199254740992_int64  ! 2**53
+        integer(int32), parameter :: big32 = 16777217_int32              ! 2**24 + 1
+        integer(int32), parameter :: big32_rounded = 16777216_int32      ! 2**24
+        integer(int64) :: src64(2), back64(2)
+        integer(int32) :: src32(2), back32(2)
+        real(real64) :: as_r64(2)
+        real(real32) :: as_r32(2)
+
+        src64 = [big64, 1_int64]
+        src32 = [big32, 1_int32]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "wide", src64)
+        call parquet_write_column(writer, "narrow", src32)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "wide", back64)      ! control: exact
+        call parquet_read_column(reader, "wide", as_r64)      ! lossy, and must not abort
+        call parquet_read_column(reader, "narrow", back32)    ! control: exact
+        call parquet_read_column(reader, "narrow", as_r32)    ! lossy, and must not abort
+        call parquet_close_reader(reader)
+
+        ! Controls first: the file really does hold the un-representable values.
+        call check(error, back64(1) == big64, &
+            "int64 control read did not return 2**53 + 1 exactly, so the fixture is wrong")
+        if (allocated(error)) return
+        call check(error, back32(1) == big32, &
+            "int32 control read did not return 2**24 + 1 exactly, so the fixture is wrong")
+        if (allocated(error)) return
+        ! The documented behaviour: silently rounded, no abort, no warning.
+        call check(error, int(as_r64(1), int64) == big64_rounded, &
+            "int64 -> real64 read did not silently round 2**53 + 1 down to 2**53")
+        if (allocated(error)) return
+        call check(error, int(as_r32(1), int32) == big32_rounded, &
+            "int32 -> real32 read did not silently round 2**24 + 1 down to 2**24")
+        if (allocated(error)) return
+        ! The representable rows are unaffected on every path.
+        call check(error, back64(2) == 1_int64 .and. as_r64(2) == 1.0_real64 .and. &
+            back32(2) == 1_int32 .and. as_r32(2) == 1.0_real32, &
+            "a representable row did not round-trip on one of the four reads")
+    end subroutine test_int_to_real_precision_is_unchecked
+    !
     !> Exercises at least one int-target and one real-target read per source
     !> type (except v_decimal_scaled, genuinely fractional -- real-target
     !> only, since a fractional value read into an int array is an error, not

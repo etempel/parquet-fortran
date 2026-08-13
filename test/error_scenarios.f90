@@ -780,6 +780,8 @@ program error_scenarios
         call scenario_qc_miss_string_warns()
     case ("qc_miss_temporal_warns")
         call scenario_qc_miss_temporal_warns()
+    case ("qc_miss_temporal_declared_null_no_warning")
+        call scenario_qc_miss_temporal_declared_null_no_warning()
     case ("add_field_qc_drives_reader_enforcement")
         call scenario_add_field_qc_drives_reader_enforcement()
     case ("write_unknown_compression")
@@ -1118,6 +1120,8 @@ program error_scenarios
         call scenario_temporal_foreign_int96_roundtrip()
     case ("temporal_foreign_tz_roundtrip")
         call scenario_temporal_foreign_tz_roundtrip()
+    case ("time_info_on_date_column")
+        call scenario_time_info_on_date_column()
     case ("list_type_foreign_fixture")
         call scenario_list_type_foreign_fixture()
     case ("schema_add_field_date_with_unit")
@@ -9889,6 +9893,73 @@ contains
         if (.not. values(3)%is_null()) error stop "tz fixture: row 3 should be Null"
         if (values(1)%is_null()) error stop "tz fixture: row 1 should not be Null"
     end subroutine scenario_temporal_foreign_tz_roundtrip
+
+    !> parquet_get_column_time_info aborts for a column that is not a TIME/TIMESTAMP, which
+    !> includes a `date` column -- the surprising case, since a date IS temporal and yet has no
+    !> unit to report (resolve_temporal_value_type's default arm, parquet_wrapper.cpp).
+    !>
+    !> The query on "ev" first is the NEGATIVE CONTROL and is what makes the scenario mean
+    !> anything: it goes through the identical entry point on the same reader and must return
+    !> micros without aborting. Without it, an implementation whose time-info query aborted
+    !> unconditionally would pass. Deliberately a `date` column rather than an int32 one --
+    !> an int32 column would also pass against a guard that merely asked "is this temporal?".
+    subroutine scenario_time_info_on_date_column()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_date) :: day(2)
+        type(parquet_timestamp) :: ev(2)
+        character(len=*), parameter :: out_file = "test_run/error_scenario_time_info_date.parquet"
+        integer :: unit
+
+        call schema%init(table="time_info_table")
+        call schema%add_field("day", "date")
+        call schema%add_field("ev", "timestamp[us]")
+        call parquet_parse_maml(schema)
+
+        call day(1)%set(2024, 7, 16)
+        call day(2)%set(2024, 7, 17)
+        call ev(1)%set(2024, 7, 16, 12, 0, 0)
+        call ev(2)%set(2024, 7, 17, 12, 0, 0)
+
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "day", day)
+        call parquet_write_column(writer, "ev", ev)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        ! Negative control: the timestamp column answers normally.
+        call parquet_get_column_time_info(reader, "ev", unit=unit)
+        if (unit /= parquet_unit_micros) error stop "time_info control: expected unit=micros for 'ev'"
+        ! The abort under test: a date column has no unit.
+        call parquet_get_column_time_info(reader, "day", unit=unit)
+        print '(a)', "unexpectedly queried a date column's time unit without error"
+        call parquet_close_reader(reader)
+    end subroutine scenario_time_info_on_date_column
+
+    !> The qc: miss: half of the temporal qc rule: `min:`/`max:` bounds are rejected for a
+    !> date/time/timestamp field, but `miss:` is accepted and active. This scenario declares
+    !> qc_miss="Null" on a `date` column holding a null element and must therefore print NO
+    !> WARNING; scenario_qc_miss_temporal_warns above is its negative control (same shape, no
+    !> qc_miss declared, one WARNING). Asserting only this half would pass against a build that
+    !> had stopped miss-checking temporal columns altogether.
+    subroutine scenario_qc_miss_temporal_declared_null_no_warning()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_date) :: values(3)
+
+        call values(1)%set(2024, 1, 1)
+        ! values(2) left default-initialized -- a null date.
+        call values(3)%set(2024, 1, 3)
+
+        call schema%init(table="qc_miss_table")
+        call schema%add_field("d", "date", qc_miss="Null")
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_temporal_allowed.parquet", schema)
+        call parquet_write_column(writer, "d", values)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_miss_temporal_declared_null_no_warning
 
     !> get_col_size/flatten_for_stats/parquet_reader_get_string_length's
     !> LIST/LARGE_LIST branches -- this library's own writer only ever emits FIXED_SIZE_LIST for

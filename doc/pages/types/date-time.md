@@ -20,6 +20,7 @@ you want the types without the rest of the library (it depends only on the intri
 ```fortran
 program datetime_quickstart
     use parquet
+    use iso_fortran_env, only: int64
     implicit none
 
     type(parquet_writer) :: writer
@@ -34,7 +35,7 @@ program datetime_quickstart
 
     call taken_at(1)%set(2024, 7, 16, 12, 34, 56)
     call taken_at(2)%parse("2024-07-17T08:00:00.5")     ! from an ISO-8601 string
-    call taken_at(3)%set_unix(1721260800_8, parquet_unit_seconds)
+    call taken_at(3)%set_unix(1721260800_int64, parquet_unit_seconds)
 
     call parquet_open_writer(writer, "data.parquet")
     call parquet_write_column(writer, "observed", observed)
@@ -196,7 +197,7 @@ and `operator(+)`/`operator(-)` between a value and a plain integer offset (`int
 value of the same type:
 
 ```fortran
-integer(8) :: days_between, ns_between
+integer(int64) :: days_between, ns_between
 type(parquet_date) :: tomorrow
 type(parquet_time) :: wrapped
 type(parquet_timestamp) :: later
@@ -205,7 +206,7 @@ days_between = observed(2) - observed(1)          ! whole days, exact
 ns_between = taken_at(2) - taken_at(1)              ! nanoseconds, exact (aborts past ~292 years apart)
 
 tomorrow = observed(1) + 1                          ! one day forward
-wrapped = t + 3600_8*parquet_ns_per_sec             ! one hour forward, wraps at midnight
+wrapped = t + 3600_int64*parquet_ns_per_sec         ! one hour forward, wraps at midnight
 later = taken_at(1) + parquet_ns_per_sec            ! one second forward
 ```
 
@@ -254,7 +255,7 @@ languages, JSON APIs), **not** related to what unit a file stores (see
 [Units](#units-and-schema-declared-columns) below):
 
 ```fortran
-call ts%set_unix(1721133296123_8, parquet_unit_millis)   ! both arguments required
+call ts%set_unix(1721133296123_int64, parquet_unit_millis)   ! both arguments required
 v = ts%to_unix(parquet_unit_micros)                        ! pure query, never mutates ts
 ```
 
@@ -268,9 +269,9 @@ Julian Date (`real64`, never `real32` — consecutive `real32` values around a p
 about 340 seconds apart, so a `real32` MJD could not even resolve minutes):
 
 ```fortran
-call ts%set_mjd(60507.5_8)          ! MJD 60507.5
+call ts%set_mjd(60507.5_real64)     ! MJD 60507.5
 mjd = ts%to_mjd()                    ! ~1 microsecond resolution in the current era
-call ts%set_jd(2460508.0_8)         ! JD = MJD + 2400000.5
+call ts%set_jd(2460508.0_real64)    ! JD = MJD + 2400000.5
 jd = ts%to_jd()                      ! ~50 microsecond resolution in the current era
 ```
 
@@ -280,7 +281,8 @@ fractional part, since a pure date *is* a whole MJD number).
 ## Units and schema-declared columns
 
 Without a schema, a temporal column defaults to microseconds (timestamp/time) — the ecosystem-safe
-choice (e.g. Spark cannot read nanosecond-precision files); `date` has no unit. Writing a value
+choice, since some readers in the wider ecosystem reject nanosecond-precision timestamps; `date`
+has no unit. Writing a value
 with finer precision than the target unit `error stop`s (a nanosecond-precision `parquet_time`
 value written into a microsecond column, say) rather than silently truncating.
 
@@ -374,6 +376,9 @@ Every access pattern the other supported types have works identically for `parqu
   `parquet_write_column_chunk` requires an exact `data_type` match (no cross-type conversion).
 - **Row mode / element mode**: `parquet_read_array_row_mode`/`parquet_read_array_element_mode` —
   see [Reading only touches the columns you ask for](../io/reading.html#reading-only-touches-the-columns-you-ask-for).
+- **Write-time row masks**: `parquet_write_row_mask`/`parquet_write_chunk_row_mask` drop rows from
+  a temporal column exactly as they do from any other — see
+  [Filtering rows with a mask](../io/writing.html#filtering-rows-with-a-mask).
 
 None of these take an `is_valid=`/`null_value=` argument, for the same reason the whole-column
 calls don't — see [Null values are part of the element](#null-values-are-part-of-the-element-not-a-separate-mask)

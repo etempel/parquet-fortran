@@ -255,6 +255,8 @@ contains
                 test_datetime_chunked_roundtrip), &
             new_unittest("date/time/timestamp: MAML-declared units (incl. utc) preserve precision", &
                 test_datetime_schema_units_roundtrip), &
+            new_unittest("date/time/timestamp: a schema-less write defaults to microseconds", &
+                test_datetime_default_unit_is_micros), &
             new_unittest("parquet_write_row_mask compacts whole-column writes across multiple columns", &
                 test_mask_row_mask_whole_column), &
             new_unittest("parquet_write_row_mask produces a genuine zero-row file when every row is masked out", &
@@ -4530,6 +4532,54 @@ contains
         call check(error, clock_vec_unit == parquet_unit_millis, &
             "get_column_time_info reports the declared millis unit for a vector TIME32 column")
     end subroutine test_datetime_schema_units_roundtrip
+    !
+    !> A schema-less writer stores a time/timestamp column as MICROSECONDS -- the documented
+    !> default (resolve_temporal_write_unit, parquet_write_temporal.f90), and the reason a
+    !> nanosecond-precision value needs a declared unit to survive a write at all.
+    !>
+    !> This is the negative-control half of test_datetime_schema_units_roundtrip above, which
+    !> pins the DECLARED units (timestamp[ns,utc], time[ms]) for the same query. Asserting only
+    !> that side would pass against a build whose default had drifted to nanoseconds; asserting
+    !> only this side would pass against one that ignored a declared unit and always wrote
+    !> micros. The pair is what shows the default is a default.
+    !>
+    !> The values here are deliberately whole seconds: a value carrying finer precision than
+    !> microseconds would abort on write, which is a different guarantee (covered by the
+    !> temporal_write_time_precision_loss error scenario) and would mask this one.
+    subroutine test_datetime_default_unit_is_micros(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/test_datetime_default_unit.parquet"
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_timestamp) :: ev(2)
+        type(parquet_time) :: clock(2)
+        integer :: ev_unit, clock_unit
+        character(len=:), allocatable :: ev_tz
+
+        call ev(1)%set(2024, 7, 16, 12, 0, 0)
+        call ev(2)%set(2024, 7, 17, 12, 0, 0)
+        call clock(1)%set(8, 30, 0)
+        call clock(2)%set(17, 45, 0)
+
+        call parquet_open_writer(writer, out_file)   ! no schema -- the default applies
+        call parquet_write_column(writer, "ev", ev)
+        call parquet_write_column(writer, "clock", clock)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_column_time_info(reader, "ev", unit=ev_unit, timezone=ev_tz)
+        call parquet_get_column_time_info(reader, "clock", unit=clock_unit)
+        call parquet_close_reader(reader)
+
+        call check(error, ev_unit == parquet_unit_micros, &
+            "a schema-less timestamp column must be stored as microseconds (the documented default)")
+        if (allocated(error)) return
+        call check(error, clock_unit == parquet_unit_micros, &
+            "a schema-less time column must be stored as microseconds (the documented default)")
+        if (allocated(error)) return
+        call check(error, ev_tz == "", &
+            "a schema-less timestamp column must be timezone-naive (no utc token was declared)")
+    end subroutine test_datetime_default_unit_is_micros
     !
     ! ==================================================================================
     ! Row-filtering ("mask") tests -- parquet_write_row_mask/parquet_write_chunk_row_mask.

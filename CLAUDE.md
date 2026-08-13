@@ -482,6 +482,12 @@ Working rules:
   looked right, and only reading the generated HTML found it. So indent a continuation paragraph 4
   spaces, or leave the bullet as one paragraph — and when a page gains a multi-paragraph list item,
   render it once and check the following bullet is still an `<li>`.
+- **Code-fence tags: `fortran`, `bash`, `yaml` or bare — never `maml`.** `fortran` for library
+  code, `bash` for a shell command, a bare fence for program output and for a plain-text diagram.
+  A MAML block takes **either** a bare fence or ```` ```yaml ```` — both are established practice
+  (`schema/maml-format.md`, the MAML reference page, uses each), so neither is to be "corrected"
+  into the other. ```` ```maml ```` appears nowhere and must not be introduced: Pygments has no
+  `maml` lexer, so it changes no rendering while making whichever page adopts it the only outlier.
 - **Diagrams: plain text, not Mermaid.** This project's GitLab does not reliably render Mermaid
   diagrams, so draw flows as plain-text/ASCII inside a normal code fence (renders identically
   everywhere) — see the MAML→header flow in `doc/pages/schema/maml-format.md`'s "The MAML metadata format".

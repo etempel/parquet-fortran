@@ -319,7 +319,7 @@ contains
 
         call taken_at(1)%set(2024, 7, 16, 12, 34, 56)
         call taken_at(2)%parse("2024-07-17T08:00:00.5")     ! from an ISO-8601 string
-        call taken_at(3)%set_unix(1721260800_8, parquet_unit_seconds)
+        call taken_at(3)%set_unix(1721260800_int64, parquet_unit_seconds)
 
         call parquet_open_writer(writer, out_file)
         call parquet_write_column(writer, "observed", observed)
@@ -354,7 +354,7 @@ contains
             "datetime_quickstart example: 'taken_at' row 2 (parsed from ISO-8601) did not round-trip correctly")
         if (allocated(error)) return
 
-        call check(error, taken_at(3)%to_unix(parquet_unit_seconds) == 1721260800_8, &
+        call check(error, taken_at(3)%to_unix(parquet_unit_seconds) == 1721260800_int64, &
             "datetime_quickstart example: 'taken_at' row 3 (set_unix) did not round-trip correctly")
     end subroutine test_datetime_quickstart_example
     !

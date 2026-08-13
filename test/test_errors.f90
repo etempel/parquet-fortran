@@ -1203,6 +1203,10 @@ contains
                 test_temporal_ts_get_year_overflow_aborts), &
             new_unittest("writing a time value finer than its declared unit aborts", &
                 test_temporal_write_time_precision_loss_aborts), &
+            new_unittest("parquet_get_column_time_info on a date column aborts", &
+                test_temporal_time_info_on_date_column_aborts), &
+            new_unittest("qc: miss: declared on a temporal column suppresses the null WARNING", &
+                test_temporal_qc_miss_declared_null_no_warning), &
             new_unittest("writing a Null into a protected timestamp column aborts", &
                 test_temporal_protected_col_null_aborts), &
             new_unittest("reading a date column via the plain int32 reader aborts", &
@@ -6483,6 +6487,35 @@ contains
             failure_message="writing a sub-millisecond time value into a time[ms] column was expected to abort", &
             required_stderr="time value has finer precision than the column's declared unit")
     end subroutine test_temporal_write_time_precision_loss_aborts
+
+    !> parquet_get_column_time_info's documented abort for a column that is not a
+    !> TIME/TIMESTAMP. The scenario queries the file's timestamp column first and error stops
+    !> if that does not answer micros, so a build whose time-info query aborted unconditionally
+    !> fails here rather than passing -- see the scenario's own comment for why the abort is
+    !> provoked with a `date` column rather than an int32 one.
+    subroutine test_temporal_time_info_on_date_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "time_info_on_date_column", expect_abort=.true., &
+            failure_message="parquet_get_column_time_info on a date column was expected to abort", &
+            required_stderr="column is not a time/timestamp column")
+    end subroutine test_temporal_time_info_on_date_column_aborts
+
+    !> `qc: miss:` is supported on a temporal column even though `qc:` BOUNDS are not: a `date`
+    !> field declaring qc_miss="Null" must write its null element without a WARNING. Both halves
+    !> are asserted here, because either alone is vacuous -- the no-WARNING assertion passes
+    !> against a build that never miss-checks temporal columns, and the WARNING assertion passes
+    !> against one that ignores a declared qc_miss.
+    subroutine test_temporal_qc_miss_declared_null_no_warning(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_no_output(error, "qc_miss_temporal_declared_null_no_warning", &
+            expect_abort=.false., &
+            failure_message="declaring qc_miss on a date column was not expected to abort", &
+            forbidden_text="WARNING:")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "qc_miss_temporal_warns", expect_abort=.false., &
+            failure_message="a date column with an undeclared qc_miss was not expected to abort", &
+            required_stderr="qc violation for column 'd'")
+    end subroutine test_temporal_qc_miss_declared_null_no_warning
 
     subroutine test_temporal_protected_col_null_aborts(error)
         type(error_type), allocatable, intent(out) :: error

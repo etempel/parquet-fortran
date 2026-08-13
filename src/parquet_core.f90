@@ -42,9 +42,12 @@ module parquet_core
 
     !> col_size/array_size sentinel for a MAML col_size: auto/array_size: auto declaration:
     !> resolved later, either by schema%set_col_size/%set_array_size before parquet_open_writer,
-    !> or automatically from the actual data's own shape at the first matrix-form
-    !> parquet_write_column/parquet_write_column_chunk call for that column (never for the flat/
-    !> 1-D form, which needs col_size already known to interpret its own row count).
+    !> or automatically from the actual data's own shape at the first
+    !> parquet_write_column/parquet_write_column_chunk call able to supply it. col_size needs a
+    !> matrix-form write (never the flat/1-D form, which needs col_size already known to interpret
+    !> its own row count); array_size is resolved by either shape, from the caller's declared
+    !> character length -- so a scalar string column's array_size: auto resolves on an ordinary
+    !> 1-D write. See parquet_resolve_or_check_col_size/_array_size in parquet_write.f90.
     integer, parameter :: parquet_size_auto = -1
     !> col_size/array_size sentinel for a malformed MAML col_size:/array_size: value (non-numeric,
     !> or an explicit non-positive number) -- parquet_validate_maml_internal always rejects a

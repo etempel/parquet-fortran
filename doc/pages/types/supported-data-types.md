@@ -64,10 +64,11 @@ column as `utf8_view()`. Reading such a column works transparently through
 `parquet_read_column`/`parquet_get_string_length` and every other scalar/vector string read
 function, exactly like `string`/`large_string` above, including `qc:` range checks and row filtering
 (`parquet_filter`). `parquet_close_reader(print_stat=.true.)`'s `parquet_type` column shows
-`string_view` for such a column — note that once a row filter is active on the reader, it shows as
-`large_string` instead, since filtering internally casts a `string_view` column to `large_utf8`
-first (Arrow's own row-filter compute kernel has no `string_view` support to call directly); this is
-transparent to every read result, just a cosmetic difference in that one diagnostic column. The one
+`string_view` for such a column, and goes on showing it whatever else is in force — that cell
+reports the file's own stored schema, which nothing on the read side rewrites. Filtering does cast
+the column to `large_utf8` internally first, because Arrow's row-filter compute kernel has no
+`string_view` support to call directly, but the cast is invisible: it changes no read result and no
+diagnostic. The one
 exception is the compact `parquet_string_column` (see [String columns](string-columns.html)) read
 path: its buffer-handoff fast path only understands `string`/`large_string`'s offset-based layout,
 so reading a `string_view` column that way aborts with a clear error — read it through a fixed-width

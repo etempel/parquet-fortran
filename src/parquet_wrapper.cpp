@@ -1304,10 +1304,13 @@ extern "C"
 	// STRING_VIEW identically to STRING/LARGE_STRING via is_string_like_type/
 	// make_string_like_accessor, working around this Arrow gap by casting to arrow::large_utf8()
 	// first (rather than teaching every filter call site about STRING_VIEW specifically) is
-	// lossless for every consumer -- the one visible side effect is that a STRING_VIEW column's
-	// reported parquet_type in parquet_reader_print_stat becomes "large_string" once a filter is
-	// active on the reader (parquet_type reflects the column_cache's actual decoded type, not
-	// the original file schema's). Returns `array` unchanged for every other type.
+	// lossless for every consumer, and has NO visible side effect at all: parquet_reader_print_stat's
+	// parquet_type cell reads reader_handle->schema (the file's own schema, populated once by
+	// GetSchema and never rewritten), not the column_cache's decoded array, so a filtered
+	// STRING_VIEW column still reports "string_view". An earlier version of this comment claimed
+	// the cell became "large_string" once a filter was active; that was wrong, and was checked by
+	// running print_stat on a filtered STRING_VIEW fixture. Returns `array` unchanged for every
+	// other type.
 	static arrow::Result<std::shared_ptr<arrow::Array>> coerce_for_filter_kernel(const std::shared_ptr<arrow::Array> &array)
 	{
 		if (array->type_id() != arrow::Type::STRING_VIEW) return array;

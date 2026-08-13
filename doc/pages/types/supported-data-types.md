@@ -75,9 +75,7 @@ that same cast for its own reason. Its buffer handoff needs the offsets-plus-pay
 only `string`/`large_string` have — a view array's values are inlined or spread across several data
 buffers — so a `string_view` column is converted to `large_utf8` first and then handed over. It
 costs one pass over the column's bytes, and the result replaces the cached column, so reading it a
-second time pays nothing. Values, nulls and reported types are unchanged either way. This used to be
-refused outright, with the advice to read through a fixed-width `character` array instead; that is
-no longer necessary, and the conversion is cheaper than that workaround was.
+second time pays nothing. Values, nulls and reported types are unchanged either way.
 
 ## Vector-column width (`col_size`) limit
 
@@ -279,7 +277,8 @@ Whatever is in `values` at a `.false.` slot is ignored — a real Parquet Null i
 regardless. For vector columns, `is_valid` is element-level only: an entire row's vector can never
 be Null, only individual elements within it. A column only becomes nullable in the file's schema if
 `is_valid` is actually passed and contains at least one `.false.` entry; omitting `is_valid` (or
-passing an all-`.true.` mask) writes exactly as before, keeping the column non-nullable.
+passing an all-`.true.` mask) writes the column exactly as it would with no mask at all, keeping it
+non-nullable.
 
 **A streamed column's nullability comes from its FIRST row group, and from whether you passed a
 mask — not from what the mask said.** `parquet_write_column_chunk` fixes the column's Arrow field the

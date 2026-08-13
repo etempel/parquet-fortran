@@ -404,9 +404,9 @@ The three types are also first-class outside the reader and writer:
   legacy `INTERVAL` converted type was never migrated to Parquet's modern `LogicalType` union and
   has no mainstream write path in Arrow/pyarrow/Hive/Trino either, and Arrow's separate
   `DURATION` type only round-trips through Parquet as a semantically-untyped plain `INT64`
-  column readable through the existing numeric path — neither needs a dedicated type here. (See
-  [Difference and offset arithmetic](#difference-and-offset-arithmetic) above for the timestamp
-  arithmetic this bullet used to mention as missing — that is now implemented.)
+  column readable through the existing numeric path — neither needs a dedicated type here. (Timestamp
+  arithmetic itself is supported — see
+  [Difference and offset arithmetic](#difference-and-offset-arithmetic) above.)
 - `LIST`/`MAP` element types are unrelated to this page; see
   [Supported data types](supported-data-types.html#reading-a-nested-struct-field) for the library's current struct/list/map
   coverage.

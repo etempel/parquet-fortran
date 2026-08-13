@@ -632,8 +632,7 @@ does — same rules, same helpers — so a `float64` column can be chunk-read in
 [Reading a column into a different numeric kind](../types/supported-data-types.html#reading-a-column-into-a-different-numeric-kind)
 for what is permitted and where an out-of-range or non-integral value aborts. `logical` and
 `character` chunk reads are the exception: those require the stored column to actually be boolean or
-string, and fail with `error stop` naming both types otherwise. (This paragraph previously claimed
-the opposite for every type — that the kinds had to match exactly on this path. They never did.)
+string, and fail with `error stop` naming both types otherwise.
 
 **Compact string columns:** a scalar `string` column can also be chunk-read into a
 `type(parquet_string_column)` (`values` is cleared, then filled with just that row group's rows) —

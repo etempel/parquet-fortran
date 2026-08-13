@@ -238,10 +238,10 @@ n = col%length(i)                     ! 0 for a null
 n = col%length(i, check_null=.true.)  ! error stops on a null
 ```
 
-> Note: `call col%get(i, s, allow_null=.true.)` returns `s` as an empty string, not an
-> unallocated one, purely by choice (to keep this behavior unchanged from before `get` became
-> a subroutine) — `s`'s `intent(out)` status would technically allow leaving it unallocated to
-> signal a null. Detect nulls with `is_null()` either way.
+> Note: `call col%get(i, s, allow_null=.true.)` returns `s` as an **empty string**, not an
+> unallocated one. `s`'s `intent(out)` status would technically allow leaving it unallocated to
+> signal a null, and that is deliberately not done: an unallocated result is indistinguishable
+> from one the callee never reached. Detect nulls with `is_null()`.
 
 ## Trimming on append
 
@@ -272,8 +272,8 @@ call col%build_from(values, is_null=mask)    ! mask entries become zero-width nu
 ```
 
 `values` is a `character(len=*)` array, so each element's trailing blanks are dropped — matching
-what `parquet_column%set_all`/`%append_values` on a string column have always done, and what they
-now use internally. Prefer these over a loop of `append_string` whenever the whole array is in
+`parquet_column%set_all`/`%append_values` on a string column, which reach these same two bulk
+forms internally. Prefer these over a loop of `append_string` whenever the whole array is in
 hand: filling a million-row column this way measured **about six times faster**, because the
 per-element form re-derives the trim, re-checks capacity, and copies the payload through a
 temporary each time.
@@ -447,9 +447,12 @@ cost of a dangling-reference hazard if the source column is mutated afterward.
 no no-op mode either.
 
 A `slice` result must be assigned into a local variable before being passed on — `slice` is a
-subroutine, not a function (this module never returns an allocatable-heavy derived type or
-`character(len=:), allocatable` as a function result), so there is no expression form to chain
-inline:
+subroutine, not a function, so there is no expression form to chain inline. It fills a destination
+you own, which is what lets one buffer serve a whole chunking loop instead of a fresh column being
+built per row group; `%clone`, which has no such loop to serve, is a function. (No procedure in
+this module returns `character(len=:), allocatable` — that shape is forbidden project-wide, for a
+reason unrelated to either: see
+[Thread safety](../operating/thread-safety.html#a-note-on-functions-returning-characterlen-allocatable).)
 
 ```fortran
 type(parquet_string_column) :: chunk
@@ -608,9 +611,9 @@ read-only operations (`get`, `view`, `length`, the comparisons, `find`, the size
 long as no thread mutates the column concurrently. Any mutation must be externally
 synchronized, and a handle must not be used across a mutation on any thread.
 
-This is the only thread-safety rule specific to this type. A separate, library-wide compiler
-caveat around functions returning `character(len=:), allocatable` — found and root-caused via this
-same type's accessors, but not specific to it — is covered in the main
+This is the only thread-safety rule specific to this type. A separate, library-wide compiler caveat
+around functions returning `character(len=:), allocatable` applies here as it does everywhere else,
+and is covered in the main
 [Thread safety](../operating/thread-safety.html#a-note-on-functions-returning-characterlen-allocatable) guide.
 
 ## Complexity at a glance

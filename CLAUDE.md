@@ -33,6 +33,7 @@ working rules).
 - [Documentation conventions](#documentation-conventions)
   - [New features require tests and docs](#new-features-require-tests-and-docs)
   - [Documentation structure](#documentation-structure)
+  - [A guide page describes the CURRENT state, never a former one](#a-guide-page-describes-the-current-state-never-a-former-one)
   - [Checking documentation links](#checking-documentation-links)
   - [FORD doc-comment conventions](#ford-doc-comment-conventions)
   - [FORD config gotchas](#ford-config-gotchas)
@@ -495,6 +496,66 @@ Working rules:
   coverage, API documentation) alongside the static license/language/fpm ones. These are
   GitLab-specific — `tools/prep_github_mirroring.sh` swaps them for a single GitHub Pages
   documentation badge when mirroring (see CONTRIBUTING.md's "Mirroring to GitHub").
+
+### A guide page describes the CURRENT state, never a former one
+
+**A sentence in `doc/pages/`, README.md or a `!>` doc-comment is a defect when a reader cannot
+evaluate it without knowing a state of the code they have never seen** — however true it is. The
+reader is using the library as it ships today; the history is in git, in `CHANGELOG.md` and in this
+file, all of which have an audience that wants it. A user-facing page has no such audience.
+
+Three shapes, all of which have shipped here and all of which read as perfectly ordinary prose:
+
+- **A justification that appeals to a former API.** `types/string-columns.md` explained why a null
+  reads back as `""` with *"purely by choice (to keep this behavior unchanged from before `get`
+  became a subroutine)"*. The behaviour is right and the reason is unusable: `get` has only ever been
+  a subroutine as far as any reader can tell, so the justification reduces to "because it used to be
+  something else". Give the reason that still applies — here, that an unallocated result would be
+  indistinguishable from one the callee never reached.
+- **"now" or "have always" attached to behaviour.** *"…what they have always done, and what they now
+  use internally"* asserts a change (implying they once did not) and a claim about history, where the
+  page needed only the fact: *"…which reach these same two bulk forms internally"*. **"now" is the
+  single highest-yield word to grep for**, and most of its occurrences are innocent — "the column is
+  now empty", "`col%is_null(i)` is now `.true.`" describe a state after an operation, not a release.
+  Read every hit; do not replace them mechanically.
+- **Provenance — how or where something was discovered.** *"a library-wide compiler caveat … found
+  and root-caused via this same type's accessors"* tells a reader nothing they can use. That belongs
+  in this file, which is exactly where it already was.
+
+**What is NOT in this class**, since over-applying the rule costs real information: a performance
+comparison between two *current* APIs ("about six times faster than a loop of `%append_string`"); a
+"before/after" that means *within one call* ("result element k is the old element `perm(k)`", "the
+column is now empty"); a documented deprecation a user can still encounter; and `CHANGELOG.md`, whose
+whole job is to describe change. Code comments in `src/` are also exempt — their reader is a
+maintainer, for whom "this was consolidated into one place" is useful context.
+
+**This class is MANUFACTURED by ordinary correct work, so a page being finished is no evidence
+against it.** Every instance found in the 2026-08-13 sweep was written by a careful edit: someone
+reviews a page, the review produces a code or documentation change, the change updates the page —
+and the updating sentence explains *what changed*, because at that moment the change is the salient
+thing. Six weeks later it is the only thing on the page a reader cannot check. So this is not a
+one-off cleanup that can be declared done: **re-check it whenever you touch a page for any other
+reason**, and expect the pages most actively maintained to carry the most of it.
+
+**Grep for it, but never sweep it mechanically — most hits are innocent and the ratio is brutal.**
+Across the eight pages swept, fourteen hits, **three real**. The eleven survivors were the same words
+meaning something else entirely: "no longer belongs to any one row group" and "the column is now
+empty" (state after an operation), "most recently used to read this column" and "a value used to
+*detect* a Null" ("employed to", not "formerly"), "originally Null" and "the old element `perm(k)`"
+(within one call), "could not even resolve minutes" (hypothetical). A find-and-replace pass would
+have damaged every one of them. Three greps find the candidates; a human decides:
+
+```bash
+grep -nE "used to|previously|formerly|no longer|in the past|historically|originally" doc/pages/<page>
+grep -nE "ha(ve|s) always|as before|unchanged from|for (backward )?compatibility|root-caused" doc/pages/<page>
+grep -nE "\bnow\b" doc/pages/<page>
+```
+
+**When this is found on an already-reviewed page, fix the sentences and nothing else.** A page-wide
+rewrap on a later targeted round produced 49 hunks for four one-sentence fixes on
+`types/string-columns.md` and was reverted: the reflow buried the change and would have turned a
+review into a re-read. Rewrap on the round that first reviews a page (see `feature_doc.md` §6.2's
+Pass 4), never on a follow-up.
 
 ### Checking documentation links
 

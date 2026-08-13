@@ -293,9 +293,12 @@ contains
         do i = 1, size(writer%enabled_columns)
             if (trim(writer%enabled_columns(i)%name) == trim(name)) then
                 if (writer%enabled_columns(i)%col_size == parquet_size_auto) then
+                    ! Deliberately does not tell the caller to "use the matrix write form": this is
+                    ! also reached by a parquet_string_column write, which has no matrix form at all
+                    ! (it is scalar-only, and rejects col_size /= 1 a few lines later).
                     error stop "parquet_write_column: col_size for column '" // trim(name) // "' is still " // &
-                        "'auto' -- call schema%set_col_size before parquet_open_writer, or use the matrix " // &
-                        "write form to resolve it automatically from the data"
+                        "'auto' -- call schema%set_col_size before parquet_open_writer. Only a matrix (2-D) " // &
+                        "write can resolve col_size from the data's own shape"
                 end if
                 parquet_get_column_col_size = max(1, writer%enabled_columns(i)%col_size)
                 return
@@ -343,6 +346,10 @@ contains
     !> len(values(1,1)) -- a structural property of the call, not derived from actual string
     !> content, mirroring col_size's own shape-derived resolution). Otherwise a no-op: the
     !> existing max_item_len/array_size ceiling check at each call site runs unchanged afterward.
+    !>
+    !> A parquet_string_column write has no declared length to pass here at all; it records what it
+    !> actually wrote in writer%observed_string_len instead, and parquet_reconcile_string_sizes
+    !> below settles the column's reported array_size once, at close.
     subroutine parquet_resolve_or_check_array_size(writer, name, idx, item_len)
         type(parquet_writer), intent(inout) :: writer !! open (schema-enforced) writer.
         character(len=*), intent(in) :: name !! string column being written.
@@ -360,6 +367,52 @@ contains
                 int(writer%all_columns(idx)%col_size, kind=c_long_long), int(item_len, kind=c_long_long))
         end if
     end subroutine parquet_resolve_or_check_array_size
+    !> Makes every string column's reported array_size describe what was actually written, run once
+    !> by parquet_close_writer BEFORE close_parquet_writer serializes the footer (the sidecar is
+    !> rewritten from writer%all_columns afterwards, so both outputs follow from this one step).
+    !>
+    !> Only a parquet_string_column write can make this necessary, and it does so in two ways. A
+    !> column declared `array_size: auto` and written only that way has no declared length anywhere
+    !> to resolve from -- left alone it would reach the sidecar as the raw parquet_size_auto
+    !> sentinel, i.e. `array_size: -1`, which is not a valid MAML at all (feature_risks.md Risk-83).
+    !> And a column whose declaration is simply too small is written anyway: the compact path stores
+    !> each element's own bytes and does not enforce array_size, which is deliberate -- a reader
+    !> takes each length from the data and never needs the declaration. **Accepting an inaccurate
+    !> declaration on the way in is a choice; repeating it on the way out is not**, so the value
+    !> reported here is the longest element actually written whenever that exceeds the declaration.
+    !>
+    !> Deliberately at CLOSE rather than per write: raising the value mid-write would also raise the
+    !> ceiling `any_item_too_long` enforces on the padded (character-array) paths, so a column
+    !> written through both forms would have its declared limit quietly relaxed for the padded half.
+    !> At close there are no writes left to affect.
+    subroutine parquet_reconcile_string_sizes(writer)
+        type(parquet_writer), intent(inout) :: writer !! writer being closed.
+        integer :: i, k, resolved
+        character(len=:), allocatable :: outname
+
+        if (.not. writer%is_schema_enforced) return
+        if (.not. allocated(writer%all_columns) .or. .not. allocated(writer%observed_string_len)) return
+
+        do i = 1, size(writer%all_columns)
+            if (writer%all_columns(i)%array_size == parquet_size_auto) then
+                ! An all-null or all-empty column observes 0, which is not a legal array_size; 1 is
+                ! the same floor parquet_write_empty_columns applies for the same reason.
+                resolved = max(1, writer%observed_string_len(i))
+            else if (writer%observed_string_len(i) > writer%all_columns(i)%array_size) then
+                resolved = writer%observed_string_len(i)
+            else
+                cycle
+            end if
+
+            writer%all_columns(i)%array_size = resolved
+            outname = trim(writer%all_columns(i)%name)
+            k = parquet_get_enabled_column_index(writer, outname)
+            if (k > 0) writer%enabled_columns(k)%array_size = resolved
+            call parquet_resolve_output_name(writer, outname, outname)
+            call parquet_update_column_metadata_size(writer%handle, trim(outname)//char(0), &
+                int(writer%all_columns(i)%col_size, kind=c_long_long), int(resolved, kind=c_long_long))
+        end do
+    end subroutine parquet_reconcile_string_sizes
     !> Every column in a file must have the same number of rows (Arrow/Parquet
     !> requirement). Called by every parquet_write_column variant with that
     !> call's own row count: the first call for a given writer fixes the
@@ -567,6 +620,8 @@ contains
 
             allocate(writer%all_columns(size(schema%cinfo%col)))
             writer%all_columns = schema%cinfo%col
+            allocate(writer%observed_string_len(size(schema%cinfo%col)))
+            writer%observed_string_len = 0
 
             n_enabled = 0
             do i = 1, size(schema%cinfo%col)
@@ -674,7 +729,7 @@ contains
         n = size(lines)
         idx_fields = 0
         do i = 1, n
-            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "fields:") then
+            if (lines(i)(1:1) /= " " .and. parquet_maml_key_matches(lines(i), "fields:")) then
                 idx_fields = i
                 exit
             end if
@@ -786,7 +841,7 @@ contains
         n = size(lines)
         idx_fields = 0
         do i = 1, n
-            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "fields:") then
+            if (lines(i)(1:1) /= " " .and. parquet_maml_key_matches(lines(i), "fields:")) then
                 idx_fields = i
                 exit
             end if
@@ -1370,6 +1425,8 @@ contains
             end do
         end if
 
+        call parquet_reconcile_string_sizes(writer)
+
         call close_parquet_writer(writer%handle)
 
         if (writer%write_maml_requested) then
@@ -1381,6 +1438,7 @@ contains
 
         writer%handle = c_null_ptr
         if (allocated(writer%all_columns)) deallocate(writer%all_columns)
+        if (allocated(writer%observed_string_len)) deallocate(writer%observed_string_len)
         if (allocated(writer%write_counts)) deallocate(writer%write_counts)
         if (allocated(writer%enabled_columns)) deallocate(writer%enabled_columns)
         if (allocated(writer%written_names)) deallocate(writer%written_names)

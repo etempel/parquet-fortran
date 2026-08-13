@@ -331,6 +331,7 @@ contains
         integer(int64) :: i, nr, nchars
 
         call parquet_check_row_count(writer, name, nrows)
+        call resolve_compact_array_size(writer, name, col, nrows)
 
         if (col%null_count() > 0_int64) then
             allocate(is_valid_flat(nrows))
@@ -359,6 +360,7 @@ contains
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(int64) :: i, nr, nchars
 
+        call resolve_compact_array_size(writer, name, col, nrows)
         if (col%null_count() > 0_int64) then
             allocate(is_valid_flat(nrows))
             do i = 1_int64, nrows
@@ -375,6 +377,60 @@ contains
         if (nrows > 0) call parquet_write_string_column_chunk_buffers(writer%handle, trim(outname)//char(0), &
             nr, nchars, offsets_ptr, data_ptr, validity_ptr)
     end subroutine write_string_compact_chunk_tail
+    !> Records the longest element this parquet_string_column write actually writes, so that
+    !! parquet_reconcile_string_sizes can make the column's REPORTED array_size describe the data.
+    !!
+    !! The compact path deliberately neither reads nor enforces a declared array_size: it stores
+    !! each element's own bytes, and a reader takes each length from the data, so the declaration is
+    !! not needed to read the column back. A caller may therefore write elements longer than the
+    !! schema declares, and that stays legal. What it must not do is leave the file *claiming* the
+    !! declaration -- accepting an inaccurate declaration on the way in is a choice, repeating it on
+    !! the way out is not. See feature_risks.md Risk-83.
+    !!
+    !! A chunked write calls this per chunk and the maximum accumulates, so the value settles at the
+    !! longest element across the whole column rather than the first row group's. Costs one pass
+    !! over this chunk's lengths (no allocation); the write is already walking the same elements for
+    !! its null count and its qc checks.
+    !!
+    !! Exceeding a declared array_size is accepted but never silent: it draws one WARNING naming the
+    !! column, the declaration and the actual length. Warned once per column, at the first chunk
+    !! that exceeds -- `observed_string_len` still holding a value within the declaration is exactly
+    !! the "not warned yet" state, so no extra flag is needed and a chunked write cannot repeat it.
+    subroutine resolve_compact_array_size(writer, name, col, nrows)
+        type(parquet_writer), intent(inout) :: writer !! open (possibly schema-less) writer.
+        character(len=*), intent(in) :: name !! column being written.
+        type(parquet_string_column), intent(in) :: col !! the column actually being written.
+        integer(int64), intent(in) :: nrows !! its row count.
+        integer :: idx, declared
+        integer(int64) :: i, longest
+        character(len=32) :: declared_buf, longest_buf
+        character(len=:), allocatable :: ctx !! writer_context_suffix scratch.
+
+        if (.not. writer%is_schema_enforced) return
+        if (.not. allocated(writer%observed_string_len)) return
+        idx = parquet_get_defined_column_index(writer, name)
+        if (idx == 0) return
+
+        longest = 0_int64
+        do i = 1_int64, nrows
+            longest = max(longest, col%length(i))   ! a null element reports 0
+        end do
+
+        declared = writer%all_columns(idx)%array_size
+        if (declared /= parquet_size_auto .and. longest > int(declared, int64) .and. &
+            writer%observed_string_len(idx) <= declared) then
+            write(declared_buf, '(I0)') declared
+            write(longest_buf, '(I0)') longest
+            call writer_context_suffix(writer, ctx)
+            call parquet_emit_warning("parquet_write_column: column '" // trim(name) // "' declares " // &
+                "array_size: " // trim(declared_buf) // " but a parquet_string_column write carries an " // &
+                "element of " // trim(longest_buf) // " characters; the write proceeds (this path stores " // &
+                "each element's own bytes and does not enforce array_size), and the written metadata " // &
+                "reports " // trim(longest_buf) // "" // ctx)
+        end if
+
+        writer%observed_string_len(idx) = max(writer%observed_string_len(idx), int(longest))
+    end subroutine resolve_compact_array_size
     module procedure parquet_write_string_column
         integer(int64) :: i, nrows, asize, nitems, nkeep
         integer :: idx, max_string_len

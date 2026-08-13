@@ -1044,6 +1044,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A MAML key is now case-insensitive everywhere, including the block headers.** Section names and
+  field sub-keys were already matched case-insensitively by `parquet_validate_maml`, but the code
+  that *locates* a block compared against a lowercase literal — so a MAML spelling its section
+  `Extra:` validated cleanly while the `col_map:`, `protected_cols:`, `remap:`, `filter:` and
+  `sort:` nested inside it were never found. Nothing warned: a column declared Null-protected
+  simply was not, and a `parquet_table` column renamed by `remap:` kept its physical name. The same
+  applied to a capitalized `Fields:`/`KeyArray:`. Values remain case-sensitive — a column name in
+  `col_map:`/`remap:`/`protected_cols:` must still match its column exactly.
+
+- **A `parquet_string_column` write now reports a truthful `array_size`.** That path stores each
+  element's own bytes and a reader takes each length from the data, so it neither needs nor enforces
+  a declared `array_size` — but it was still leaving its trace in the metadata wrong, in two ways.
+  A column declared `array_size: auto` kept the internal `-1` sentinel all the way to
+  `parquet_close_writer`, which wrote it verbatim into a `write_maml=.true.` sidecar and into the
+  file's own `column.<name>.array_size` entry; the resulting sidecar was not a valid MAML at all
+  (reading it back failed with "invalid array_size"), while the `.parquet` file itself round-tripped
+  fine, so the mistake surfaced far from the write. And a column whose declaration the data simply
+  outgrew kept advertising the declaration.
+
+  Both are now settled at close from the longest element actually written, across every row group.
+  Writing elements longer than the declaration **remains accepted** — that is what this path is for
+  — but it now emits one `WARNING` naming the column, the declaration and the actual length. A
+  declaration the data does *not* exceed is left exactly as written.
+
+- **A MAML list under an ordinary top-level key no longer prints a spurious duplicate-key
+  warning.** A plain string list under, say, `survey:` is *defined* to produce one metadata entry
+  per item, all sharing that key's name — but each item after the first tripped the duplicate-key
+  `WARNING` meant for a caller's own accidental `%add_metadata` collision, telling users their
+  well-formed MAML was suspect. Reading such entries back is unchanged: a lookup by key answers
+  with the first, and `parquet_get_metadata_items` lists them all.
+
 - **`parquet_reader_set_filter`'s six-argument form now rejects a row range that lies outside the
   row groups it was given**, instead of silently returning their intersection. Both ranges were
   validated individually — against the file's row-group count and its row count — but never

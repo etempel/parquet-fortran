@@ -213,6 +213,23 @@ contains
         indent = len(line) ! GCOVR_EXCL_LINE
     end function parquet_line_indent
 
+    module procedure parquet_maml_key_matches
+        character(len=len(line)) :: t
+        character(len=1) :: c
+        integer :: i, n
+
+        t = adjustl(line)
+        n = len_trim(t)
+        parquet_maml_key_matches = .false.
+        if (n /= len_trim(key)) return
+        do i = 1, n
+            c = t(i:i)
+            if (c >= "A" .and. c <= "Z") c = achar(iachar(c) + 32)
+            if (c /= key(i:i)) return
+        end do
+        parquet_maml_key_matches = .true.
+    end procedure parquet_maml_key_matches
+
     !> 1-based index of `key` in allowed_maml_sections (case-insensitive), or 0 if unknown.
     function parquet_find_maml_section(key) result(idx)
         character(len=*), intent(in) :: key !! top-level section name to look up.
@@ -870,7 +887,7 @@ contains
             if (tline(1:1) == "#") cycle
 
             if (.not. in_fields) then
-                if (tline == "fields:") in_fields = .true.
+                if (parquet_maml_key_matches(tline, "fields:")) in_fields = .true.
                 cycle
             end if
 
@@ -1240,7 +1257,7 @@ contains
             if (len(tline) == 0) cycle
             if (tline(1:1) == "#") cycle
             if (.not. in_fields) then
-                if (tline == "fields:") in_fields = .true.
+                if (parquet_maml_key_matches(tline, "fields:")) in_fields = .true.
                 cycle
             end if
             ! A new unindented top-level key ends the fields: block.

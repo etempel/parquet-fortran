@@ -27,9 +27,14 @@ description, ...) is given as top-level keys, and column definitions are given a
 
 **Only a fixed, known set of top-level keys is accepted** — `survey`, `dataset`, `table`, `version`,
 `date`, `author`, `coauthors`, `dois`, `depends`, `description`, `comments`, `license`, `keywords`,
-`maml_version`, `keyarray`, `extra`, and `fields` (matched case-insensitively; see
-`allowed_maml_sections` in `src/parquet_metadata_maml.f90`) — any other top-level key fails
-`parquet_validate_maml` as an unknown section.
+`maml_version`, `keyarray`, `extra`, and `fields` (see `allowed_maml_sections` in
+`src/parquet_metadata_maml.f90`) — any other top-level key fails `parquet_validate_maml` as an
+unknown section.
+
+**Every MAML key is case-insensitive**, at every level: `Extra:`, `FIELDS:` and `Data_Type:` mean
+exactly what their lowercase spellings mean. Values are not — a column name in `col_map:`, `remap:`
+or `protected_cols:` is data and must match the column exactly. The two fixed-vocabulary values that
+are also matched case-insensitively say so where they are described (`auto`, and `unit: unitless`).
 
 To attach your own custom metadata not covered by that list, nest it under `extra:` instead, which
 accepts arbitrary structure unvalidated (see [Renaming columns for output with
@@ -39,7 +44,7 @@ keys).
 `parquet_parse_maml` always runs this same validation before parsing a MAML into a `parquet_schema`,
 so an invalid MAML is caught immediately rather than silently parsed.
 
-Three full worked examples are checked into the repository under `schemas/`:
+Four full worked examples are checked into the repository:
 
 - [schemas/maml_example.maml](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/schemas/maml_example.maml)
   — the base example used throughout these docs.
@@ -49,6 +54,18 @@ Three full worked examples are checked into the repository under `schemas/`:
 - [schemas/maml_example3.maml](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/schemas/maml_example3.maml)
   — adds `extra: col_map:` column renaming (e.g. `id` → `uberid`, `RA` → `ra_J2000`) alongside
   `qc:`.
+- [table_types/maml_example4.maml](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/table_types/maml_example4.maml)
+  — a **table-type** schema rather than a write schema: the input
+  [`tools/generate_user_table_code.py`](../utilities/generated-tables.html) turns into a named
+  `parquet_table` extension. It lives under `table_types/` rather than `schemas/` for that reason,
+  and it is the one role in which `col_size: auto`/`array_size: auto` are rejected.
+
+The MAML format itself is defined by the [MAML specification](https://github.com/asgr/MAML-Format);
+this page describes what *this library* reads and writes.
+
+For a complete program that loads a MAML, writes a file with it and reads the result back, see the
+[Combined example](combined-example.html) — the sections below are a reference for the file format,
+not a tutorial for the API.
 
 If you're new to MAML in this library, focus first on `table:` and `fields:` (`name` + `data_type`
 for each field). Everything else is optional metadata or advanced behavior.
@@ -99,6 +116,13 @@ Notes on the `fields:` entries:
 - `col_size` (default `1`) makes the column a fixed-length vector column, read/written as a 2D array
   of shape `(col_size, nrows)`.
 - `array_size` sets the maximum string length for `string` columns; it is ignored for other types.
+  Writing a longer value through an ordinary `character` array is an error. A
+  [`parquet_string_column`](../types/string-columns.html) write is the one exception: it stores each
+  element's own bytes and a reader takes each length from the data, so `array_size` is not needed to
+  read the column back and is not enforced on that path. Such a write is **accepted**, emits one
+  `WARNING` naming the column and the actual length, and the written metadata — both the file's own
+  `column.<name>.array_size` and a `write_maml=.true.` sidecar — then reports what was really
+  written rather than the declaration it outgrew.
   > Don't confuse `col_size` with `array_size` — despite the similar-sounding names, they're
   > unrelated: `col_size` is how many elements a vector column's row holds, `array_size` is how many
   > characters a `string` column's values can hold.
@@ -183,6 +207,11 @@ file is written at `parquet_close_writer` time (not at `parquet_open_writer` tim
 column's `col_size`/`array_size` is guaranteed resolved — so the sidecar always shows the actual
 resolved value, never a leftover `auto` placeholder, matching what was actually written to the
 `.parquet` file.
+
+That last part is a rule the sidecar keeps even where the declaration and the data disagree: a
+`string` column written through a [`parquet_string_column`](../types/string-columns.html), which
+does not enforce `array_size`, is reported at the longest element actually written whenever that
+exceeds what the MAML declared. A `.maml` this library produces always describes the file beside it.
 
 ## Renaming columns for output with `col_map:`
 
@@ -310,12 +339,11 @@ Table-level keys become parquet metadata entries, with these special mappings:
 |---|---|
 | `keyarray:` | A list of `key`/`value`/`comment` maps; each becomes one metadata entry named by its `key`. |
 | `DOIs:` | A list of `DOI`/`type` maps; becomes `DOI_1`, `DOI_2`, ... entries (value = DOI, description = type). |
-| `depends:` | A list of `survey`/`dataset`/`table`/`version` maps (for referencing upstream datasets this table was built from); becomes `depends_1`, `depends_2`, ... entries, each value being those four fields joined with `;` in that fixed order (regardless of the order they appear in the file; any missing sub-key becomes an empty segment). |
+| `depends:` | A list of `survey`/`dataset`/`table`/`version` maps — those four sub-keys and no others — for referencing upstream datasets this table was built from; becomes `depends_1`, `depends_2`, ... entries, each value being the four fields joined with `;` in that fixed order (regardless of the order they appear in the file; any missing sub-key becomes an empty segment). |
 | `comments:` / `coauthors:` | Plain string lists; become `comment_1`, `comment_2`, ... / `coauthor_1`, `coauthor_2`, ... entries. |
 | `keywords:` | A plain-string list, combined into a single `keywords` entry with its items joined by `;`. |
 | any other allowed section, given as a plain-string list (e.g. `survey:`, `author:`, `license:`, ...) | Several entries that all share that key's name (e.g. multiple `list_key` entries with the same name). |
 | any other allowed section, given as a list of *maps* | **Not** specially handled: only its first sub-key ends up captured as a raw, unparsed string, and the rest of that entry's sub-keys are silently dropped. Use `keyarray:` for arbitrary structured metadata instead. |
-| `extra:` | Opaque to table-level metadata (produces no metadata entry of its own), but not ignored: `col_map:`, `protected_cols:` and (for a read-in table MAML) `remap:`, `filter:` and `sort:` are specifically parsed out of it — see [Renaming columns for output with `col_map:`](#renaming-columns-for-output-with-col_map) [Null values](../types/supported-data-types.html#null-values) [Renaming columns for reading with `extra: remap:`](#renaming-columns-for-reading-with-extra-remap) and [Filtering and sorting on read](#filtering-and-sorting-on-read-with-extra-filter-and-extra-sort). Anything else nested inside `extra:` is accepted unvalidated and otherwise unused. |
 
 Every entry in this table is read back on the read side with `parquet_get_metadata` (see [Reading
 table metadata with
@@ -323,11 +351,31 @@ table metadata with
 one caveat for the two rows above that produce **several entries sharing one key**: a lookup by key
 answers with the first of them, so use
 [`parquet_get_metadata_items`](../io/reading.html#listing-every-metadata-entry) — which lists every
-entry in file order, repeats included — to reach the rest. Parsing such a list also prints one
-`WARNING: add_metadata: key '<key>' ... already exists` per repeated entry, which is expected here
-and not a sign of a malformed MAML. A schema can also add further entries at runtime that were never
-in the MAML file at all — see [Runtime table
+entry in file order, repeats included — to reach the rest. A schema can also add further entries at
+runtime that were never in the MAML file at all — see [Runtime table
 metadata](building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata).
+
+### `extra:` produces no metadata entry, but is not ignored
+
+`extra:` is the one section whose contents never become table-level metadata — which is what makes
+it the right home for anything the fixed key list does not cover. It is still read, though: five
+nested keys are parsed specifically out of it, and everything else in it is accepted unvalidated and
+otherwise unused.
+
+Which five depends on what the MAML is *for*, and that is the distinction to hold on to when reading
+the sections above:
+
+| nested key | belongs to | what it does |
+|---|---|---|
+| `col_map:` | a **write** schema | renames a column on the way out — [Renaming columns for output](#renaming-columns-for-output-with-col_map) |
+| `protected_cols:` | a **write** schema | forbids Nulls in the named columns — [Null values](../types/supported-data-types.html#null-values) |
+| `remap:` | a **read-in** MAML (`parquet_table`) | gives a file's columns table-facing names — [Renaming columns for reading](#renaming-columns-for-reading-with-extra-remap) |
+| `filter:` | a **read-in** MAML (`parquet_table`) | keeps only the rows a rule matches — [Filtering and sorting on read](#filtering-and-sorting-on-read-with-extra-filter-and-extra-sort) |
+| `sort:` | a **read-in** MAML (`parquet_table`) | returns the rows in a chosen order — same section |
+
+A third role exists and uses no `extra:` key at all: a **table-type** schema under `table_types/`,
+whose `source:` field sub-key `tools/generate_user_table_code.py` reads to generate a
+`parquet_table` extension — see [Generated table types](../utilities/generated-tables.html).
 
 **Every MAML-declared table-level value is a string.** MAML carries no type for these keys, and that
 is a design decision rather than a missing feature: `keyarray:` has no `datatype:` sub-key and is

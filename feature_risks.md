@@ -147,6 +147,8 @@ something a reader is expected to have.
 | [Risk-80](#risk-80--a-metadata-only-query-quietly-decodes-a-whole-column-and-the-answer-is-still-right) | A metadata-only query quietly decodes a whole column, and the answer is still right | 4 — covered |
 | [Risk-82](#risk-82--a-non-nullable-field-that-receives-a-null-writes-definition-levels-that-disagree-with-its-schema) | A non-nullable field that receives a Null writes definition levels that disagree with its schema | 4 — covered |
 | [Risk-81](#risk-81--two-individually-valid-ranges-that-describe-different-parts-of-the-file) | Two individually valid ranges that describe different parts of the file | 4 — covered |
+| [Risk-83](#risk-83--a-write-path-that-does-not-resolve-a-declared-auto-size-emits-a-sentinel-into-the-sidecar) | A write path that does not resolve a declared `auto` size emits a sentinel into the sidecar | 4 — covered |
+| [Risk-84](#risk-84--a-maml-key-matched-case-sensitively-loses-a-whole-block-in-silence) | A MAML key matched case-sensitively loses a whole block, in silence | 4 — covered |
 
 ---
 
@@ -154,7 +156,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-83**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-85**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3464,3 +3466,112 @@ and what it carries (a reservation survives `%clone` and `%clone_structure`).
 making the bump unconditional (guarantee arm fails), never bumping (negative control and the sweep
 both fail), and making `%reserve_columns` a no-op (guarantee arm fails — **only after** the
 fill-to-capacity fix above; it survived before it).
+
+### Risk-83 — A write path that does not resolve a declared `auto` size emits a sentinel into the sidecar
+
+`col_size: auto`/`array_size: auto` are placeholders resolved before any data is written — explicitly
+by `schema%set_col_size`/`%set_array_size`, or automatically by the first write that can supply the
+value. Until then the column carries `parquet_size_auto`, which is **-1**. `parquet_close_writer`
+writes the column's final `col_size`/`array_size` verbatim into a `write_maml=.true.` sidecar
+(`parquet_rewrite_resolved_sizes`) and into the file's own `column.<name>.array_size` metadata entry,
+so a column that was never resolved advertises `-1` in both.
+
+**Why the failure is silent, and why it is worse than it looks.** Nothing aborts and nothing warns:
+the `.parquet` file is valid and round-trips through this library perfectly, because the reader takes
+each string's length from the data rather than from `array_size`. The damage is in the *sidecar*,
+which is a `.maml` file that **fails `parquet_validate_maml`** — "field 'X' has an invalid array_size
+(must be a positive integer or 'auto')" — so the failure surfaces in whatever program reads the
+sidecar back, possibly much later and on another machine, naming a file rather than the write that
+produced it. `parquet_close_writer`'s own "resolve any remaining auto to 1" loop does **not** cover
+this: it lives in `parquet_write_empty_columns` and runs only when no column was written at all.
+
+**The rule this forbids, and it is wider than the sentinel.** *Every size this library writes into a
+sidecar or into the file's own metadata must describe the data that was written.* Two distinct ways
+of breaking it live here, and only the first is about `auto` at all:
+
+1. **A path that cannot resolve an `auto` size leaves the sentinel.** "This path has no declared
+   length to read" is not an exemption — the confirmed instance was exactly that. The two
+   `parquet_string_column` paths (`parquet_write_string_column_compact` and its chunk twin) store
+   each element's own bytes and so have no `len(values)` to take; they were the only string write
+   sites calling neither `parquet_resolve_or_check_col_size` nor
+   `parquet_resolve_or_check_array_size`, and they shipped writing `-1`.
+2. **A path that does not ENFORCE a declared size may still not repeat it.** The compact path
+   deliberately does not enforce `array_size` — a reader takes each length from the data, so the
+   declaration is not needed to read the column back — and a caller may legitimately write elements
+   longer than the schema declares. That write is accepted, with one WARNING. What it must not
+   produce is a sidecar still claiming the declaration. **Accepting inaccurate input is a policy
+   choice; emitting inaccurate output is a defect**, and the two are easy to conflate because the
+   same number is involved.
+
+**The implementation is one reconciliation at close, not a per-write fix, and that placement is
+load-bearing.** `resolve_compact_array_size` (`src/parquet_write_string.f90`) only *records* the
+longest element each compact write carries, into `writer%observed_string_len`;
+`parquet_reconcile_string_sizes` (`src/parquet_write.f90`) settles the reported value once, in
+`parquet_close_writer`, before `close_parquet_writer` serializes the footer and before the sidecar is
+rewritten from `writer%all_columns`. Raising the value *mid-write* instead would also raise the
+ceiling `any_item_too_long` enforces on the padded (`character`-array) paths, so a column written
+through both forms would have its declared limit quietly relaxed for the padded half — a second
+silent failure introduced by the fix for the first. At close there are no writes left to affect.
+
+An earlier version of this fix carried a `writer%array_size_from_data` marker so that only a
+data-derived value would ever be raised, protecting a declared `array_size` from being widened. The
+close-time reconciliation makes that marker unnecessary *and* makes the protection wrong: a
+declaration the data has outgrown is precisely what must be corrected on the way out.
+
+**Test.** `test_compact_write_array_size_auto_resolves` and
+`test_compact_chunk_array_size_auto_grows` (`test/test_writing.f90`) both re-parse the sidecar with
+`parquet_parse_maml` rather than only reading a number out of it — that is the assertion that it is a
+*valid* MAML, and it is what fails (by aborting) if the sentinel comes back.
+`test_flat_write_array_size_auto_resolves` covers the declared-length path the same way.
+`test_compact_write_exceeds_declared_array_size` covers rule 2: the write is accepted and the sidecar
+reports 20 against a declared 5.
+
+Each carries its own control, and they are what stop the group passing against a cruder
+implementation: a second column that must resolve to its *own* longest element (ruling out one width
+applied to every `auto` column), a third chunk shorter than the second (ruling out "overwrite with
+every chunk's own longest"), a second file written at a different declared length, and a column whose
+declaration the data does *not* exceed and which must therefore come back unchanged (ruling out
+overwriting every declaration with the measured width).
+
+The warning is its own scenario, since a message can only be read from a captured run:
+`compact_write_exceeds_array_size_warns` (`test/error_scenarios.f90`) asserts the write exits 0, that
+the warning names the 20-character element, that a later 25-character chunk produces **no second
+warning** (once per column, not once per chunk), and that the within-declaration column draws none at
+all. Mutation-verified in both directions: warning per chunk → fails; warning removed → fails.
+
+### Risk-84 — A MAML key matched case-sensitively loses a whole block, in silence
+
+Every MAML key is case-insensitive: `parquet_find_maml_section` lowercases both sides, so
+`parquet_validate_maml` accepts `Extra:`, `FIELDS:` and `Data_Type:` as the sections and sub-keys they
+plainly are. The block **locators** did not follow that rule. `parquet_parse_col_map`,
+`parquet_parse_protected_cols` (`src/parquet_metadata.f90`) and `locate_extra_block`
+(`src/parquet_tables_maml.f90`) each compared `trim(adjustl(line))` against a lowercase literal, as
+did the `fields:`/`keyarray:` scans in `parquet_parse_maml_lines`, `parquet_parse_qc_maml`,
+`parquet_prune_disabled_fields` and `parquet_rewrite_resolved_sizes`.
+
+**Why the failure is silent.** A MAML spelling its section `Extra:` passes validation — the section
+name is checked case-insensitively — and then its `col_map:`, `protected_cols:`, `remap:`, `filter:`
+and `sort:` are simply never found. No warning, no abort, and a file that looks entirely correct.
+`protected_cols:` is the sharpest: the Null protection its author asked for is gone, so Nulls reach a
+column declared free of them. `remap:` is next: a table's columns keep their physical names, so a
+program looking one up by its internal name meets "column not found" from a MAML that names it.
+
+**The rule this forbids.** *A section name and the keys nested inside it must be matched by the same
+case rule, everywhere.* A validator that is case-insensitive over a locator that is not is worse than
+both being strict — strictness would at least have rejected the file. Two predicates implement it,
+one per subtree, because `parquet_core`'s helpers are private to its own submodule tree and
+`parquet_tables_maml.f90` deliberately carries its own parsing primitives:
+`parquet_maml_key_matches` and `maml_key_matches`. **Two copies of "ASCII case-insensitive equality"
+cannot drift harmfully; a NEW site using neither is the real hazard**, which is why the guard is a
+lint check rather than a shared symbol.
+
+**Test.** `check_maml_keys_case_insensitive` (`tools/check_source_conventions.py`, run by CI's lint
+stage) fails on any `== "<word>:"` literal in `src/*.f90` — verified to fire by reintroducing one.
+`test_maml_block_headers_case_insensitive` (`test/test_maml.f90`) asserts a fully capitalized MAML
+parses to the same fields and the same metadata entries as its lowercase twin, with a control that a
+metadata *value* keeps its own capitalization. The `extra:` half needs an abort to be observable at
+all — a block that was found is only visible through something it does — so
+`extra_section_capitalized` (`test/error_scenarios.f90`) asserts that a capitalized `Extra:` with a
+bogus `protected_cols:` name is still rejected, **paired with** `extra_section_lowercase_control`:
+without the lowercase twin the capitalized test would pass against a library that had stopped reading
+`extra:` altogether.

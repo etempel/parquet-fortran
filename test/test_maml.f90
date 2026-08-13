@@ -144,6 +144,11 @@ contains
                 test_schema_clear_then_reinit_reusable), &
             new_unittest("col_size: auto/array_size: auto parse to an unresolved, still-valid state", &
                 test_parse_col_size_array_size_auto_ok), &
+            new_unittest("unit: unitless parses to no unit at all, in any capitalization", &
+                test_unit_unitless_parses_to_empty), &
+            new_unittest("a list-form ucd: joins its items with ';'", test_ucd_list_form_joins), &
+            new_unittest("a MAML key is case-insensitive, section headers included", &
+                test_maml_block_headers_case_insensitive), &
             new_unittest("schema%add_field(col_size=parquet_size_auto) writes 'col_size: auto', not a raw -1", &
                 test_add_field_col_size_auto_writes_auto_token), &
             new_unittest("schema%add_field(array_size=parquet_size_auto) writes 'array_size: auto', not a raw -1", &
@@ -1642,6 +1647,164 @@ contains
         call check(error, schema%cinfo%col(2)%array_size == parquet_size_auto, &
             "array_size: Auto did not parse to parquet_size_auto")
     end subroutine test_parse_col_size_array_size_auto_ok
+
+    !> `unit: unitless` is a declaration that the column HAS no unit, so the parser stores an empty
+    !! string for it rather than the literal word -- which is what keeps "unitless" out of the
+    !! written file's VOTable header and out of column.<name>.unit. It is matched case-insensitively
+    !! like every other MAML value that has a fixed vocabulary.
+    !!
+    !! The erasure is a single unremarkable line in parquet_parse_maml_lines and nothing else fails
+    !! if it goes: every file written from then on simply carries a bogus "unitless" unit. The
+    !! negative control is the third field -- a real unit must survive untouched, or this test would
+    !! pass just as happily against a parser that erased every unit it saw.
+    subroutine test_unit_unitless_parses_to_empty(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "unit_unitless.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: unit_unitless_table", &
+            "fields:", &
+            "- name: plain", &
+            "  unit: unitless", &
+            "  data_type: int32", &
+            "- name: mixedcase", &
+            "  unit: UnItLeSs", &
+            "  data_type: int32", &
+            "- name: real_unit", &
+            "  unit: kg", &
+            "  data_type: int32" ]
+
+        call parquet_parse_maml(schema)
+
+        call check(error, len_trim(schema%cinfo%col(1)%unit) == 0, &
+            "unit: unitless should parse to an empty unit, not to the literal word")
+        if (allocated(error)) return
+        call check(error, len_trim(schema%cinfo%col(2)%unit) == 0, &
+            "unit: UnItLeSs should parse to an empty unit too (the token is case-insensitive)")
+        if (allocated(error)) return
+        call check(error, trim(schema%cinfo%col(3)%unit) == "kg", &
+            "a real unit must survive unchanged -- the control that rules out erasing every unit")
+    end subroutine test_unit_unitless_parses_to_empty
+
+    !> A field's `ucd:` may be written either as one string or as a YAML list, and the list form is
+    !! joined into a single ';'-separated value. schemas/maml_example.maml uses the list form and
+    !! test_examples.f90 asserts the result end to end; this is the direct unit test of the join
+    !! itself, including the single-item case (which must NOT acquire a separator) and the scalar
+    !! form beside it as the control.
+    subroutine test_ucd_list_form_joins(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "ucd_list_form.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: ucd_list_form_table", &
+            "fields:", &
+            "- name: many", &
+            "  ucd:", &
+            "  - meta.id", &
+            "  - meta.main", &
+            "  data_type: int32", &
+            "- name: one", &
+            "  ucd:", &
+            "  - pos.eq.ra", &
+            "  data_type: int32", &
+            "- name: scalar", &
+            "  ucd: pos.eq.dec", &
+            "  data_type: int32" ]
+
+        call parquet_parse_maml(schema)
+
+        call check(error, trim(schema%cinfo%col(1)%ucd) == "meta.id;meta.main", &
+            "a two-item list-form ucd: should join with ';'")
+        if (allocated(error)) return
+        call check(error, trim(schema%cinfo%col(2)%ucd) == "pos.eq.ra", &
+            "a single-item list-form ucd: should carry no separator")
+        if (allocated(error)) return
+        call check(error, trim(schema%cinfo%col(3)%ucd) == "pos.eq.dec", &
+            "a scalar ucd: must be unaffected -- the control for the list handling")
+    end subroutine test_ucd_list_form_joins
+
+    !> Every MAML KEY is case-insensitive, and that has to hold for the block headers as well as for
+    !! the scalar keys. It did not: `parquet_find_maml_section` lowercased both sides while the block
+    !! locators compared against lowercase literals, so a MAML spelling its section `Extra:` passed
+    !! validation with its nested `protected_cols:`/`col_map:` never found at all -- silently, with
+    !! the Null protection the author asked for simply gone. See feature_risks.md Risk-91.
+    !!
+    !! This is the in-process half: that a fully capitalized MAML parses to the same schema and the
+    !! same metadata as its lowercase twin. The abort half -- that a capitalized `Extra:` block's
+    !! contents are really reached, not merely tolerated -- is
+    !! scenario_extra_section_capitalized in test/error_scenarios.f90.
+    subroutine test_maml_block_headers_case_insensitive(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: upper, lower
+        character(len=:), allocatable :: got_survey
+        integer :: i
+
+        upper%maml%name = "block_headers_upper.maml"
+        upper%maml%lines = [character(len=40) :: &
+            "TABLE: case_table", &
+            "Survey: The Big Survey", &
+            "KeyArray:", &
+            "- Key: scale", &
+            "  Value: 8.1", &
+            "DOIs:", &
+            "- DOI: 10.1234/x", &
+            "  Type: article", &
+            "FIELDS:", &
+            "- Name: id", &
+            "  Data_Type: int32", &
+            "  Col_Size: 2" ]
+        lower%maml%name = "block_headers_lower.maml"
+        lower%maml%lines = [character(len=40) :: &
+            "table: case_table", &
+            "survey: The Big Survey", &
+            "keyarray:", &
+            "- key: scale", &
+            "  value: 8.1", &
+            "dois:", &
+            "- doi: 10.1234/x", &
+            "  type: article", &
+            "fields:", &
+            "- name: id", &
+            "  data_type: int32", &
+            "  col_size: 2" ]
+
+        ! parquet_parse_maml validates first, so reaching the checks at all already proves the
+        ! capitalized spelling was accepted as a known set of sections.
+        call parquet_parse_maml(upper)
+        call parquet_parse_maml(lower)
+
+        call check(error, upper%cinfo%get_num_fields() == 1, &
+            "a capitalized FIELDS: block should parse exactly like fields:")
+        if (allocated(error)) return
+        call check(error, trim(upper%cinfo%col(1)%name) == "id" .and. &
+            trim(upper%cinfo%col(1)%data_type) == "int32" .and. upper%cinfo%col(1)%col_size == 2, &
+            "a capitalized field's Name:/Data_Type:/Col_Size: should parse like their lowercase twins")
+        if (allocated(error)) return
+
+        ! Every metadata entry the lowercase MAML produced must be present, with the same value,
+        ! in the capitalized one -- which covers KeyArray:'s and DOIs:' own derived entries.
+        call check(error, size(upper%metadata%items) == size(lower%metadata%items), &
+            "a capitalized MAML should produce the same number of metadata entries as its lowercase twin")
+        if (allocated(error)) return
+        do i = 1, size(lower%metadata%items)
+            call check(error, trim(upper%metadata%items(i)%key) == trim(lower%metadata%items(i)%key) .and. &
+                trim(upper%metadata%items(i)%value) == trim(lower%metadata%items(i)%value), &
+                "metadata entry " // trim(lower%metadata%items(i)%key) // " differs between a " // &
+                "capitalized MAML and its lowercase twin")
+            if (allocated(error)) return
+        end do
+
+        ! The control: a VALUE stays case-sensitive. Only keys were made case-insensitive, and a
+        ! survey name that came back lowercased would mean the lowercasing had reached the data.
+        got_survey = ""
+        do i = 1, size(upper%metadata%items)
+            if (trim(upper%metadata%items(i)%key) == "survey") got_survey = trim(upper%metadata%items(i)%value)
+        end do
+        call check(error, got_survey == "The Big Survey", &
+            "a metadata VALUE must keep its own capitalization -- only keys are case-insensitive")
+    end subroutine test_maml_block_headers_case_insensitive
 
     !> Regression test: %add_field used to format col_size=parquet_size_auto as a raw integer
     !! ("col_size: -1") instead of the "auto" token the parser actually recognizes, so it would

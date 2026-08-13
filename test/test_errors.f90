@@ -647,6 +647,12 @@ contains
                 test_write_string_exceeds_array_size_aborts), &
             new_unittest("protected_cols: referencing an unknown field aborts", &
                 test_validate_protected_cols_unknown_name_aborts), &
+            new_unittest("a capitalized Extra: block is read, so its protected_cols: is still checked", &
+                test_extra_section_capitalized_aborts), &
+            new_unittest("the lowercase extra: twin behaves identically (the case control)", &
+                test_extra_section_lowercase_control_aborts), &
+            new_unittest("a compact string write over its declared array_size is accepted, with one warning", &
+                test_compact_write_exceeds_array_size_warns), &
             new_unittest("writing a Null into a protected column aborts", &
                 test_write_protected_column_with_null_aborts), &
             new_unittest("a null element of a protected vector column aborts", &
@@ -5478,6 +5484,80 @@ contains
             failure_message="protected_cols: referencing a column not declared in fields: " // &
                 "was expected to error stop")
     end subroutine test_validate_protected_cols_unknown_name_aborts
+
+    !> A MAML key is case-insensitive, block headers included -- so `Extra:` must be read as the
+    !! `extra:` section, and the `protected_cols:` inside it must still be validated. Before this
+    !! was fixed the capitalized spelling validated cleanly, because the block was never found:
+    !! silent, and it took a column's Null protection with it. See feature_risks.md Risk-91.
+    !!
+    !! The message is asserted, not only the abort, because "validation rejected this MAML" is a
+    !! thing several unrelated defects could also produce -- only naming the unknown column proves
+    !! the protected_cols: line itself was read.
+    subroutine test_extra_section_capitalized_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extra_section_capitalized", expect_abort=.true., &
+            failure_message="a capitalized Extra: section's protected_cols: should still be " // &
+                "validated (it was silently ignored before MAML keys became case-insensitive)", &
+            required_stderr="protected_cols: unknown column")
+    end subroutine test_extra_section_capitalized_aborts
+
+    !> The control for the test above: the identical MAML spelled `extra:`. Asserting only the
+    !! capitalized spelling would pass just as happily against a library that had stopped reading
+    !! the `extra:` section altogether, so both spellings are asserted to abort the same way.
+    subroutine test_extra_section_lowercase_control_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "extra_section_lowercase_control", expect_abort=.true., &
+            failure_message="the lowercase extra: twin should abort identically -- if it does not, " // &
+                "the capitalized test above proves nothing", &
+            required_stderr="protected_cols: unknown column")
+    end subroutine test_extra_section_lowercase_control_aborts
+
+    !> The compact string path does not enforce a declared array_size, by decision: it stores each
+    !! element's own bytes and a reader never needs the declaration to read the column back. The
+    !! write is therefore accepted — but not silently, and the metadata it produces describes the
+    !! data rather than repeating a declaration the data has outgrown.
+    !!
+    !! Four assertions off one captured run, and the last two are what make it more than a smoke
+    !! test: the warning is emitted ONCE per column (chunk 3's longer 25-character element must not
+    !! produce a second one, so "25" must be absent), and the column that stayed within its
+    !! declaration must draw no warning at all.
+    subroutine test_compact_write_exceeds_array_size_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: saw_completed, saw_warning, saw_second_warning, saw_within
+
+        call run_error_scenario("compact_write_exceeds_array_size_warns", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, &
+            "a parquet_string_column write longer than the declared array_size must be ACCEPTED, " // &
+            "not aborted -- that path does not enforce array_size")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "compact-exceeds-write-completed", saw_completed)
+        call check(error, saw_completed, "the scenario did not run to completion")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "element of 20 characters", saw_warning)
+        call check(error, saw_warning, &
+            "exceeding a declared array_size must emit a WARNING naming the actual element length")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "element of 25 characters", saw_second_warning)
+        call check(error, .not. saw_second_warning, &
+            "the warning must be emitted once per COLUMN, not once per chunk -- a later, longer " // &
+            "chunk (25 characters) must not produce a second one")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "column 'within'", saw_within)
+        call check(error, .not. saw_within, &
+            "a column that stays within its declared array_size must draw no warning -- the " // &
+            "control that rules out warning about every string column")
+    end subroutine test_compact_write_exceeds_array_size_warns
 
     subroutine test_write_protected_column_with_null_aborts(error)
         type(error_type), allocatable, intent(out) :: error

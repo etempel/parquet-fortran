@@ -1106,7 +1106,7 @@ contains
         type(parquet_maml_col_map_entry), allocatable :: col_map(:)
         integer :: ios, n, i, j, list_item_idx, doi_idx, depends_idx
         character(len=32) :: idx_buf
-        character(len=:), allocatable :: tlo2, tlo3, tlo8, tlo9, tlo12, tlo17, tlo27, tlo28, tlo29, tlo30, &
+        character(len=:), allocatable :: tlo2, tlo3, tlo8, tlo9, tlo12, tlo17, tlo30, &
             tlo33, tlo34, tlo37, tlo41, tlo42, tlo43, tlo44 !! scratch (to_lower).
         character(len=:), allocatable :: tuq1, tuq4, tuq5, tuq6, tuq7, tuq10, tuq11, tuq13, tuq14, tuq15, &
             tuq16, tuq18, tuq19, tuq20, tuq21, tuq22, tuq23, tuq24, tuq25, tuq26, tuq31, tuq32, tuq35, tuq36, &
@@ -1308,8 +1308,14 @@ contains
                                 keywords_value = trim(tuq25)
                             end if
                         else
+                            ! A plain-string list under an ordinary section (survey:, license:,
+                            ! ...) is DEFINED to produce one entry per item, all sharing that
+                            ! key's name -- so warn=.false.: the duplicate-key warning exists to
+                            ! catch a caller's own accidental %add_metadata collision, and firing
+                            ! it here told a user their perfectly well-formed MAML was suspect.
+                            ! Only the parser's own deliberate multi-entry emission is exempt.
                             call parquet_unquote(tline(3:), tuq26)
-                            call metadata%add_metadata(list_key, tuq26)
+                            call metadata%add_metadata(list_key, tuq26, warn=.false.)
                         end if
                         cycle
                     else if (index(tline, ":") > 0 .and. line(1:1) /= " ") then
@@ -1323,10 +1329,10 @@ contains
                     end if
                 end if
 
-                if (tline == "fields:") in_fields = .true.
+                if (parquet_maml_key_matches(tline, "fields:")) in_fields = .true.
                 if (in_fields) cycle
 
-                if (tline == "keyarray:") then
+                if (parquet_maml_key_matches(tline, "keyarray:")) then
                     in_keyarray = .true.
                     ka_key = ""
                     ka_value = ""
@@ -1334,8 +1340,7 @@ contains
                     cycle
                 end if
 
-                call parquet_to_lower(tline, tlo27)
-                if (tlo27 == "dois:") then
+                if (parquet_maml_key_matches(tline, "dois:")) then
                     in_doiarray = .true.
                     doi_idx = 0
                     doi_value = ""
@@ -1343,8 +1348,7 @@ contains
                     cycle
                 end if
 
-                call parquet_to_lower(tline, tlo28)
-                if (tlo28 == "depends:") then
+                if (parquet_maml_key_matches(tline, "depends:")) then
                     in_dependsarray = .true.
                     depends_idx = 0
                     depends_survey = ""
@@ -1354,8 +1358,7 @@ contains
                     cycle
                 end if
 
-                call parquet_to_lower(tline, tlo29)
-                if (tlo29 == "extra:") then
+                if (parquet_maml_key_matches(tline, "extra:")) then
                     in_extra = .true.
                     cycle
                 end if
@@ -1638,7 +1641,7 @@ contains
 
         do i = 1, n
             tline = trim(adjustl(lines(i)))
-            if (lines(i)(1:1) /= " " .and. tline == "keyarray:") then
+            if (lines(i)(1:1) /= " " .and. parquet_maml_key_matches(tline, "keyarray:")) then
                 need_header = .false.
                 insert_pos = i + 1
                 do while (insert_pos <= n)
@@ -1652,7 +1655,7 @@ contains
 
         do i = 1, n
             tline = trim(adjustl(lines(i)))
-            if (lines(i)(1:1) /= " " .and. tline == "extra:") then
+            if (lines(i)(1:1) /= " " .and. parquet_maml_key_matches(tline, "extra:")) then
                 insert_pos = i
                 return
             end if
@@ -1660,7 +1663,7 @@ contains
 
         do i = 1, n
             tline = trim(adjustl(lines(i)))
-            if (lines(i)(1:1) /= " " .and. tline == "fields:") then
+            if (lines(i)(1:1) /= " " .and. parquet_maml_key_matches(tline, "fields:")) then
                 insert_pos = i
                 return
             end if
@@ -1766,7 +1769,7 @@ contains
         n = size(lines)
         idx_extra = 0
         do i = 1, n
-            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "extra:") then
+            if (lines(i)(1:1) /= " " .and. parquet_maml_key_matches(lines(i), "extra:")) then
                 idx_extra = i
                 exit
             end if
@@ -1786,7 +1789,7 @@ contains
         idx_col_map = 0
         do i = idx_extra + 1, extra_end
             if (len_trim(lines(i)) == 0) cycle
-            if (trim(adjustl(lines(i))) == "col_map:") then
+            if (parquet_maml_key_matches(lines(i), "col_map:")) then
                 idx_col_map = i
                 exit
             end if
@@ -1836,7 +1839,7 @@ contains
         n = size(lines)
         idx_extra = 0
         do i = 1, n
-            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "extra:") then
+            if (lines(i)(1:1) /= " " .and. parquet_maml_key_matches(lines(i), "extra:")) then
                 idx_extra = i
                 exit
             end if

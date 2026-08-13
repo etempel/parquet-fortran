@@ -98,6 +98,39 @@ contains
         end do
     end procedure parse_read_maml_remap
     !
+    !> .true. when `line` is exactly the MAML block header `key`, ignoring surrounding blanks and
+    !! ASCII case — a MAML key is case-insensitive, so `Extra:` and `extra:` are the same section.
+    !!
+    !! A local twin of `parquet_core`'s `parquet_maml_key_matches`, which is private to that
+    !! module's own subtree. This file already carries its own `split_key_value`/`unquote_trimmed`
+    !! for the same reason (see the module doc above): the read-side parser is deliberately
+    !! independent of the write-side one. What must not diverge is the RULE, and
+    !! `check_maml_keys_case_insensitive` (`tools/check_source_conventions.py`) is what enforces
+    !! that — it fails on any new literal `== "<key>:"` comparison in either subtree, which is the
+    !! shape that once let a capitalized `Extra:` silently lose its whole block. See
+    !! `feature_risks.md` Risk-91.
+    !!
+    !! Indentation is not considered here; a caller needing a top-level header keeps its own
+    !! `line(1:1) /= " "` test. Values stay case-sensitive — a `remap:` column name is data.
+    logical function maml_key_matches(line, key)
+        character(len=*), intent(in) :: line !! raw MAML source line.
+        character(len=*), intent(in) :: key  !! block-header name, lowercase, with its colon.
+        character(len=len(line)) :: t
+        character(len=1) :: c
+        integer :: i, n
+        !
+        t = adjustl(line)
+        n = len_trim(t)
+        maml_key_matches = .false.
+        if (n /= len_trim(key)) return
+        do i = 1, n
+            c = t(i:i)
+            if (c >= "A" .and. c <= "Z") c = achar(iachar(c) + 32)
+            if (c /= key(i:i)) return
+        end do
+        maml_key_matches = .true.
+    end function maml_key_matches
+    !
     !> Finds `key` nested inside the MAML's own `extra:` section, reporting the block bounds the
     !! caller then walks. `idx_key` is 0 when there is no `extra:` section at all, or none with
     !! that key in it.
@@ -120,7 +153,7 @@ contains
         idx_key = 0
         do i = 1, nlines
             if (len(lines(i)) == 0) cycle
-            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "extra:") then
+            if (lines(i)(1:1) /= " " .and. maml_key_matches(lines(i), "extra:")) then
                 idx_extra = i
                 exit
             end if
@@ -136,7 +169,7 @@ contains
         end do
         do i = idx_extra + 1, extra_end
             if (len_trim(lines(i)) == 0) cycle
-            if (trim(adjustl(lines(i))) == key) then
+            if (maml_key_matches(lines(i), key)) then
                 idx_key = i
                 exit
             end if
@@ -403,7 +436,7 @@ contains
         last = nlines
         do i = 1, nlines
             if (len_trim(lines(i)) == 0) cycle
-            if (lines(i)(1:1) /= " " .and. trim(adjustl(lines(i))) == "fields:") then
+            if (lines(i)(1:1) /= " " .and. maml_key_matches(lines(i), "fields:")) then
                 first = i + 1
                 exit
             end if

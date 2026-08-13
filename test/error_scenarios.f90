@@ -1282,6 +1282,12 @@ program error_scenarios
         call scenario_set_array_size_already_resolved_no_force()
     case ("flat_write_col_size_still_auto")
         call scenario_flat_write_col_size_still_auto()
+    case ("extra_section_capitalized")
+        call scenario_extra_section_capitalized(.true.)
+    case ("extra_section_lowercase_control")
+        call scenario_extra_section_capitalized(.false.)
+    case ("compact_write_exceeds_array_size_warns")
+        call scenario_compact_write_exceeds_array_size_warns()
     case ("table_assignment_blocked")
         call scenario_table_assignment_blocked()
     case ("table_not_opened")
@@ -11017,6 +11023,96 @@ contains
         call parquet_close_writer(writer)
         print '(a)', "unexpectedly wrote a flat column whose schema col_size is still 'auto'"
     end subroutine scenario_flat_write_col_size_still_auto
+
+    !> A MAML key is case-insensitive, and the block headers have to obey that as much as the
+    !! scalar keys do. They did not: `parquet_find_maml_section` lowercased both sides while every
+    !! block LOCATOR compared against a lowercase literal, so a MAML spelling its section `Extra:`
+    !! validated cleanly with its nested `protected_cols:`/`col_map:`/`remap:`/`filter:`/`sort:`
+    !! never found at all -- no warning, and a file whose Null protection had quietly vanished.
+    !! See feature_risks.md Risk-91.
+    !!
+    !! Both spellings run the SAME body, because "the block was found" is only observable through
+    !! something the block does: here a `protected_cols:` naming a column that does not exist, which
+    !! validation rejects only if it read the block in the first place. The two scenarios must
+    !! therefore behave identically -- and a test asserting only the capitalized one would pass
+    !! against a library that had stopped reading `extra:` altogether, which is why the lowercase
+    !! twin is registered as its own scenario rather than being assumed.
+    subroutine scenario_extra_section_capitalized(capitalized)
+        logical, intent(in) :: capitalized !! .true. spells the section `Extra:`, .false. `extra:`.
+        type(parquet_maml_file) :: maml
+
+        maml%name = "extra_section_case.maml"
+        maml%lines = [character(len=40) :: &
+            "table: extra_section_case_table", &
+            "extra:", &
+            "  protected_cols: nosuchcolumn", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32" ]
+        if (capitalized) maml%lines(2) = "Extra:"
+
+        call parquet_validate_maml(maml)
+        print '(a)', "unexpectedly accepted a protected_cols: naming a column that is not declared"
+    end subroutine scenario_extra_section_capitalized
+
+    !> A parquet_string_column write does not enforce a declared array_size -- it stores each
+    !! element's own bytes, and a reader takes each length from the data -- so writing longer
+    !! elements than the schema declares is accepted. It is not silent, though: one WARNING names
+    !! the column, the declaration and the actual length. This scenario is the out-of-process half,
+    !! because a warning goes to the message channel and only a captured run can read it.
+    !!
+    !! Three things are asserted from one run (see test_errors.f90):
+    !!   * the write is ACCEPTED -- the scenario exits 0, and a stray abort would fail the scenario
+    !!     rather than the assertion;
+    !!   * the warning names the offending column and its 20-character element;
+    !!   * it is emitted ONCE per column, not once per chunk. Chunk 3 carries a 25-character element
+    !!     -- longer again -- so a per-chunk warning would put "25" in the output. The test asserts
+    !!     that it is absent, which is a precise once-only check using only "does this text appear".
+    !!
+    !! The second column is the negative control: it stays within its declaration and must draw no
+    !! warning at all, so a scenario that warned about every string column would fail.
+    subroutine scenario_compact_write_exceeds_array_size_warns()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: over1, over2, over3, fits1, fits2, fits3
+
+        call over1%append_string("abc")                          ! within the declared 5
+        call over2%append_string("a_twenty_char_value!")         ! 20 -- the one warning
+        call over3%append_string("a_twenty_five_char_value!")    ! 25 -- must NOT warn again
+        call fits1%append_string("ab")
+        call fits2%append_string("cd")
+        call fits3%append_string("ef")
+
+        schema%maml%name = "compact_exceeds_array_size.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: compact_exceeds_array_size_table", &
+            "fields:", &
+            "- name: over", &
+            "  data_type: string", &
+            "  array_size: 5", &
+            "- name: within", &
+            "  data_type: string", &
+            "  array_size: 8" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_compact_exceeds.parquet", schema, &
+            write_maml=.true.)
+        call parquet_new_row_group(writer, 1_int64)
+        call parquet_write_column_chunk(writer, "over", over1)
+        call parquet_write_column_chunk(writer, "within", fits1)
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 1_int64)
+        call parquet_write_column_chunk(writer, "over", over2)
+        call parquet_write_column_chunk(writer, "within", fits2)
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 1_int64)
+        call parquet_write_column_chunk(writer, "over", over3)
+        call parquet_write_column_chunk(writer, "within", fits3)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        print '(a)', "compact-exceeds-write-completed"
+    end subroutine scenario_compact_write_exceeds_array_size_warns
 
     !> parquet_column%data_ptr is EXACT-kind by design (DD2): it aliases raw storage, so a
     !! pointer of a different kind would reinterpret the bytes rather than convert them. Asking

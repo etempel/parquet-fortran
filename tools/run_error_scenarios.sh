@@ -864,6 +864,9 @@ scenarios=(
     "set_array_size_non_positive:1"
     "set_array_size_already_resolved_no_force:1"
     "flat_write_col_size_still_auto:1"
+    "extra_section_capitalized:1"
+    "extra_section_lowercase_control:1"
+    "compact_write_exceeds_array_size_warns:0"
 )
 
 # writer_guard_sequential_handoff is the negative control for the two racy

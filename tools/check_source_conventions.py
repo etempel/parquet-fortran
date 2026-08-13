@@ -1464,8 +1464,52 @@ def check_no_indented_code_fence():
     return problems
 
 
+def check_maml_keys_case_insensitive():
+    """A MAML block header must never be recognized by a literal case-SENSITIVE comparison.
+
+    Every MAML key is case-insensitive -- `parquet_find_maml_section` lowercases both sides, so
+    `Extra:` validates exactly like `extra:`. The block LOCATORS did not: they compared
+    `trim(adjustl(line)) == "extra:"` against a lowercase literal, so a MAML spelling its section
+    `Extra:` passed validation while its `protected_cols:`, `col_map:`, `remap:`, `filter:` and
+    `sort:` were silently never found -- no warning, and a file that looks right. The sharpest
+    case is `protected_cols:`, where the Null protection a user asked for simply disappears.
+
+    So a header is matched with `parquet_maml_key_matches` (parquet_core's subtree) or
+    `maml_key_matches` (parquet_tables_maml.f90's own twin -- that file deliberately carries its
+    own parsing primitives). Two copies of the predicate cannot drift in any harmful way; a NEW
+    site forgetting both is the real hazard, and it is what this check catches. See
+    feature_risks.md Risk-91.
+
+    Matched by shape, not by a file list, and an empty scan FAILS (CLAUDE.md, "A static check that
+    enumerates names goes stale silently"). Only a `"<word>:"` literal counts -- a comparison
+    against a variable, or against a value rather than a key, is none of this check's business.
+    """
+    problems = []
+    sources = sorted((REPO_ROOT / "src").glob("*.f90"))
+    if not sources:
+        return ["src/: no .f90 sources found -- this check has gone blind"]
+    # A literal key comparison: == "something:" (or /=), where the literal ends in a colon.
+    pattern = re.compile(r'[=/]=\s*"[A-Za-z_][A-Za-z0-9_]*:"')
+    scanned = 0
+    for source in sources:
+        rel = source.relative_to(REPO_ROOT)
+        for lineno, line in enumerate(source.read_text().split("\n"), start=1):
+            code = line.split("!")[0]
+            if not pattern.search(code):
+                continue
+            scanned += 1
+            problems.append(
+                "%s:%d: a MAML block header compared against a lowercase literal -- a "
+                "capitalized `Extra:`/`Fields:` would then be silently ignored. Use "
+                "parquet_maml_key_matches (or maml_key_matches in parquet_tables_maml.f90) "
+                "instead: %s" % (rel, lineno, code.strip())
+            )
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
+    ("MAML block headers are matched case-insensitively", check_maml_keys_case_insensitive),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),
     ("no per-cell path reaches a column through a binding", check_no_type_bound_column_access),
     ("generated files carry their conventions", check_generated_file_conventions),

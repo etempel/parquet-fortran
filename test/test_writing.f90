@@ -294,7 +294,15 @@ contains
             new_unittest("sidecar col_size rewrite handles short source lines and name: not first in its block", &
                 test_write_maml_sidecar_short_lines_name_not_first), &
             new_unittest("a flat (1-D) write on a still-'auto' col_size column aborts", &
-                test_flat_write_col_size_still_auto_aborts) &
+                test_flat_write_col_size_still_auto_aborts), &
+            new_unittest("a flat (1-D) string write auto-resolves array_size from its declared length", &
+                test_flat_write_array_size_auto_resolves), &
+            new_unittest("a parquet_string_column write resolves array_size: auto from the longest element", &
+                test_compact_write_array_size_auto_resolves), &
+            new_unittest("a chunked parquet_string_column write raises array_size: auto for a longer later chunk", &
+                test_compact_chunk_array_size_auto_grows), &
+            new_unittest("a parquet_string_column write longer than the declared array_size is accepted, " // &
+                "and the sidecar reports what was written", test_compact_write_exceeds_declared_array_size) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -5442,5 +5450,229 @@ contains
             failure_message="a flat write on a still-'auto' col_size column should abort", &
             required_stderr="is still 'auto'")
     end subroutine test_flat_write_col_size_still_auto_aborts
+
+    !> array_size: auto is resolved by a FLAT (1-D) string write too, not only by the matrix form
+    !> that test_string_matrix_array_size_auto_resolves covers -- from len(values), the caller's own
+    !> declared character length. This is the half col_size does NOT share (a 1-D write cannot
+    !> resolve col_size, since it needs it to divide its flat array into rows), and the guide said
+    !> for a long time that neither could be resolved this way.
+    !>
+    !> The negative control is the second file: the same schema written with a len=12 array must
+    !> resolve to 12, so the test cannot pass against an implementation that hard-codes a width or
+    !> falls back to 1.
+    subroutine test_flat_write_array_size_auto_resolves(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=7) :: short_values(3)
+        character(len=12) :: long_values(3)
+        integer :: got_short, got_long
+
+        short_values = [character(len=7) :: "alpha", "bee", "gamma12"]
+        long_values = [character(len=12) :: "alpha", "bee", "gamma12"]
+
+        call write_auto_string_sidecar("test_run/test_array_size_auto_flat7", short_values, got_short)
+        call write_auto_string_sidecar("test_run/test_array_size_auto_flat12", long_values, got_long)
+
+        call check(error, got_short == 7, &
+            "expected a flat 1-D string write to resolve array_size: auto to len(values) = 7")
+        if (allocated(error)) return
+        call check(error, got_long == 12, &
+            "expected the same write with a len=12 array to resolve array_size: auto to 12 " // &
+            "(the control that rules out a hard-coded width)")
+    end subroutine test_flat_write_array_size_auto_resolves
+
+    !> Writes `values` to <stem>.parquet as the single array_size: auto column "nm", with
+    !> write_maml=.true., and reports the array_size the sidecar ends up declaring. Shared by the
+    !> two tests above and below so each one's arms differ only in the data they write.
+    subroutine write_auto_string_sidecar(stem, values, array_size_out)
+        character(len=*), intent(in) :: stem !! output path without its extension.
+        character(len=*), intent(in) :: values(:) !! the column to write.
+        integer, intent(out) :: array_size_out !! array_size declared by the resulting sidecar.
+        type(parquet_schema) :: schema, sidecar_schema
+        type(parquet_writer) :: writer
+
+        schema%maml%name = trim(stem) // ".maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: array_size_auto_flat_table", &
+            "fields:", &
+            "- name: nm", &
+            "  data_type: string", &
+            "  array_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, trim(stem) // ".parquet", schema, write_maml=.true.)
+        call parquet_write_column(writer, "nm", values)
+        call parquet_close_writer(writer)
+
+        call parquet_parse_maml(trim(stem) // ".maml", sidecar_schema)
+        array_size_out = sidecar_schema%cinfo%col(1)%array_size
+    end subroutine write_auto_string_sidecar
+
+    !> A parquet_string_column write has no declared character length to read, so it resolves
+    !> array_size: auto from the longest element it actually carries. Before this was implemented
+    !> the column stayed at parquet_size_auto all the way to parquet_close_writer, which wrote the
+    !> raw -1 sentinel into the sidecar -- a .maml that FAILS parquet_validate_maml, which is why
+    !> this test re-parses the sidecar rather than only reading a number out of it.
+    !>
+    !> The negative control is the second column: "zz" alongside a 7-character longest element must
+    !> resolve to 2, not to the same 7, so a test cannot pass against an implementation that
+    !> resolves every such column to one shared value.
+    subroutine test_compact_write_array_size_auto_resolves(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema, sidecar_schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: wide, narrow
+        character(len=*), parameter :: out_file = "test_run/test_array_size_auto_compact.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_array_size_auto_compact.maml"
+        integer :: iw, inr
+
+        call wide%append_string("alpha")
+        call wide%append_string("bee")
+        call wide%append_string("gamma12")     ! 7 characters, the longest
+        call narrow%append_string("zz")
+        call narrow%append_string("y")
+        call narrow%append_string("xx")        ! 2 characters, the longest
+
+        schema%maml%name = "array_size_auto_compact.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: array_size_auto_compact_table", &
+            "fields:", &
+            "- name: wide", &
+            "  data_type: string", &
+            "  array_size: auto", &
+            "- name: narrow", &
+            "  data_type: string", &
+            "  array_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_write_column(writer, "wide", wide)
+        call parquet_write_column(writer, "narrow", narrow)
+        call parquet_close_writer(writer)
+
+        ! Re-parsing is the assertion that the sidecar is a VALID maml: parquet_parse_maml
+        ! validates, and an unresolved "array_size: -1" aborts here rather than failing a check.
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
+        iw = sidecar_schema%cinfo%get_column_index("wide")
+        inr = sidecar_schema%cinfo%get_column_index("narrow")
+
+        call check(error, sidecar_schema%cinfo%col(iw)%array_size == 7, &
+            "expected a parquet_string_column write to resolve array_size: auto to its longest " // &
+            "element (7), not to leave it unresolved")
+        if (allocated(error)) return
+        call check(error, sidecar_schema%cinfo%col(inr)%array_size == 2, &
+            "expected the second column to resolve to its OWN longest element (2) -- the control " // &
+            "that rules out one width being applied to every auto column")
+    end subroutine test_compact_write_array_size_auto_resolves
+
+    !> A chunked parquet_string_column write sees only part of the column per call, so the first
+    !> chunk's longest element is not the column's. array_size: auto therefore RISES when a later
+    !> chunk carries a longer element (2 -> 11 here), which is what makes the sidecar describe the
+    !> whole column rather than its first row group.
+    !>
+    !> The negative control is the third chunk: it is shorter than the second, and must NOT lower
+    !> the value back down. Without it a test passes against an implementation that simply
+    !> overwrites array_size with every chunk's own longest.
+    subroutine test_compact_chunk_array_size_auto_grows(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema, sidecar_schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: c1, c2, c3
+        character(len=*), parameter :: out_file = "test_run/test_array_size_auto_compact_chunks.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_array_size_auto_compact_chunks.maml"
+
+        call c1%append_string("ab")
+        call c1%append_string("c")             ! chunk 1 longest: 2
+        call c2%append_string("xyzzy_plugh")   ! chunk 2 longest: 11
+        call c2%append_string("q")
+        call c3%append_string("de")
+        call c3%append_string("f")             ! chunk 3 longest: 2, must not lower it back
+
+        schema%maml%name = "array_size_auto_compact_chunks.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: array_size_auto_chunks_table", &
+            "fields:", &
+            "- name: nm", &
+            "  data_type: string", &
+            "  array_size: auto" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "nm", c1)
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "nm", c2)
+        call parquet_finish_row_group(writer)
+        call parquet_new_row_group(writer, 2)
+        call parquet_write_column_chunk(writer, "nm", c3)
+        call parquet_finish_row_group(writer)
+        call parquet_close_writer(writer)
+
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
+        call check(error, sidecar_schema%cinfo%col(1)%array_size == 11, &
+            "expected a chunked parquet_string_column write to raise array_size: auto to the " // &
+            "longest element across ALL chunks (11), and a shorter later chunk not to lower it")
+    end subroutine test_compact_chunk_array_size_auto_grows
+
+    !> Two halves of one decision, which is why they are asserted together.
+    !>
+    !> A parquet_string_column write does NOT enforce a declared array_size -- it stores each
+    !> element's own bytes and a reader takes each length from the data, so the declaration is not
+    !> needed to read the column back. Writing a 20-character element into a column declared
+    !> `array_size: 5` is therefore accepted, where the padded (character-array) path aborts with
+    !> "string length exceeds declared array_size". That asymmetry is deliberate.
+    !>
+    !> What is NOT accepted is the file then repeating the declaration: the sidecar and the file's
+    !> own column.<name>.array_size must describe what was actually written (20), or this library
+    !> would be emitting metadata it knows to be wrong. Accepting loose input is a choice; producing
+    !> loose output is not.
+    !>
+    !> The negative control is the second column, whose declared 8 is NOT exceeded by its data and
+    !> must come back as 8 -- so the test cannot pass against an implementation that simply
+    !> overwrites every declaration with whatever it measured, which would lose the caller's own
+    !> intent for every column that was declared correctly.
+    subroutine test_compact_write_exceeds_declared_array_size(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema, sidecar_schema
+        type(parquet_writer) :: writer
+        type(parquet_string_column) :: over, within
+        character(len=*), parameter :: out_file = "test_run/test_array_size_declared_exceeded.parquet"
+        character(len=*), parameter :: sidecar_file = "test_run/test_array_size_declared_exceeded.maml"
+        integer :: io, iw
+
+        call over%append_string("short")
+        call over%append_string("a_twenty_char_value!")   ! 20 characters, declared 5
+        call within%append_string("abc")
+        call within%append_string("de")                   ! 3 characters, declared 8
+
+        schema%maml%name = "array_size_declared_exceeded.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: array_size_declared_table", &
+            "fields:", &
+            "- name: over", &
+            "  data_type: string", &
+            "  array_size: 5", &
+            "- name: within", &
+            "  data_type: string", &
+            "  array_size: 8" ]
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_write_column(writer, "over", over)     ! must NOT abort
+        call parquet_write_column(writer, "within", within)
+        call parquet_close_writer(writer)
+
+        call parquet_parse_maml(sidecar_file, sidecar_schema)
+        io = sidecar_schema%cinfo%get_column_index("over")
+        iw = sidecar_schema%cinfo%get_column_index("within")
+
+        call check(error, sidecar_schema%cinfo%col(io)%array_size == 20, &
+            "a compact write longer than the declared array_size must be accepted, and the " // &
+            "sidecar must then report what was written (20), not the declaration (5)")
+        if (allocated(error)) return
+        call check(error, sidecar_schema%cinfo%col(iw)%array_size == 8, &
+            "a declaration the data does NOT exceed must survive unchanged (8) -- the control " // &
+            "that rules out overwriting every declaration with the measured width")
+    end subroutine test_compact_write_exceeds_declared_array_size
     !
 end module test_writing

@@ -337,6 +337,18 @@ module parquet_core
         type(parquet_column_type), allocatable :: all_columns(:) !! Every column the schema declares, enabled or not.
         type(parquet_column_type), allocatable :: enabled_columns(:) !! Subset of all_columns currently enabled (is_set).
         integer, allocatable :: write_counts(:) !! Per-enabled-column count of parquet_write_column calls so far.
+        !> Per-all_columns longest element (in characters) any parquet_string_column write has
+        !> actually written to this column; 0 for a column no such write touched. Unallocated for a
+        !> schema-less writer.
+        !>
+        !> The compact path neither reads nor enforces a declared array_size -- it stores each
+        !> element's own bytes, and a reader takes each length from the data -- so a caller may
+        !> legitimately write elements longer than the schema declares. What must NOT happen is the
+        !> file then advertising the declaration: parquet_close_writer reconciles the two
+        !> (parquet_reconcile_string_sizes) so the sidecar .maml and the file's own
+        !> column.<name>.array_size describe what was written. Accepting loose input is a choice;
+        !> emitting wrong metadata is not.
+        integer, allocatable :: observed_string_len(:)
         logical :: is_schema_enforced = .false. !! true when opened with a schema (vs. a schema-less writer).
         logical :: qc = .false. !! defaults to present(schema) (i.e. on whenever a schema is given), overridable
         !! via parquet_open_writer(..., qc=); when true, parquet_write_column checks each column's qc: min/max
@@ -3904,6 +3916,24 @@ module parquet_core
             character(len=*), intent(in) :: s !! input string.
             character(len=:), allocatable, intent(out) :: out !! s with every ASCII A-Z lowercased; other characters unchanged.
         end subroutine parquet_to_lower
+        !> .true. when `line` is exactly the MAML block header `key` -- "fields:", "extra:",
+        !> "keyarray:", "col_map:", "remap:", ... -- ignoring surrounding blanks and ASCII case.
+        !>
+        !> Every MAML KEY is case-insensitive, so every place that recognizes a block header must
+        !> ask this rather than comparing the line against a lowercase literal. A section name and
+        !> the keys nested inside it must agree on that rule: they did not once, and a MAML
+        !> spelling its section `Extra:` then passed validation (which is case-insensitive) while
+        !> its `protected_cols:`/`col_map:`/`remap:`/`filter:`/`sort:` were silently never found.
+        !> See feature_risks.md Risk-91.
+        !>
+        !> Indentation is deliberately NOT considered: a caller that requires a top-level header
+        !> keeps its own `line(1:1) /= " "` test, and a caller looking one level inside a block
+        !> does not. VALUES are a separate question and stay case-SENSITIVE -- a column name in
+        !> `col_map:`/`remap:`/`protected_cols:` is data, not a key.
+        module logical function parquet_maml_key_matches(line, key)
+            character(len=*), intent(in) :: line !! raw MAML source line.
+            character(len=*), intent(in) :: key !! block-header name, written lowercase with its colon.
+        end function parquet_maml_key_matches
     end interface
 
 contains

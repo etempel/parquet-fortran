@@ -12,7 +12,8 @@ element-mode counterparts) exactly like any other supported type.
 
 All three types, and the `parquet_unit_*` unit-selector constants used by `set_unix`/`to_unix`
 below, are re-exported from `use parquet` — a separate `use parquet_temporal` is only needed if
-you want the types without the rest of the library (it depends only on `iso_fortran_env`).
+you want the types without the rest of the library (it depends only on the intrinsic modules
+`iso_fortran_env` and `ieee_arithmetic`).
 
 ## Quick start
 
@@ -77,11 +78,19 @@ call parquet_write_column(writer, "ev", values)          ! no is_valid= argument
 call parquet_read_column(reader, "ev", values)            ! no null_value=/is_valid= argument
 ```
 
-On write, whatever elements are null (`%is_null()`) become genuine Parquet Nulls; a column is
-written non-nullable only if none of its elements are null. On read, a genuine Parquet Null
-becomes a null element (checked with `%is_null()`) — and reading a null-containing column
-**never aborts**, unlike the strict default the numeric/string readers apply (see
-[Null values](supported-data-types.html#null-values)): validity always lives in the elements
+On write, whatever elements are null (`%is_null()`) become genuine Parquet Nulls. Whether the
+column is *declared* nullable in the file's schema depends on how it was written. A **whole-column**
+write has seen every element before it writes anything, so it declares the column non-nullable
+exactly when none of them is null. A **streamed** write (`parquet_write_column_chunk`) cannot: the
+first row group fixes the schema, and a null-free first row group says nothing about the seventh —
+so a streamed `date`/`time`/`timestamp` column is always written nullable, whatever its elements
+hold. Declaring one of them null-free is what *protecting* the column is for; see
+[Null values](supported-data-types.html#null-values) for `protected_cols:` and `%set_protected`,
+and `parquet_get_column_nullable` for reading back the flag a file actually ended up with.
+
+On read, a genuine Parquet Null becomes a null element (checked with `%is_null()`) — and reading a
+null-containing column **never aborts**, unlike the strict default the numeric/string readers apply
+(see [Null values](supported-data-types.html#null-values)): validity always lives in the elements
 themselves, so there is nothing to opt into.
 
 A default-initialized element (`type(parquet_date) :: d`, no `%set` call yet) is also null — a
@@ -93,12 +102,17 @@ useful property for catching accidental use of an unset value, since every seman
 - **Semantic accessors abort on a null element**: `%get`, `%year`/`%month`/`%day`/`%hour`/...,
   `%to_string`, `%to_mjd`/`%to_jd`, `%to_unix`, and all six comparison operators. Guard with
   `%is_null()` first.
-- **Interop accessors never abort**: `%raw`/`%set_raw`/`%get_raw` return a defined placeholder
-  (`0`) for a null element instead — this is what lets the read/write integration layer bulk-convert
-  whole arrays without special-casing nulls.
-- **Type-to-type conversions propagate null** rather than aborting: `ts%get_date()` on a null
-  `parquet_timestamp` returns a null `parquet_date`; `parquet_timestamp(date, time)` with either
-  input null returns a null timestamp.
+- **Interop accessors never abort on a null element**: `%raw`/`%get_raw` return a defined
+  placeholder (`0`, or zeros for the timestamp's `(seconds, nanoseconds)` pair) instead — this is
+  what lets the read/write integration layer bulk-convert whole arrays without special-casing
+  nulls. `%set_raw` has no null to trip over either, but it does validate its *argument*:
+  `parquet_time%set_raw` aborts on a nanosecond count outside one day and
+  `parquet_timestamp%set_raw` on a nanosecond-of-second part outside 0..999999999, while
+  `parquet_date%set_raw` accepts any `int32` day count.
+- **Type-to-type conversions propagate null**: `ts%get_date()` on a null `parquet_timestamp`
+  returns a null `parquet_date`; `parquet_timestamp(date, time)` with either input null returns a
+  null timestamp. Neither aborts on a null — though `%get_date` does abort when a *non-null*
+  instant's date part falls outside `parquet_date`'s own +-5.8 million year range.
 
 ## Setting and reading values
 
@@ -125,19 +139,35 @@ Every `%set` validates its fields (month 1–12, a day valid for that month/year
 and `error stop`s on an invalid civil date/time rather than silently normalizing it (no leap
 seconds, no month-13-becomes-next-January rollover).
 
+Each type also has a **constructor of the same name**, taking the same fields as its `%set` and
+validating them identically, for when a value is wanted as an expression rather than assigned into
+an existing variable. They are elemental, so they build whole arrays too:
+
+```fortran
+d  = parquet_date(2024, 7, 16)
+t  = parquet_time(12, 34, 56)                    ! nanosecond optional, as in %set
+ts = parquet_timestamp(2024, 7, 16, 12, 34, 56)  ! civil fields, or...
+ts = parquet_timestamp(d, t)                     ! ...a date + a time (null propagates)
+dates = parquet_date(years, months, days)        ! elemental: whole arrays at once
+```
+
 ## Formatting and parsing (ISO-8601)
 
 ```fortran
 character(len=:), allocatable :: s
 logical :: ok
 
-call ts%to_string(s)              ! "2024-07-16T12:34:56.5" (fraction omitted when zero)
+call ts%to_string(s)              ! "2024-07-16T12:34:56.500"
 call d%to_string(s)                ! "2024-07-16"
-call t%to_string(s)                ! "12:34:56.5"
+call t%to_string(s)                ! "12:34:56.500"
 
 call ts%parse("2024-07-16T12:34:56.5")     ! error stops on a malformed/invalid string
 call ts%parse("garbage", success=ok)        ! ok=.false., element left null; no abort
 ```
+
+The fractional part is omitted entirely when the sub-second value is zero, and otherwise printed
+with the shortest of 3, 6 or 9 digits that reproduces it exactly — so half a second is `.500`, not
+`.5`, and a nanosecond-precision value gets all nine digits.
 
 `parse` accepts `'T'` or a space as the date/time separator and an optional trailing `'Z'`
 (accepted and ignored — values are stored as epoch offsets regardless of timezone). Pass the
@@ -229,11 +259,13 @@ v = ts%to_unix(parquet_unit_micros)                        ! pure query, never m
 ```
 
 `to_unix` aborts if the value carries finer precision than the requested unit (e.g. asking for
-milliseconds from a nanosecond-precision instant) or if the result overflows `int64` in that
-unit; pass `exact=.false.` to floor toward the requested unit instead of aborting.
+milliseconds from a nanosecond-precision instant) or if the result overflows `int64` in that unit.
+Pass `exact=.false.` to floor toward the requested unit instead of aborting on precision; the
+overflow check applies either way.
 
 For astronomy/scientific use, `parquet_timestamp` also converts to/from Modified Julian Date and
-Julian Date (`real64`, never `real32` — a `real32` MJD only resolves to about two seconds):
+Julian Date (`real64`, never `real32` — consecutive `real32` values around a present-day MJD are
+about 340 seconds apart, so a `real32` MJD could not even resolve minutes):
 
 ```fortran
 call ts%set_mjd(60507.5_8)          ! MJD 60507.5
@@ -283,9 +315,12 @@ The same `schema%add_field` call used for any other type works for these tokens:
 call schema%add_field("ev", "timestamp[ns,utc]", info="event time")
 ```
 
-`qc:` bounds are not supported for `date`/`time`/`timestamp` columns yet —
-`parquet_validate_maml` rejects a `qc:` block declared on one of these fields with a clear
-message, rather than silently ignoring it. `parquet_filter` rules on these columns *are*
+`qc:` **bounds** (`min:`/`max:`) are not supported for `date`/`time`/`timestamp` columns yet —
+`parquet_validate_maml` rejects a field declaring one with a clear message, rather than silently
+ignoring it. `qc: miss:` is a separate matter and *is* supported on these columns, behaving exactly
+as it does elsewhere (see [Quality control](../schema/quality-control.html)) — worth knowing here,
+since a temporal column carries its nulls in the element and so is a natural place to declare
+whether Nulls are expected. `parquet_filter` rules on these columns *are*
 supported, comparing against a double-quoted ISO-8601 literal — see
 [Filtering `date`, `time` and `timestamp` columns](../io/filter-sort-sample.html#filtering-date-time-and-timestamp-columns).
 
@@ -293,7 +328,7 @@ supported, comparing against a double-quoted ISO-8601 literal — see
 
 `parquet_get_column_time_info(reader, name [, unit] [, timezone])` reads back a `time`/
 `timestamp` column's stored unit (as a `parquet_unit_*` selector) and, for a timestamp, its
-timezone string (empty for a timezone-naive column):
+timezone string (empty for a timezone-naive column). Square brackets mark optional arguments:
 
 ```fortran
 integer :: unit
@@ -344,11 +379,20 @@ None of these take an `is_valid=`/`null_value=` argument, for the same reason th
 calls don't — see [Null values are part of the element](#null-values-are-part-of-the-element-not-a-separate-mask)
 above.
 
+The three types are also first-class outside the reader and writer:
+
+- **In-memory tables**: a `parquet_table` column can hold any of them, scalar or vector — see
+  [Tables in memory](../tables/table.html).
+- **Sorting**: `pf_sort`/`pf_argsort` and the rest of `parquet_sorting` take arrays of all three
+  directly, with their null state understood as part of the ordering — see
+  [Supported types](../utilities/sorting.html#supported-types).
+
 ## Not yet supported
 
-- `qc:` range checks on `date`/`time`/`timestamp` columns (deferred; rejected at validation rather
-  than silently ignored — see
-  [Units and schema-declared columns](#units-and-schema-declared-columns) above).
+- `qc:` range checks (`min:`/`max:`) on `date`/`time`/`timestamp` columns (deferred; rejected at
+  validation rather than silently ignored — see
+  [Units and schema-declared columns](#units-and-schema-declared-columns) above, and note that
+  `qc: miss:` on these columns *is* supported).
   `parquet_filter` rules on these columns are *not* on this list — they are implemented, see
   [Filtering `date`, `time` and `timestamp` columns](../io/filter-sort-sample.html#filtering-date-time-and-timestamp-columns).
 - `INTERVAL`/duration values — a deliberately dropped non-goal, not a pending gap: Parquet's

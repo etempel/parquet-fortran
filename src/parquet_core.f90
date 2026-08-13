@@ -2787,7 +2787,6 @@ module parquet_core
         end subroutine parquet_get_column_time_info
         !> Returns .true. if column `name` (a top-level or dotted struct-leaf path, same
         !> convention as every other column-name argument) exists in `reader`'s schema,
-        !> optionally restricted to a set of allowed data types via `types`. `types` is a
         !> optionally restricted to a set of allowed data types via `types`.
         !>
         !> **`types` asks "can I read this column as one of these?", not "is its physical type

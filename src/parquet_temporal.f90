@@ -1424,7 +1424,8 @@ contains
     !> Sets the element from a real64 Modified Julian Date (MJD 0 = 1858-11-17T00:00:00),
     !! rounding to the nearest nanosecond; marks it valid. Aborts on NaN or a magnitude beyond
     !! the representable range. real64 only by design -- real32 would silently lose precision
-    !! (~2 s resolution in the current era) and is deliberately not accepted.
+    !! (consecutive real32 values around a present-day MJD are ~340 s apart) and is deliberately
+    !! not accepted.
     impure elemental subroutine ts_set_mjd(self, mjd)
         class(parquet_timestamp), intent(inout) :: self !! receives the instant (marked valid).
         real(real64), intent(in) :: mjd               !! Modified Julian Date (fractional days).

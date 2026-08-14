@@ -88,6 +88,14 @@ program benchmark_sort_engine
     real(real32), allocatable :: vf32(:)           !! real32 key values.
     real(real64), allocatable :: vf64(:)           !! real64 key values.
     character(len=:), allocatable :: vstr(:)       !! string key values, fixed width.
+    ! vvalid is passed DIRECTLY as `is_valid=vvalid`, and it must stay a VARIABLE. Passing an
+    ! unallocated allocatable to an optional dummy makes that dummy absent (F2018 15.5.2.12), which
+    ! is how one call site serves both the masked and unmasked arms -- but that rule is about a
+    ! VARIABLE. It does not cover an unallocated allocatable FUNCTION RESULT, and a helper of that
+    ! shape used to sit here. gfortran accepted it; ifx 2026.1.1 passed the dummy as PRESENT with a
+    ! garbage descriptor, and the whole ifx arm of the 2026-08-14 machine B campaign aborted on its
+    ! first figure with "is_valid has 140735245936080 elements" -- a stack address read as size().
+    ! Do not reintroduce a function here: it is unallocated exactly when has_valid is .false.
     logical, allocatable :: vvalid(:)              !! validity mask; allocated only for a null arm.
     type(pf_sort_keys) :: mkeys                    !! the multi-key object, built outside the timer.
     integer(int32), allocatable :: perm32(:)       !! int32 permutation destination.
@@ -392,33 +400,33 @@ contains
         select case (fam)
         case ("i32")
             if (permkind == 64) then
-                call pf_argsort(vi32, perm64, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vi32, perm64, threads=nthr, is_valid=vvalid)
             else
-                call pf_argsort(vi32, perm32, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vi32, perm32, threads=nthr, is_valid=vvalid)
             end if
         case ("i64", "i64lo")
             if (permkind == 64) then
-                call pf_argsort(vi64, perm64, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vi64, perm64, threads=nthr, is_valid=vvalid)
             else
-                call pf_argsort(vi64, perm32, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vi64, perm32, threads=nthr, is_valid=vvalid)
             end if
         case ("f32")
             if (permkind == 64) then
-                call pf_argsort(vf32, perm64, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vf32, perm64, threads=nthr, is_valid=vvalid)
             else
-                call pf_argsort(vf32, perm32, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vf32, perm32, threads=nthr, is_valid=vvalid)
             end if
         case ("f64")
             if (permkind == 64) then
-                call pf_argsort(vf64, perm64, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vf64, perm64, threads=nthr, is_valid=vvalid)
             else
-                call pf_argsort(vf64, perm32, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vf64, perm32, threads=nthr, is_valid=vvalid)
             end if
         case ("str")
             if (permkind == 64) then
-                call pf_argsort(vstr, perm64, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vstr, perm64, threads=nthr, is_valid=vvalid)
             else
-                call pf_argsort(vstr, perm32, threads=nthr, is_valid=valid_or_absent())
+                call pf_argsort(vstr, perm32, threads=nthr, is_valid=vvalid)
             end if
         case ("multi2", "multi3")
             ! Keys are built in build_data, OUTSIDE the timer -- see the program header.
@@ -691,17 +699,6 @@ contains
         call mkeys%clear()
         has_valid = .false.
     end subroutine free_data
-
-    !> The validity mask, or an unallocated array when the arm has no nulls.
-    !!
-    !! Passing an UNALLOCATED allocatable to an `optional` dummy makes that dummy ABSENT
-    !! (F2018 15.5.2.12), which is how one call site serves both the masked and unmasked arms
-    !! without an `if (present(...))` fork and without duplicating the call.
-    function valid_or_absent() result(m)
-        logical, allocatable :: m(:) !! the mask, or unallocated when the arm has no nulls.
-        !
-        if (has_valid) m = vvalid
-    end function valid_or_absent
 
     ! ================================================================================
     ! Verification -- a fast wrong answer must never be reported as a win

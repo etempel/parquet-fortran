@@ -31,7 +31,7 @@
 module test_sorting
     use parquet
     use iso_fortran_env, only : int32, int64, real32, real64
-    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan
+    use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan, ieee_positive_inf, ieee_negative_inf
     use testdrive, only : new_unittest, unittest_type, error_type, check
     ! For the Stage 1 conformance oracle only: it builds a C++ key set of its own so that both
     ! engines can be asked about the same rows. These are ordinary library bindings, not debug
@@ -220,6 +220,12 @@ contains
                 test_fortran_engine_ab_families), &
             new_unittest("engine: the Fortran sort matches on degenerate input shapes", &
                 test_fortran_engine_adversarial), &
+            new_unittest("engine: the radix path really runs, and only above its floor", &
+                test_radix_path_runs), &
+            new_unittest("engine: the radix path matches C++ on the values a key transform can lose", &
+                test_radix_path_value_shapes), &
+            new_unittest("engine: the radix path matches C++ on strings that outrun its prefix", &
+                test_radix_path_string_shapes), &
             new_unittest("engine: the forced heapsort fallback matches the C++ sort", &
                 test_fortran_engine_heapsort_fallback), &
             new_unittest("engine: the depth-limit hook really reaches the heapsort fallback", &
@@ -5909,6 +5915,218 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_fortran_engine_adversarial
+    !
+    !> The radix path must actually RUN above its row floor, and must NOT run below it.
+    !!
+    !! Every other radix test compares permutations, and the radix path and the introsort answer
+    !! identically by construction -- so all of them would pass just as happily against a radix path
+    !! that never ran, which is the whole trap `SORT_RADIX_MIN_ROWS` sets: the engine's other
+    !! fixtures top out at 1000 rows, well under the floor.
+    !!
+    !! The observable is the insertion tracker. The introsort always ends with one insertion pass
+    !! over the whole range, so on random input it records a positive shift; the radix path never
+    !! calls `sort_insertion` at all for a non-string key. A REAL key is used because the string
+    !! refine pass does call it, and an integer one could be taken by the counting path instead.
+    subroutine test_radix_path_runs(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: above = 4096_int64 !! comfortably over the floor.
+        integer(int64), parameter :: below = 1000_int64 !! comfortably under it.
+        real(real64), allocatable :: v(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, shift_above, shift_below
+        !
+        allocate(v(above))
+        do k = 1_int64, above
+            v(k) = real(mod(k * 2654435761_int64, 100003_int64), real64)
+        end do
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(v(1:above), perm)
+        shift_above = parquet_debug_sort_max_insertion_shift()
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(v(1:below), perm)
+        shift_below = parquet_debug_sort_max_insertion_shift()
+        call parquet_debug_set_sort_track_shift(.false.)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        ! The negative control, and the half that fails if the floor ever stops being consulted.
+        call check(error, shift_below > 0_int64, &
+            "below the floor the introsort should have run, but the insertion tracker recorded nothing")
+        if (allocated(error)) return
+        call check(error, shift_above == 0_int64, &
+            "above the floor the insertion pass still ran, so the radix path did not take the sort")
+    end subroutine test_radix_path_runs
+    !
+    !> The radix path's key transform must not lose a value shape the comparator distinguishes.
+    !!
+    !! Signed zero is the sharp one: `-0.0` and `+0.0` compare EQUAL under `<`, so the answer must
+    !! be file order between them, and a transform that mapped them to different images would order
+    !! a pair the comparator does not. The rest are where a sign-bit transform goes wrong --
+    !! infinities, both ends of int64 -- plus the tier shapes that leave the value block empty or
+    !! nearly so. All are run at a size above the radix floor, which is what makes this test about
+    !! the radix path at all.
+    subroutine test_radix_path_value_shapes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 4096_int64
+        real(real64), allocatable :: vr(:)
+        integer(int64), allocatable :: vi(:)
+        logical, allocatable :: valid(:)
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k
+        integer :: id, inf
+        logical :: desc, nf
+        !
+        allocate(vr(n), vi(n), valid(n))
+        do id = 0, 1
+            do inf = 0, 1
+                desc = (id == 1)
+                nf = (inf == 1)
+                !
+                ! Signed zero beside ordinary values.
+                valid = .true.
+                do k = 1_int64, n
+                    select case (int(mod(k, 4_int64)))
+                    case (0)
+                        vr(k) = 0.0_real64
+                    case (1)
+                        vr(k) = -0.0_real64
+                    case (2)
+                        vr(k) = real(mod(k, 7_int64), real64)
+                    case default
+                        vr(k) = -real(mod(k, 5_int64), real64)
+                    end select
+                end do
+                call keys%clear()
+                call keys%add(vr, descending=desc, nulls_first=nf, is_valid=valid)
+                call engine_ab(error, "radix signed zero" // radix_tag(desc, nf), keys, n)
+                if (allocated(error)) return
+                !
+                ! Infinities and NaNs beside the largest finite magnitudes.
+                do k = 1_int64, n
+                    select case (int(mod(k, 6_int64)))
+                    case (0)
+                        vr(k) = ieee_value(1.0_real64, ieee_positive_inf)
+                    case (1)
+                        vr(k) = ieee_value(1.0_real64, ieee_negative_inf)
+                    case (2)
+                        vr(k) = ieee_value(1.0_real64, ieee_quiet_nan)
+                    case (3)
+                        vr(k) = huge(1.0_real64)
+                    case (4)
+                        vr(k) = -huge(1.0_real64)
+                    case default
+                        vr(k) = real(k, real64) * 1.0e-9_real64
+                    end select
+                end do
+                call keys%clear()
+                call keys%add(vr, descending=desc, nulls_first=nf, is_valid=valid)
+                call engine_ab(error, "radix inf/nan" // radix_tag(desc, nf), keys, n)
+                if (allocated(error)) return
+                !
+                ! Both ends of int64, where flipping the sign bit is the whole transform. The range
+                ! spans the type, so the counting path declines and this really is the radix path.
+                do k = 1_int64, n
+                    select case (int(mod(k, 5_int64)))
+                    case (0)
+                        vi(k) = huge(0_int64)
+                    case (1)
+                        vi(k) = -huge(0_int64) - 1_int64
+                    case (2)
+                        vi(k) = 0_int64
+                    case (3)
+                        vi(k) = -1_int64
+                    case default
+                        vi(k) = k - n / 2_int64
+                    end select
+                end do
+                call keys%clear()
+                call keys%add(vi, descending=desc, nulls_first=nf, is_valid=valid)
+                call engine_ab(error, "radix int64 extremes" // radix_tag(desc, nf), keys, n)
+                if (allocated(error)) return
+                !
+                ! Every row null: the value block is empty and the answer is entirely tier
+                ! placement. Then one valid row among nulls, which is the same code path with a
+                ! single-element value block.
+                valid = .false.
+                vr = 3.25_real64
+                call keys%clear()
+                call keys%add(vr, descending=desc, nulls_first=nf, is_valid=valid)
+                call engine_ab(error, "radix all null" // radix_tag(desc, nf), keys, n)
+                if (allocated(error)) return
+                !
+                valid(n / 2_int64) = .true.
+                call keys%clear()
+                call keys%add(vr, descending=desc, nulls_first=nf, is_valid=valid)
+                call engine_ab(error, "radix one valid" // radix_tag(desc, nf), keys, n)
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_radix_path_value_shapes
+    !
+    !> The radix path sorts strings on a fixed-length PREFIX, so the refine pass is what settles
+    !! everything past it -- and these are the shapes that reach it.
+    !!
+    !! Rows sharing a prefix longer than the window can only be ordered by the refine pass, so a
+    !! missing or broken one shows up here and nowhere else. The rest are where the zero padding has
+    !! to agree with `compare_bytes`: lengths on either side of the window and exactly on it, an
+    !! empty string, an embedded NUL just past the window (a real byte that pads look like), and
+    !! bytes above 127, which must sort HIGH because the comparison is unsigned.
+    subroutine test_radix_path_string_shapes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 4096_int64
+        type(parquet_string_column) :: col
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k
+        integer :: id, inf
+        logical :: desc, nf
+        character(len=:), allocatable :: s
+        character(len=8) :: num
+        !
+        call col%clear()
+        do k = 1_int64, n
+            write (num, "(i8.8)") int(mod(k * 7_int64, 97_int64))
+            select case (int(mod(k, 8_int64)))
+            case (0)
+                s = "commonpre" // num          ! differs only AFTER the prefix window
+            case (1)
+                s = "commonpre" // num // "tl"  ! ... and again at a different length
+            case (2)
+                s = ""                          ! empty
+            case (3)
+                s = "commonp"                   ! shorter than the window
+            case (4)
+                s = "commonpr"                  ! exactly the window
+            case (5)
+                s = "commonpr" // char(0) // num ! an embedded NUL just past it
+            case (6)
+                s = char(200) // char(255) // num ! bytes above 127 sort HIGH
+            case default
+                s = num
+            end select
+            call col%append_string(s)
+        end do
+        !
+        do id = 0, 1
+            do inf = 0, 1
+                desc = (id == 1)
+                nf = (inf == 1)
+                call keys%clear()
+                call keys%add(col, descending=desc, nulls_first=nf)
+                call engine_ab(error, "radix strings" // radix_tag(desc, nf), keys, n)
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_radix_path_string_shapes
+    !
+    !> Names the flag combination in a radix test's failure message.
+    function radix_tag(desc, nf) result(tag)
+        logical, intent(in) :: desc !! the key's `descending` flag.
+        logical, intent(in) :: nf   !! the key's `nulls_first` flag.
+        character(len=16) :: tag    !! " desc=T nf=F" and the like.
+        !
+        tag = " desc=" // merge("T", "F", desc) // " nf=" // merge("T", "F", nf)
+    end function radix_tag
     !
     !> The heapsort fallback, forced, must produce the same permutation as the quicksort path.
     !!

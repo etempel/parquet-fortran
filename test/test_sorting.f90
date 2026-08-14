@@ -225,7 +225,13 @@ contains
             new_unittest("engine: the depth-limit hook really reaches the heapsort fallback", &
                 test_fortran_engine_depth_limit_bites), &
             new_unittest("engine: the quicksort leaves every element within the insertion cutoff", &
-                test_fortran_engine_presort_invariant) &
+                test_fortran_engine_presort_invariant), &
+            new_unittest("engine: the counting path agrees with the comparator path and with C++", &
+                test_counting_path_matches_comparator), &
+            new_unittest("engine: the counting path's bucket limit declines a wide range", &
+                test_counting_path_bucket_limit), &
+            new_unittest("engine: the counting range check survives int64 extremes", &
+                test_counting_path_int64_extremes) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -5786,10 +5792,10 @@ contains
     !! numbers would miss the cutoff boundary, which is where an off-by-one in the loop condition
     !! lives.
     !!
-    !! The integer key is deliberately LOW-CARDINALITY, which sends the C++ arm down its integer
-    !! counting fast path while the Fortran arm compares its way there. The two engines then reach
-    !! the same permutation by genuinely different routes, which is a stronger check than two
-    !! comparison sorts agreeing.
+    !! The integer key is deliberately LOW-CARDINALITY, so that both engines take their integer
+    !! counting fast path and the *fast* paths are compared rather than only the comparator ones.
+    !! Until Stage 3 the Fortran side had no counting path and this arm crossed the two routes; it no
+    !! longer does, and `test_counting_path_matches_comparator` is what crosses them now.
     subroutine test_fortran_engine_ab_families(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64), parameter :: sizes(6) = [2_int64, 5_int64, 16_int64, 17_int64, 257_int64, 1000_int64]
@@ -6009,6 +6015,247 @@ contains
             "the forced heapsort fallback left the range unordered for the insertion pass to repair")
     end subroutine test_fortran_engine_presort_invariant
     !
+    ! ============================================================================================
+    ! Stage 3 conformance -- the integer counting fast path
+    ! ============================================================================================
+    !
+    ! The counting path is a SECOND code path to the same answer, and it fails fast rather than slow:
+    ! it performs zero comparisons by construction, so a fixture that reaches it exercises none of
+    ! the comparator. That is the shape behind `feature_risks.md` Risk-35, where a comparator
+    ! mutation survived twice because the fixture took this path and called the comparator zero
+    ! times. So every fixture here is run BOTH ways and the two are required to agree.
+    !
+    !> Runs one key set three ways — C++, Fortran counting, Fortran comparator — and requires agreement.
+    !!
+    !! **The shift tracker is what stops this being vacuous.** The A/B turns `parquet_set_sort_counting_path`
+    !! off for the second Fortran arm, and if that setting did nothing, both arms would be the same
+    !! path and the comparison would hold trivially — passing while testing nothing. The counting path
+    !! never calls the introsort, so it must leave the insertion-shift tracker at zero, while the
+    !! comparator path on a scrambled fixture must move something. Asserting both is what proves the
+    !! two arms really diverged.
+    subroutine counting_ab(error, label, keys, n, expect_counting, scrambled)
+        type(error_type), allocatable, intent(inout) :: error !! set on the first disagreement.
+        character(len=*), intent(in) :: label                 !! names the fixture in every message.
+        class(pf_sort_keys), intent(in) :: keys               !! the key set to sort by.
+        integer(int64), intent(in) :: n                       !! rows.
+        logical, intent(in) :: expect_counting                !! the counting path should accept this key.
+        logical, intent(in) :: scrambled
+        !! .true. when the fixture is disordered enough that a comparison sort must move something.
+        !! An all-null or single-valued key is NOT: every row ties, so `sort_row_less` falls back to
+        !! the row index, the input is already in order and the insertion pass correctly shifts
+        !! nothing. Asserting otherwise there would assert a property of the fixture, not the engine.
+        integer(int64), allocatable :: pc(:)    !! the C++ engine's permutation.
+        integer(int64), allocatable :: p_on(:)  !! Fortran, counting path available.
+        integer(int64), allocatable :: p_off(:) !! Fortran, counting path forced off.
+        integer(int64) :: shift_on, shift_off   !! insertion-pass movement on each Fortran arm.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_argsort(keys, pc)
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_set_sort_counting_path(.true.)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(keys, p_on)
+        shift_on = parquet_debug_sort_max_insertion_shift()
+        !
+        call parquet_set_sort_counting_path(.false.)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(keys, p_off)
+        shift_off = parquet_debug_sort_max_insertion_shift()
+        !
+        call parquet_set_sort_counting_path(.true.)
+        call parquet_debug_set_sort_track_shift(.false.)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, all(p_on == pc), label // ": the counting path disagrees with the C++ engine")
+        if (allocated(error)) return
+        call check(error, all(p_off == pc), label // ": the comparator path disagrees with the C++ engine")
+        if (allocated(error)) return
+        !
+        if (expect_counting) then
+            call check(error, shift_on == 0_int64, &
+                label // ": the counting path was expected to apply here and did not")
+            if (allocated(error)) return
+            if (scrambled) then
+                call check(error, shift_off > 0_int64, &
+                    label // ": turning the counting path off changed nothing, so the A/B is vacuous")
+            end if
+        else if (scrambled) then
+            call check(error, shift_on > 0_int64, &
+                label // ": the counting path was expected to decline this key and did not")
+        end if
+    end subroutine counting_ab
+    !
+    !> Every shape the counting path has to handle, against the comparator path and against C++.
+    !!
+    !! The fixtures are chosen against the *clauses* of `sort_counting_candidate`/
+    !! `sort_counting_permutation` rather than at random, since each clause encodes a correctness
+    !! fact that ordinary low-cardinality data cannot exercise: a null-bearing key (accepted, and the
+    !! range scan must skip the nulls' garbage value slots), an all-null key (accepted, `lo == hi == 0`,
+    !! identity), a single-valued key (one bucket), a range spanning zero and a wholly negative range
+    !! (the bucket index is an offset from `lo`, not an absolute value), and a range past the bucket
+    !! limit (declined). Every one is run under both `descending` and `nulls_first`, because
+    !! `value_base` and `null_pos` must not mention `descending` and no ascending test can see it.
+    subroutine test_counting_path_matches_comparator(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 500_int64
+        integer(int64) :: v(n)
+        logical :: valid(n)
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k
+        integer :: fixture, id, inf
+        logical :: desc, nf, use_nulls, expect_counting, scrambled
+        character(len=24) :: name
+        character(len=:), allocatable :: tag
+        !
+        do fixture = 1, 7
+            use_nulls = .false.
+            expect_counting = .true.
+            scrambled = .true.
+            valid = .true.
+            select case (fixture)
+            case (1)
+                name = "low-card"
+                do k = 1_int64, n
+                    v(k) = mod(k * 5_int64, 8_int64)
+                end do
+            case (2)
+                name = "low-card+nulls"
+                use_nulls = .true.
+                do k = 1_int64, n
+                    v(k) = mod(k * 5_int64, 8_int64)
+                    valid(k) = (mod(k, 7_int64) /= 0_int64)
+                end do
+                ! The null rows' value slots deliberately hold ordinary in-range values here. A range
+                ! scan that forgot to skip them would still produce a correct answer on THIS fixture,
+                ! which is why the extreme-value test below exists as well.
+            case (3)
+                name = "all-null"
+                use_nulls = .true.
+                scrambled = .false.
+                v = 3_int64
+                valid = .false.
+            case (4)
+                name = "single-value"
+                scrambled = .false.
+                v = 42_int64
+            case (5)
+                name = "spans-zero"
+                do k = 1_int64, n
+                    v(k) = mod(k * 11_int64, 201_int64) - 100_int64
+                end do
+            case (6)
+                name = "all-negative"
+                do k = 1_int64, n
+                    v(k) = -1_int64 - mod(k * 13_int64, 97_int64)
+                end do
+            case default
+                ! **The only fixture that can see the range scan skip nulls.** One null row holds
+                ! `huge(int64)`; every valid row holds 0..7. Skipping it leaves a range of 7 and the
+                ! fast path applies, which is what `expect_counting` asserts. Counting it gives a
+                ! range of `huge`, far past the bucket limit, and the path is declined — a
+                ! performance defect with no wrong answer anywhere, so nothing else here would
+                ! notice. Note this differs from the C++ engine's own reasoning: there a null row's
+                ! slot holds whatever the buffer contained, whereas Fortran's extractor copies every
+                ! value before applying the mask, so the hazard is a caller's real value rather than
+                ! garbage. Same clause, same fix, different way in.
+                name = "null-holds-extreme"
+                use_nulls = .true.
+                do k = 1_int64, n
+                    v(k) = mod(k * 5_int64, 8_int64)
+                end do
+                v(3) = huge(0_int64)
+                valid(3) = .false.
+            end select
+            !
+            do id = 0, 1
+                do inf = 0, 1
+                    desc = (id == 1)
+                    nf = (inf == 1)
+                    tag = trim(name) // " desc=" // merge("T", "F", desc) // " nf=" // merge("T", "F", nf)
+                    call keys%clear()
+                    if (use_nulls) then
+                        call keys%add(v, descending=desc, nulls_first=nf, is_valid=valid)
+                    else
+                        call keys%add(v, descending=desc, nulls_first=nf)
+                    end if
+                    call counting_ab(error, tag, keys, n, expect_counting, scrambled)
+                    if (allocated(error)) return
+                end do
+            end do
+        end do
+    end subroutine test_counting_path_matches_comparator
+    !
+    !> The bucket limit must decline a wide range, and the answer must not change when it does.
+    !!
+    !! `parquet_set_sort_counting_bucket_limit` bounds the key's value RANGE, not its cardinality, so
+    !! a handful of values spread far apart is declined while a million dense ones are accepted. Both
+    !! directions are asserted here against one fixture, by moving the limit rather than the data —
+    !! which is also what proves the setting is read at all rather than merely stored.
+    subroutine test_counting_path_bucket_limit(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        integer(int64), parameter :: n = 400_int64
+        integer(int64) :: v(n)
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k
+        !
+        do k = 1_int64, n
+            v(k) = mod(k * 3_int64, 64_int64)
+        end do
+        call keys%add(v)
+        !
+        ! Range 63, comfortably inside the built-in limit of 2**22.
+        call counting_ab(error, "wide-range default limit", keys, n, .true., .true.)
+        if (allocated(error)) return
+        !
+        ! Range 63 against a limit of 8: the same key, now declined.
+        call parquet_set_sort_counting_bucket_limit(8_int64)
+        call counting_ab(error, "wide-range small limit", keys, n, .false., .true.)
+        call parquet_set_sort_counting_bucket_limit(0_int64)
+    end subroutine test_counting_path_bucket_limit
+    !
+    !> Values at both ends of int64: the range check must not overflow, in either direction.
+    !!
+    !! **This is the one place the Fortran port deliberately departs from the C++ engine.** C++ bounds
+    !! the range with `(uint64_t)hi - (uint64_t)lo`, which cannot overflow; Fortran has no portable
+    !! unsigned integer and signed overflow is undefined, so `sort_counting_candidate` rearranges the
+    !! comparison to keep every intermediate in range. Both branches of that rearrangement are
+    !! exercised here, and neither is reachable from any ordinary fixture:
+    !!
+    !! * a key packed against `huge(int64)`, whose range is tiny but whose `lo + limit` would
+    !!   overflow — must be ACCEPTED;
+    !! * a key holding values near both ends, whose true range exceeds `huge(int64)` — must be
+    !!   DECLINED, and the naive `hi - lo < limit` would wrap to a negative value and accept it,
+    !!   after which the bucket count is meaningless.
+    subroutine test_counting_path_int64_extremes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        integer(int64), parameter :: n = 200_int64
+        integer(int64) :: v(n)
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k
+        !
+        ! Packed against the top of the domain: range 49, but `lo + limit` overflows.
+        do k = 1_int64, n
+            v(k) = huge(0_int64) - mod(k * 7_int64, 50_int64)
+        end do
+        call keys%clear()
+        call keys%add(v)
+        call counting_ab(error, "near-huge", keys, n, .true., .true.)
+        if (allocated(error)) return
+        !
+        ! Both ends at once: the true range is about 2**64, which no int64 can hold.
+        do k = 1_int64, n
+            if (mod(k, 2_int64) == 0_int64) then
+                v(k) = huge(0_int64) - mod(k * 7_int64, 50_int64)
+            else
+                v(k) = -huge(0_int64) + mod(k * 11_int64, 50_int64)
+            end if
+        end do
+        call keys%clear()
+        call keys%add(v)
+        call counting_ab(error, "spans-int64", keys, n, .false., .true.)
+    end subroutine test_counting_path_int64_extremes
+    !
     !> The depth-limit hook must actually change which code runs, or the test above proves nothing.
     !!
     !! **Both paths answer identically -- that is the point of them -- so no assertion on the
@@ -6022,15 +6269,18 @@ contains
     subroutine test_fortran_engine_depth_limit_bites(error)
         type(error_type), allocatable, intent(out) :: error !! set on failure.
         integer(int64), parameter :: n = 300_int64
-        integer(int64) :: v(n)
+        real(real64) :: v(n)
         type(pf_sort_keys) :: keys
         integer(int64), allocatable :: perm(:)
         integer(int64) :: k, heap_normal, heap_forced
         !
-        ! High-cardinality, so the C++ side would decline the counting path anyway; the Fortran side
-        ! has no counting path at all yet, so this only has to be a size that partitions.
+        ! **A REAL key, and that is load-bearing.** The counting fast path accepts integer keys only,
+        ! so a real one cannot reach it whatever `parquet_set_sort_counting_path` says — which keeps
+        ! this test independent of a process-global setting a sibling could disturb. It used an
+        ! integer key until Stage 3 landed, at which point the counting path silently took over and
+        ! the introsort stopped running here at all.
         do k = 1_int64, n
-            v(k) = mod(k * 17_int64, 251_int64)
+            v(k) = real(mod(k * 17_int64, 251_int64), real64)
         end do
         call keys%add(v)
         call parquet_debug_use_fortran_sort_engine(.true.)

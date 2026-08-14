@@ -786,7 +786,7 @@ contains
             ! costs the A/B nothing: the C++ engine's own answer is bit-identical at every thread
             ! count, because its comparator is a total order. A serial Fortran permutation and a
             ! threaded C++ one must therefore still match element for element.
-            call sort_comparison_permutation(keys, nrows, perm)
+            call sort_build_permutation(keys, nrows, perm)
             return
         end if
         call resolve_thread_count(threads, nrows, nthreads)

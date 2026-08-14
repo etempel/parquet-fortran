@@ -288,6 +288,178 @@ contains
         end if
     end function compare_bytes
 
+    ! ---- The engine entry point, and the integer counting fast path -----------------------------
+    !
+    ! Ported clause for clause from `sort_build_permutation`/`sort_counting_candidate`/
+    ! `sort_counting_permutation` (src/parquet_wrapper.cpp), deliberately: every clause there encodes
+    ! a measured or a correctness fact, and re-deriving them from the idea of a counting sort is how
+    ! one of them gets lost. The C++ comments are the long-form reasoning; what follows states what
+    ! must not change.
+    !
+    ! **The range scan skips nulls, and that is correctness rather than tidiness.** A null row's key
+    ! slot holds whatever the buffer contained -- Arrow promises nothing there -- so counting it can
+    ! widen the range past the bucket limit and decline the fast path for no reason, or size a bucket
+    ! domain from garbage.
+    !
+    ! **A null-bearing key is ACCEPTED.** Declining one cost the entire fast path to a single null
+    ! anywhere in the column: a measured 4.6-5.6x cliff at 0.1% null density on a 4M-row int32
+    ! column, i.e. a step function of WHETHER a null exists rather than of how many. Nulls are
+    ! tractable because they are a TIER here and never a value, so they form one contiguous block.
+    !
+    ! **`value_base` and `null_pos` do not mention `descending`, and must not learn to.** A
+    ! descending sort still puts nulls last; `sort_compare_key` applies the tier test before the
+    ! descending negation, and this path has to agree. It is the single most likely thing to get
+    ! wrong here and it is invisible to any ascending test.
+    !
+    ! **The descending offset pass runs top-down** so the largest value lands at the front of the
+    ! VALUE BLOCK while ties keep file order.
+    !
+    ! **Stability is by construction**: one forward pass in index order emits equal values in
+    ! increasing row index, which is exactly what `sort_row_less`'s index tiebreaker produces. That
+    ! is why the two paths can be A/B'd for equality at all.
+
+    module procedure sort_build_permutation
+        use parquet_settings, only : parquet_get_sort_counting_path
+        integer(int64) :: lo, hi !! the counting path's value range, carried from the candidate test.
+        !
+        ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so the one-line form would
+        ! run the candidate's O(n) range scan even with the counting path switched off -- and would
+        ! define `lo`/`hi` as a side effect while doing it. CLAUDE.md records both halves of this.
+        if (parquet_get_sort_counting_path()) then
+            if (sort_counting_candidate(keys, n, lo, hi)) then
+                call sort_counting_permutation(keys(1), n, lo, hi, perm)
+                return
+            end if
+        end if
+        call sort_comparison_permutation(keys, n, perm)
+    end procedure sort_build_permutation
+
+    module procedure sort_counting_candidate
+        use parquet_settings, only : parquet_get_sort_counting_bucket_limit
+        integer(int64) :: i     !! row index.
+        integer(int64) :: v     !! one key value.
+        integer(int64) :: limit !! largest admissible value RANGE, from the setting.
+        logical :: has_nulls    !! this key carries a validity array.
+        logical :: seen         !! at least one valid row has been read.
+        !
+        ok = .false.
+        lo = 0_int64
+        hi = 0_int64
+        if (size(keys) /= 1) return
+        if (keys(1)%family /= SK_INT) return
+        if (n < 2_int64) return
+        !
+        has_nulls = allocated(keys(1)%valid)
+        seen = .false.
+        do i = 1_int64, n
+            if (has_nulls) then
+                if (keys(1)%valid(i) == 0_c_int8_t) cycle
+            end if
+            v = keys(1)%ints(i)
+            if (.not. seen) then
+                lo = v
+                hi = v
+                seen = .true.
+            else
+                if (v < lo) lo = v
+                if (v > hi) hi = v
+            end if
+        end do
+        !
+        ! Every row null: there is no range to bound, and the answer is file order because all nulls
+        ! tie. `lo == hi == 0` leaves one empty bucket and the placement pass then emits the identity
+        ! -- correct, and cheaper than letting the comparator path discover the same thing through
+        ! n log n comparisons that all return 0.
+        if (.not. seen) then
+            ok = .true.
+            return
+        end if
+        !
+        ! **This is the ONE place the port is not clause for clause, and the reason is the language.**
+        ! C++ computes `(uint64_t)hi - (uint64_t)lo` so that a range spanning both signs cannot
+        ! overflow the check itself. Fortran has no portable unsigned integer, and signed overflow is
+        ! not defined, so the subtraction cannot simply be repeated here. The comparison below is
+        ! rearranged to keep every intermediate in range instead:
+        !
+        !   * when `lo` is within `limit` of `huge`, so is `hi` (they satisfy `lo <= hi <= huge`), so
+        !     `hi - lo < limit` holds automatically and no arithmetic is needed at all;
+        !   * otherwise `lo + limit` cannot overflow, and `hi < lo + limit` is exactly the same test.
+        !
+        ! Do not "simplify" this back into `hi - lo < limit`: that is correct for every fixture a
+        ! test will ever build and wrong for a key holding values near both ends of int64.
+        limit = parquet_get_sort_counting_bucket_limit()
+        if (lo > huge(0_int64) - limit) then
+            ok = .true.
+        else
+            ok = (hi < lo + limit)
+        end if
+    end procedure sort_counting_candidate
+
+    module procedure sort_counting_permutation
+        integer(int64), allocatable :: counts(:)  !! rows per bucket.
+        integer(int64), allocatable :: offsets(:) !! next output position per bucket, 1-based.
+        integer(int64) :: nbuckets !! distinct values the range spans.
+        integer(int64) :: i, b     !! row index, bucket index.
+        integer(int64) :: nn       !! null rows.
+        integer(int64) :: running  !! offset accumulator.
+        integer(int64) :: value_base !! positions before the value block, 0-based.
+        integer(int64) :: null_pos   !! next output position for a null, 1-based.
+        logical :: has_nulls         !! this key carries a validity array.
+        !
+        ! Safe: `sort_counting_candidate` has already bounded `hi - lo` below the bucket limit, so
+        ! both this and every `ints(i) - lo` below stay well inside int64 whatever the values are.
+        nbuckets = hi - lo + 1_int64
+        allocate(counts(nbuckets))
+        counts = 0_int64
+        has_nulls = allocated(key%valid)
+        !
+        nn = 0_int64
+        do i = 1_int64, n
+            if (has_nulls) then
+                if (key%valid(i) == 0_c_int8_t) then
+                    nn = nn + 1_int64
+                    cycle
+                end if
+            end if
+            b = key%ints(i) - lo + 1_int64
+            counts(b) = counts(b) + 1_int64
+        end do
+        !
+        ! Where each block starts. Deliberately free of `descending` -- see this section's header.
+        value_base = 0_int64
+        if (has_nulls .and. key%nulls_first) value_base = nn
+        null_pos = n - nn + 1_int64
+        if (has_nulls .and. key%nulls_first) null_pos = 1_int64
+        !
+        ! Each bucket's first output position: bottom-up ascending, top-down descending.
+        allocate(offsets(nbuckets))
+        running = value_base + 1_int64
+        if (key%descending) then
+            do b = nbuckets, 1_int64, -1_int64
+                offsets(b) = running
+                running = running + counts(b)
+            end do
+        else
+            do b = 1_int64, nbuckets
+                offsets(b) = running
+                running = running + counts(b)
+            end do
+        end if
+        !
+        do i = 1_int64, n
+            if (has_nulls) then
+                if (key%valid(i) == 0_c_int8_t) then
+                    perm(null_pos) = i
+                    null_pos = null_pos + 1_int64
+                    cycle
+                end if
+            end if
+            b = key%ints(i) - lo + 1_int64
+            perm(offsets(b)) = i
+            offsets(b) = offsets(b) + 1_int64
+        end do
+    end procedure sort_counting_permutation
+
     ! ---- The serial sort: introsort over sort_row_less ------------------------------------------
     !
     ! The same algorithm `std::sort` is, deliberately: quicksort with median-of-three pivoting, a

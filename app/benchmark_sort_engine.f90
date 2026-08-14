@@ -231,9 +231,30 @@ contains
         integer :: nthr                          !! threads to ask the engine for.
         real(real64) :: best
         integer(int64) :: nrep, r
+        integer(int64) :: saved_checksum         !! checksum before the untimed warm-up call.
         !
         call build_data(fam, dst, n)
         nrep = reps(n)
+        !
+        ! ONE UNTIMED CALL FIRST, and it is not a formality. The permutation is an `intent(out)`
+        ! allocatable, so every call allocates its own; the first at a given size pays to map those
+        ! pages and later calls get the same block back already mapped. At reps >= 3 that amortises
+        ! away, but `reps()` drops to 1 at the largest sizes, where the whole cost landed on
+        ! whichever arm ran first -- **measured at 7.19 ns/elem against 3.05 for identical work** on
+        ! the n = 5e7 i64lo arm. It read as a 2.3x threading win on an engine that ignores `threads=`
+        ! entirely, which is what exposed it.
+        !
+        ! It bites hardest exactly where it is least visible: a FAST arm at a LARGE n, i.e. the
+        ! counting fast path, which is the one arm feature_sort.md's Stage 6 bar requires not to
+        ! regress at all. A slow arm at the same size (f64 at ~414 ns/elem) hides it inside 2% noise.
+        !
+        ! The checksum is saved and restored across the warm-up so that adding this changed no run's
+        ! printed checksum -- earlier reports are compared against those values.
+        saved_checksum = checksum
+        best = huge(1.0_real64)
+        call time_argsort(fam, n, nthr, best)
+        checksum = saved_checksum
+        !
         best = huge(1.0_real64)
         do r = 1_int64, nrep
             call time_argsort(fam, n, nthr, best)

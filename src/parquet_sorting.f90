@@ -5571,6 +5571,42 @@ module parquet_sorting
             integer(int64), intent(in) :: n           !! rows to order.
             integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
         end subroutine sort_comparison_permutation
+        !> THE engine entry point: the counting fast path where it applies, the introsort otherwise.
+        !!
+        !! Mirrors the C++ `sort_build_permutation` exactly, including that the range scan's
+        !! `lo`/`hi` are carried from the candidate test into the placement pass rather than
+        !! rescanned. The two paths answer identically — the counting one is stable by
+        !! construction, which is the same answer the comparator's index tiebreaker gives.
+        module subroutine sort_build_permutation(keys, n, perm)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+            integer(int64), intent(in) :: n           !! rows to order.
+            integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
+        end subroutine sort_build_permutation
+        !> Whether the single-key integer counting sort applies, and over what value range.
+        !!
+        !! `lo`/`hi` are the key's range over its VALID rows only — a null row's value slot
+        !! holds whatever the buffer contained, so including it could widen the range past the
+        !! bucket limit and decline the fast path for no reason. An all-null key answers
+        !! `.true.` with `lo == hi == 0`, which yields the identity permutation.
+        module function sort_counting_candidate(keys, n, lo, hi) result(ok)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys; only a lone integer key qualifies.
+            integer(int64), intent(in) :: n           !! rows.
+            integer(int64), intent(out) :: lo         !! smallest valid key value, or 0.
+            integer(int64), intent(out) :: hi         !! largest valid key value, or 0.
+            logical :: ok                             !! .true. when the counting path applies.
+        end function sort_counting_candidate
+        !> Fills `perm` by counting sort over `lo..hi`, with the nulls placed as one block.
+        !!
+        !! Two O(n) passes and no comparisons at all. Stable by construction: the placement
+        !! pass walks the input in index order, so equal values are emitted in file order —
+        !! the same answer `sort_row_less`'s index tiebreaker produces.
+        module subroutine sort_counting_permutation(key, n, lo, hi, perm)
+            type(sort_key_buf), intent(in) :: key    !! the lone integer key.
+            integer(int64), intent(in) :: n          !! rows.
+            integer(int64), intent(in) :: lo         !! smallest valid key value.
+            integer(int64), intent(in) :: hi         !! largest valid key value.
+            integer(int64), intent(inout) :: perm(:) !! receives `n` 1-based row indices.
+        end subroutine sort_counting_permutation
     end interface
     !
     ! ---- Test-only access to the comparator core (parquet_sorting_engine) ----

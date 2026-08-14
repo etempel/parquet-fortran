@@ -119,44 +119,36 @@ contains
     ! ---- The two comparators. Adjacent on purpose -- Risk-34. ----------------------------------
 
     module procedure sort_tier_of
-        logical :: is_null !! row `i` is null under this key.
-        logical :: is_nan  !! row `i` is a NaN under this key (real keys only).
+        ! **This returns the RAW tier and `nulls_first` does not appear.** That flag only ever
+        ! REVERSES the order of the three tiers -- values(0)/NaNs(1)/nulls(2) becomes
+        ! nulls(0)/NaNs(1)/values(2), which is `2 - tier` -- so `sort_compare_key` applies it once,
+        ! by negating the tier comparison, instead of this procedure relabelling on every call.
         !
+        ! That is not a tidy-up. This whole chain has to fit inside GCC's default inlining budget or
+        ! the sort pays a CALL per comparison, and the pair of nested if-chains this replaces was
+        ! most of the reason it did not: `sort_compare_key` was being split into a `.part.0` clone
+        ! that the hot path called every time. Keep it small. See this file's header.
+        !
+        ! `descending` deliberately does not appear here either. A descending sort still puts nulls
+        ! last by default; it does not flip them to the front.
+        tier = 0
+        ! `x /= x` rather than `ieee_is_nan` -- see this submodule's header. A deliberate, measured
+        ! exception to a project-wide convention, not an oversight. A null row's slot is read here
+        ! where it was previously skipped, which is harmless: the load is in-bounds, and whatever it
+        ! answers is overwritten by the null test below.
+        if (key%family == SK_REAL) then
+            if (key%reals(i) /= key%reals(i)) tier = 1
+        end if
         ! An UNALLOCATED `valid` means "this key has no nulls at all" -- the fast path, and the
         ! first thing a port of the C++ side gets wrong, because there the same state is an empty
-        ! vector. Every caller must be safe against it.
-        is_null = .false.
-        if (allocated(key%valid)) is_null = (key%valid(i) == 0_c_int8_t)
-        !
-        is_nan = .false.
-        ! `x /= x` rather than `ieee_is_nan` -- see this submodule's header. A deliberate, measured
-        ! exception to a project-wide convention, not an oversight.
-        if (.not. is_null .and. key%family == SK_REAL) is_nan = (key%reals(i) /= key%reals(i))
-        !
-        ! `descending` deliberately does not appear here. A descending sort still puts nulls last by
-        ! default; it does not flip them to the front.
-        if (key%nulls_first) then
-            if (is_null) then
-                tier = 0
-            else if (is_nan) then
-                tier = 1
-            else
-                tier = 2
-            end if
-        else
-            if (is_null) then
-                tier = 2
-            else if (is_nan) then
-                tier = 1
-            else
-                tier = 0
-            end if
+        ! vector. Every caller must be safe against it. Tested LAST so that null wins over NaN.
+        if (allocated(key%valid)) then
+            if (key%valid(i) == 0_c_int8_t) tier = 2
         end if
     end procedure sort_tier_of
 
     module procedure sort_compare_key
-        integer :: ta, tb       !! tiers of `a` and `b`.
-        integer :: value_tier   !! which tier number the VALUES occupy under this key's placement.
+        integer :: ta, tb       !! RAW tiers of `a` and `b`: 0 value, 1 NaN, 2 null.
         integer(int64) :: ia, ib !! integer key values.
         real(real64) :: ra, rb   !! real key values.
         !
@@ -165,15 +157,18 @@ contains
         if (ta /= tb) then
             c = -1
             if (ta > tb) c = 1
+            ! `nulls_first` reverses the tier ORDER and nothing else -- see `sort_tier_of`. This is
+            ! the single place it is applied, and it is applied to the TIER comparison only, never
+            ! to a value comparison.
+            if (key%nulls_first) c = -c
             return
         end if
         !
         ! Same tier. If it is not the VALUE tier then both rows are null, or both are NaN, and the
         ! answer is EQUAL -- which is what leaves them in file order once the caller's index
-        ! tiebreaker runs. Note the value tier is 2 under `nulls_first` and 0 otherwise.
-        value_tier = 0
-        if (key%nulls_first) value_tier = 2
-        if (ta /= value_tier) then
+        ! tiebreaker runs. The raw value tier is 0 whatever `nulls_first` says, which is the point of
+        ! keeping the tiers raw.
+        if (ta /= 0) then
             c = 0
             return
         end if
@@ -632,7 +627,7 @@ contains
         integer(int64) :: a, b, c !! the three candidate positions.
         !
         a = lo + 1_int64
-        b = lo + (hi - lo) / 2_int64
+        b = lo + (hi - lo + 1_int64) / 2_int64
         c = hi
         if (sort_row_less(keys, perm(a), perm(b))) then
             if (sort_row_less(keys, perm(b), perm(c))) then

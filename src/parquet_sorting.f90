@@ -5506,13 +5506,14 @@ module parquet_sorting
     !
     ! ---- The comparator core (parquet_sorting_engine -- HAND-WRITTEN, not generated) ----
     interface
-        !> Output tier of row `i` under one key: 0 sorts first, 2 last.
+        !> RAW output tier of row `i` under one key: values(0), NaNs(1), nulls(2).
         !!
-        !! Absolute -- `descending` never reaches this, which is Arrow's own rule (a
-        !! descending sort still puts nulls last by default rather than flipping them to the
-        !! front). Under the default placement the tiers are values(0), NaNs(1), nulls(2);
-        !! under `nulls_first` they are nulls(0), NaNs(1), values(2). NaN is tier 1 either
-        !! way, and only a real-family key can be in it.
+        !! Absolute, and **neither `descending` nor `nulls_first` reaches this**. That a
+        !! descending sort still puts nulls last is Arrow's own rule. `nulls_first` is left
+        !! out for a different reason: it only ever REVERSES the tier order, so
+        !! `sort_compare_key` applies it once by negating the tier comparison rather than
+        !! having this relabel on every call — which is what keeps the whole comparator chain
+        !! inside GCC's default inlining budget. Only a real-family key can be tier 1.
         module function sort_tier_of(key, i) result(tier)
             type(sort_key_buf), intent(in) :: key !! the bound key.
             integer(int64), intent(in) :: i       !! row, 1-based.

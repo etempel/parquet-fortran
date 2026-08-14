@@ -152,6 +152,7 @@ something a reader is expected to have.
 | [Risk-85](#risk-85--the-in-code-schema-builder-now-owns-both-parsing-and-validating-its-own-text) | The in-code schema builder now owns both parsing and validating its own text | 4 — covered |
 | [Risk-86](#risk-86--a-defective-quicksort-still-returns-a-correctly-sorted-answer) | A defective quicksort still returns a correctly sorted answer | 4 — covered |
 | [Risk-87](#risk-87--the-counting-sorts-range-check-cannot-be-written-the-way-c-writes-it) | The counting sort's range check cannot be written the way C++ writes it | 4 — covered |
+| [Risk-88](#risk-88--the-sort-comparator-silently-loses-a-third-of-its-speed-if-it-outgrows-an-inlining-budget) | The sort comparator silently loses a third of its speed if it outgrows an inlining budget | 3 — not testable |
 
 ---
 
@@ -159,7 +160,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-88**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-89**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3707,3 +3708,48 @@ must be DECLINED. Both run through `counting_ab`, which requires the counting an
 agree with each other and with the C++ engine, and which asserts via the insertion-shift tracker that
 the expected path was actually taken — without that last check the "declined" half would pass just as
 happily against a counting path that accepted the key and answered correctly by luck.
+
+### Risk-88 — The sort comparator silently loses a third of its speed if it outgrows an inlining budget
+
+`sort_compare_key` and `sort_tier_of` (`src/parquet_sorting_engine.f90`) are called once per
+comparison from the introsort's inner loops. GCC inlines them **only while they fit its default
+budget**; past that it splits `sort_compare_key` into a `sort_compare_key.part.0` clone, inlines a
+cheap prologue and leaves the body out of line — so the hot path, a single non-null key reaching the
+value comparison, takes a **call on every comparison**, on the critical path of a dependent branch
+chain.
+
+Measured on machine A, gfortran 15.2, `--profile release`: with the split present, the serial
+`f64` argsort ran at **1.28x** the C++ engine; without it, **0.91x**. Same algorithm, same
+comparison count, same data — a **~39%** swing decided entirely by whether one procedure fit.
+
+**What breaks, and why nothing notices.** Every answer stays identical, every test passes, and the
+only symptom is speed. Worse, it is invisible in the obvious place to look: `sort_row_less` *is*
+fully inlined into the sort's loops in both cases, so a check for "is the comparator inlined" that
+greps for a call to `sort_row_less` reports success while the damage sits one level down. And the
+comparator's own microbenchmark does **not** see it — `app/benchmark_sort_comparator.f90` measured
+the Fortran comparator at 0.72–0.85x of C++ *with the split in place*, because a sweep's iterations
+are independent and the call overlaps with them, where a quicksort partition's next iteration
+depends on this comparison's branch.
+
+The current shape was arrived at deliberately for this: `sort_tier_of` returns the **raw** tier and
+`nulls_first` is applied once by `sort_compare_key`, as a negation of the tier comparison, rather
+than by relabelling tiers on every call. That removed two nested three-way if-chains and is what
+brought the chain back under the budget.
+
+**The rule this forbids.** *Anything added to `sort_tier_of` or `sort_compare_key` must be paid for
+by taking something else out.* Concretely: a new tier, a new key family arm inline (put it behind a
+call, as `compare_bytes` already is), a validity scheme needing more than one test, or hoisting a
+branch "for clarity" are all changes that can cross the threshold. They will look free.
+
+**Test.** None — a static check, not a test, because the failure is a timing one and this project
+does not put timing assertions in the suite. The check is one command against a release build:
+
+```bash
+nm <build>/.../src_parquet_sorting_engine.f90.o | grep -c 'sort_compare_key\.part'
+```
+
+It must read **0**. A nonzero count means the comparator no longer fits and the sort has lost
+roughly a third of its speed. `tools/benchmark_sort_ab.sh` is what confirms the size of the loss
+once the symbol is seen. Note the budget is a property of the compiler and its version, so a future
+GCC may reintroduce the split without any source change — which is exactly why this is written down
+rather than left to whoever next reads a disappointing benchmark.

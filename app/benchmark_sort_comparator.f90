@@ -287,7 +287,11 @@ contains
             ! Low cardinality on purpose: a comparator benchmark wants TIES, so that the key loop
             ! runs past its first key rather than deciding on the first byte every time.
             k1(k) = mod(v, 64_int64)
-            k2(k) = real(mod(v, 128_int64), real64)
+            ! SAME values as k1, deliberately. These two fixtures are subtracted from each other to
+            ! isolate the cost of a real key over an integer one, so a different cardinality here
+            ! would put a tie-rate difference into that subtraction as well. They differed (64
+            ! against 128 distinct values) until 2026-08-14.
+            k2(k) = real(k1(k), real64)
             do j = 1, 8
                 k3(k)(j:j) = achar(97 + int(mod(v / int(j, int64) + int(j, int64), 26_int64)))
             end do

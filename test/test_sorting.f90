@@ -5967,7 +5967,10 @@ contains
     subroutine test_radix_path_runs(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64), parameter :: above = 4096_int64 !! comfortably over the shipped floor.
-        integer(int64), parameter :: below = 64_int64   !! comfortably under it.
+        integer(int64), parameter :: below = 64_int64
+        !! Comfortably under it -- but only 2x under, since the floor moved to 128. Lowering
+        !! `SORT_RADIX_MIN_ROWS` further means lowering this too, or the shipped-floor half of this
+        !! test silently stops testing the floor and starts testing the radix path twice.
         real(real64), allocatable :: v(:)
         integer(int64), allocatable :: perm(:)
         integer(int64) :: k, shift_above, shift_below, shift_declined, shift_forced
@@ -6212,12 +6215,13 @@ contains
         integer(int64) :: vi(n)
         real(real64) :: vr(n)
         logical :: valid_i(n), valid_r(n)
-        type(parquet_string_column) :: col
+        type(parquet_string_column) :: col, long_col
         type(pf_sort_keys) :: keys
-        integer(int64) :: k, shift_num, shift_str
+        integer(int64) :: k, shift_num, shift_str, shift_long
         integer(int64), allocatable :: perm(:)
         integer :: a, b
         logical :: d1, n1, d2, n2
+        character(len=8) :: num
         !
         do k = 1_int64, n
             vi(k) = mod(k * 7_int64, 16_int64)          ! 16 distinct values: long tie runs
@@ -6226,9 +6230,48 @@ contains
             valid_i(k) = (mod(k, 23_int64) /= 0_int64)
             valid_r(k) = (mod(k, 29_int64) /= 0_int64)
         end do
+        ! A string key with everything the MSD pass has to handle: a shared prefix that forces the
+        ! recursion, values of differing length under one prefix, an embedded NUL, an empty value,
+        ! and heavy duplication so that the LATER keys are reached through it.
         call col%clear()
         do k = 1_int64, n
-            call col%append_string("tie")               ! one shared prefix, to make a decline matter
+            write (num, "(i8.8)") int(mod(k, 11_int64))
+            select case (int(mod(k, 9_int64)))
+            case (0)
+                call col%append_string("shared" // num)
+            case (1)
+                call col%append_string("shared" // num // "x")
+            case (2)
+                call col%append_string("shared")
+            case (3)
+                call col%append_string("")
+            case (4)
+                call col%append_string("sh" // char(0) // num)
+            case (5)
+                ! High-cardinality under one prefix: 26^3 possible values over 1024 rows, so the
+                ! MSD narrows to runs of one or two that are still DISTINCT and therefore reach the
+                ! tail with real work to do. Every other shape here collapses to byte-identical
+                ! groups, which return before the tail and leave it untested.
+                call col%append_string("pfx" // achar(97 + int(mod(k, 26_int64))) // &
+                    achar(97 + int(mod(k / 26_int64, 26_int64))) // &
+                    achar(97 + int(mod(k / 676_int64, 26_int64))))
+            case (6)
+                call col%append_string("q")
+            case (7)
+                call col%append_string("q" // char(0))  ! same bytes as "q", one longer
+            case default
+                ! NULLS, and they are what makes `nulls_first` observable on a string key at all.
+                ! Without them the value block always starts at row 1 and a pass that located it
+                ! without consulting `nulls_first` would sort the right range by accident.
+                call col%append_null()
+            end select
+        end do
+        !
+        ! The same shapes, but past SORT_RADIX_MAX_BYTE: the one string a multi-key sort refuses.
+        call long_col%clear()
+        do k = 1_int64, n
+            write (num, "(i8.8)") int(mod(k, 11_int64))
+            call long_col%append_string(repeat("p", 70) // num)
         end do
         !
         ! Each key's own flags, swept independently of the other's.
@@ -6243,8 +6286,26 @@ contains
                 call keys%add(vr, descending=d2, nulls_first=n2, is_valid=valid_r)
                 call engine_ab(error, "multi radix" // radix_tag(d1, n1) // radix_tag(d2, n2), keys, n)
                 if (allocated(error)) return
+                !
+                ! The same sweep with the STRING key in the middle, so its own flags are exercised
+                ! against a numeric key on each side of it -- a string pass that ignored
+                ! `descending` or `nulls_first` would still agree with C++ on every fixture where
+                ! those happened to match its neighbours'.
+                call keys%clear()
+                call keys%add(vi, descending=d1, nulls_first=n1, is_valid=valid_i)
+                call keys%add(col, descending=d2, nulls_first=n2)
+                call keys%add(vr, descending=d1, nulls_first=n2, is_valid=valid_r)
+                call engine_ab(error, "multi radix str" // radix_tag(d1, n1) // radix_tag(d2, n2), keys, n)
+                if (allocated(error)) return
             end do
         end do
+        !
+        ! A string key FIRST, so the chain's most significant pass is the MSD one.
+        call keys%clear()
+        call keys%add(col)
+        call keys%add(vi, descending=.true., is_valid=valid_i)
+        call engine_ab(error, "multi radix str first", keys, n)
+        if (allocated(error)) return
         !
         ! Three keys, to prove the chain composes rather than only handling a pair.
         call keys%clear()
@@ -6266,14 +6327,30 @@ contains
         call parquet_debug_set_sort_track_shift(.true.)
         call pf_argsort(keys, perm)
         shift_str = parquet_debug_sort_max_insertion_shift()
+        !
+        call keys%clear()
+        call keys%add(vi)
+        call keys%add(long_col)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(keys, perm)
+        shift_long = parquet_debug_sort_max_insertion_shift()
         call parquet_debug_set_sort_track_shift(.false.)
         call parquet_debug_use_fortran_sort_engine(.false.)
         !
         call check(error, shift_num == 0_int64, &
             "two numeric keys above the floor should have taken the multi-key radix, but the insertion pass ran")
         if (allocated(error)) return
-        call check(error, shift_str > 0_int64, &
-            "adding a string key must make the multi-key radix decline, but the introsort did not run")
+        call check(error, shift_str == 0_int64, &
+            "a short string key should now be taken by the multi-key radix, but the introsort ran")
+        if (allocated(error)) return
+        ! The one string a multi-key sort still refuses. This is a COST guard, not a correctness one:
+        ! the MSD tail is a stable insertion sort, whose O(m^2) is only sound while the recursion
+        ! ends by exhausting bytes rather than by hitting SORT_RADIX_MAX_BYTE. If that tail is ever
+        ! replaced by something with a better worst case, this becomes an equality test rather than
+        ! a deletion -- what it asserts today is that the refusal is real, and what it should assert
+        ! afterwards is that the replacement kept the answer.
+        call check(error, shift_long > 0_int64, &
+            "a string key longer than SORT_RADIX_MAX_BYTE must make the multi-key radix decline")
     end subroutine test_radix_path_multi_key
     !
     !> The refine pass continues the radix a BYTE at a time past its 8-byte window, so these are the

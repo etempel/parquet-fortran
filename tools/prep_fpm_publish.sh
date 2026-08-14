@@ -94,6 +94,7 @@ REMOVE_PATHS=(
     tools/benchmark_stage7.sh
     tools/benchmark_template.md
     tools/benchmark_sort_comparator.sh
+    tools/benchmark_sort_ab.sh
     tools/probe_isnan.sh
     tools/benchmark_sort_engine.sh
     tools/benchmark_strings.sh

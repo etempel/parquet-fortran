@@ -151,6 +151,7 @@ something a reader is expected to have.
 | [Risk-84](#risk-84--a-maml-key-matched-case-sensitively-loses-a-whole-block-in-silence) | A MAML key matched case-sensitively loses a whole block, in silence | 4 — covered |
 | [Risk-85](#risk-85--the-in-code-schema-builder-now-owns-both-parsing-and-validating-its-own-text) | The in-code schema builder now owns both parsing and validating its own text | 4 — covered |
 | [Risk-86](#risk-86--a-defective-quicksort-still-returns-a-correctly-sorted-answer) | A defective quicksort still returns a correctly sorted answer | 4 — covered |
+| [Risk-87](#risk-87--the-counting-sorts-range-check-cannot-be-written-the-way-c-writes-it) | The counting sort's range check cannot be written the way C++ writes it | 4 — covered |
 
 ---
 
@@ -158,7 +159,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-87**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-88**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3669,3 +3670,40 @@ to it — the one measured instance of that class was shown to be correct rather
 undetected. `test_fortran_engine_depth_limit_bites` is what proves the forced-fallback half is not
 vacuous, via `parquet_debug_sort_heapsort_calls`, since both paths answer identically and no
 assertion on a permutation can tell them apart.
+
+### Risk-87 — The counting sort's range check cannot be written the way C++ writes it
+
+`sort_counting_candidate` (`src/parquet_sorting_engine.f90`) decides whether a key's value range is
+small enough to counting-sort. The C++ engine it was ported from bounds that range with
+`(uint64_t)hi - (uint64_t)lo` (`sort_counting_candidate`, `src/parquet_wrapper.cpp`), which cannot
+overflow whatever the two values are. **Fortran has no portable unsigned integer, and signed
+overflow is undefined**, so that line cannot be repeated here. The Fortran version rearranges the
+comparison instead, so that every intermediate stays in range:
+
+- when `lo` is within `limit` of `huge(int64)`, so is `hi` (they satisfy `lo <= hi <= huge`), so the
+  range is necessarily below `limit` and no arithmetic is performed at all;
+- otherwise `lo + limit` cannot overflow, and `hi < lo + limit` is exactly the same test.
+
+**What breaks.** Writing it back as the obvious `hi - lo < limit` is correct for every fixture anyone
+would naturally build and wrong for a key holding values near both ends of int64: the subtraction
+wraps to a negative number, the range test passes, and the placement pass then allocates a bucket
+array from a meaningless count and indexes it with meaningless offsets. Confirmed by mutation — the
+naive form **segfaults**, so at least it fails loudly once a fixture reaches it; what makes this a
+risk rather than a bug is that no ordinary fixture does.
+
+The reason it invites a rewrite is that the guarded form looks like defensive clutter next to a
+one-line C++ original sitting a few files away, and the two are easy to "reconcile" in the wrong
+direction. The code carries a comment saying so; this entry is what a reviewer should be pointed at.
+
+**The rule this forbids.** *A ported arithmetic guard must be checked against the arithmetic of the
+language it lands in, not against the source it came from.* The clause-for-clause discipline
+`feature_sort.md` Stage 3 requires is about preserving the engine's decisions, not its arithmetic
+idioms — and unsigned range arithmetic is exactly where those two part company.
+
+**Test.** `test_counting_path_int64_extremes` (`test/test_sorting.f90`) drives both branches: a key
+packed against `huge(int64)` whose range is 49 but whose `lo + limit` would overflow, which must be
+ACCEPTED; and a key holding values near both ends at once, whose true range is about 2**64, which
+must be DECLINED. Both run through `counting_ab`, which requires the counting and comparator paths to
+agree with each other and with the C++ engine, and which asserts via the insertion-shift tracker that
+the expected path was actually taken — without that last check the "declined" half would pass just as
+happily against a counting path that accepted the key and answered correctly by luck.

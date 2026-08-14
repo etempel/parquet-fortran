@@ -454,6 +454,15 @@ permutation is verified before its timing is accepted** (it must be a permutatio
 arm has no nulls or NaNs it must actually order the input), because a fast wrong answer is the one
 failure mode a benchmark will happily report as a win.
 
+**Every arm makes one untimed call before its timed loop**, and that is not a formality. The
+permutation is an `intent(out)` allocatable, so each call allocates its own; the first at a given
+size pays to map those pages and later calls get the same block back already mapped. `reps()` drops
+to 1 at the largest sizes, where the whole cost otherwise landed on whichever arm ran first — worth
+7.19 ns/elem against 3.05 for identical work on the 50-million-row low-cardinality arm, i.e. it read
+as a 2.3x threading win on an engine that ignores `threads=` entirely. It bites hardest on a *fast*
+arm at a *large* n, which is exactly where a figure is least likely to be double-checked; a slow arm
+at the same size hides the same absolute cost inside its noise.
+
 `ENGINE=cpp|fortran` selects which sort engine to measure — the shipped C++ one, or the pure-Fortran
 engine `feature_sort.md` is building, which the library reaches only through a debug hook until that
 work is cut over. An A/B is two runs of the script differing in nothing else. The two engines return
@@ -467,6 +476,36 @@ tools/benchmark_sort_engine.sh --mode=threads                   # the thread lad
 SIZES=50000000 FAMILIES=f64,i64lo tools/benchmark_sort_engine.sh --mode=argsort
 PERM=64 tools/benchmark_sort_engine.sh --mode=argsort           # the int64 permutation path
 ENGINE=fortran tools/benchmark_sort_engine.sh --mode=argsort    # the Fortran engine's own figures
+```
+
+`tools/benchmark_sort_ab.sh` is the one to reach for when the question is *"is the Fortran sort
+engine faster than the C++ one on this machine?"*. It runs `benchmark_sort_engine.sh --mode=argsort`
+twice — `ENGINE=cpp` then `ENGINE=fortran`, same build, same data, same seed — and joins the two
+tables into one so the per-arm ratio is read off directly instead of by eye across two logs. It
+**refuses to print the table at all** if the two arms' checksums disagree, since the two engines
+return identical permutations by contract and a mismatch means either they do not or the arms did
+not see the same data.
+
+**It sources nothing and chooses no compiler** — it measures whatever the shell it was invoked from
+is set up to build. On a machine carrying more than one toolchain, activate one, run it, then
+activate the other in a fresh shell and run it again; the build trees and log files are named after
+the compiler, so the two runs do not collide. It prints a provenance block describing *that shell*
+(compiler, every `FPM_*` variable, commit, load) rather than asking for one separately, because a
+provenance block collected in a different shell than the one that built the binary is not
+provenance.
+
+It refuses exactly one thing: a `gfortran` below 13. That is the only way to get this environment
+wrong *silently* — such a compiler builds the library cleanly and miscompiles it (see
+[Prerequisites](README.md#prerequisites)) — whereas a missing Arrow announces itself as
+`'arrow/api.h' file not found` and a missing compiler as a build error. With `--test` it runs the
+full suite as a correctness gate *before* any timing and then waits for the machine to drain,
+because an ordered penalty biases one arm rather than adding symmetric noise and best-of-N does not
+remove it.
+
+```bash
+tools/benchmark_sort_ab.sh                                    # whatever this shell builds
+tools/benchmark_sort_ab.sh --test                             # with the correctness gate first
+SIZES=1000000,50000000 tools/benchmark_sort_ab.sh
 ```
 
 `tools/benchmark_sort_comparator.sh` answers a narrower question than the harness above: what does

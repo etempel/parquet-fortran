@@ -81,6 +81,7 @@ To generate the executables:
 | `benchmark_stage7` | `app/benchmark_stage7.f90` | Driven by `tools/benchmark_stage7.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_sort_engine` | `app/benchmark_sort_engine.f90` | Driven by `tools/benchmark_sort_engine.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_sort_comparator` | `app/benchmark_sort_comparator.f90` | Driven by `tools/benchmark_sort_comparator.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `probe_isnan` | `app/probe_isnan.f90` | Driven by `tools/probe_isnan.sh`. A **temporary diagnostic** for the Stage 1e comparator campaign — what one NaN test costs, per toolchain. Delete both once that question is answered. |
 | `benchmark_strings` | `app/benchmark_strings.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_string_threads` | `app/benchmark_string_threads.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `test_large_scale` | `app/test_large_scale.f90` | Driven by `tools/test_large_scale.sh` — see [Other tools/ helpers](#other-tools-helpers). |

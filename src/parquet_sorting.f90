@@ -81,6 +81,15 @@ module parquet_sorting
     public :: pf_merge
     public :: pf_sort_threads
     !
+    ! Test-only, and PUBLIC because there is no other route: they expose the comparator core, whose
+    ! state (`sort_key_buf`) is private to this module. CLAUDE.md's "A Fortran-side debug hook has
+    ! to be PUBLIC, so prefer a C++ one" states the rule and the accepted precedents; the C++ route
+    ! is unavailable here precisely because Stage 1 exists to move this decision OUT of C++.
+    ! No library code calls either, neither appears in README.md's API overview, and neither is
+    ! mentioned in any doc/pages/ guide -- see feature_sort.md section 7.4.
+    public :: parquet_debug_sort_row_less
+    public :: parquet_debug_sort_keys_compare
+    !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
     !
@@ -5442,6 +5451,87 @@ module parquet_sorting
             logical, intent(in), optional :: assume_sorted
             !! .true. skips the O(n) sortedness check on BOTH inputs.
         end subroutine merge_ts
+    end interface
+    !
+    ! ---- The comparator core (parquet_sorting_engine -- HAND-WRITTEN, not generated) ----
+    interface
+        !> Output tier of row `i` under one key: 0 sorts first, 2 last.
+        !!
+        !! Absolute -- `descending` never reaches this, which is Arrow's own rule (a
+        !! descending sort still puts nulls last by default rather than flipping them to the
+        !! front). Under the default placement the tiers are values(0), NaNs(1), nulls(2);
+        !! under `nulls_first` they are nulls(0), NaNs(1), values(2). NaN is tier 1 either
+        !! way, and only a real-family key can be in it.
+        module function sort_tier_of(key, i) result(tier)
+            type(sort_key_buf), intent(in) :: key !! the bound key.
+            integer(int64), intent(in) :: i       !! row, 1-based.
+            integer :: tier                       !! 0, 1 or 2.
+        end function sort_tier_of
+        !> -1/0/+1 for rows `a` and `b` under ONE key, with its order and null placement applied.
+        !!
+        !! Two rows in the same non-value tier (both null, or both NaN) compare EQUAL, so the
+        !! caller's index tiebreaker keeps them in file order. `descending` negates the answer
+        !! within the value tier only.
+        module function sort_compare_key(key, a, b) result(c)
+            type(sort_key_buf), intent(in) :: key !! the bound key.
+            integer(int64), intent(in) :: a       !! first row, 1-based.
+            integer(int64), intent(in) :: b       !! second row, 1-based.
+            integer :: c                          !! -1, 0 or +1.
+        end function sort_compare_key
+        !> THE sort comparator: every key in precedence order, then the row index as tiebreaker.
+        !!
+        !! The index tiebreaker makes this a TOTAL ORDER in which no two distinct rows compare
+        !! equal, which is what makes an unstable sort produce the stable answer, makes
+        !! nth_element deterministic, and makes a parallel result bit-identical to a serial one
+        !! by construction. Keep it beside `sort_keys_compare` -- feature_risks.md Risk-34.
+        module function sort_row_less(keys, a, b) result(less)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+            integer(int64), intent(in) :: a           !! first row, 1-based.
+            integer(int64), intent(in) :: b           !! second row, 1-based.
+            logical :: less                           !! .true. when `a` sorts before `b`.
+        end function sort_row_less
+        !> The same ordering as `sort_row_less`, three-way and WITHOUT the index tiebreaker.
+        !!
+        !! Everything that must recognise "these two rows are equal" -- binary search, run
+        !! detection for pf_unique/pf_rank, merging, is_sorted -- needs this one, since under
+        !! the tiebreaker no two rows ever are equal. Sorting is the only caller that must NOT
+        !! use it. `nkeys` is how many LEADING keys take part, clamped to `size(keys)`: run
+        !! detection passes a prefix because "sort by field then magnitude, but group by field
+        !! alone" is one pass.
+        module function sort_keys_compare(keys, a, b, nkeys) result(c)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+            integer(int64), intent(in) :: a           !! first row, 1-based.
+            integer(int64), intent(in) :: b           !! second row, 1-based.
+            integer, intent(in) :: nkeys              !! leading keys taking part.
+            integer :: c                              !! -1, 0 or +1.
+        end function sort_keys_compare
+    end interface
+    !
+    ! ---- Test-only access to the comparator core (parquet_sorting_engine) ----
+    interface
+        !> Test-only: what the Fortran SORT comparator says about one pair of rows.
+        !!
+        !! Public only because it has to be: `sort_key_buf` is private to this module, so a
+        !! test cannot reach `sort_row_less` any other way, and the C++-side hook convention
+        !! is unavailable for a decision that Stage 1 exists to move out of C++. Not called by
+        !! library code. Rows are 1-based, as everywhere else in this module's public API.
+        module function parquet_debug_sort_row_less(keys, a, b) result(less)
+            type(pf_sort_keys), intent(in) :: keys !! the built key set.
+            integer(int64), intent(in) :: a        !! first row, 1-based.
+            integer(int64), intent(in) :: b        !! second row, 1-based.
+            logical :: less                        !! .true. when `a` sorts before `b`.
+        end function parquet_debug_sort_row_less
+        !> Test-only: what the Fortran TIE-FREE comparator says about one pair of rows.
+        !!
+        !! Same reasoning as `parquet_debug_sort_row_less`. `nkeys` counts ENGINE keys and is
+        !! clamped to how many the set holds; note a `parquet_timestamp` key binds as two.
+        module function parquet_debug_sort_keys_compare(keys, a, b, nkeys) result(c)
+            type(pf_sort_keys), intent(in) :: keys !! the built key set.
+            integer(int64), intent(in) :: a        !! first row, 1-based.
+            integer(int64), intent(in) :: b        !! second row, 1-based.
+            integer, intent(in) :: nkeys           !! leading engine keys taking part.
+            integer :: c                           !! -1, 0 or +1.
+        end function parquet_debug_sort_keys_compare
     end interface
     !
 end module parquet_sorting ! GCOVR_EXCL_LINE

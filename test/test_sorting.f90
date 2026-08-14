@@ -33,6 +33,13 @@ module test_sorting
     use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan
     use testdrive, only : new_unittest, unittest_type, error_type, check
+    ! For the Stage 1 conformance oracle only: it builds a C++ key set of its own so that both
+    ! engines can be asked about the same rows. These are ordinary library bindings, not debug
+    ! hooks -- the two debug hooks are declared locally in `sweep_pairs`, per convention.
+    use iso_c_binding, only : c_ptr, c_loc, c_null_ptr, c_int8_t, c_char, c_long_long
+    use parquet_bindings, only : parquet_sort_builder_new, parquet_sort_builder_free, &
+        parquet_sort_builder_add_key_int64, parquet_sort_builder_add_key_double, &
+        parquet_sort_builder_add_key_string
     !
     implicit none
     private
@@ -200,7 +207,13 @@ contains
             new_unittest("group_nkeys counts caller keys, not engine keys", test_group_nkeys_timestamp), &
             new_unittest("nkeys_added counts %add calls, not engine keys", test_nkeys_added_counts_adds), &
             new_unittest("is_sorted accepts a pf_sort_keys", test_is_sorted_keys), &
-            new_unittest("partial_argsort accepts a pf_sort_keys", test_partial_argsort_keys) &
+            new_unittest("partial_argsort accepts a pf_sort_keys", test_partial_argsort_keys), &
+            new_unittest("engine: integer keys match the C++ comparators", test_engine_conf_int), &
+            new_unittest("engine: real keys with NaNs match the C++ comparators", test_engine_conf_real), &
+            new_unittest("engine: string keys match the C++ comparators", test_engine_conf_str), &
+            new_unittest("engine: variable-length strings compare like memcmp", test_engine_conf_varstr), &
+            new_unittest("engine: multi-key and the nkeys prefix match the C++ comparators", &
+                test_engine_conf_multi) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -5285,5 +5298,340 @@ contains
         call check(error, all(int(part32, int64) == full(1:3)), &
             "the int32 form must agree with the int64 one")
     end subroutine test_partial_argsort_keys
+    !
+    ! ============================================================================================
+    ! Stage 1 conformance oracle -- feature_sort.md section 6 Stage 1
+    ! ============================================================================================
+    !
+    ! The Fortran comparator core must answer EXACTLY as the C++ one does, because after the Stage 6
+    ! cutover the two decide the order of the same data by different routes. Asserting that a sort
+    ! comes out sorted does not test this: both engines sort correctly and can still disagree about
+    ! which of two EQUAL rows comes first, which is the maintainer's stated requirement ("the two
+    ! sorting algorithms provide the same ordering, even for duplicated values").
+    !
+    ! So these tests compare ANSWERS, not orderings, over every ordered pair of a small tie-rich
+    ! fixture. Every fixture is deliberately duplicate-heavy: a random real64 column of any size
+    ! contains essentially no ties at all, which is exactly why the motivating benchmark in
+    ! feature_sort.md section 2 could not have caught a tie-order defect.
+    !
+    ! Both engines are fed from ONE source in each test -- the same Fortran arrays go into a
+    ! `pf_sort_keys` and into a C++ builder -- so a disagreement is a comparator disagreement and
+    ! not a data one.
+    !
+    !> Asks BOTH engines about every ordered pair, and checks the total-order properties.
+    !!
+    !! The C++ side is reached through two test-only hooks in src/parquet_wrapper.cpp, declared
+    !! locally here because that is how every `parquet_debug_*` hook is reached and it keeps them
+    !! out of src/parquet_bindings.f90. Their rows are 0-BASED (the C++ internal convention), so
+    !! each index is passed as `i - 1`; the Fortran side is 1-based throughout.
+    !!
+    !! The three property checks are what the C++ side cannot be asked about, and they are the
+    !! reason this is not merely a two-way diff: irreflexivity, antisymmetry, and that `less` agrees
+    !! with the sign of the tie-free answer or -- on a full tie -- falls back to row order, which is
+    !! the index tiebreaker doing its job.
+    subroutine sweep_pairs(error, label, keys, builder, n, nkeys, ntotal)
+        type(error_type), allocatable, intent(inout) :: error !! set on the first disagreement.
+        character(len=*), intent(in) :: label                 !! names the fixture in every message.
+        type(pf_sort_keys), intent(in) :: keys                !! the Fortran key set.
+        type(c_ptr), intent(in) :: builder                    !! the C++ builder over the same data.
+        integer(int64), intent(in) :: n                       !! rows.
+        integer, intent(in) :: nkeys                          !! prefix for the tie-free comparator.
+        integer, intent(in) :: ntotal                         !! engine keys the set actually holds.
+        interface
+            function c_dbg_row_less(handle, a, b) bind(C, name="parquet_debug_sort_row_less") result(r)
+                import :: c_ptr, c_long_long
+                type(c_ptr), value :: handle           !! the C++ builder handle.
+                integer(c_long_long), value :: a       !! first row, 0-based.
+                integer(c_long_long), value :: b       !! second row, 0-based.
+                integer(c_long_long) :: r              !! 1 = less, 0 = not, -1 = no key added.
+            end function c_dbg_row_less
+            function c_dbg_keys_compare(handle, a, b, nk) &
+                    bind(C, name="parquet_debug_sort_keys_compare") result(r)
+                import :: c_ptr, c_long_long
+                type(c_ptr), value :: handle           !! the C++ builder handle.
+                integer(c_long_long), value :: a       !! first row, 0-based.
+                integer(c_long_long), value :: b       !! second row, 0-based.
+                integer(c_long_long), value :: nk      !! leading keys taking part.
+                integer(c_long_long) :: r              !! -1/0/+1, or -2 when no key was added.
+            end function c_dbg_keys_compare
+        end interface
+        integer(int64) :: a, b
+        logical :: fl, cl, fl_rev
+        integer :: fc, cc
+        !
+        do a = 1_int64, n
+            do b = 1_int64, n
+                fl = parquet_debug_sort_row_less(keys, a, b)
+                cl = c_dbg_row_less(builder, int(a - 1_int64, c_long_long), &
+                    int(b - 1_int64, c_long_long)) == 1_c_long_long
+                call check(error, fl .eqv. cl, label // ": sort_row_less disagrees with the C++ engine")
+                if (allocated(error)) return
+                !
+                fc = parquet_debug_sort_keys_compare(keys, a, b, nkeys)
+                cc = int(c_dbg_keys_compare(builder, int(a - 1_int64, c_long_long), &
+                    int(b - 1_int64, c_long_long), int(nkeys, c_long_long)))
+                call check(error, fc == cc, label // ": sort_keys_compare disagrees with the C++ engine")
+                if (allocated(error)) return
+                !
+                if (a == b) then
+                    call check(error, .not. fl, label // ": sort_row_less(i, i) must be .false.")
+                    if (allocated(error)) return
+                else
+                    fl_rev = parquet_debug_sort_row_less(keys, b, a)
+                    call check(error, fl .neqv. fl_rev, &
+                        label // ": exactly one of less(a,b) and less(b,a) must hold")
+                    if (allocated(error)) return
+                    if (fc /= 0) then
+                        ! Safe for any prefix: if the leading `nkeys` keys already decide, the full
+                        ! comparator decides the same way on the same key.
+                        call check(error, fl .eqv. (fc < 0), &
+                            label // ": less must follow the sign of the tie-free comparator")
+                    else if (nkeys >= ntotal) then
+                        ! Only meaningful when the prefix covers EVERY key. On a shorter prefix a
+                        ! zero says "tied so far", and a later key -- not the row index -- is what
+                        ! `less` used to decide. Asserting row order here would be asserting that
+                        ! the prefix is the whole key list.
+                        call check(error, fl .eqv. (a < b), &
+                            label // ": on a full tie, less must fall back to row order")
+                    end if
+                    if (allocated(error)) return
+                end if
+            end do
+        end do
+    end subroutine sweep_pairs
+    !
+    !> Integer keys: three-way ties, two nulls, every direction and null placement.
+    subroutine test_engine_conf_int(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 8_int64
+        integer(int64), target :: vals(n)
+        integer(c_int8_t), target :: cvalid(n)
+        logical :: fvalid(n)
+        type(pf_sort_keys) :: keys
+        type(c_ptr) :: builder
+        integer :: id, inf
+        logical :: desc, nf
+        !
+        ! Three 5s and two 3s, so tie order is exercised on most pairs; rows 3 and 5 are null, and
+        ! their value slots deliberately hold ordinary values -- a comparator that forgets the tier
+        ! test would order them by those and still look plausible.
+        vals = [5_int64, 3_int64, 5_int64, 1_int64, 3_int64, 9_int64, 0_int64, 5_int64]
+        fvalid = [.true., .true., .false., .true., .false., .true., .true., .true.]
+        cvalid = merge(1_c_int8_t, 0_c_int8_t, fvalid)
+        do id = 0, 1
+            do inf = 0, 1
+                desc = (id == 1)
+                nf = (inf == 1)
+                call keys%clear()
+                call keys%add(vals, descending=desc, nulls_first=nf, is_valid=fvalid)
+                builder = parquet_sort_builder_new(int(n, c_long_long))
+                call parquet_sort_builder_add_key_int64(builder, vals, c_loc(cvalid), &
+                    merge(1_c_int8_t, 0_c_int8_t, desc), merge(1_c_int8_t, 0_c_int8_t, nf))
+                call sweep_pairs(error, "int desc=" // merge("T", "F", desc) // " nf=" // &
+                    merge("T", "F", nf), keys, builder, n, 1, 1)
+                call parquet_sort_builder_free(builder)
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_engine_conf_int
+    !
+    !> Real keys: all three tiers at once -- values, NaNs and nulls -- with ties inside each.
+    subroutine test_engine_conf_real(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 8_int64
+        real(real64), target :: vals(n)
+        integer(c_int8_t), target :: cvalid(n)
+        logical :: fvalid(n)
+        real(real64) :: qnan
+        type(pf_sort_keys) :: keys
+        type(c_ptr) :: builder
+        integer :: id, inf
+        logical :: desc, nf
+        !
+        qnan = ieee_value(1.0_real64, ieee_quiet_nan)
+        ! Two NaNs and two nulls, plus repeated values: this is the only fixture that can catch a
+        ! comparator putting NaNs on the wrong side of the null block, which no ascending,
+        ! null-free test can see (feature_sort.md section 5.1).
+        vals = [2.0_real64, qnan, -1.0_real64, 2.0_real64, qnan, 0.0_real64, 3.0_real64, -1.0_real64]
+        fvalid = [.true., .true., .true., .false., .true., .false., .true., .true.]
+        cvalid = merge(1_c_int8_t, 0_c_int8_t, fvalid)
+        do id = 0, 1
+            do inf = 0, 1
+                desc = (id == 1)
+                nf = (inf == 1)
+                call keys%clear()
+                call keys%add(vals, descending=desc, nulls_first=nf, is_valid=fvalid)
+                builder = parquet_sort_builder_new(int(n, c_long_long))
+                call parquet_sort_builder_add_key_double(builder, vals, c_loc(cvalid), &
+                    merge(1_c_int8_t, 0_c_int8_t, desc), merge(1_c_int8_t, 0_c_int8_t, nf))
+                call sweep_pairs(error, "real desc=" // merge("T", "F", desc) // " nf=" // &
+                    merge("T", "F", nf), keys, builder, n, 1, 1)
+                call parquet_sort_builder_free(builder)
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_engine_conf_real
+    !
+    !> Fixed-width string keys, including a byte above 127.
+    !!
+    !! `%add` on a `character(len=*)` array sorts on the FULL declared width, blanks included, so
+    !! every row here is the same length and the length tail of the comparison is not reached — that
+    !! is `test_engine_conf_varstr`'s job. What this fixture does cover is the **unsigned** byte
+    !! rule: row 6 carries `achar(200)`, which must sort ABOVE every ASCII row. A comparator reading
+    !! bytes as signed puts it below them, and nothing else in the suite would notice.
+    subroutine test_engine_conf_str(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 7_int64
+        integer(int64), parameter :: w = 3_int64
+        character(len=3), target :: vals(n)
+        integer(c_long_long), target :: offs(n + 1)
+        character(kind=c_char), target :: bytes(n * w)
+        integer(c_int8_t), target :: cvalid(n)
+        logical :: fvalid(n)
+        type(pf_sort_keys) :: keys
+        type(c_ptr) :: builder
+        integer :: id, inf, j
+        integer(int64) :: k
+        logical :: desc, nf
+        !
+        vals = ["abc", "ab ", "abc", "b  ", "a  ", "z  ", "abc"]
+        vals(6)(1:1) = achar(200)
+        fvalid = [.true., .true., .false., .true., .true., .true., .true.]
+        cvalid = merge(1_c_int8_t, 0_c_int8_t, fvalid)
+        ! The same bytes the Fortran side will pack, laid out for the C++ builder: fixed width,
+        ! 0-based offsets, no trimming.
+        do k = 1_int64, n + 1_int64
+            offs(k) = int((k - 1_int64) * w, c_long_long)
+        end do
+        do k = 1_int64, n
+            do j = 1, int(w)
+                bytes((k - 1_int64) * w + j) = vals(k)(j:j)
+            end do
+        end do
+        do id = 0, 1
+            do inf = 0, 1
+                desc = (id == 1)
+                nf = (inf == 1)
+                call keys%clear()
+                call keys%add(vals, descending=desc, nulls_first=nf, is_valid=fvalid)
+                builder = parquet_sort_builder_new(int(n, c_long_long))
+                call parquet_sort_builder_add_key_string(builder, offs, bytes, c_loc(cvalid), &
+                    merge(1_c_int8_t, 0_c_int8_t, desc), merge(1_c_int8_t, 0_c_int8_t, nf))
+                call sweep_pairs(error, "str desc=" // merge("T", "F", desc) // " nf=" // &
+                    merge("T", "F", nf), keys, builder, n, 1, 1)
+                call parquet_sort_builder_free(builder)
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_engine_conf_str
+    !
+    !> Variable-length string keys, where a prefix must sort BEFORE the string it is a prefix of.
+    !!
+    !! This is the one fixture that separates `memcmp` semantics from Fortran's own `<`, which
+    !! blank-pads the shorter operand and would call "ab" and "ab " equal. A `parquet_string_column`
+    !! is the only route to genuinely ragged rows, since the `character(len=*)` form is fixed width.
+    subroutine test_engine_conf_varstr(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 6_int64
+        character(len=*), parameter :: raw(n) = ["ab ", "a  ", "abc", "ab ", "   ", "b  "]
+        integer(int64), parameter :: lens(n) = [2_int64, 1_int64, 3_int64, 2_int64, 0_int64, 1_int64]
+        type(parquet_string_column) :: col
+        integer(c_long_long), target :: offs(n + 1)
+        character(kind=c_char), target :: bytes(9) !! sum(lens) -- sized exactly, not guessed.
+        type(pf_sort_keys) :: keys
+        type(c_ptr) :: builder
+        integer :: id, inf, j
+        integer(int64) :: k, pos
+        logical :: desc, nf
+        !
+        ! "a" is a prefix of "ab", which is a prefix of "abc", and "" is a prefix of everything;
+        ! rows 1 and 4 are an exact tie. Fortran's own comparison would order several of these
+        ! differently from memcmp, which is precisely the point.
+        call col%clear()
+        do k = 1_int64, n
+            call col%append_string(raw(k)(1:lens(k)))
+        end do
+        pos = 0_int64
+        do k = 1_int64, n
+            offs(k) = int(pos, c_long_long)
+            do j = 1, int(lens(k))
+                bytes(pos + j) = raw(k)(j:j)
+            end do
+            pos = pos + lens(k)
+        end do
+        offs(n + 1) = int(pos, c_long_long)
+        do id = 0, 1
+            do inf = 0, 1
+                desc = (id == 1)
+                nf = (inf == 1)
+                call keys%clear()
+                call keys%add(col, descending=desc, nulls_first=nf)
+                builder = parquet_sort_builder_new(int(n, c_long_long))
+                call parquet_sort_builder_add_key_string(builder, offs, bytes, c_null_ptr, &
+                    merge(1_c_int8_t, 0_c_int8_t, desc), merge(1_c_int8_t, 0_c_int8_t, nf))
+                call sweep_pairs(error, "varstr desc=" // merge("T", "F", desc) // " nf=" // &
+                    merge("T", "F", nf), keys, builder, n, 1, 1)
+                call parquet_sort_builder_free(builder)
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_engine_conf_varstr
+    !
+    !> Three keys of mixed family, swept over every `nkeys` prefix including an over-long one.
+    !!
+    !! The prefix is what run detection uses -- "sort by field then magnitude, but group by field
+    !! alone" -- so an off-by-one there silently changes what `pf_unique`/`pf_rank` treat as one
+    !! group while leaving every ordering correct. The primary key repeats heavily so that the
+    !! second and third keys actually decide most pairs.
+    subroutine test_engine_conf_multi(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 8_int64
+        integer(int64), parameter :: w = 2_int64
+        integer(int64), target :: k1(n)
+        real(real64), target :: k2(n)
+        character(len=2), target :: k3(n)
+        integer(c_long_long), target :: offs(n + 1)
+        character(kind=c_char), target :: bytes(n * w)
+        integer(c_int8_t), target :: cvalid(n)
+        logical :: fvalid(n)
+        type(pf_sort_keys) :: keys
+        type(c_ptr) :: builder
+        integer :: nk, j
+        integer(int64) :: k
+        !
+        k1 = [1_int64, 1_int64, 1_int64, 2_int64, 2_int64, 2_int64, 1_int64, 2_int64]
+        k2 = [7.0_real64, 7.0_real64, 5.0_real64, 1.0_real64, 1.0_real64, 9.0_real64, 7.0_real64, 1.0_real64]
+        k3 = ["bb", "aa", "cc", "aa", "zz", "mm", "bb", "aa"]
+        ! Nulls on the SECOND key only, so the tier rule has to be applied per key rather than per
+        ! row -- a comparator that hoisted the null test out of the key loop would pass every
+        ! single-key fixture above and fail here.
+        fvalid = [.true., .true., .false., .true., .true., .true., .true., .false.]
+        cvalid = merge(1_c_int8_t, 0_c_int8_t, fvalid)
+        do k = 1_int64, n + 1_int64
+            offs(k) = int((k - 1_int64) * w, c_long_long)
+        end do
+        do k = 1_int64, n
+            do j = 1, int(w)
+                bytes((k - 1_int64) * w + j) = k3(k)(j:j)
+            end do
+        end do
+        !
+        call keys%add(k1)
+        call keys%add(k2, descending=.true., is_valid=fvalid)
+        call keys%add(k3, nulls_first=.true.)
+        builder = parquet_sort_builder_new(int(n, c_long_long))
+        call parquet_sort_builder_add_key_int64(builder, k1, c_null_ptr, 0_c_int8_t, 0_c_int8_t)
+        call parquet_sort_builder_add_key_double(builder, k2, c_loc(cvalid), 1_c_int8_t, 0_c_int8_t)
+        call parquet_sort_builder_add_key_string(builder, offs, bytes, c_null_ptr, 0_c_int8_t, 1_c_int8_t)
+        ! nkeys = 4 is deliberately one more than exists: both engines must clamp, not read past.
+        do nk = 1, 4
+            call sweep_pairs(error, "multi nkeys=" // achar(iachar("0") + nk), keys, builder, n, nk, 3)
+            if (allocated(error)) then
+                call parquet_sort_builder_free(builder)
+                return
+            end if
+        end do
+        call parquet_sort_builder_free(builder)
+    end subroutine test_engine_conf_multi
     !
 end module test_sorting

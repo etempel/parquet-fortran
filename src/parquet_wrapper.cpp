@@ -7203,6 +7203,54 @@ extern "C"
 		return 1;
 	}
 
+	// ---- Conformance hooks for the Fortran comparator core (TEST-ONLY) -------------------------
+	//
+	// feature_sort.md Stage 1 replaces sort_tier_of/sort_compare_key/SortRowLess/sort_keys_compare
+	// with Fortran equivalents, and requires them proved equal to THESE, comparator answer for
+	// comparator answer, before any sorting code is written. That cannot be done through any of the
+	// 24 entry points above: every one of them answers at whole-permutation level, and at Stage 1
+	// the Fortran side does not sort yet, so there is no permutation to compare. The four
+	// comparators are `static`, i.e. unreachable from outside this translation unit. Hence these.
+	//
+	// Rows are 0-BASED, matching every other internal index in this file -- the entry points add
+	// the +1 on the way out. The Fortran test declares its own local bind(C) interfaces (the
+	// convention every parquet_debug_* hook follows) and passes i-1. Deliberately NOT declared in
+	// src/parquet_bindings.f90, so none of this reaches the library's own interface.
+	//
+	// Being C++-side is the point: the six hooks of feature_sort.md section 7.4 have to become
+	// PUBLIC Fortran procedures because their state is Fortran-side, and these do not, because the
+	// state they read is here.
+	//
+	// NOTE for anyone writing a test that also counts comparisons: parquet_debug_sort_row_less
+	// invokes SortRowLess, so it increments g_debug_sort_comparison_count when counting is armed.
+	//
+	// Lifetime: under Endpoint B they are deleted with the rest of the engine at Stage 9; under
+	// Endpoint A they stop being scaffolding and become the permanent conformance harness of
+	// feature_sort.md section 8.1.
+
+	// 1 when row `a` sorts before row `b` under the full sort comparator, 0 when it does not,
+	// -1 when no key has been added (which no correct caller does).
+	int64_t parquet_debug_sort_row_less(void *handle, int64_t a, int64_t b)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return -1;
+		SortRowLess less{&h->keys};
+		return less(a, b) ? 1 : 0;
+	}
+
+	// The three-way, tiebreaker-free answer over the leading `nkeys` keys: -1, 0 or +1.
+	//
+	// Returns -2 when no key has been added. NOT -1: that is a legitimate answer here, so the
+	// error sentinel has to sit outside the value range -- unlike parquet_debug_sort_row_less
+	// above, whose answers are only 0 and 1.
+	int64_t parquet_debug_sort_keys_compare(void *handle, int64_t a, int64_t b, int64_t nkeys)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty()) return -2;
+		if (nkeys < 0) nkeys = 0;
+		return sort_keys_compare(h->keys, a, b, static_cast<size_t>(nkeys));
+	}
+
 	// Writes the first `count` entries of the 1-BASED permutation into `perm_out` (which the caller
 	// sized to `count`, not to nrows). `count` is clamped to nrows, so asking for more elements than
 	// exist returns all of them rather than failing -- pf_partial_sort's documented behaviour.

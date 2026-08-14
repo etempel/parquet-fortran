@@ -347,6 +347,8 @@ module parquet_sorting
     public :: parquet_debug_sort_heapsort_calls
     public :: parquet_debug_set_sort_track_shift
     public :: parquet_debug_sort_max_insertion_shift
+    public :: parquet_debug_set_sort_radix_min_rows
+    public :: parquet_debug_set_sort_radix_fail_alloc
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -393,6 +395,28 @@ module parquet_sorting
     logical, save :: dbg_sort_track_shift = .false.
     !> Largest distance the final insertion pass moved any element since the tracker was armed.
     integer(int64), save :: dbg_sort_max_shift = 0_int64
+    !> Overrides the radix path's row floor; NEGATIVE restores the built-in `SORT_RADIX_MIN_ROWS`.
+    !!
+    !! Needed in BOTH directions, which is unusual for a threshold hook. Raising it (to `huge`)
+    !! declines the radix path, which is how the introsort's own negative controls stay non-vacuous
+    !! once the floor drops below their fixture sizes; lowering it (to 2) drives every engine fixture
+    !! in the suite through the radix path, which is the sweep `feature_sort_radix.md` section 7.4
+    !! describes. Both are the `feature_risks.md` Risk-49 shape -- a size threshold hiding a code
+    !! path from the tests written for everything else.
+    integer(int64), save :: dbg_sort_radix_min_rows = -1_int64
+    !> Which of the radix path's scratch allocations should report failure: 0 none, 1 the main
+    !! buffers, 2 the deep string refine's.
+    !!
+    !! Those fallbacks -- decline and let the comparison sort finish the job -- are otherwise
+    !! unreachable from any fixture a test can build: provoking a real `allocate` failure needs a
+    !! machine-sized array, and on Linux's default overcommit policy it would not report one anyway.
+    !! Without this they would ship untested and every mutation to them would survive, which is the
+    !! same argument `dbg_sort_depth_limit` carries for the heapsort arm.
+    !!
+    !! **It selects rather than switches, and it has to.** The two allocations are in series: with a
+    !! single flag, failing the main one returns before the refine's is ever reached, so the refine's
+    !! fallback would stay untested however the flag was set.
+    integer, save :: dbg_sort_radix_fail_alloc = 0
     !
     ! ---- Internal key families ----
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
@@ -1615,6 +1639,25 @@ def emit_engine_interfaces(w):
     w("        module function parquet_debug_sort_max_insertion_shift() result(n)")
     w("            integer(int64) :: n !! largest shift, in positions.")
     w("        end function parquet_debug_sort_max_insertion_shift")
+    w("        !> Test-only override for the radix path's row floor; NEGATIVE restores the built-in.")
+    w("        !!")
+    w("        !! Used in both directions. A huge value DECLINES the radix path, which is what keeps")
+    w("        !! the introsort's and the counting path's own negative controls non-vacuous now that")
+    w("        !! the floor sits below their fixture sizes. A small one drives ordinary fixtures")
+    w("        !! through the radix path. Has no effect on the C++ engine.")
+    w("        module subroutine parquet_debug_set_sort_radix_min_rows(n)")
+    w("            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.")
+    w("        end subroutine parquet_debug_set_sort_radix_min_rows")
+    w("        !> Test-only forcing of an allocation failure in the radix path, to reach its fallbacks.")
+    w("        !!")
+    w("        !! Selects WHICH allocation fails, because the two are in series and a single flag")
+    w("        !! would make the first mask the second: 0 none, 1 the main scratch, 2 the deep")
+    w("        !! string refine's. The fallback answers identically -- it is the comparison sort --")
+    w("        !! so no assertion on a permutation can tell it apart from the radix path. Pair this")
+    w("        !! with the insertion-shift tracker, which can.")
+    w("        module subroutine parquet_debug_set_sort_radix_fail_alloc(which)")
+    w("            integer, intent(in) :: which !! 0 none, 1 the main scratch, 2 the refine's.")
+    w("        end subroutine parquet_debug_set_sort_radix_fail_alloc")
     w("    end interface")
     w("    !")
 

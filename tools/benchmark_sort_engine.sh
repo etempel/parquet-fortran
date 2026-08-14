@@ -68,6 +68,12 @@
 #                    answer identically -- test/test_sorting.f90 asserts that -- so this changes
 #                    timing and nothing else, and an A/B is two runs of this script differing only
 #                    here. Do not change anything else between them.
+#   RADIX_MIN_ROWS=-1
+#                    Overrides the Fortran engine's radix row floor (SORT_RADIX_MIN_ROWS).
+#                    Negative leaves the shipped value in force. This is how the small-n ladder in
+#                    feature_sort_radix.md section 6.4 is run without editing source: set it to 2 to
+#                    force the radix path at every size, or to a huge value to decline it entirely
+#                    and measure the introsort. Ignored by ENGINE=cpp, which has no such path.
 #   TAG=            Extra build-tree suffix, when you need two trees for one compiler.
 #
 # Output goes to stdout; redirect it per the run sheet. Build trees go under test_run/, which is
@@ -88,6 +94,8 @@ THREADS="${THREADS-64}"
 STRWIDTH="${STRWIDTH:-16}"
 SEED="${SEED:-20260814}"
 ENGINE="${ENGINE:-cpp}"
+RADIX_MIN_ROWS="${RADIX_MIN_ROWS:--1}"   # negative leaves the shipped SORT_RADIX_MIN_ROWS alone
+INNER="${INNER:-1}"                     # argsorts per timed region; raise it for small n
 TAG="${TAG:-}"
 
 MODES=(argsort dist ops)
@@ -106,6 +114,8 @@ for arg in "$@"; do
         --strwidth=*)        STRWIDTH="${arg#*=}" ;;
         --seed=*)            SEED="${arg#*=}" ;;
         --engine=*)          ENGINE="${arg#*=}" ;;
+        --radix-min-rows=*)  RADIX_MIN_ROWS="${arg#*=}" ;;
+        --inner=*)           INNER="${arg#*=}" ;;
         --tag=*)             TAG="${arg#*=}" ;;
         -h|--help)
             # Print the leading comment block, however long it grows. A hard-coded line range
@@ -188,6 +198,7 @@ echo "                $DIST_FAMILIES        (dist)"
 echo "                $THREAD_FAMILIES        (threads)"
 echo "  perm kind   : int$PERM      rounds: $ROUNDS      seed: $SEED"
 echo "  sort engine : $ENGINE"
+echo "  radix floor : $RADIX_MIN_ROWS (negative = the shipped SORT_RADIX_MIN_ROWS)"
 echo "  threads     : ${THREADS:-omp_get_max_threads()}      OMP_NUM_THREADS=${OMP_NUM_THREADS:-(unset)}"
 echo "  date        : $(date -u '+%Y-%m-%dT%H:%M:%SZ')  host: $(hostname)"
 echo "=============================================================================="
@@ -262,6 +273,8 @@ for m in "${MODES[@]}"; do
         --mode="$m" --sizes="$SIZES" --families="$(families_for "$m")" --dists="$DISTS" \
         --rounds="$ROUNDS" --perm="$PERM" --strwidth="$STRWIDTH" --seed="$SEED" \
         --engine="$ENGINE" \
+        --radix-min-rows="$RADIX_MIN_ROWS" \
+        --inner="$INNER" \
         "${THREADS_ARG[@]}"
     echo
 done

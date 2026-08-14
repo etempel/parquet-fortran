@@ -67,6 +67,7 @@ module parquet_settings
     public :: parquet_set_message_stream, parquet_get_message_stream
     public :: parquet_set_sort_parallel_min_rows, parquet_get_sort_parallel_min_rows
     public :: parquet_set_sort_counting_path, parquet_get_sort_counting_path
+    public :: parquet_set_sort_radix_path, parquet_get_sort_radix_path
     public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
     public :: parquet_set_target_row_group_bytes, parquet_get_target_row_group_bytes
     public :: parquet_set_statistics_prescreen, parquet_get_statistics_prescreen
@@ -203,6 +204,13 @@ module parquet_settings
     integer(int64), save :: cfg_sort_parallel_min_rows = 0
     !> Whether the sort's integer counting fast path may be taken at all.
     logical, save :: cfg_sort_counting_path = .true.
+    !> Whether the sort's single-key radix fast path may be taken at all.
+    !!
+    !! Deliberately NOT mirrored to C++ by `push_performance_settings`, unlike its counting-path
+    !! neighbour: the radix path exists only in the Fortran engine, so there is nothing on the other
+    !! side of the `bind(C)` boundary for a mirror to govern. Adding one would be a global that no
+    !! code reads, which is the shape `feature_risks.md` Risk-42 warns about from the other end.
+    logical, save :: cfg_sort_radix_path = .true.
     !> Largest key value RANGE (not cardinality) the counting path will accept. `0` = built-in.
     integer(int64), save :: cfg_sort_counting_bucket_limit = 0
     !> Target size in bytes of one auto-sized row group. `0` = built-in.
@@ -662,6 +670,36 @@ contains
         enabled = cfg_sort_counting_path
     end function parquet_get_sort_counting_path
 
+    !> Enables or disables the sort's single-key radix fast path.
+    !>
+    !> The radix path is a stable LSD radix sort that performs **no comparisons at all**, so it is a
+    !> third independent statement of the ordering beside the two comparators
+    !> (`feature_risks.md` Risk-89). Turning it off is how a test compares it against the comparison
+    !> sort on one fixture, which is the only way to grade a path that cannot fail slowly.
+    !>
+    !> **The one reason a program might turn it off is MEMORY.** The radix path allocates up to four
+    !> `n`-element `int64` buffers -- about 32 bytes per row -- where the comparison sort allocates
+    !> nothing beyond the permutation itself. At 50 million rows that is roughly 1.6 GB of scratch,
+    !> which a caller sorting near the edge of available memory may not want to spend. It buys
+    !> several times the throughput on a single key, so leave it on unless that trade is real for
+    !> you.
+    !>
+    !> The full rule, in this order: the radix path is used when this flag is on **and** there is
+    !> exactly one sort key **and** the row count clears an internal floor (the measured crossover
+    !> below which the comparison sort is cheaper). It applies to every key family -- integer, real
+    !> and string alike -- so unlike the counting path, the key's type is no reason it would decline.
+    subroutine parquet_set_sort_radix_path(enabled)
+        logical, intent(in) :: enabled !! .true. (the default) allows the fast path.
+
+        cfg_sort_radix_path = enabled
+    end subroutine parquet_set_sort_radix_path
+
+    !> Reports whether the sort's single-key radix fast path is allowed.
+    logical function parquet_get_sort_radix_path() result(enabled)
+
+        enabled = cfg_sort_radix_path
+    end function parquet_get_sort_radix_path
+
     !> Sets the largest key value RANGE for which the sort's counting fast path is taken. Pass `0`
     !> to restore the built-in 4194304 (2**22).
     !>
@@ -940,6 +978,11 @@ contains
             call env_logical("PARQUET_FORTRAN_SORT_COUNTING_PATH", text, flag)
             call parquet_set_sort_counting_path(flag)
         end if
+        call env_value("PARQUET_FORTRAN_SORT_RADIX_PATH", text, got)
+        if (got) then
+            call env_logical("PARQUET_FORTRAN_SORT_RADIX_PATH", text, flag)
+            call parquet_set_sort_radix_path(flag)
+        end if
         call env_value("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", text, got)
         if (got) then
             call env_int64("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", text, n64)
@@ -1191,6 +1234,7 @@ contains
         cfg_message_stream = stream_stdout
         cfg_sort_parallel_min_rows = 0
         cfg_sort_counting_path = .true.
+        cfg_sort_radix_path = .true.
         cfg_sort_counting_bucket_limit = 0
         cfg_target_row_group_bytes = 0
         cfg_statistics_prescreen = .true.
@@ -1222,6 +1266,7 @@ contains
         call print_one(u, "string_threads", cfg_string_threads)
         call print_big(u, "sort_parallel_min_rows", parquet_get_sort_parallel_min_rows())
         call print_text(u, "sort_counting_path", merge("true ", "false", cfg_sort_counting_path))
+        call print_text(u, "sort_radix_path", merge("true ", "false", cfg_sort_radix_path))
         call print_big(u, "sort_counting_bucket_limit", parquet_get_sort_counting_bucket_limit())
         call parquet_get_default_compression(codec)
         call print_text(u, "default_compression", codec)

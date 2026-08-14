@@ -79,17 +79,42 @@ submodule (parquet_sorting) parquet_sorting_engine
     integer(int64), parameter :: SORT_INSERTION_CUTOFF = 16_int64
     !> Below this row count the single-key radix path declines and the introsort runs.
     !!
-    !! **This is a floor against the radix path's FIXED cost, not a crossover.** The only cost that
-    !! does not scale with `n` is zeroing the 8 x 256 histogram (16 KB) and the bucket cursors, so
-    !! the crossover sits far below this: measured on machine B at n = 200 the radix path is
-    !! already 2.7x faster on a real key and 1.8x on a string one, and it never loses at any size
-    !! measured up to 10^6. The value is deliberately conservative anyway, because
-    !! `test/test_sorting.f90`'s largest engine fixture is 1000 rows and three of its negative
-    !! controls assert that the INTROSORT ran -- lowering this without teaching those tests to
-    !! disable the radix path first turns them from passing into vacuous. See `feature_sort_radix.md`.
-    integer(int64), parameter :: SORT_RADIX_MIN_ROWS = 2048_int64
+    !! **This is the measured crossover, and it is set by the WORST family rather than the best.**
+    !! The radix path's fixed cost is zeroing the 8 x 256 histogram (16 KB) plus 2 KB of cursors,
+    !! which does not scale with `n`; against that, the introsort's per-element cost grows with
+    !! `log n`. Where the two cross depends on how many of the eight byte passes a family can skip,
+    !! and that varies by more than a factor of two -- measured on machine A, gfortran 15.2,
+    !! radix / introsort at `--inner=300`:
+    !!
+    !!       n      i32    i64    f32    f64    str
+    !!       96    1.47   1.42   0.66   0.84   0.62
+    !!      128    1.34   0.99   0.49   0.63   0.46
+    !!      192    1.22   0.77   0.36   0.44   0.35
+    !!      256    0.81   0.67   0.28   0.37   0.28
+    !!
+    !! `f32` and `str` are already winning at n = 96; `i32` still loses at 224 and wins at 256, so
+    !! 256 is where NO family loses. **The reason `i32` is the latecomer is worth knowing before
+    !! anyone lowers this**: key extraction widens an int32 to int64, and a widened NEGATIVE value
+    !! sign-extends to `0xFFFFFFFF...`, so the top four bytes are not constant across a signed
+    !! column and none of those four passes can be skipped. A float32 widened to float64 zeroes its
+    !! low mantissa bytes instead, which is why `f32` is the fastest arm here rather than the
+    !! slowest. The pass-skip test in `sort_radix_permutation` is real; it just fires on fewer
+    !! passes than a reader of it would assume.
+    !!
+    !! Overridable in both directions by `parquet_debug_set_sort_radix_min_rows`, which is what
+    !! keeps the introsort's and the counting path's own negative controls non-vacuous now that this
+    !! sits below their fixture sizes -- see `engine_only_introsort` (`test/test_sorting.f90`) and
+    !! `feature_sort_radix.md`.
+    integer(int64), parameter :: SORT_RADIX_MIN_ROWS = 256_int64
     !> Bytes of a string key that go into the radix; the rest is settled by the refine pass.
     integer(int64), parameter :: SORT_RADIX_PREFIX = 8_int64
+    !> Byte position past which the deep string refine stops recursing and lets the introsort finish.
+    !!
+    !! Bounds the recursion, whose depth is the run's common prefix length -- caller data, and so
+    !! unbounded. Each frame holds a 256-element counter array (2 KB), so 64 bytes is at most ~128 KB
+    !! of stack. Past it the introsort is correct, merely without the radix's help; a column whose
+    !! values share a 64-byte prefix is pathological rather than ordinary.
+    integer(int64), parameter :: SORT_RADIX_MAX_BYTE = 64_int64
     !> The int64 sign bit as a VALUE, since `ishft(1_int64, 63)` is awkward in a constant expression.
     integer(int64), parameter :: SORT_SIGN_BIT = -huge(0_int64) - 1_int64
     !
@@ -331,6 +356,7 @@ contains
     module procedure sort_build_permutation
         use parquet_settings, only : parquet_get_sort_counting_path
         integer(int64) :: lo, hi !! the counting path's value range, carried from the candidate test.
+        logical :: did_radix     !! .false. when the radix path declined for want of memory.
         !
         ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so the one-line form would
         ! run the candidate's O(n) range scan even with the counting path switched off -- and would
@@ -345,8 +371,15 @@ contains
         ! counting sort is one pass where this is up to eight, and Stage 6 requires the `i64lo`
         ! arm not to regress at all.
         if (sort_radix_candidate(keys, n)) then
-            call sort_radix_permutation(keys, n, perm)
-            return
+            ! `did_radix` is .false. only when the scratch could not be allocated, in which case
+            ! nothing has been written to `perm` and the comparison sort below finishes the job --
+            ! it needs no scratch at all. See sort_radix_permutation for why this is not an abort.
+            if (size(keys) == 1) then
+                call sort_radix_permutation(keys, n, perm, did_radix)
+            else
+                call sort_radix_multi_permutation(keys, n, perm, did_radix)
+            end if
+            if (did_radix) return
         end if
         call sort_comparison_permutation(keys, n, perm)
     end procedure sort_build_permutation
@@ -526,13 +559,34 @@ contains
     !! histogram's fixed cost. A multi-key sort is deliberately excluded: LSD does compose across
     !! keys, but that is a larger change and is not implemented here.
     function sort_radix_candidate(keys, n) result(ok)
+        use parquet_settings, only : parquet_get_sort_radix_path
         type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
         integer(int64), intent(in) :: n           !! rows to order.
         logical :: ok                             !! .true. when the radix path applies.
         !
+        integer(int64) :: floor_rows !! the floor in force, built-in or forced by the debug hook.
+        !
+        integer :: k !! key index, when checking a multi-key list.
+        !
         ok = .false.
-        if (size(keys) /= 1) return
-        if (n < SORT_RADIX_MIN_ROWS) return
+        if (.not. parquet_get_sort_radix_path()) return
+        if (size(keys) < 1) return
+        floor_rows = SORT_RADIX_MIN_ROWS
+        if (dbg_sort_radix_min_rows >= 0_int64) floor_rows = dbg_sort_radix_min_rows
+        if (n < floor_rows) return
+        ! A STRING key is accepted alone and refused in company, and the asymmetry is not an
+        ! oversight. A string's image is only its first `SORT_RADIX_PREFIX` bytes, so rows sharing a
+        ! prefix come out of the radix unordered; the single-key path finishes them with
+        ! `sort_radix_refine_strings`, which is free to consult the whole ordering because there is
+        ! only one key. In a multi-key sort that repair would have to order a run by ONE key while
+        ! preserving the order the lower keys already established -- a stable single-key comparison
+        ! sort, which this engine does not have. See `feature_sort_radix.md` W4 for what including
+        ! them would cost.
+        if (size(keys) > 1) then
+            do k = 1, size(keys)
+                if (keys(k)%family == SK_STR) return
+            end do
+        end if
         ok = .true.
     end function sort_radix_candidate
 
@@ -593,10 +647,26 @@ contains
 
     !> Fills `perm` by a stable LSD radix sort over ONE key. See this section's banner for why the
     !! result is the permutation `sort_comparison_permutation` would have produced.
-    subroutine sort_radix_permutation(keys, n, perm)
+    !!
+    !! **Runs out of memory by DECLINING, not by aborting.** This path needs about 32 bytes per row
+    !! of scratch (measured, and linear: 32.03 B/row at 5 M rows, 32.01 at 10 M, 31.92 at 20 M; a
+    !! string column can add 8 more, but only if a shared-prefix run actually needs splitting)
+    !! where the comparison sort needs none, so it is the one place in the engine where an ordinary
+    !! sort of ordinary data can fail purely for being large. Both `allocate`s therefore carry
+    !! `stat=`, and a failure returns `ok = .false.` with `perm` untouched, whereupon the caller
+    !! runs the comparison sort instead. The answer is identical either way -- only the time differs
+    !! -- so there is nothing to report and no reason to stop.
+    !!
+    !! **On Linux this is a partial defence and that is worth knowing.** Under the default
+    !! overcommit policy a large `allocate` usually SUCCEEDS and the kernel kills the process on
+    !! first touch, so `stat=` never sees it; the fallback works where allocation failure is really
+    !! reported (macOS, and Linux with overcommit restricted). Where it cannot help, the honest
+    !! answer is `parquet_set_sort_radix_path(.false.)`, which declines the scratch up front.
+    subroutine sort_radix_permutation(keys, n, perm, ok)
         type(sort_key_buf), intent(in) :: keys(:) !! the keys; exactly one, per `sort_radix_candidate`.
         integer(int64), intent(in) :: n           !! rows to order.
         integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
+        logical, intent(out) :: ok                !! .false. when the scratch could not be allocated.
         !
         integer(int64), allocatable :: ka(:), kb(:) !! key images, ping-ponged between passes.
         integer(int64), allocatable :: ra(:), rb(:) !! the row indices travelling with them.
@@ -609,12 +679,15 @@ contains
         integer(int64) :: nan_pos, null_pos !! next output position for a NaN / a null, 1-based.
         logical :: has_nulls, is_real, is_str !! hoisted family and nullability tests.
         integer :: p !! byte position, 0 = least significant.
+        integer :: ios !! allocation status; nonzero means decline, never abort.
         real(real64) :: x !! one real key value, for the NaN test.
         !
+        ok = .false.
         has_nulls = allocated(keys(1)%valid)
         is_real = (keys(1)%family == SK_REAL)
         is_str = (keys(1)%family == SK_STR)
-        allocate(ka(n), ra(n))
+        allocate(ka(n), ra(n), stat=ios)
+        if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 1) return
         !
         ! Pass 1 -- tier split and key transform, walked in ROW ORDER so that every tie and both
         ! non-value tiers keep file order with no later stable pass needed.
@@ -664,7 +737,11 @@ contains
                     u = ishft(u, -8)
                 end do
             end do
-            allocate(kb(nv), rb(nv))
+            allocate(kb(nv), rb(nv), stat=ios)
+            ! Nothing has been written to `perm` yet, so returning here really is a clean decline
+            ! rather than a half-finished sort. Keep any future allocation ahead of the first
+            ! `perm` write for the same reason.
+            if (ios /= 0) return
             do p = 0, 7
                 ! A byte position every row agrees on cannot reorder anything. This is what makes a
                 ! key narrower than 64 bits cost proportionately less -- an int32 or a float32 key
@@ -715,7 +792,152 @@ contains
                 end if
             end do
         end if
+        ok = .true.
     end subroutine sort_radix_permutation
+
+    !> Fills `perm` by running one stable radix pass per key, from the LAST key to the first.
+    !!
+    !! **Why right to left.** Each pass is stable, so a pass on key `k` leaves rows that tie on key
+    !! `k` in the order the previous passes established — which is the order given by keys `k+1 …`.
+    !! Running the keys in reverse therefore ends with the rows ordered by key 1, ties broken by
+    !! key 2, and so on, which is exactly what `sort_row_less` walks. The initial order is the
+    !! identity, so rows tying on every key keep file order — the row-index tiebreaker, obtained
+    !! without ever comparing an index.
+    !!
+    !! **Every key carries its own tiers and its own flags**, which is the thing to hold on to here:
+    !! `descending` and `nulls_first` are per key, a NaN tier exists only for a real key, and a row
+    !! that is null under key 2 may be an ordinary value under key 1. Nothing about a row is decided
+    !! once for all keys; each pass asks its own key afresh.
+    !!
+    !! String keys are excluded by `sort_radix_candidate` — see the note there.
+    subroutine sort_radix_multi_permutation(keys, n, perm, ok)
+        type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order; at least two.
+        integer(int64), intent(in) :: n           !! rows to order.
+        integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
+        logical, intent(out) :: ok                !! .false. when the scratch could not be allocated.
+        !
+        integer(int64), allocatable :: code(:), pb(:), cb(:) !! key images, and the ping-pong buffers.
+        integer(int64), allocatable :: tmp(:)                !! `move_alloc` intermediary.
+        integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
+        integer(int64) :: off(0:255)       !! running output cursor per bucket.
+        integer(int64) :: tier(0:2)        !! rows per tier, then the tier pass's output cursor.
+        integer(int64) :: i, j, b, u       !! row, output slot, bucket, shift register.
+        integer :: k, p, r                 !! key index, byte position, tier rank.
+        integer :: ios                     !! allocation status; a failure declines, never aborts.
+        !
+        ok = .false.
+        allocate(code(n), pb(n), cb(n), stat=ios)
+        if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 1) return
+        do i = 1_int64, n
+            perm(i) = i
+        end do
+        !
+        do k = size(keys), 1, -1
+            ! The value image, and 0 for a row this key calls null or NaN -- those are ordered by
+            ! the tier pass below, and giving them one shared image leaves them in the order the
+            ! keys after this one established, which is what stability owes them.
+            do j = 1_int64, n
+                if (sort_radix_tier_rank(keys(k), perm(j)) == sort_radix_value_rank(keys(k))) then
+                    code(j) = sort_radix_image(keys(k), perm(j))
+                else
+                    code(j) = 0_int64
+                end if
+            end do
+            !
+            hist = 0_int64
+            do j = 1_int64, n
+                u = code(j)
+                do p = 0, 7
+                    b = iand(u, 255_int64)
+                    hist(b, p) = hist(b, p) + 1_int64
+                    u = ishft(u, -8)
+                end do
+            end do
+            do p = 0, 7
+                ! A byte position every row agrees on cannot reorder anything -- the same skip the
+                ! single-key path uses, and the reason a narrow key costs proportionately less.
+                b = iand(ishft(code(1), -8 * p), 255_int64)
+                if (hist(b, p) == n) cycle
+                i = 1_int64
+                do b = 0_int64, 255_int64
+                    off(b) = i
+                    i = i + hist(b, p)
+                end do
+                do j = 1_int64, n
+                    b = iand(ishft(code(j), -8 * p), 255_int64)
+                    cb(off(b)) = code(j)
+                    pb(off(b)) = perm(j)
+                    off(b) = off(b) + 1_int64
+                end do
+                call move_alloc(code, tmp)
+                call move_alloc(cb, code)
+                call move_alloc(tmp, cb)
+                do j = 1_int64, n
+                    perm(j) = pb(j)
+                end do
+            end do
+            !
+            ! The tier pass, last because the tier outranks the value. Three buckets, whose ORDER
+            ! already carries this key's `nulls_first` -- see `sort_radix_tier_rank`.
+            tier = 0_int64
+            do j = 1_int64, n
+                r = sort_radix_tier_rank(keys(k), perm(j))
+                tier(r) = tier(r) + 1_int64
+            end do
+            ! Every row in one tier: nothing to reorder, and the common case for an ordinary column.
+            if (maxval(tier) == n) cycle
+            i = 1_int64
+            do r = 0, 2
+                b = tier(r)
+                tier(r) = i
+                i = i + b
+            end do
+            do j = 1_int64, n
+                r = sort_radix_tier_rank(keys(k), perm(j))
+                pb(tier(r)) = perm(j)
+                tier(r) = tier(r) + 1_int64
+            end do
+            do j = 1_int64, n
+                perm(j) = pb(j)
+            end do
+        end do
+        ok = .true.
+    end subroutine sort_radix_multi_permutation
+
+    !> Which tier one row sits in under one key, as a rank that sorts ASCENDING: 0 first, 2 last.
+    !!
+    !! `value`/`NaN`/`null` is 0/1/2 by default; `nulls_first` reverses the tier order outright,
+    !! which is `2 - tier` and not a special case anywhere. `descending` is deliberately absent —
+    !! it reorders WITHIN the value tier and never moves a null or a NaN, which is the single rule
+    !! this engine is most often got wrong.
+    function sort_radix_tier_rank(key, i) result(r)
+        type(sort_key_buf), intent(in) :: key !! the bound key.
+        integer(int64), intent(in) :: i       !! row, 1-based.
+        integer :: r                          !! 0, 1 or 2.
+        !
+        real(real64) :: x !! the value being tested for NaN.
+        !
+        r = 0
+        if (allocated(key%valid)) then
+            if (key%valid(i) == 0_c_int8_t) r = 2
+        end if
+        if (r == 0 .and. key%family == SK_REAL) then
+            ! `x /= x` rather than `ieee_is_nan` -- see this submodule's header.
+            x = key%reals(i)
+            if (x /= x) r = 1
+        end if
+        if (key%nulls_first) r = 2 - r
+    end function sort_radix_tier_rank
+
+    !> The rank `sort_radix_tier_rank` gives a VALUE-tier row under one key, so a caller can ask
+    !! "is this row a value?" without restating the `nulls_first` arithmetic and getting it backwards.
+    function sort_radix_value_rank(key) result(r)
+        type(sort_key_buf), intent(in) :: key !! the bound key.
+        integer :: r                          !! the rank a value-tier row has under this key.
+        !
+        r = 0
+        if (key%nulls_first) r = 2
+    end function sort_radix_value_rank
 
     !> Orders the string rows the radix could not separate, using the ordinary comparator.
     !!
@@ -728,10 +950,17 @@ contains
     !! and `compare_bytes` calls the shorter string less, which is what a zero pad does. So a run
     !! boundary in `ka` is a genuine ordering boundary and each run can be finished independently.
     !!
-    !! **A run whose rows are all `SORT_RADIX_PREFIX` bytes or shorter is already finished.** Those
-    !! rows are byte-identical, so the comparator answers 0 for every pair and the radix's own
-    !! stability has already left them in row order. Skipping them is what keeps a column of short
-    !! repeated values — a category label, a status flag — off the comparator entirely.
+    !! **A run whose rows all fit the window AND share one LENGTH is already finished.** Only then are
+    !! they byte-identical, so the comparator answers 0 for every pair and the radix's own stability
+    !! has already left them in row order. Skipping those is what keeps a column of short repeated
+    !! values — a category label, a status flag — off the comparator entirely.
+    !!
+    !! **The length half of that test is load-bearing and is easy to drop**, because "fits the window
+    !! and shares an image" reads like it already means byte-identical. It does not: the image is
+    !! zero-PADDED, so `"a"` and `"a"//char(0)` produce the same 8 bytes at lengths 1 and 2, and
+    !! `compare_bytes` calls the shorter one less. Dropping the test leaves such a run in file order,
+    !! which is a wrong permutation with no abort and nothing to notice it — `feature_risks.md`
+    !! Risk-89, and `feature_sort_radix.md` §12.2 for the reproduction.
     subroutine sort_radix_refine_strings(keys, ka, ra, nv, value_base, perm)
         type(sort_key_buf), intent(in) :: keys(:) !! the keys; exactly one, of family SK_STR.
         integer(int64), intent(in) :: ka(:)       !! the sorted key images, `1..nv`.
@@ -741,7 +970,13 @@ contains
         integer(int64), intent(inout) :: perm(:)  !! the permutation, refined in place.
         !
         integer(int64) :: s, e, j !! first and last index of a run, and a cursor within it.
-        logical :: refine         !! .true. when some row in the run outruns the prefix window.
+        integer(int64) :: ln      !! byte length of row `j`.
+        integer(int64) :: len0    !! byte length of the run's first row, the one the others must match.
+        integer(int64) :: minlen, maxlen !! the run's length extremes, handed to the refine.
+        logical :: refine         !! .true. when the run is not already in its final order.
+        integer(int64), allocatable :: buf(:)
+        !! scatter scratch for the deep refine, allocated only if some run actually needs it -- so a
+        !! column whose values all fit the window never pays for it at all.
         !
         if (nv < 2_int64) return
         s = 1_int64
@@ -752,25 +987,185 @@ contains
                 e = e + 1_int64
             end do
             if (e > s) then
+                ! One scan answers both questions: whether this run needs refining at all, and the
+                ! length extremes the refine then carries down instead of rescanning per level.
+                len0 = keys(1)%offsets(ra(s) + 1_int64) - keys(1)%offsets(ra(s))
+                minlen = len0
+                maxlen = len0
                 refine = .false.
                 do j = s, e
-                    if (keys(1)%offsets(ra(j) + 1_int64) - keys(1)%offsets(ra(j)) > SORT_RADIX_PREFIX) then
-                        refine = .true.
-                        exit
-                    end if
+                    ln = keys(1)%offsets(ra(j) + 1_int64) - keys(1)%offsets(ra(j))
+                    if (ln < minlen) minlen = ln
+                    if (ln > maxlen) maxlen = ln
+                    ! Past the window: bytes the radix never saw may still separate these rows.
+                    ! A differing length: same image, different string -- see the note above.
+                    if (ln > SORT_RADIX_PREFIX .or. ln /= len0) refine = .true.
                 end do
-                if (refine) then
-                    ! The ordinary introsort, over this run only. It settles the remaining bytes,
-                    ! the lengths and the index tiebreaker in one go, because `sort_row_less` is
-                    ! the whole ordering and knows nothing about how the run was reached.
-                    call sort_introsort_loop(keys, perm, value_base + s, value_base + e, &
-                        2 * sort_ilog2(e - s + 1_int64))
-                    call sort_insertion(keys, perm, value_base + s, value_base + e)
-                end if
+                if (refine) call sort_radix_refine_run(keys, value_base + s, value_base + e, &
+                    SORT_RADIX_PREFIX, minlen, maxlen, perm, buf)
             end if
             s = e + 1_int64
         end do
     end subroutine sort_radix_refine_strings
+
+    !> Orders one tied run by continuing the radix a byte at a time, recursing on each new run.
+    !!
+    !! `perm(lo:hi)` all agree on bytes `[0, at)` -- under the PADDING convention, so a row shorter
+    !! than `at` agrees by having NUL where a longer one has a real byte. This is MSD rather than
+    !! LSD, which is what lets it subdivide: one counting pass over byte `at` splits the run into
+    !! buckets that are already in final order relative to each other, and each bucket is then the
+    !! same problem one byte deeper.
+    !!
+    !! **Why byte `at` orders the buckets correctly** is the sound half of the argument in the
+    !! caller, one level down: two rows differing at byte `at` hold either two real bytes, which
+    !! `compare_bytes` compares as unsigned exactly as the bucket index does, or a real byte against
+    !! a row that has ended -- and a row that has ended pads to 0, which is the lowest bucket, which
+    !! is `compare_bytes` calling the shorter string less.
+    !!
+    !! Three ways out, and each is there for a different reason:
+    !!
+    !! * **`at >= maxlen` with every length equal: the rows are byte-identical.** Stability has
+    !!   already left them in row order, which is the whole answer. This is the case that makes an
+    !!   all-equal string column O(n) instead of O(n log n) -- the one worst case the radix path had.
+    !! * **`at >= maxlen` with lengths differing, or a run at the depth cap: hand it to the
+    !!   introsort.** `sort_row_less` is the whole ordering, so it settles remaining bytes, lengths
+    !!   and the index tiebreaker together and knows nothing about how the run was reached. Length
+    !!   ordering is deliberately NOT reimplemented here: it would be a fourth expression of the
+    !!   ordering, and `descending` would have to be applied to it by hand.
+    !! * **A short run: hand it to the introsort too**, because 256 counters cost more than sorting
+    !!   a handful of rows.
+    !!
+    !! The depth cap is what bounds the recursion. Depth grows with the common prefix length, which
+    !! is caller data and therefore unbounded; each frame holds a 2 KB counter array, so an
+    !! uncapped recursion on pathological input would exhaust the stack. Past the cap the introsort
+    !! finishes the job correctly, just without the radix's help.
+    !! Two shortcuts keep the all-equal case cheap, and both mirror something the main radix already
+    !! does. **A byte every row agrees on cannot reorder anything**, so a single non-empty bucket
+    !! recurses without scattering or copying — the same reasoning as the main pass-skip test, one
+    !! level down. And **the run's length extremes are carried down rather than rescanned**, which
+    !! is exact rather than approximate: a run that did not split has precisely the rows its parent
+    !! had, so its extremes are its parent's. Together these take a column of identical long strings
+    !! from four passes per byte to one.
+    recursive subroutine sort_radix_refine_run(keys, lo, hi, at, minlen, maxlen, perm, buf)
+        type(sort_key_buf), intent(in) :: keys(:)   !! the keys; exactly one, of family SK_STR.
+        integer(int64), intent(in) :: lo, hi        !! the run, as absolute `perm` positions.
+        integer(int64), intent(in) :: at            !! byte position to split on, 0-based.
+        integer(int64), intent(in) :: minlen, maxlen !! this run's own byte-length extremes.
+        integer(int64), intent(inout) :: perm(:)    !! the permutation, refined in place.
+        integer(int64), allocatable, intent(inout) :: buf(:)
+        !! scatter scratch, allocated on first need and reused by every run below it.
+        !
+        integer(int64) :: cnt(0:255) !! rows per bucket, then the running output cursor.
+        integer(int64) :: i, t, b    !! walk index, prefix-sum accumulator, bucket.
+        integer(int64) :: sub_lo, sub_min, sub_max !! one child run and its own extremes.
+        integer(int64) :: ln         !! byte length of one row, while scanning a child's extremes.
+        integer :: ios               !! allocation status; a failure just means the introsort finishes.
+        !
+        if (hi <= lo) return
+        ! Every real byte is behind us: only length can separate these rows now.
+        if (at >= maxlen) then
+            if (minlen == maxlen) return
+            call sort_radix_refine_tail(keys, lo, hi, perm)
+            return
+        end if
+        if (hi - lo < SORT_INSERTION_CUTOFF .or. at >= SORT_RADIX_MAX_BYTE) then
+            call sort_radix_refine_tail(keys, lo, hi, perm)
+            return
+        end if
+        !
+        cnt = 0_int64
+        do i = lo, hi
+            b = sort_radix_byte_at(keys(1), perm(i), at)
+            cnt(b) = cnt(b) + 1_int64
+        end do
+        ! One bucket holds the whole run: this byte separates nothing, so there is nothing to move.
+        do b = 0_int64, 255_int64
+            if (cnt(b) == hi - lo + 1_int64) then
+                call sort_radix_refine_run(keys, lo, hi, at + 1_int64, minlen, maxlen, perm, buf)
+                return
+            end if
+        end do
+        !
+        if (.not. allocated(buf)) then
+            allocate(buf(size(perm, kind=int64)), stat=ios)
+            ! Same rule as the main path: running out of scratch is a reason to be slower, never a
+            ! reason to fail. The introsort needs none. The debug hook covers BOTH allocations, so
+            ! that one scenario reaches both fallbacks rather than leaving this one untested.
+            if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 2) then
+                call sort_radix_refine_tail(keys, lo, hi, perm)
+                return
+            end if
+        end if
+        t = lo
+        do b = 0_int64, 255_int64
+            i = cnt(b)
+            cnt(b) = t
+            t = t + i
+        end do
+        ! Stable by construction, which is what keeps the row-index tiebreaker satisfied without
+        ! ever consulting it: equal bytes leave in the order they arrived.
+        do i = lo, hi
+            b = sort_radix_byte_at(keys(1), perm(i), at)
+            buf(cnt(b)) = perm(i)
+            cnt(b) = cnt(b) + 1_int64
+        end do
+        perm(lo:hi) = buf(lo:hi)
+        !
+        ! `cnt(b)` is now one PAST that bucket's last slot, so the bucket is [previous end, cnt(b)).
+        ! The run really split here, so each child's extremes are rescanned -- summed over the
+        ! buckets that is one pass over the run, i.e. exactly what scanning in the child would cost.
+        t = lo
+        do b = 0_int64, 255_int64
+            if (cnt(b) > t) then
+                sub_lo = t
+                sub_min = huge(0_int64)
+                sub_max = 0_int64
+                do i = sub_lo, cnt(b) - 1_int64
+                    ln = keys(1)%offsets(perm(i) + 1_int64) - keys(1)%offsets(perm(i))
+                    if (ln < sub_min) sub_min = ln
+                    if (ln > sub_max) sub_max = ln
+                end do
+                call sort_radix_refine_run(keys, sub_lo, cnt(b) - 1_int64, at + 1_int64, &
+                    sub_min, sub_max, perm, buf)
+                t = cnt(b)
+            end if
+        end do
+    end subroutine sort_radix_refine_run
+
+    !> Hands one run to the ordinary introsort. Split out so that the three ways the radix gives up
+    !! read as one decision rather than three copies of a two-line call.
+    subroutine sort_radix_refine_tail(keys, lo, hi, perm)
+        type(sort_key_buf), intent(in) :: keys(:) !! the keys; exactly one, of family SK_STR.
+        integer(int64), intent(in) :: lo, hi      !! the run, as absolute `perm` positions.
+        integer(int64), intent(inout) :: perm(:)  !! the permutation, refined in place.
+        !
+        if (hi <= lo) return
+        call sort_introsort_loop(keys, perm, lo, hi, 2 * sort_ilog2(hi - lo + 1_int64))
+        call sort_insertion(keys, perm, lo, hi)
+    end subroutine sort_radix_refine_tail
+
+    !> Byte `at` of one string row, 0-based, as an unsigned 0..255 -- or the PAD when the row has
+    !! ended, which is what makes a shorter string sort before a longer one that extends it.
+    !!
+    !! `descending` complements the byte, exactly as `sort_radix_image` complements the whole
+    !! 64-bit image and for the same reason: complementing reverses the value order while leaving
+    !! stability intact, where reversing the output would put ties backwards.
+    function sort_radix_byte_at(key, i, at) result(b)
+        type(sort_key_buf), intent(in) :: key !! the bound key, of family SK_STR.
+        integer(int64), intent(in) :: i       !! row, 1-based.
+        integer(int64), intent(in) :: at      !! byte position, 0-based.
+        integer(int64) :: b                   !! the bucket, 0..255.
+        !
+        integer(int64) :: ln !! byte length of row `i`.
+        !
+        ln = key%offsets(i + 1_int64) - key%offsets(i)
+        if (at >= ln) then
+            b = 0_int64
+        else
+            b = int(iand(iachar(key%data(key%offsets(i) + 1_int64 + at)), 255), int64)
+        end if
+        if (key%descending) b = 255_int64 - b
+    end function sort_radix_byte_at
 
     ! ---- The serial sort: introsort over sort_row_less ------------------------------------------
     !
@@ -1142,6 +1537,14 @@ contains
     module procedure parquet_debug_sort_max_insertion_shift
         n = dbg_sort_max_shift
     end procedure parquet_debug_sort_max_insertion_shift
+
+    module procedure parquet_debug_set_sort_radix_min_rows
+        dbg_sort_radix_min_rows = n
+    end procedure parquet_debug_set_sort_radix_min_rows
+
+    module procedure parquet_debug_set_sort_radix_fail_alloc
+        dbg_sort_radix_fail_alloc = which
+    end procedure parquet_debug_set_sort_radix_fail_alloc
 
     module procedure parquet_debug_sort_sweep_compare
         integer(int64) :: rep, i, j, stride

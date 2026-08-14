@@ -75,6 +75,8 @@ program benchmark_sort_engine
     integer :: threads_hi = -1                 !! high thread count; -1 = omp_get_max_threads().
     integer(int64) :: seed_arg = 20260814_int64
     character(len=:), allocatable :: engine !! "cpp" or "fortran": which sort engine to measure.
+    integer(int64) :: radix_min !! forced radix row floor; NEGATIVE leaves the shipped one in force.
+    integer :: inner = 1 !! argsort repetitions INSIDE one timed region; see time_argsort.
 
     integer(int64), allocatable :: sizes(:)
     integer(int64) :: checksum = 0_int64
@@ -411,14 +413,28 @@ contains
 
     !> One timed `pf_argsort` for the current data set. Splitting this out keeps the timer
     !! immediately around the library call, with the family dispatch outside it.
+    !!
+    !! **`--inner` exists because `system_clock` has a floor and a small sort is under it.** At
+    !! n = 32 a whole argsort is a few hundred nanoseconds, so a single timed call reports one clock
+    !! tick whatever it actually cost -- 31.24 ns/element at n = 32 and 15.63 at n = 64 is the same
+    !! 1 us tick divided by two different n, not a measurement. Repeating the call inside the timer
+    !! and dividing is what makes the small end of a size ladder mean anything. Rounds cannot
+    !! substitute: the best of seven quantised readings is still quantised.
+    !!
+    !! It is NOT free of its own bias -- later iterations run on warm caches, and `perm` is
+    !! reallocated per call on every one of them. Both apply equally to whatever two configurations
+    !! are being compared, so a RATIO survives; an absolute ns/element at small n does not, and
+    !! should not be quoted against a figure taken at `--inner=1`.
     subroutine time_argsort(fam, n, nthr, best)
         character(len=*), intent(in) :: fam   !! key family.
         integer(int64), intent(in) :: n       !! rows.
         integer, intent(in) :: nthr           !! threads to ask for.
         real(real64), intent(inout) :: best   !! running minimum, updated in place.
         real(real64) :: t0, t1
+        integer :: it
         !
         t0 = wtime()
+        do it = 1, inner
         select case (fam)
         case ("i32")
             if (permkind == 64) then
@@ -461,8 +477,9 @@ contains
             write(error_unit,'(a)') "benchmark_sort_engine: unknown family '"//fam//"'"
             error stop 2
         end select
+        end do
         t1 = wtime()
-        best = min(best, t1 - t0)
+        best = min(best, (t1 - t0) / real(inner, real64))
         if (permkind == 64) then
             checksum = checksum + perm64(1) + perm64(n)
         else
@@ -1024,6 +1041,7 @@ contains
         dists = "rand,sorted,reverse,organ,equal,null001,null10,nan"
         sizes_arg = "1000,10000,100000,1000000,5000000,20000000"
         engine = "cpp"
+        radix_min = -1_int64
         !
         do i = 1, command_argument_count()
             call get_command_argument(i, arg)
@@ -1047,6 +1065,8 @@ contains
             case ("--threads");  read(val, *, iostat=ios) threads_hi
             case ("--seed");     read(val, *, iostat=ios) seed_arg
             case ("--engine");   engine = val
+            case ("--radix-min-rows"); read(val, *, iostat=ios) radix_min
+            case ("--inner");    read(val, *, iostat=ios) inner
             case default
                 write(error_unit,'(a)') "benchmark_sort_engine: unknown option '"//key//"'"
                 call usage()
@@ -1065,11 +1085,15 @@ contains
         ! Selecting the engine here rather than per arm: every arm below must run on ONE engine, or
         ! a figure could be filed against the wrong one with nothing in the output to say so.
         call parquet_debug_use_fortran_sort_engine(engine == "fortran")
+        ! Same reasoning: set once, for every arm, so no figure can be filed against a floor
+        ! other than the one the banner reports. Negative leaves the shipped floor alone.
+        call parquet_debug_set_sort_radix_min_rows(radix_min)
         if (permkind /= 32 .and. permkind /= 64) then
             write(error_unit,'(a)') "benchmark_sort_engine: --perm must be 32 or 64"
             error stop 2
         end if
         if (rounds < 1) rounds = 1
+        if (inner < 1) inner = 1
         if (seed_arg == 0_int64) seed_arg = 1_int64   ! xorshift64 is degenerate at zero
         !
         ! `read` needs a CHARACTER VARIABLE as its internal unit, never a function result, so the
@@ -1100,6 +1124,8 @@ contains
         write(output_unit,'(a)') "  --threads=N                           high thread count (default: max)"
         write(output_unit,'(a)') "  --seed=N                              PRNG seed"
         write(output_unit,'(a)') "  --engine=cpp|fortran                  which sort engine to measure"
+        write(output_unit,'(a)') "  --radix-min-rows=N                    override the radix path's row floor"
+        write(output_unit,'(a)') "  --inner=N                             argsorts per timed region (small n)"
         write(output_unit,'(a)') ""
         write(output_unit,'(a)') "Drive this with tools/benchmark_sort_engine.sh, never a bare fpm run:"
         write(output_unit,'(a)') "without --profile release every number here is meaningless."

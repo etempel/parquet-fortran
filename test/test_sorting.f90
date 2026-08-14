@@ -226,6 +226,12 @@ contains
                 test_radix_path_value_shapes), &
             new_unittest("engine: the radix path matches C++ on strings that outrun its prefix", &
                 test_radix_path_string_shapes), &
+            new_unittest("engine: the radix path falls back rather than aborting when it cannot allocate", &
+                test_radix_path_alloc_fallback), &
+            new_unittest("engine: the radix path's deep string refine matches C++ past its window", &
+                test_radix_path_deep_strings), &
+            new_unittest("engine: the multi-key radix matches C++ and declines a string key", &
+                test_radix_path_multi_key), &
             new_unittest("engine: the forced heapsort fallback matches the C++ sort", &
                 test_fortran_engine_heapsort_fallback), &
             new_unittest("engine: the depth-limit hook really reaches the heapsort fallback", &
@@ -5739,6 +5745,30 @@ contains
         call check(error, all(seen(1:n)), label // ": the Fortran permutation does not name every row once")
     end subroutine engine_ab
     !
+    !> Forces the introsort by declining BOTH single-key fast paths, or restores the shipped defaults.
+    !!
+    !! Every test that observes the introsort — its heapsort arm, its depth limit, its presort
+    !! invariant, its behaviour on adversarial shapes — needs the range actually to reach it. Both
+    !! fast paths answer identically, so a test intercepted by one of them does not fail; it goes
+    !! quiet, which is worse. That is `feature_risks.md` Risk-49 and it has now happened twice here:
+    !! the counting path took `test_fortran_engine_depth_limit_bites` when Stage 3 landed, and
+    !! lowering `SORT_RADIX_MIN_ROWS` below these fixtures' sizes would have taken five more.
+    !!
+    !! Calling this in pairs (`.true.` … `.false.`) rather than reading and restoring the previous
+    !! values is safe because the `sorting` suite is excluded from test-drive's per-test parallelism
+    !! — both knobs are process-global, which is why that exclusion exists.
+    subroutine engine_only_introsort(on)
+        logical, intent(in) :: on !! .true. forces the introsort; .false. restores the shipped floors.
+        !
+        if (on) then
+            call parquet_set_sort_counting_path(.false.)
+            call parquet_debug_set_sort_radix_min_rows(huge(0_int64))
+        else
+            call parquet_set_sort_counting_path(.true.)
+            call parquet_debug_set_sort_radix_min_rows(-1_int64)
+        end if
+    end subroutine engine_only_introsort
+    !
     !> The switch really switches: the C++ engine counts comparisons, the Fortran one cannot.
     !!
     !! **Without this every other Stage 2 test is potentially vacuous.** They assert that two
@@ -5904,36 +5934,43 @@ contains
                     v(k) = min(k, n - k + 1_int64)
                 end do
             end select
-            ! The counting fast path would take the C++ arm for every one of these -- they are all
-            ! dense small ranges -- so it is turned off, leaving both arms comparison sorts over the
-            ! same degenerate shape. That is the comparison this test is for.
-            call parquet_set_sort_counting_path(.false.)
+            ! Both fast paths would take every one of these -- they are all dense small ranges, and
+            ! n clears the radix floor -- so both are declined, leaving both arms comparison sorts
+            ! over the same degenerate shape. That is the comparison this test is for.
+            call engine_only_introsort(.true.)
             call keys%clear()
             call keys%add(v)
             call engine_ab(error, trim(label), keys, n)
-            call parquet_set_sort_counting_path(.true.)
+            call engine_only_introsort(.false.)
             if (allocated(error)) return
         end do
     end subroutine test_fortran_engine_adversarial
     !
-    !> The radix path must actually RUN above its row floor, and must NOT run below it.
+    !> The radix path must actually RUN above its row floor, must NOT below it, and the OVERRIDE must
+    !! move that floor in both directions.
     !!
     !! Every other radix test compares permutations, and the radix path and the introsort answer
     !! identically by construction -- so all of them would pass just as happily against a radix path
-    !! that never ran, which is the whole trap `SORT_RADIX_MIN_ROWS` sets: the engine's other
-    !! fixtures top out at 1000 rows, well under the floor.
+    !! that never ran, which is the whole trap `SORT_RADIX_MIN_ROWS` sets.
     !!
     !! The observable is the insertion tracker. The introsort always ends with one insertion pass
     !! over the whole range, so on random input it records a positive shift; the radix path never
     !! calls `sort_insertion` at all for a non-string key. A REAL key is used because the string
     !! refine pass does call it, and an integer one could be taken by the counting path instead.
+    !!
+    !! **The last two assertions are what six other tests rest on.** Since the floor was lowered,
+    !! `engine_only_introsort` is the only thing keeping the introsort's and the counting path's own
+    !! negative controls non-vacuous, and it works by raising this floor to `huge`. A hook that
+    !! silently did nothing would leave all six passing while testing a fast path instead -- the
+    !! `had_index` shape from `feature_risks.md` Risk-75, where a hook that forces a state has to
+    !! prove the state took effect.
     subroutine test_radix_path_runs(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
-        integer(int64), parameter :: above = 4096_int64 !! comfortably over the floor.
-        integer(int64), parameter :: below = 1000_int64 !! comfortably under it.
+        integer(int64), parameter :: above = 4096_int64 !! comfortably over the shipped floor.
+        integer(int64), parameter :: below = 64_int64   !! comfortably under it.
         real(real64), allocatable :: v(:)
         integer(int64), allocatable :: perm(:)
-        integer(int64) :: k, shift_above, shift_below
+        integer(int64) :: k, shift_above, shift_below, shift_declined, shift_forced
         !
         allocate(v(above))
         do k = 1_int64, above
@@ -5941,12 +5978,26 @@ contains
         end do
         !
         call parquet_debug_use_fortran_sort_engine(.true.)
+        !
+        ! The shipped floor, both sides of it.
         call parquet_debug_set_sort_track_shift(.true.)
         call pf_argsort(v(1:above), perm)
         shift_above = parquet_debug_sort_max_insertion_shift()
         call parquet_debug_set_sort_track_shift(.true.)
         call pf_argsort(v(1:below), perm)
         shift_below = parquet_debug_sort_max_insertion_shift()
+        !
+        ! The override, both directions, over the sizes that just took the OTHER path.
+        call parquet_debug_set_sort_radix_min_rows(huge(0_int64))
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(v(1:above), perm)
+        shift_declined = parquet_debug_sort_max_insertion_shift()
+        call parquet_debug_set_sort_radix_min_rows(2_int64)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(v(1:below), perm)
+        shift_forced = parquet_debug_sort_max_insertion_shift()
+        !
+        call parquet_debug_set_sort_radix_min_rows(-1_int64)
         call parquet_debug_set_sort_track_shift(.false.)
         call parquet_debug_use_fortran_sort_engine(.false.)
         !
@@ -5956,6 +6007,12 @@ contains
         if (allocated(error)) return
         call check(error, shift_above == 0_int64, &
             "above the floor the insertion pass still ran, so the radix path did not take the sort")
+        if (allocated(error)) return
+        call check(error, shift_declined > 0_int64, &
+            "raising the radix floor to huge did not decline the radix path, so engine_only_introsort is a no-op")
+        if (allocated(error)) return
+        call check(error, shift_forced == 0_int64, &
+            "lowering the radix floor to 2 did not reach the radix path, so the override is one-directional")
     end subroutine test_radix_path_runs
     !
     !> The radix path's key transform must not lose a value shape the comparator distinguishes.
@@ -6072,6 +6129,12 @@ contains
     !! to agree with `compare_bytes`: lengths on either side of the window and exactly on it, an
     !! empty string, an embedded NUL just past the window (a real byte that pads look like), and
     !! bytes above 127, which must sort HIGH because the comparison is unsigned.
+    !!
+    !! Cases 8-11 are the ones the refine pass may NOT skip even though every row fits the window:
+    !! `""`/`char(0)` and `"a"`/`"a"//char(0)`/`"a"//char(0)//char(0)` are distinct strings sharing
+    !! one zero-padded image, so a run of them is ordered by LENGTH and the radix leaves them in file
+    !! order. The NUL at case 5 does not reach this — it sits past the window, where the refine pass
+    !! runs anyway. See `feature_sort_radix.md` §12.2 and `feature_risks.md` Risk-89.
     subroutine test_radix_path_string_shapes(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64), parameter :: n = 4096_int64
@@ -6086,7 +6149,7 @@ contains
         call col%clear()
         do k = 1_int64, n
             write (num, "(i8.8)") int(mod(k * 7_int64, 97_int64))
-            select case (int(mod(k, 8_int64)))
+            select case (int(mod(k, 12_int64)))
             case (0)
                 s = "commonpre" // num          ! differs only AFTER the prefix window
             case (1)
@@ -6101,6 +6164,14 @@ contains
                 s = "commonpr" // char(0) // num ! an embedded NUL just past it
             case (6)
                 s = char(200) // char(255) // num ! bytes above 127 sort HIGH
+            case (8)
+                s = "a"                         ! these four share one zero-padded image
+            case (9)
+                s = "a" // char(0)              ! ... at length 2 -- ordered AFTER "a"
+            case (10)
+                s = "a" // char(0) // char(0)   ! ... and at length 3
+            case (11)
+                s = char(0)                     ! ... as do "" (case 2) and this, at 0 and 1
             case default
                 s = num
             end select
@@ -6118,6 +6189,262 @@ contains
             end do
         end do
     end subroutine test_radix_path_string_shapes
+    !
+    !> The multi-key radix runs one stable pass per key from the LAST key to the first, so what it
+    !! has to get right is that every key carries its OWN tiers and its own flags.
+    !!
+    !! The fixture is built so the later keys are actually reached: the primary is low-cardinality
+    !! (16 distinct values over 1024 rows), which is the shape `feature_risks.md` Risk-35 is about —
+    !! a multi-key test whose primary key has no ties never consults the second key and silently
+    !! measures a single-key sort. Both keys carry nulls, the real key carries NaNs, and
+    !! `descending`/`nulls_first` are swept INDEPENDENTLY per key, because a pass that applied one
+    !! key's flags to another would agree with C++ on every fixture where the two happen to match.
+    !!
+    !! The last two assertions are the negative control and the decline. Two numeric keys above the
+    !! floor must take the radix, which leaves the insertion tracker at zero; adding a STRING key
+    !! must make `sort_radix_candidate` refuse — a string's image is only its first 8 bytes and the
+    !! multi-key path has no way to repair a shared-prefix run — so the introsort runs and the
+    !! tracker records a shift. Without the second half, a candidate that wrongly accepted a string
+    !! key would return a quietly wrong permutation on any column with a shared prefix.
+    subroutine test_radix_path_multi_key(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 1024_int64
+        integer(int64) :: vi(n)
+        real(real64) :: vr(n)
+        logical :: valid_i(n), valid_r(n)
+        type(parquet_string_column) :: col
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k, shift_num, shift_str
+        integer(int64), allocatable :: perm(:)
+        integer :: a, b
+        logical :: d1, n1, d2, n2
+        !
+        do k = 1_int64, n
+            vi(k) = mod(k * 7_int64, 16_int64)          ! 16 distinct values: long tie runs
+            vr(k) = real(mod(k * 31_int64, 1009_int64), real64)
+            if (mod(k, 37_int64) == 0_int64) vr(k) = ieee_value(1.0_real64, ieee_quiet_nan)
+            valid_i(k) = (mod(k, 23_int64) /= 0_int64)
+            valid_r(k) = (mod(k, 29_int64) /= 0_int64)
+        end do
+        call col%clear()
+        do k = 1_int64, n
+            call col%append_string("tie")               ! one shared prefix, to make a decline matter
+        end do
+        !
+        ! Each key's own flags, swept independently of the other's.
+        do a = 0, 3
+            do b = 0, 3
+                d1 = (mod(a, 2) == 1)
+                n1 = (a / 2 == 1)
+                d2 = (mod(b, 2) == 1)
+                n2 = (b / 2 == 1)
+                call keys%clear()
+                call keys%add(vi, descending=d1, nulls_first=n1, is_valid=valid_i)
+                call keys%add(vr, descending=d2, nulls_first=n2, is_valid=valid_r)
+                call engine_ab(error, "multi radix" // radix_tag(d1, n1) // radix_tag(d2, n2), keys, n)
+                if (allocated(error)) return
+            end do
+        end do
+        !
+        ! Three keys, to prove the chain composes rather than only handling a pair.
+        call keys%clear()
+        call keys%add(vi, is_valid=valid_i)
+        call keys%add(vr, descending=.true., is_valid=valid_r)
+        call keys%add(vi, descending=.true.)
+        call engine_ab(error, "multi radix three keys", keys, n)
+        if (allocated(error)) return
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call keys%clear()
+        call keys%add(vi)
+        call keys%add(vr)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(keys, perm)
+        shift_num = parquet_debug_sort_max_insertion_shift()
+        !
+        call keys%add(col)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(keys, perm)
+        shift_str = parquet_debug_sort_max_insertion_shift()
+        call parquet_debug_set_sort_track_shift(.false.)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, shift_num == 0_int64, &
+            "two numeric keys above the floor should have taken the multi-key radix, but the insertion pass ran")
+        if (allocated(error)) return
+        call check(error, shift_str > 0_int64, &
+            "adding a string key must make the multi-key radix decline, but the introsort did not run")
+    end subroutine test_radix_path_multi_key
+    !
+    !> The refine pass continues the radix a BYTE at a time past its 8-byte window, so these are the
+    !! shapes that reach the recursion rather than the first window.
+    !!
+    !! Each case targets one clause of `sort_radix_refine_run`, and several would pass against a
+    !! plainly broken one — which is why they run through `engine_ab` against C++ rather than against
+    !! the introsort, and why the shapes are mixed into ONE column so that runs actually interleave:
+    !!
+    !! * a long shared prefix with varying tails — the recursion itself, and the bucket split;
+    !! * the SAME prefix at two different lengths — the W12 hazard one level down, where a row that
+    !!   has ended pads to 0 and must sort before one that continues;
+    !! * an embedded NUL deep in the value, which is a real byte that looks exactly like that pad;
+    !! * a run of identical long values — the single-bucket shortcut and the `minlen == maxlen`
+    !!   early return, which is the case the whole item exists for;
+    !! * a prefix longer than `SORT_RADIX_MAX_BYTE`, so the recursion hits its depth cap and the
+    !!   introsort finishes — the one path where the radix deliberately gives up mid-string.
+    !!
+    !! **The `AAAAAAAAAAAAx`/`...y` pair is sized deliberately and the size is the point.** Reversing
+    !! the scatter — dropping the stability the row-index tiebreaker depends on — survived every
+    !! other shape here, because their byte-identical groups are all smaller than
+    !! `SORT_INSERTION_CUTOFF` and so end at the introsort, which re-sorts them correctly and hides
+    !! the damage. That is `feature_risks.md` Risk-86 one level down: a complete sort underneath
+    !! makes everything above it invisible. This pair gives ~455 byte-identical rows per bucket,
+    !! comfortably over the cutoff, in a run that really splits — so they leave through the
+    !! `minlen == maxlen` return in whatever order the scatter left them, and an unstable scatter
+    !! fails. Do not shrink `n` or add cases without checking this group stays over the cutoff.
+    subroutine test_radix_path_deep_strings(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 4096_int64
+        character(len=*), parameter :: p40 = "0123456789012345678901234567890123456789"
+        character(len=*), parameter :: p80 = p40 // p40
+        type(parquet_string_column) :: col
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k
+        integer :: id, inf
+        logical :: desc, nf
+        character(len=:), allocatable :: s
+        character(len=8) :: num
+        !
+        call col%clear()
+        do k = 1_int64, n
+            write (num, "(i8.8)") int(mod(k * 7_int64, 97_int64))
+            select case (int(mod(k, 9_int64)))
+            case (0)
+                s = p40 // num                       ! deep recursion, varying tail
+            case (1)
+                s = p40 // num // "z"                ! same tail, one byte longer
+            case (2)
+                s = p40                              ! a strict prefix of both above
+            case (3)
+                s = "identical-long-value-24"        ! all-equal run: the single-bucket shortcut
+            case (4)
+                s = p40(1:20) // char(0) // num      ! a NUL deep inside, past the window
+            case (5)
+                s = p40(1:20)                        ! ends exactly where that NUL sits
+            case (6)
+                s = "AAAAAAAAAAAAx"                  ! see below: a LARGE byte-identical group...
+            case (7)
+                s = "AAAAAAAAAAAAy"                  ! ...that its sibling splits away from
+            case default
+                s = p80 // num                       ! past SORT_RADIX_MAX_BYTE: the depth cap
+            end select
+            call col%append_string(s)
+        end do
+        !
+        do id = 0, 1
+            do inf = 0, 1
+                desc = (id == 1)
+                nf = (inf == 1)
+                call keys%clear()
+                call keys%add(col, descending=desc, nulls_first=nf)
+                call engine_ab(error, "radix deep strings" // radix_tag(desc, nf), keys, n)
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_radix_path_deep_strings
+    !
+    !> A radix path that cannot get its scratch must DECLINE, not abort — and still be right.
+    !!
+    !! It needs about 32 bytes per row where the comparison sort needs none (measured: 32.03 B/row
+    !! at 5 M rows, 32.01 at 10 M, 31.92 at 20 M), so an ordinary sort of ordinary data can fail
+    !! purely for being large. Both `allocate`s carry `stat=` and return `perm` untouched on
+    !! failure, whereupon the caller runs the comparison sort. The answer is identical either way,
+    !! which is exactly why this needs the insertion tracker as well as an equality check: without
+    !! it, a fallback that never engaged and a fallback that engaged correctly are the same test.
+    !!
+    !! Provoking a real allocation failure would need a machine-sized array and, under Linux's
+    !! default overcommit policy, would not report one anyway — hence the hook.
+    subroutine test_radix_path_alloc_fallback(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 4096_int64
+        real(real64), allocatable :: v(:)
+        integer(int64), allocatable :: perm_scratch(:)
+        type(parquet_string_column) :: strs
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k, shift_ok, shift_failed
+        !
+        allocate(v(n))
+        do k = 1_int64, n
+            v(k) = real(mod(k * 7919_int64, 4001_int64), real64)
+        end do
+        call keys%add(v)
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(v, perm_scratch)
+        shift_ok = parquet_debug_sort_max_insertion_shift()
+        !
+        call parquet_debug_set_sort_radix_fail_alloc(1)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(v, perm_scratch)
+        shift_failed = parquet_debug_sort_max_insertion_shift()
+        call parquet_debug_set_sort_radix_fail_alloc(0)
+        call parquet_debug_set_sort_track_shift(.false.)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, shift_ok == 0_int64, &
+            "the control run should have taken the radix path, but the insertion pass ran")
+        if (allocated(error)) return
+        call check(error, shift_failed > 0_int64, &
+            "a failed radix allocation did not fall back to the comparison sort")
+        if (allocated(error)) return
+        !
+        ! And the answer is still right. Forced on for the whole A/B, so both Fortran arms would
+        ! have to be wrong in the same way to agree with C++.
+        call parquet_debug_set_sort_radix_fail_alloc(1)
+        call engine_ab(error, "radix alloc fallback", keys, n)
+        if (allocated(error)) then
+            call parquet_debug_set_sort_radix_fail_alloc(0)
+            return
+        end if
+        !
+        ! The deep string refine allocates a SECOND buffer, on its own, only when a shared-prefix run
+        ! actually splits — so it has its own fallback and the hook covers that one too. A string
+        ! fixture is the only way in: the run above is a real key and never reaches it.
+        call parquet_debug_set_sort_radix_fail_alloc(2)
+        call keys%clear()
+        call str_prefix_column(strs, n)
+        call keys%add(strs)
+        call engine_ab(error, "radix deep alloc fallback", keys, n)
+        call parquet_debug_set_sort_radix_fail_alloc(0)
+        if (allocated(error)) return
+        call engine_ab(error, "radix deep alloc control", keys, n)
+        if (allocated(error)) return
+        !
+        ! The MULTI-key driver allocates its own scratch and so has its own fallback. It shares the
+        ! `1` selector with the single-key path because the two are alternatives rather than a
+        ! sequence — only one of them runs for a given key list — so no third value is needed.
+        call keys%clear()
+        call keys%add(v)
+        call keys%add(v, descending=.true.)
+        call parquet_debug_set_sort_radix_fail_alloc(1)
+        call engine_ab(error, "multi radix alloc fallback", keys, n)
+        call parquet_debug_set_sort_radix_fail_alloc(0)
+    end subroutine test_radix_path_alloc_fallback
+    !
+    !> A string column whose values share a prefix past the radix window and then split — the shape
+    !! that makes the deep refine allocate its scatter buffer at all.
+    subroutine str_prefix_column(col, n)
+        type(parquet_string_column), intent(inout) :: col !! receives `n` values.
+        integer(int64), intent(in) :: n                   !! rows to build.
+        integer(int64) :: k
+        character(len=8) :: num
+        !
+        call col%clear()
+        do k = 1_int64, n
+            write (num, "(i8.8)") int(mod(k * 7_int64, 211_int64))
+            call col%append_string("sharedprefix" // num)
+        end do
+    end subroutine str_prefix_column
     !
     !> Names the flag combination in a radix test's failure message.
     function radix_tag(desc, nf) result(tag)
@@ -6153,13 +6480,20 @@ contains
             valid(k) = (mod(k, 11_int64) /= 0_int64)
         end do
         !
+        ! The depth limit is an introsort concept, so the radix path has to be declined or it takes
+        ! the sort and the forced fallback is never entered at all.
+        call engine_only_introsort(.true.)
+        !
         ! The negative control: the same fixture through the ordinary quicksort path first. If the
         ! forced-limit run below were silently taking that same path, this pair would still pass --
         ! but `test_fortran_engine_depth_limit_bites` is what rules that out.
         call keys%clear()
         call keys%add(v, is_valid=valid)
         call engine_ab(error, "heap control", keys, n)
-        if (allocated(error)) return
+        if (allocated(error)) then
+            call engine_only_introsort(.false.)
+            return
+        end if
         !
         call parquet_debug_set_sort_depth_limit(0)
         do id = 0, 1
@@ -6169,10 +6503,12 @@ contains
             call engine_ab(error, "heapsort desc=" // merge("T", "F", desc), keys, n)
             if (allocated(error)) then
                 call parquet_debug_set_sort_depth_limit(-1)
+                call engine_only_introsort(.false.)
                 return
             end if
         end do
         call parquet_debug_set_sort_depth_limit(-1)
+        call engine_only_introsort(.false.)
     end subroutine test_fortran_engine_heapsort_fallback
     !
     !> The quicksort must leave every element within the cutoff of its place — not merely sortable.
@@ -6206,6 +6542,10 @@ contains
         end do
         call keys%add(v)
         call parquet_debug_use_fortran_sort_engine(.true.)
+        ! The invariant belongs to the introsort, and both fast paths leave the tracker at zero --
+        ! which would satisfy the bound below while proving nothing. Declining them is what keeps
+        ! the `shift_quick > 0` control meaningful.
+        call engine_only_introsort(.true.)
         !
         call parquet_debug_set_sort_track_shift(.true.)
         call pf_argsort(keys, perm)
@@ -6218,6 +6558,7 @@ contains
         !
         call parquet_debug_set_sort_track_shift(.false.)
         call parquet_debug_set_sort_depth_limit(-1)
+        call engine_only_introsort(.false.)
         call parquet_debug_use_fortran_sort_engine(.false.)
         !
         ! Nonzero on the way up as well as bounded on the way down: a tracker that never fired would
@@ -6267,6 +6608,12 @@ contains
         integer(int64), allocatable :: p_off(:) !! Fortran, counting path forced off.
         integer(int64) :: shift_on, shift_off   !! insertion-pass movement on each Fortran arm.
         !
+        ! The RADIX path is declined for the whole comparison, not because it would answer wrongly
+        ! but because it would answer FIRST: it accepts every single-key sort above its floor, so
+        ! with it live the "counting off" arm would be the radix rather than the comparator and the
+        ! A/B this whole subroutine exists to perform would compare two fast paths.
+        call parquet_debug_set_sort_radix_min_rows(huge(0_int64))
+        !
         call parquet_debug_use_fortran_sort_engine(.false.)
         call pf_argsort(keys, pc)
         !
@@ -6283,6 +6630,7 @@ contains
         !
         call parquet_set_sort_counting_path(.true.)
         call parquet_debug_set_sort_track_shift(.false.)
+        call parquet_debug_set_sort_radix_min_rows(-1_int64)
         call parquet_debug_use_fortran_sort_engine(.false.)
         !
         call check(error, all(p_on == pc), label // ": the counting path disagrees with the C++ engine")
@@ -6496,12 +6844,14 @@ contains
         ! so a real one cannot reach it whatever `parquet_set_sort_counting_path` says — which keeps
         ! this test independent of a process-global setting a sibling could disturb. It used an
         ! integer key until Stage 3 landed, at which point the counting path silently took over and
-        ! the introsort stopped running here at all.
+        ! the introsort stopped running here at all. The RADIX path accepts every family, so a key
+        ! type is no defence against that one and it has to be declined explicitly.
         do k = 1_int64, n
             v(k) = real(mod(k * 17_int64, 251_int64), real64)
         end do
         call keys%add(v)
         call parquet_debug_use_fortran_sort_engine(.true.)
+        call engine_only_introsort(.true.)
         !
         ! The computed limit, i.e. what ships: 2*floor(log2(300)) = 16, which 300 random-ish rows
         ! come nowhere near. Setting -1 both restores the computed limit and zeroes the counter.
@@ -6513,6 +6863,7 @@ contains
         call pf_argsort(keys, perm)
         heap_forced = parquet_debug_sort_heapsort_calls()
         call parquet_debug_set_sort_depth_limit(-1)
+        call engine_only_introsort(.false.)
         call parquet_debug_use_fortran_sort_engine(.false.)
         !
         call check(error, heap_normal == 0_int64, &

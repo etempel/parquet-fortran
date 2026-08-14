@@ -153,6 +153,7 @@ something a reader is expected to have.
 | [Risk-86](#risk-86--a-defective-quicksort-still-returns-a-correctly-sorted-answer) | A defective quicksort still returns a correctly sorted answer | 4 — covered |
 | [Risk-87](#risk-87--the-counting-sorts-range-check-cannot-be-written-the-way-c-writes-it) | The counting sort's range check cannot be written the way C++ writes it | 4 — covered |
 | [Risk-88](#risk-88--the-sort-comparator-silently-loses-a-third-of-its-speed-if-it-outgrows-an-inlining-budget) | The sort comparator silently loses a third of its speed if it outgrows an inlining budget | 3 — not testable |
+| [Risk-89](#risk-89--the-radix-path-is-a-third-expression-of-the-ordering-and-a-wrong-answer-there-is-silent) | The radix path is a third expression of the ordering, and a wrong answer there is silent | 4 — covered |
 
 ---
 
@@ -3753,3 +3754,71 @@ roughly a third of its speed. `tools/benchmark_sort_ab.sh` is what confirms the 
 once the symbol is seen. Note the budget is a property of the compiler and its version, so a future
 GCC may reintroduce the split without any source change — which is exactly why this is written down
 rather than left to whoever next reads a disappointing benchmark.
+
+### Risk-89 — The radix path is a third expression of the ordering, and a wrong answer there is silent
+
+`sort_radix_image` and `sort_radix_permutation` (`src/parquet_sorting_engine.f90`,
+`feature_sort_radix.md`) reproduce `sort_compare_key`'s ordering without performing a single
+comparison. That makes them a **third** independent statement of what "sorted" means, beside
+`sort_row_less` and `sort_keys_compare` — which is `feature_risks.md` **Risk-34** with one more
+party, and worse than Risk-34 in one respect: the two comparators at least fail in the same
+direction, whereas a radix defect answers a shape the comparator answers differently and nothing
+compares the two unless a fixture happens to contain that shape.
+
+Every rule the comparator applies has a counterpart here that looks nothing like it, so a change to
+one does not visibly implicate the other:
+
+| comparator rule | radix counterpart |
+|---|---|
+| tier: value / NaN / null, absolute | a three-block split of the output, walked in row order |
+| `descending` reorders the value tier only | `not(t)` on the value image; block order untouched |
+| `nulls_first` reverses tier order | which block base is which, computed before any pass |
+| `-0.0 == +0.0` | both forced to one image, or the radix would order a pair the comparator calls equal |
+| `compare_bytes` reads bytes unsigned, prefix < longer | a big-endian zero-padded 8-byte image, plus a refine pass |
+| the row-index tiebreaker | LSD stability, which is not the same mechanism at all |
+
+**Confirmed instance, and it is what this entry is really for.** The refine pass skipped any tied run
+whose rows all fit the 8-byte window, on the stated grounds that such rows are byte-identical. They
+are not — the image is zero-*padded*, so `"a"` (1 byte) and `"a"//char(0)` (2 bytes) share one image
+while `compare_bytes` calls the shorter one less. A 4096-row column alternating those two values came
+back **4096/4096 positions wrong**, with the whole column left in file order. Nothing aborted, the
+suite stayed green, and the two string defences that existed both missed it for the same reason: the
+one embedded NUL in `test_radix_path_string_shapes` sat at byte 17, *past* the window, where the
+refine pass runs anyway, and `feature_sort_radix.md` §7.4's floor-forced-to-2 sweep — the strongest
+evidence in that document — swept a fixture space containing no window-internal NUL at all. **A sweep
+is only as exhaustive as its fixtures.**
+
+**The rule this forbids.** *A change to any tier, `descending`, `nulls_first` or byte-comparison rule
+must be applied to the radix path in the same change, and the fixture that distinguishes the old rule
+from the new one must be added to the string/value shape tests.* And the sharper half, since it is
+the one that actually bit: *an argument that two rows "must be identical" because they agree on a
+LOSSY image is never sound* — the image is 8 bytes of a variable-length value, so agreement on it is
+agreement on a projection, and the missing coordinate (here, length) has to be tested separately.
+
+Two further consequences worth stating, because both are ways of re-entering the same hole.
+`SORT_RADIX_MIN_ROWS` keeps this path off every ordinary fixture (`feature_risks.md` **Risk-49** is
+the general form: a size threshold hiding a code path), so the tests that reach it are only the ones
+written for it — which is why lowering the floor is real coverage work and not a tuning change. And
+the radix path is currently reachable only through
+`parquet_debug_use_fortran_sort_engine(.true.)`; at `feature_sort.md`'s Stage 6 cutover it becomes
+the shipped answer for every single-key `pf_argsort`/`pf_sort` above the floor.
+
+**A FOURTH party joined this since the entry was written.** `sort_radix_multi_permutation` orders a
+multi-key sort by running one stable radix pass per key from the last key to the first, and it
+expresses the tier / `descending` / `nulls_first` rules again in its own terms — per key rather than
+per row, via `sort_radix_tier_rank`. Everything above applies to it unchanged, with one addition
+specific to it: **the per-key flags must stay per key.** A pass that applied one key's `descending`
+or `nulls_first` to another agrees with the comparator on every fixture where the two flags happen to
+match, which is most of them; only a fixture sweeping the flags **independently per key** can see it,
+and `test_radix_path_multi_key` is built that way for exactly this reason.
+
+**Test.** `test_radix_path_string_shapes`, `test_radix_path_value_shapes`, `test_radix_path_runs`,
+`test_radix_path_deep_strings`, `test_radix_path_multi_key` and `test_radix_path_alloc_fallback`
+(`test/test_sorting.f90`). The first now carries the window-internal shapes that caught the instance
+above — `""`/`char(0)` and `"a"`/`"a"//char(0)`/`"a"//char(0)//char(0)`, three distinct lengths under
+one image — and reverting the length half of the refine test fails it, confirmed by mutation. The
+second sweeps the value shapes a key transform can lose (signed zero, infinities, NaN, int64
+extremes, all-null, one-valid) across all four `descending`/`nulls_first` combinations. The third is
+the negative control for both: it asserts via the insertion-shift tracker that the radix path
+actually ran above the floor and did not below it, without which every other radix test would pass
+just as happily against a radix path that never executed.

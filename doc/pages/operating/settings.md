@@ -209,8 +209,8 @@ because you changed the codec.
 
 ## Tuning the sort
 
-Three knobs govern the sort engine. All three are read at each sort, so they take effect
-immediately, and all three are process-global — a sort anywhere in your program sees the same
+Four knobs govern the sort engine. All four are read at each sort, so they take effect
+immediately, and all four are process-global — a sort anywhere in your program sees the same
 values.
 
 ```fortran
@@ -246,6 +246,39 @@ Turning the counting path off has no performance case — it exists so the two i
 compared against each other on the same data, which is how the library tests that they agree.
 
 Both numbers accept `0`, meaning "restore the built-in value", and both accept either integer kind.
+
+`parquet_set_sort_radix_path(flag)` controls the single-key radix fast path — a stable
+least-significant-digit radix sort that orders a column by bucketing its bytes rather than by
+comparing rows at all. It applies to **every** key family, integer, real and string alike, so unlike
+the counting path the key's type is never a reason it declines. The rule is: the radix path is used
+when the flag is on, *and* there is exactly one sort key, *and* the row count clears an internal
+floor set at the measured point below which the comparison sort is cheaper.
+
+**This knob governs the pure-Fortran sort engine, which is not yet the default one** — until it
+becomes so, setting it changes nothing about an ordinary sort. Everything below describes what it
+will control, and is measured rather than projected.
+
+**Unlike the counting path, this one has a real reason to turn off, and it is memory.** The radix
+path needs about **32 bytes of scratch per row** — four `int64` buffers — where the comparison sort
+needs none beyond the permutation itself. Measured peak resident set, radix on against radix off:
+
+| rows | comparison sort | radix path | difference |
+|---|---|---|---|
+| 5 million | 296 MB | 456 MB | 160 MB |
+| 10 million | 536 MB | 856 MB | 320 MB |
+| 20 million | 656 MB | 1295 MB | 638 MB |
+
+At 50 million rows that is roughly 1.6 GB of scratch. A string column whose values share more than
+eight leading bytes can add one further buffer — 8 bytes per row — but only if such a run actually
+needs splitting, so an ordinary string column never allocates it. What you buy for it is several
+times the throughput — at 20 million rows the same sort took 68 ns per element with the radix path and 1092 ns
+without, a factor of 16 — so leave it on unless you are sorting near the edge of available memory.
+
+If the scratch cannot be allocated the library does **not** fail: the radix path stands down and the
+comparison sort finishes the job, which needs no scratch and gives the identical answer. One caveat
+worth knowing — on Linux's default memory-overcommit policy a large allocation usually succeeds and
+the kernel kills the process on first touch instead, so this safety net cannot engage there. If you
+know you are memory-bound, turn the setting off rather than relying on it.
 
 ## Row-group size when writing
 
@@ -358,6 +391,7 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_STRING_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS` | integer >= 0 (`0` = built-in) |
 | `PARQUET_FORTRAN_SORT_COUNTING_PATH` | `true`/`false`/`1`/`0` |
+| `PARQUET_FORTRAN_SORT_RADIX_PATH` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT` | integer >= 0 (`0` = built-in) |
 | `PARQUET_FORTRAN_DEFAULT_COMPRESSION` | `uncompressed`/`snappy`/`gzip`/`zstd`/`brotli`/`lz4` |
 | `PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL` | integer |
@@ -420,6 +454,7 @@ parquet-fortran settings
   string_threads                   0
   sort_parallel_min_rows           8192
   sort_counting_path               true
+  sort_radix_path                  true
   sort_counting_bucket_limit       4194304
   default_compression              zstd
   default_compression_level        3

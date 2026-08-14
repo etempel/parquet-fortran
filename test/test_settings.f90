@@ -101,6 +101,8 @@ contains
                 test_sort_parallel_min_rows_effect), &
             new_unittest("sort_counting_path switches the sort between its two engines", &
                 test_sort_counting_path_effect), &
+            new_unittest("sort_radix_path switches a single-key sort between radix and comparison", &
+                test_sort_radix_path_effect), &
             new_unittest("sort_counting_bucket_limit declines a key whose range exceeds it", &
                 test_sort_counting_bucket_limit_effect), &
             new_unittest("target_row_group_bytes sizes the row groups of a whole-table write", &
@@ -274,6 +276,8 @@ contains
         if (allocated(error)) return
         call check(error, parquet_get_sort_counting_path(), "sort_counting_path defaults to .true.")
         if (allocated(error)) return
+        call check(error, parquet_get_sort_radix_path(), "sort_radix_path defaults to .true.")
+        if (allocated(error)) return
         call check(error, parquet_get_sort_counting_bucket_limit() == 4194304_int64, &
             "sort_counting_bucket_limit defaults to the built-in 2**22")
         if (allocated(error)) return
@@ -325,6 +329,7 @@ contains
         call parquet_set_default_use_threads(.false.)
         call parquet_set_sort_parallel_min_rows(64_int64)
         call parquet_set_sort_counting_path(.false.)
+        call parquet_set_sort_radix_path(.false.)
         call parquet_set_sort_counting_bucket_limit(128_int64)
         call parquet_set_target_row_group_bytes(4096_int64)
         call parquet_set_statistics_prescreen(.false.)
@@ -347,6 +352,8 @@ contains
             "reset restores sort_parallel_min_rows")
         if (allocated(error)) return
         call check(error, parquet_get_sort_counting_path(), "reset restores sort_counting_path")
+        if (allocated(error)) return
+        call check(error, parquet_get_sort_radix_path(), "reset restores sort_radix_path")
         if (allocated(error)) return
         call check(error, parquet_get_sort_counting_bucket_limit() == 4194304_int64, &
             "reset restores sort_counting_bucket_limit")
@@ -945,6 +952,7 @@ contains
         call unset_env("PARQUET_FORTRAN_STRING_THREADS")
         call unset_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_PATH")
+        call unset_env("PARQUET_FORTRAN_SORT_RADIX_PATH")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT")
         call unset_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION")
         call unset_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL")
@@ -977,6 +985,7 @@ contains
         call set_env("PARQUET_FORTRAN_STRING_THREADS", "5")
         call set_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", "64")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_PATH", "false")
+        call set_env("PARQUET_FORTRAN_SORT_RADIX_PATH", "false")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", "128")
         call set_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION", "gzip")
         call set_env("PARQUET_FORTRAN_DEFAULT_COMPRESSION_LEVEL", "6")
@@ -1002,6 +1011,8 @@ contains
             "PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS reaches sort_parallel_min_rows")
         if (.not. allocated(error)) call check(error, .not. parquet_get_sort_counting_path(), &
             "PARQUET_FORTRAN_SORT_COUNTING_PATH reaches sort_counting_path")
+        if (.not. allocated(error)) call check(error, .not. parquet_get_sort_radix_path(), &
+            "PARQUET_FORTRAN_SORT_RADIX_PATH reaches sort_radix_path")
         if (.not. allocated(error)) call check(error, parquet_get_sort_counting_bucket_limit() == 128_int64, &
             "PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT reaches sort_counting_bucket_limit")
         if (.not. allocated(error)) then
@@ -1282,6 +1293,51 @@ contains
         call check(error, cmp_off > 0_int64, &
             "turning sort_counting_path off must force the comparator path (nonzero comparisons)")
     end subroutine test_sort_counting_path_effect
+
+    !> The radix path performs zero comparisons too, but the C++ comparison counter cannot see it:
+    !> the radix path exists only in the FORTRAN engine, so this knob has to be observed there.
+    !>
+    !> The observable is the introsort's final insertion pass. That pass runs over the whole range
+    !> on every comparison sort and, on a scrambled fixture, always moves something; the radix path
+    !> never calls it at all for a non-string key. So "did the tracker record anything" answers
+    !> which path ran, and asserting BOTH directions is what stops a knob that is stored and never
+    !> read from passing (feature_risks.md Risk-41).
+    !>
+    !> A REAL key at 512 rows: real because the counting path takes integer keys and would confound
+    !> the observation, 512 because the radix path has a row floor beneath which it declines
+    !> regardless of this setting.
+    subroutine test_sort_radix_path_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        real(real64) :: v(512)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: shift_on, shift_off
+        integer :: k
+        !
+        call parquet_reset_settings()
+        do k = 1, size(v)
+            v(k) = real(mod(k * 7919, 4001), real64)
+        end do
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(v, perm)
+        shift_on = parquet_debug_sort_max_insertion_shift()
+        !
+        call parquet_set_sort_radix_path(.false.)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(v, perm)
+        shift_off = parquet_debug_sort_max_insertion_shift()
+        !
+        call parquet_debug_set_sort_track_shift(.false.)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call parquet_reset_settings()
+        !
+        call check(error, shift_on == 0_int64, &
+            "with sort_radix_path on, a single-key sort above the floor must take the radix path")
+        if (allocated(error)) return
+        call check(error, shift_off > 0_int64, &
+            "turning sort_radix_path off must force the comparison sort (a nonzero insertion shift)")
+    end subroutine test_sort_radix_path_effect
 
     !> The bound is on the key's value RANGE, not its cardinality (feature_risks.md Risk-39), so
     !> both halves here use the SAME 500 values and the same cardinality -- only the spread differs,

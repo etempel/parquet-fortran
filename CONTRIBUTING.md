@@ -498,9 +498,10 @@ It refuses exactly one thing: a `gfortran` below 13. That is the only way to get
 wrong *silently* — such a compiler builds the library cleanly and miscompiles it (see
 [Prerequisites](README.md#prerequisites)) — whereas a missing Arrow announces itself as
 `'arrow/api.h' file not found` and a missing compiler as a build error. With `--test` it runs the
-full suite as a correctness gate *before* any timing and then waits for the machine to drain,
-because an ordered penalty biases one arm rather than adding symmetric noise and best-of-N does not
-remove it.
+full suite as a correctness gate *before* any timing. It reports the load and does not wait on it —
+say what the load was in the report rather than leaving it to be inferred, and note that a figure
+taken straight after a suite is worth re-taking if it would change a decision, since an ordered
+penalty biases one arm rather than adding symmetric noise and best-of-N does not remove it.
 
 ```bash
 tools/benchmark_sort_ab.sh                                    # whatever this shell builds

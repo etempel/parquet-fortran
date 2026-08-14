@@ -60,9 +60,11 @@
 #                   default rather than "all of them". Set THREADS= (empty) for every core.
 #   PERM=32        Permutation kind to ask the library for.
 #   RUN_TESTS=0    Set to 1 (or pass --test) to run the full suite first, as a correctness gate.
-#                   It then WAITS for the machine to drain before timing anything.
-#   MAX_LOAD=      1-minute load average to wait below before measuring. Default is a quarter of
-#                   the core count, floor 2. Set to 0 to disable the wait.
+#                   Note it does NOT then wait for the machine to settle -- the load is reported
+#                   before timing and judging it is yours. CLAUDE.md's warning still stands: an
+#                   ordered penalty biases one arm rather than adding symmetric noise, and
+#                   best-of-N does not remove it, so a figure taken straight after a suite is worth
+#                   re-taking if it would change a decision.
 #
 # Output is one joined table on stdout; the raw per-engine logs are left under test_run/ for the
 # report. Redirect stdout to a file and return that file.
@@ -77,7 +79,6 @@ ROUNDS="${ROUNDS:-5}"
 THREADS="${THREADS-64}"
 PERM="${PERM:-32}"
 RUN_TESTS="${RUN_TESTS:-0}"
-MAX_LOAD="${MAX_LOAD:-}"
 
 for arg in "$@"; do
     case "$arg" in
@@ -87,7 +88,6 @@ for arg in "$@"; do
         --threads=*)  THREADS="${arg#*=}" ;;
         --perm=*)     PERM="${arg#*=}" ;;
         --test)       RUN_TESTS=1 ;;
-        --max-load=*) MAX_LOAD="${arg#*=}" ;;
         -h|--help)
             awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
             exit 0
@@ -117,28 +117,15 @@ fi
 
 CORES="$( { nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null; } | head -n 1 )"
 CORES="${CORES:-8}"
-if [[ -z "$MAX_LOAD" ]]; then
-    MAX_LOAD=$(( CORES / 4 ))
-    (( MAX_LOAD < 2 )) && MAX_LOAD=2
-fi
 
 load1() { uptime | sed 's/.*load average[s]*: *//' | tr -d ',' | awk '{print $1}'; }
 
-# CLAUDE.md: never measure immediately after a heavy phase, and an ORDERED penalty biases one arm
-# rather than adding symmetric noise -- best-of-N does not remove it. A full suite is hundreds of
-# subprocesses, so if we ran one, wait for the machine to actually drain.
-wait_for_quiet() {
-    [[ "$MAX_LOAD" == "0" ]] && return 0
-    local waited=0
-    while (( waited < 600 )); do
-        awk -v l="$(load1)" -v m="$MAX_LOAD" 'BEGIN { exit !(l < m) }' && return 0
-        sleep 15
-        waited=$(( waited + 15 ))
-    done
-    echo "# NOTE: load did not fall below $MAX_LOAD within 10 minutes; measuring anyway." >&2
-    echo "#       Say so in the report -- every figure below is from a loaded machine." >&2
-    return 0
-}
+# The load is REPORTED, never waited on. An earlier version blocked until it fell below a
+# threshold, which on a shared machine is a wait with no end in sight and no way to tell a busy
+# machine from a stuck script. CLAUDE.md's own guidance is the right shape here: "Say what the load
+# was, measure the floor, and let the floor decide" -- one report there ran at load 5.7-24 on 8
+# cores and still measured a 1.5% floor, because the arms are single-threaded and every figure is
+# best-of-N. So the number goes in the provenance block and the judgement is the reader's.
 
 # --------------------------------------------------------------------------------------------
 # Provenance. "The environment was already set up" is not reproducible.
@@ -159,7 +146,7 @@ echo "  FPM_FFLAGS  : ${FPM_FFLAGS:-(unset)}"
 echo "  FPM_LDFLAGS : ${FPM_LDFLAGS:-(unset)}"
 echo "  commit      : $(git rev-parse --short HEAD 2>/dev/null || echo '(not a git checkout)')"
 echo "  dirty       : $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ') file(s) modified"
-echo "  cores       : $CORES      load now: $(load1)      measuring below load: $MAX_LOAD"
+echo "  cores       : $CORES      load now: $(load1)"
 echo "  sizes       : $SIZES"
 echo "  families    : $FAMILIES"
 echo "  rounds      : $ROUNDS      perm: int$PERM      threads: ${THREADS:-max}"
@@ -179,9 +166,7 @@ if [[ "$RUN_TESTS" == "1" ]]; then
     else
         die "fpm test FAILED. No timing was taken; fix this before measuring anything."
     fi
-    echo "waiting for the machine to drain before timing (load < $MAX_LOAD)..."
-    wait_for_quiet
-    echo "load now: $(load1)"
+    echo "load after the suite: $(load1)  (not waited on -- see the note in --help)"
     echo
 fi
 
@@ -272,6 +257,9 @@ Reading this table (Stage 3 state -- see feature_sort.md):
   * f64/f32/i32/i64/multi* are the comparator path: serial introsort against std::sort.
   * str is expected to be slower, and a string regression is explicitly accepted.
   * The C++ threaded rows are the target Stage 4 has to reach, not a defeat.
+  * Check the load in the provenance block. A busy machine is not automatically disqualifying --
+    these arms are single-threaded and every figure is best-of-N -- but it widens the noise floor,
+    so say what the load was rather than leaving it to be inferred.
 
 Logs kept: $CPP_LOG
            $FOR_LOG

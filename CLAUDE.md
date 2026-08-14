@@ -75,6 +75,7 @@ working rules).
   - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
   - [gcovr <7.1 cannot parse gcov output for a 10,000+ line file](#gcovr-71-cannot-parse-gcov-output-for-a-10000-line-file)
   - [gcovr 8.4+ drops coverage for module-contained Fortran subroutines](#gcovr-84-drops-coverage-for-module-contained-fortran-subroutines)
+  - [`-fPIC` blocks inlining on ELF](#-fpic-blocks-inlining-on-elf-so-the-same-fortran-can-be-twice-as-slow-on-linux-as-on-macos)
   - [Verifying the bind(C) boundary](#verifying-the-bindc-boundary)
   - [If `src/parquet_wrapper.cpp` is ever split into multiple translation units](#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
@@ -612,12 +613,13 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and stands at
-**34** as of 2026-08-12 (14 `public ::` re-exports in `parquet_core.f90` plus 20 `private ::`
-names in the `parquet` facade). **It is stable only in the sense that it moves for a reason** —
-it rises by one for each name a future `private ::` in the facade hides, which is the expected
-cost of keeping a sibling module's plumbing out of `use parquet`'s namespace, and a rise of
-exactly that size is not a regression. It was recorded here as 23 until the typed accessor tier
-added nine such names at once; re-derive it rather than trusting the figure above:
+**36** as of 2026-08-15 (14 `public ::` re-exports in `parquet_core.f90`, 20 `private ::`
+names in the `parquet` facade, and 2 `public ::` re-exports in `parquet_settings`). **It is stable
+only in the sense that it moves for a reason** — it rises by one for each name any module re-exports
+or hides with an accessibility statement naming a **use-associated** name, which is the expected cost
+of keeping a sibling module's plumbing out of `use parquet`'s namespace, and a rise of exactly that
+size is not a regression. It was recorded here as 23 until the typed accessor tier added nine such
+names at once; re-derive it rather than trusting the figure above:
 
 ```bash
 ford --warn docs.md 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/Warning: Unknown entity/\n&/g' \
@@ -721,8 +723,8 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **34** of
-  them as of 2026-08-12 and the one FORD number worth tracking across a change. Two independent
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **36** of
+  them as of 2026-08-15 and the one FORD number worth tracking across a change. Three independent
   groups:
   **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
@@ -740,7 +742,14 @@ Keep new code to the same standard:
   `src/parquet.f90` carries 11 statements for those 20 names. Its twelfth, `private :: cversion`,
   warns about nothing — `cversion` is defined in the facade rather than use-associated, which is
   exactly the distinction this warning is about.
-  **This number rises by one for each name a future `private ::` in the facade hides**, which is
+  The third group is **2 `public ::`** re-exports in `parquet_settings`
+  (`parquet_get_string_threads`, `parquet_output_is_suppressed`, both defined in
+  `parquet_settings_base`), and it is worth knowing about mainly because it shows **the rule is not
+  about the facade at all** — an earlier version of this note said the number "rises by one for each
+  name a future `private ::` in the facade hides", which is too narrow. Any module that re-exports or
+  hides a **use-associated** name with an accessibility statement adds one per name, wherever it sits
+  in the tree.
+  **This number rises by one for each such name**, which is
   the expected cost of keeping a sibling module's internal plumbing out of the public namespace —
   a rise of exactly that size is not a regression, and is exactly what took this figure from the
   23 recorded here before the typed accessor tier added its nine names at once, and from 32 to 34
@@ -824,6 +833,19 @@ the one most likely to be edited by mistake**, because it is the table layer's m
 type-bound binding and every interface body lives there, so adding a `parquet_table` procedure means
 editing the generator's literal template text, not the file it emits. Treat this list as a snapshot —
 trust the banner, not the list, and add new generated files here when they appear.
+
+**`src/parquet_sorting_engine.f90` is the ONE `src/parquet_sorting*.f90` that is hand-written**, and
+the split matters in both directions: its four procedures' **interfaces** live in the generated
+`src/parquet_sorting.f90`, so changing a signature means editing the generator's
+`emit_engine_interfaces()` while changing the body means editing the engine file directly. Everything
+else in the sort area — including `sort_key_buf`, every module-level `save` variable and every
+`parquet_debug_*` declaration — is generated, so a new debug hook is a generator change even though
+its implementation is not.
+
+**Grep for the banner carefully: the engine's own header begins "NOT a generated file".** A
+case-insensitive search for "generated file" therefore reports it as generated, which is the exact
+inversion of the truth and would send someone to edit the generator for a file the generator does not
+emit. Read the line, don't match it.
 
 Working rules for this class of file:
 
@@ -2265,6 +2287,18 @@ applied to the harness instead of the source.
   whether a float is exactly integral) — those are exact-equality checks with no arithmetic
   drift and no equivalent NaN-style idiom, so their warning is left as an accepted false
   positive rather than "fixed" into something worse (e.g. an epsilon comparison).
+
+  **`src/parquet_sorting_engine.f90` is a deliberate, measured EXCEPTION and uses `x /= x`
+  throughout — do not "correct" it.** Its header states the case at length: `ieee_is_nan` cost ifx
+  ~2.5 ns per test on the sort's hot comparison path, where the test sits inside a dependency chain
+  rather than in isolation. Two things a future reader should take from it rather than re-deriving
+  them. The general lesson is that **a microbenchmark of an isolated operation does not predict its
+  cost inside a dependency chain** — the probe that motivated the change was right about
+  `ieee_is_nan` and wrong about its replacement. And the warning this convention exists to avoid does
+  not actually appear: `fpm build --profile debug` (which does carry `-Wall -Wextra`, checked)
+  compiles that file with **zero** diagnostics on gfortran 15.2, so `-Wcompare-reals` evidently does
+  not fire on a SELF-comparison there, whatever it does for two distinct operands. If some other
+  compiler does warn, suppress or accept it rather than restoring `ieee_is_nan`.
 - **A function returning an unallocated `allocatable` cannot yield an unallocated LHS via
   `x = func()`.** Verified on gfortran 15.2: intrinsic assignment from an unallocated allocatable
   function result leaves the LHS *allocated* (an empty string/array), even for a fresh target.
@@ -2774,6 +2808,50 @@ new regression appears in some future version, check
 "0 lines" before assuming it's a problem in this project — the symptom (a clean CI run with an
 almost-empty coverage table) looks exactly like this one.
 
+### `-fPIC` blocks inlining on ELF, so the same Fortran can be twice as slow on Linux as on macOS
+
+**A Fortran module procedure is necessarily a GLOBAL symbol, so under `-fPIC` GCC must assume a
+shared library could preempt it and refuses to inline it — every edge, at every optimisation level.**
+GCC says so itself under `-fopt-info-inline-all`: *"not inlinable: A -> B, function body can be
+overwritten at link time"*. This is a correctness barrier, not a heuristic, so raising the inline
+budget does nothing (`-finline-limit=20000` produced a byte-identical object). Measured on this
+project's sort comparator, same source, md5-identical inputs:
+
+| flags | out-of-line calls in `sort_row_less` |
+|---|---|
+| `-O3 -funroll-loops -fPIC` *(what fpm builds)* | **16** |
+| `-O3 -funroll-loops` (no `-fPIC`) | 0 |
+| `-fPIC -fno-semantic-interposition` | 0 |
+| `-fPIC -fvisibility=hidden` | 16 — does **not** help |
+
+Three consequences worth carrying to any future hot-path work:
+
+- **It is a platform difference, not a compiler-quality difference.** macOS is Mach-O, where ELF
+  semantic interposition does not exist, so a macOS build never has the barrier. A measurement
+  showing "machine A's compiler optimises this far better than machine B's" may be measuring only
+  this. Appending `-fno-semantic-interposition` on Linux took one arm from **7.89 to 4.45 ns**.
+- **There is no `fpm.toml` route to the flag**, so it cannot simply be adopted; it would have to come
+  from `FPM_FFLAGS`, which on a dev machine carries Arrow's paths and must be appended to, never
+  assigned (see "The three machines available for testing").
+- **The source-side fix was tried and REVERTED, and the negative result is the useful part.** Moving
+  the hot helpers into *internal* procedures — the only Fortran construct with local linkage, and
+  yes, both `module procedure` and a private submodule-contained procedure are still global — did
+  remove every out-of-line call, and made macOS **77-119% slower**. Do not re-attempt it without
+  measuring on both platforms.
+
+**The one-command check for whether a call was inlined**, which belongs beside any claim that it was:
+
+```bash
+objdump -dr --no-show-raw-insn <obj>/src_parquet_sorting_engine.f90.o \
+    | sed -n '/<.*mp_sort_partition_>:/,/^$/p' | grep R_X86_64
+```
+
+**On macOS, `objdump` is a trap of its own**: Apple's toolchain emits `callq`/`call` and Mach-O
+relocations rather than the `R_X86_64_PLT32` entries the command above greps for, so the same check
+silently reports "no calls" — i.e. "fully inlined" — on a build where it has proved nothing. Use
+`otool -tv` there, or run the check only on the Linux machine, and never quote a zero from it without
+saying which platform produced it.
+
 ### Verifying the bind(C) boundary
 
 A `bind(C)` interface (`src/parquet_bindings.f90`) has no compile-time link to the `extern "C"`
@@ -3095,6 +3173,17 @@ before being noticed:**
   threaded rebuilds in `parquet_strings` kept their original as a serial twin for this reason, and
   `gather` is why it is worth measuring rather than guessing in either direction: written without a
   twin, its phased form came out **1.5x slower** on one thread (0.0140 s against 0.0094 s).
+- **A LONG sweep drifts, so a figure from its tail is not comparable with one from its head.** This
+  is the "never measure immediately after a heavy phase" rule applying *within* a single run, and it
+  is easy to miss because the sweep looks like one measurement. Confirmed instance: in a 22-shape
+  distribution sweep the 21st figure came out at **163.49 ns** against the 1st shape's 42.51 — read
+  as a 50% regression against a 108.97 baseline, and very nearly reported as one. The three shapes
+  involved turn out to use **byte-identical data with identical keys** (the benchmark's validity mask
+  is passed only to its single-key families), and re-measured in isolation they are **43.36 / 43.21 /
+  43.77**. It was thermal or memory drift on a laptop, nothing else. So: **re-measure any tail figure
+  in isolation before calling it a regression** — and note the baseline's tail is inflated too, so the
+  comparison can mislead in either direction. One cheap sanity check costs nothing: ask whether two
+  shapes that ought to be identical measured identically.
 - **Take the best of several rounds, not one measurement.** Single rounds of the `access` mode swung
   0.96x–1.22x on the same build — wider than the effect being measured. The minimum is the run least
   disturbed by everything else on the machine, which is what these modes are actually asking about.

@@ -99,6 +99,8 @@ module parquet_sorting
     public :: parquet_debug_sort_max_insertion_shift
     public :: parquet_debug_set_sort_radix_min_rows
     public :: parquet_debug_set_sort_radix_fail_alloc
+    public :: parquet_debug_reset_sort_radix_passes
+    public :: parquet_debug_sort_radix_passes
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -167,6 +169,19 @@ module parquet_sorting
     !! single flag, failing the main one returns before the refine's is ever reached, so the refine's
     !! fallback would stay untested however the flag was set.
     integer, save :: dbg_sort_radix_fail_alloc = 0
+    !> Radix scatter passes actually EXECUTED since the counter was last reset.
+    !!
+    !! The `had_index` shape from `feature_risks.md` Risk-75, and the only observable an optimisation
+    !! that changes the PASS COUNT has. Several of them exist -- the constant-digit skip, and the
+    !! narrow-integer bias that exists to make that skip fire -- and every one of them leaves the
+    !! permutation bit-identical by construction. So no assertion on an answer can distinguish a
+    !! build where the optimisation fires from one where it never does, and without this counter a
+    !! test for any of them is vacuous rather than merely weak.
+    !!
+    !! Counts a pass that scatters, never one the skip declined, and never the string refine's own
+    !! recursion -- it is a measure of the LSD loop's work, which is what those optimisations move.
+    !! One increment per pass, i.e. at most eight per key and never anything per element.
+    integer(int64), save :: dbg_sort_radix_passes = 0_int64
     !
     ! ---- Internal key families ----
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
@@ -5742,6 +5757,19 @@ module parquet_sorting
         module subroutine parquet_debug_set_sort_radix_fail_alloc(which)
             integer, intent(in) :: which !! 0 none, 1 the main scratch, 2 the refine's.
         end subroutine parquet_debug_set_sort_radix_fail_alloc
+        !> Test-only zeroing of the executed-radix-pass counter, before the sort under test.
+        module subroutine parquet_debug_reset_sort_radix_passes()
+        end subroutine parquet_debug_reset_sort_radix_passes
+        !> Test-only count of radix scatter passes executed since that reset.
+        !!
+        !! What makes a test of any pass-count optimisation non-vacuous: the constant-digit
+        !! skip and the narrow-integer bias both leave the permutation bit-identical, so this
+        !! is the only thing that can say whether either fired. Zero means the radix path did
+        !! not run at all, which is itself worth asserting -- a floor or a decline is easy to
+        !! trip by accident and looks exactly like an optimisation working perfectly.
+        module function parquet_debug_sort_radix_passes() result(n)
+            integer(int64) :: n !! passes executed.
+        end function parquet_debug_sort_radix_passes
     end interface
     !
 end module parquet_sorting ! GCOVR_EXCL_LINE

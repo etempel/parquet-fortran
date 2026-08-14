@@ -247,20 +247,27 @@ compared against each other on the same data, which is how the library tests tha
 
 Both numbers accept `0`, meaning "restore the built-in value", and both accept either integer kind.
 
-`parquet_set_sort_radix_path(flag)` controls the single-key radix fast path — a stable
+`parquet_set_sort_radix_path(flag)` controls the radix fast path — a stable
 least-significant-digit radix sort that orders a column by bucketing its bytes rather than by
 comparing rows at all. It applies to **every** key family, integer, real and string alike, so unlike
 the counting path the key's type is never a reason it declines. The rule is: the radix path is used
-when the flag is on, *and* there is exactly one sort key, *and* the row count clears an internal
-floor set at the measured point below which the comparison sort is cheaper.
+when the flag is on *and* the row count clears an internal floor set at the measured point below
+which the comparison sort is cheaper.
+
+It handles a **multi-key** sort as well as a single-key one, by running one stable pass per key from
+the last key to the first. There is one exception, and it is about cost rather than correctness: a
+multi-key sort declines when one of its string keys holds a value longer than 64 bytes, because the
+pass that orders a string key finishes long shared prefixes with an insertion sort whose cost is
+quadratic in the size of a tied run. A single-key string sort has no such limit.
 
 **This knob governs the pure-Fortran sort engine, which is not yet the default one** — until it
 becomes so, setting it changes nothing about an ordinary sort. Everything below describes what it
 will control, and is measured rather than projected.
 
 **Unlike the counting path, this one has a real reason to turn off, and it is memory.** The radix
-path needs about **32 bytes of scratch per row** — four `int64` buffers — where the comparison sort
-needs none beyond the permutation itself. Measured peak resident set, radix on against radix off:
+path needs up to about **32 bytes of scratch per row** — four `int64` buffers for a single-key sort,
+three for a multi-key one — where the comparison sort needs none beyond the permutation itself.
+Measured peak resident set, radix on against radix off:
 
 | rows | comparison sort | radix path | difference |
 |---|---|---|---|

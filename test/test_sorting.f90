@@ -222,6 +222,8 @@ contains
                 test_fortran_engine_adversarial), &
             new_unittest("engine: the radix path really runs, and only above its floor", &
                 test_radix_path_runs), &
+            new_unittest("engine: the executed-pass counter reports the passes the skip removed", &
+                test_radix_pass_counter), &
             new_unittest("engine: the radix path matches C++ on the values a key transform can lose", &
                 test_radix_path_value_shapes), &
             new_unittest("engine: the radix path matches C++ on strings that outrun its prefix", &
@@ -232,6 +234,8 @@ contains
                 test_radix_path_deep_strings), &
             new_unittest("engine: the multi-key radix matches C++ and declines a string key", &
                 test_radix_path_multi_key), &
+            new_unittest("engine: a narrow integer key is biased, and a wide one is not", &
+                test_radix_path_narrow_integer), &
             new_unittest("engine: the forced heapsort fallback matches the C++ sort", &
                 test_fortran_engine_heapsort_fallback), &
             new_unittest("engine: the depth-limit hook really reaches the heapsort fallback", &
@@ -6018,6 +6022,79 @@ contains
             "lowering the radix floor to 2 did not reach the radix path, so the override is one-directional")
     end subroutine test_radix_path_runs
     !
+    !> The executed-pass counter must count passes, decline to count what the skip removed, and read
+    !! zero when the radix path did not run at all.
+    !!
+    !! **This test exists so that other tests can be non-vacuous, and it has no other purpose.** Every
+    !! optimisation in this engine that changes how many radix passes run -- the constant-digit skip,
+    !! and the narrow-integer bias built on top of it -- leaves the permutation bit-identical by
+    !! construction. So a test asserting an answer passes just as happily against a build where the
+    !! optimisation never fires, and the counter is the only observable that can tell the two apart.
+    !! Something has to establish that the counter itself is not the thing that is broken, or every
+    !! test resting on it inherits the doubt. That is what this is.
+    !!
+    !! Three properties, and the third is the one that makes it an observable rather than a number:
+    !!
+    !! * a full-width key runs all eight passes -- so the counter is counting passes and not sorts;
+    !! * a `real32` key runs strictly FEWER, because widening it to `real64` zeroes its low mantissa
+    !!   bytes and the skip drops those passes. This is the `f32`-is-the-fastest-arm observation from
+    !!   the benchmark, asserted rather than assumed;
+    !! * a sort the radix path declined counts ZERO. Without this the counter could be reporting
+    !!   something else entirely and every reading above it would still look plausible.
+    subroutine test_radix_pass_counter(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 4096_int64 !! comfortably over the shipped floor.
+        real(real64), allocatable :: wide(:)
+        real(real32), allocatable :: narrow(:)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, passes_wide, passes_narrow, passes_declined, passes_reset
+        !
+        allocate(wide(n), narrow(n))
+        do k = 1_int64, n
+            ! Divided rather than whole: a small integer held as a real64 has trailing zero mantissa
+            ! bytes, so a whole-number fixture would itself skip passes and this arm would not be the
+            ! full-width control it is supposed to be.
+            wide(k) = real(mod(k * 2654435761_int64, 100003_int64), real64) / 7.0_real64
+            narrow(k) = real(wide(k), real32)
+        end do
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        !
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(wide, perm)
+        passes_wide = parquet_debug_sort_radix_passes()
+        !
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(narrow, perm)
+        passes_narrow = parquet_debug_sort_radix_passes()
+        !
+        ! The negative control: the same data, the same call, the radix path declined by the floor.
+        call parquet_debug_set_sort_radix_min_rows(huge(0_int64))
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(wide, perm)
+        passes_declined = parquet_debug_sort_radix_passes()
+        call parquet_debug_set_sort_radix_min_rows(-1_int64)
+        !
+        call parquet_debug_reset_sort_radix_passes()
+        passes_reset = parquet_debug_sort_radix_passes()
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, passes_wide == 8_int64, &
+            "a full-width real64 key should have run all eight radix passes")
+        if (allocated(error)) return
+        call check(error, passes_narrow < passes_wide, &
+            "a real32 key should skip the passes its zeroed low mantissa bytes make constant")
+        if (allocated(error)) return
+        call check(error, passes_narrow > 0_int64, &
+            "a real32 key should still have run some radix passes")
+        if (allocated(error)) return
+        call check(error, passes_declined == 0_int64, &
+            "the counter recorded passes for a sort the radix path declined, so it counts something else")
+        if (allocated(error)) return
+        call check(error, passes_reset == 0_int64, &
+            "the reset did not zero the pass counter")
+    end subroutine test_radix_pass_counter
+    !
     !> The radix path's key transform must not lose a value shape the comparator distinguishes.
     !!
     !! Signed zero is the sharp one: `-0.0` and `+0.0` compare EQUAL under `<`, so the answer must
@@ -6215,7 +6292,7 @@ contains
         integer(int64) :: vi(n)
         real(real64) :: vr(n)
         logical :: valid_i(n), valid_r(n)
-        type(parquet_string_column) :: col, long_col
+        type(parquet_string_column) :: col, long_col, plain_col
         type(pf_sort_keys) :: keys
         integer(int64) :: k, shift_num, shift_str, shift_long
         integer(int64), allocatable :: perm(:)
@@ -6267,6 +6344,24 @@ contains
             end select
         end do
         !
+        ! The same shapes MINUS the nulls, so the string pass's no-tier branch is reached with an
+        ! equality check on it rather than only a timing one. Shared prefixes and duplicates kept,
+        ! since those are what make the later keys reachable through this one.
+        call plain_col%clear()
+        do k = 1_int64, n
+            write (num, "(i8.8)") int(mod(k, 11_int64))
+            select case (int(mod(k, 4_int64)))
+            case (0)
+                call plain_col%append_string("shared" // num)
+            case (1)
+                call plain_col%append_string("shared")
+            case (2)
+                call plain_col%append_string("")
+            case default
+                call plain_col%append_string("q" // num)
+            end select
+        end do
+        !
         ! The same shapes, but past SORT_RADIX_MAX_BYTE: the one string a multi-key sort refuses.
         call long_col%clear()
         do k = 1_int64, n
@@ -6315,6 +6410,38 @@ contains
         call engine_ab(error, "multi radix three keys", keys, n)
         if (allocated(error)) return
         !
+        ! **A real key whose NaNs are its ONLY tier -- no validity array.** Every other real key in
+        ! this test carries `is_valid`, which hides a whole class of defect: the multi-key pass asks
+        ! `key_has_tiers` once per key to decide whether the tier work can be skipped, and that
+        ! predicate is a second statement of the rule `sort_tier_of` owns. Dropping its
+        ! `family == SK_REAL` half leaves it answering correctly for every key that also has nulls,
+        ! so a fixture that always pairs the two cannot see the drift -- confirmed by mutation, where
+        ! exactly that edit survived the whole suite. Here the NaNs must be placed as a tier with
+        ! nothing else to force it.
+        do a = 0, 3
+            d1 = (mod(a, 2) == 1)
+            n1 = (a / 2 == 1)
+            call keys%clear()
+            call keys%add(vi, is_valid=valid_i)
+            call keys%add(vr, descending=d1, nulls_first=n1)
+            call engine_ab(error, "multi radix nan-only" // radix_tag(d1, n1), keys, n)
+            if (allocated(error)) return
+        end do
+        !
+        ! **A string key with no nulls at all**, for the same reason one level along: the string
+        ! pass skips its tier count on `key_has_tiers` and takes the value block to be the whole
+        ! range, which is a different code path from the one `col` (which has nulls) exercises, and
+        ! it has to place the block correctly under `nulls_first` with no tiers to place it against.
+        do a = 0, 3
+            d1 = (mod(a, 2) == 1)
+            n1 = (a / 2 == 1)
+            call keys%clear()
+            call keys%add(plain_col, descending=d1, nulls_first=n1)
+            call keys%add(vi, is_valid=valid_i)
+            call engine_ab(error, "multi radix str no-nulls" // radix_tag(d1, n1), keys, n)
+            if (allocated(error)) return
+        end do
+        !
         call parquet_debug_use_fortran_sort_engine(.true.)
         call keys%clear()
         call keys%add(vi)
@@ -6352,6 +6479,210 @@ contains
         call check(error, shift_long > 0_int64, &
             "a string key longer than SORT_RADIX_MAX_BYTE must make the multi-key radix decline")
     end subroutine test_radix_path_multi_key
+    !
+    !> An integer key whose value range spans under 2^32 is imaged by SUBTRACTING its minimum rather
+    !! than by flipping its sign bit, which leaves the top four bytes constant and skips four passes.
+    !!
+    !! **Every equality assertion here would pass against a build where the bias never fires**, since
+    !! both images are order-preserving and the permutation is identical either way. That is what the
+    !! pass counter is for, and the counter assertions at the end are the half of this test that
+    !! cannot be satisfied by accident. `feature_risks.md` Risk-75's shape: a hook that reports what
+    !! changed, because nothing about the answer can.
+    !!
+    !! Five fixtures, spanning the shapes the range test has to get right:
+    !!
+    !! * both ends non-negative, span just under 2^32 -- the bias fires;
+    !! * `lo < 0 <= hi`, span still under 2^32 -- the second branch of `sort_span_under_2p32`,
+    !!   reachable no other way;
+    !! * a span of exactly 2^32 -- the boundary, one past where the bias applies;
+    !! * both int64 extremes, and a span that overflows int64 from a minimum that is not `-2^63` --
+    !!   the two widest shapes, which must decline.
+    !!
+    !! **What this test does NOT cover, established by mutation and worth knowing before anyone
+    !! writes a sixth fixture to try.** A WRONG span decision cannot be detected here, and not for
+    !! want of a better fixture: `v - vmin` under wrapping arithmetic is exactly unsigned subtraction
+    !! mod 2^64, and every int64 range fits in 2^64, so the biased image stays order-preserving for
+    !! any minimum whatsoever. Forcing `narrow = .true.` everywhere, and replacing the range test
+    !! with the naive `hi - lo < 2^32` that overflows on both wide fixtures, each leave every
+    !! permutation here bit-identical and every pass count unchanged. What those edits really cost is
+    !! undefined behaviour (signed overflow) and the four skipped passes -- neither observable in an
+    !! answer. `sort_span_under_2p32` says so at its own head; it is reviewed, not tested.
+    !!
+    !! The near-miss worth recording: at `lo = -2^63` the bias and the sign flip are the SAME
+    !! transform, since `v - (-2^63)` is `v + 2^63` is `ieor(v, SORT_SIGN_BIT)`. So the both-extremes
+    !! fixture is degenerate for this purpose even in principle, which is why `overflow_span` exists
+    !! beside it with a minimum of `-2^62`.
+    !!
+    !! Nulls are present in half the sweeps because the range is over VALID rows only: a null row's
+    !! key slot holds whatever the buffer contained, so a scan that failed to skip nulls could widen
+    !! the range past the test and silently lose the optimisation -- or, worse, narrow it wrongly.
+    subroutine test_radix_path_narrow_integer(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 4096_int64
+        integer(int64), parameter :: TWO32 = 4294967296_int64
+        integer(int64), parameter :: MIN62 = -4611686018427387904_int64 !! -2^62: not the sign flip's fixed point.
+        integer(int64), parameter :: BASE40 = 1099511627776_int64 !! 2^40: base of a band far from zero.
+        integer(int64), parameter :: OFF32 = 3221225472_int64
+        !! 3*2^30, so the far band STRADDLES 2^32. Load-bearing: at a byte-aligned base the unbiased
+        !! image leaves byte 4 constant too and runs the same four passes, so the fixture cannot tell
+        !! a biased build from an unbiased one. Straddling makes byte 4 vary without the bias.
+        integer(int64) :: narrow_pos(n), narrow_signed(n), wide(n), extremes(n), overflow_span(n)
+        integer(int64) :: farband(n), smallband(n)
+        logical :: valid(n)
+        type(pf_sort_keys) :: keys
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, spread, passes_narrow, passes_wide, passes_extremes, passes_overflow
+        integer(int64) :: passes_farband, passes_off, passes_counting
+        integer :: a
+        logical :: desc, nf
+        !
+        do k = 1_int64, n
+            ! A spread that reaches every one of the low four bytes, so "four passes ran" really
+            ! means "the top four were skipped" and not "the data was degenerate".
+            spread = mod(k * 2654435761_int64, TWO32 - 1_int64)
+            narrow_pos(k) = spread                                   ! [0, 2^32-2]: span < 2^32
+            narrow_signed(k) = spread - (TWO32 / 2_int64 - 1_int64)  ! straddles 0, span still < 2^32
+            wide(k) = spread                                         ! ends pinned below to span 2^32
+            extremes(k) = spread - TWO32 / 2_int64
+            ! Alternating halves of a range whose SPAN overflows int64 while its minimum is not
+            ! -2^63 -- the one shape on which a wrongly-applied bias visibly wraps and reorders.
+            if (mod(k, 2_int64) == 0_int64) then
+                overflow_span(k) = MIN62 + spread
+            else
+                overflow_span(k) = huge(0_int64) - spread
+            end if
+            ! A narrow band nowhere near zero: an int64 column of epoch nanoseconds or identifiers,
+            ! and the shape that proves the range is the range rather than a distance from zero.
+            farband(k) = BASE40 + OFF32 + mod(spread, TWO32 / 2_int64)
+            ! Span ~1000 and straddling zero: narrow enough that the COUNTING path claims it while
+            ! that knob is on, which is what lets switching the knob off mean something.
+            smallband(k) = mod(spread, 1001_int64) - 500_int64
+            valid(k) = (mod(k, 17_int64) /= 0_int64)
+        end do
+        ! Pin the ends so each fixture's span is exactly what it claims, whatever the spread did.
+        narrow_pos(1) = 0_int64
+        narrow_pos(2) = TWO32 - 1_int64                     ! span 2^32-1: the largest narrow span
+        narrow_signed(1) = -(TWO32 / 2_int64)
+        narrow_signed(2) = TWO32 / 2_int64 - 1_int64        ! span 2^32-1, straddling zero
+        wide(1) = 0_int64
+        wide(2) = TWO32                                     ! span exactly 2^32: one too wide
+        extremes(1) = -huge(0_int64) - 1_int64
+        extremes(2) = huge(0_int64)                         ! naive `hi - lo` overflows to -1 here
+        overflow_span(1) = MIN62                            ! NOT the sign flip's fixed point
+        overflow_span(2) = huge(0_int64)                    ! span ~1.15e19: overflows int64
+        farband(1) = BASE40 + OFF32
+        farband(2) = BASE40 + OFF32 + TWO32 / 2_int64 - 1_int64 ! span 2^31: narrow, far from zero
+        !
+        do a = 0, 3
+            desc = (mod(a, 2) == 1)
+            nf = (a / 2 == 1)
+            call keys%clear()
+            call keys%add(narrow_pos, descending=desc, nulls_first=nf)
+            call engine_ab(error, "radix narrow int" // radix_tag(desc, nf), keys, n)
+            if (allocated(error)) return
+            !
+            call keys%clear()
+            call keys%add(narrow_signed, descending=desc, nulls_first=nf)
+            call engine_ab(error, "radix narrow signed" // radix_tag(desc, nf), keys, n)
+            if (allocated(error)) return
+            !
+            ! The same, with nulls, so the range really is the range over valid rows.
+            call keys%clear()
+            call keys%add(narrow_signed, descending=desc, nulls_first=nf, is_valid=valid)
+            call engine_ab(error, "radix narrow nulls" // radix_tag(desc, nf), keys, n)
+            if (allocated(error)) return
+            !
+            call keys%clear()
+            call keys%add(wide, descending=desc, nulls_first=nf)
+            call engine_ab(error, "radix wide int" // radix_tag(desc, nf), keys, n)
+            if (allocated(error)) return
+            !
+            call keys%clear()
+            call keys%add(extremes, descending=desc, nulls_first=nf)
+            call engine_ab(error, "radix int64 extremes" // radix_tag(desc, nf), keys, n)
+            if (allocated(error)) return
+            !
+            call keys%clear()
+            call keys%add(overflow_span, descending=desc, nulls_first=nf)
+            call engine_ab(error, "radix overflow span" // radix_tag(desc, nf), keys, n)
+            if (allocated(error)) return
+            !
+            call keys%clear()
+            call keys%add(farband, descending=desc, nulls_first=nf)
+            call engine_ab(error, "radix far band" // radix_tag(desc, nf), keys, n)
+            if (allocated(error)) return
+        end do
+        !
+        ! The non-vacuity half. A biased image occupies four bytes, so exactly four passes run; the
+        ! unbiased images below span more than that and must run strictly more.
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(narrow_signed, perm)
+        passes_narrow = parquet_debug_sort_radix_passes()
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(wide, perm)
+        passes_wide = parquet_debug_sort_radix_passes()
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(extremes, perm)
+        passes_extremes = parquet_debug_sort_radix_passes()
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(overflow_span, perm)
+        passes_overflow = parquet_debug_sort_radix_passes()
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(farband, perm)
+        passes_farband = parquet_debug_sort_radix_passes()
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, passes_narrow == 4_int64, &
+            "a key spanning under 2^32 should have been biased down to four radix passes")
+        if (allocated(error)) return
+        call check(error, passes_wide > passes_narrow, &
+            "a key spanning exactly 2^32 must NOT be biased, so it cannot run as few passes")
+        if (allocated(error)) return
+        call check(error, passes_extremes > passes_narrow, &
+            "a key at both int64 extremes must NOT be biased -- its span overflows a naive test")
+        if (allocated(error)) return
+        call check(error, passes_overflow > passes_narrow, &
+            "a key whose span overflows int64 must NOT be biased")
+        if (allocated(error)) return
+        ! The range must be a SPAN, not a distance from zero. Seeding the min/max scan at 0 instead
+        ! of at the first value leaves every fixture above unchanged -- all of them straddle or touch
+        ! zero -- while silently declaring this one wide and losing the optimisation on exactly the
+        ! shape S4 exists for: an int64 column of identifiers, epoch times or counts.
+        call check(error, passes_farband == 4_int64, &
+            "a narrow band far from zero should still be biased down to four radix passes")
+        if (allocated(error)) return
+        !
+        ! **The bias must not depend on `parquet_set_sort_counting_path`.** The range it needs is one
+        ! `sort_counting_candidate` has usually just computed, and reusing it would have been free --
+        ! and would have made a knob named for one fast path silently govern a second, unrelated one,
+        ! so that a user disabling the counting path lost a large speedup with no indication and
+        ! `doc/pages/operating/settings.md` described that knob incorrectly. The radix path scans for
+        ! itself instead. This is what stops that reuse being reintroduced as an optimisation.
+        !
+        ! **`smallband` is what makes this non-vacuous, and the obvious fixture is not.** Every other
+        ! column here spans 2^32 or more, so the counting path declines it whichever way the knob is
+        ! set and switching the knob proves nothing. This one has a span of ~1000, so the knob really
+        ! does decide which path runs -- and it straddles zero, so a build that failed to bias would
+        ! be visible: the sign-flipped image of a straddling range differs in every byte, running all
+        ! eight passes, where the biased image of `[0, 1000]` runs two.
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(smallband, perm)
+        passes_counting = parquet_debug_sort_radix_passes()
+        call parquet_set_sort_counting_path(.false.)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(smallband, perm)
+        passes_off = parquet_debug_sort_radix_passes()
+        call parquet_set_sort_counting_path(.true.)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, passes_counting == 0_int64, &
+            "a span-1000 key should have gone to the counting path, so no radix pass should have run")
+        if (allocated(error)) return
+        call check(error, passes_off == 2_int64, &
+            "with the counting path off the radix must still bias this key down to two passes")
+    end subroutine test_radix_path_narrow_integer
     !
     !> The refine pass continues the radix a BYTE at a time past its 8-byte window, so these are the
     !! shapes that reach the recursion rather than the first window.

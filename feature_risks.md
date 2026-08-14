@@ -37,7 +37,7 @@ next unused number — `Risk-83` today — and goes in "1. New risks"** until it
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
-**Counts today: 62 covered, 1 proposed, 14 not testable.** An empty section 2 is the healthy
+**Counts today: 63 covered, 1 proposed, 16 not testable.** An empty section 2 is the healthy
 state rather than a finished one — it means every risk currently identified as testable has its
 test — so the entry sitting there is a to-do, not a milestone. Nine entries are covered by
 something other than a unit test, deliberately: Risk-1 by a
@@ -161,7 +161,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-89**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-93**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -245,6 +245,63 @@ path.
 Each of these says how to check or avoid the risk instead. Most are not gaps at all — they are a
 cost, a caveat about the input, a property of a process that has already aborted, or a pre-state no
 test can arrange — and writing a test for them would freeze the wrong thing as a contract.
+
+### Risk-90 — The narrow-integer bias is safe in exactly ONE direction, and its guard cannot be tested
+
+`sort_radix_permutation` (`src/parquet_sorting_engine.f90`) images an integer key as `v - vmin`
+instead of `ieor(v, SORT_SIGN_BIT)` when `sort_span_under_2p32` says the value range spans under
+2^32, which leaves the top four bytes constant and skips four of the eight passes. It is worth 45% on
+an int32 column.
+
+**The guard's failure mode is not a wrong answer, and assuming it is leads to deleting the guard.**
+`v - vmin` under wrapping arithmetic is exactly unsigned subtraction mod 2^64, and every int64 range
+fits in 2^64, so the biased image is order-preserving for **any** minimum at or below every value.
+Confirmed by mutation: forcing `narrow = .true.` everywhere, and replacing the two-branch range test
+with the naive `hi - lo < 2^32` whose subtraction overflows on a range spanning both signs, each
+leave **every permutation in the suite bit-identical and every pass count unchanged**. What those
+edits really cost is **undefined behaviour** — a signed subtraction leaving int64 — plus the four
+skipped passes on the columns that should have had them.
+
+**The one direction that IS dangerous**, and the rule this entry exists to state: *a `vmin` ABOVE any
+value being imaged makes the difference negative and the unsigned order wrong.* Everything in the
+other direction is safe by construction, because the span test is then applied to a range that
+CONTAINS the true one — a `vmin` too low, a `vmax` too high, a range widened by a null that was not
+skipped. So when editing the range scan, the only question that matters is whether `vmin` can end up
+above a value the image build will see.
+
+**Test.** The dangerous direction is covered — biasing by `vmax` fails the suite immediately
+(`test_radix_path_narrow_integer`, `test/test_sorting.f90`), and seeding the scan at zero is caught by
+that test's far-from-zero fixture through the pass counter. The guard itself is **not testable**: no
+fixture can distinguish a correct span decision from a wrong one, because the property it defends is
+undefined behaviour rather than an answer. `sort_span_under_2p32`'s own doc-comment says so at its
+head, so that a future reader does not delete the two-branch form on the strength of a green suite or
+a surviving mutation. Both are expected.
+
+**A fixture trap worth reusing.** The both-int64-extremes column, which looks like the obvious test
+for a wide range, is degenerate here *in principle*: at `lo = -2^63` the bias and the sign flip are
+the same transform, since `v - (-2^63)` is `v + 2^63` is `ieor(v, SORT_SIGN_BIT)`. And a narrow band
+placed at a byte-ALIGNED base (2^40) does not discriminate either, because the unbiased image leaves
+byte 4 constant too and runs the same four passes. The fixtures must straddle a byte boundary and
+must avoid `-2^63`; `test_radix_path_narrow_integer` explains both.
+
+### Risk-91 — `sort_radix_refine_strings` reads one array while permuting another, and nothing diagnoses passing the same one
+
+`sort_radix_refine_strings` (`src/parquet_sorting_engine.f90`) takes the sorted row array `ra` as
+`intent(in)` and the permutation `perm` as `intent(inout)`, walks runs of equal image in the first
+and reorders the second. **They must be different arrays.** Associating one actual with a dummy that
+is defined and an `intent(in)` dummy at the same time is forbidden by F2018 15.5.2.13, and neither
+gfortran nor ifx diagnoses it — the compiler is entitled to optimise on the assumption, so the
+symptom would be a wrong permutation that appears only under optimisation, or only on one compiler.
+
+The trap is specific and easy to walk into: after the multi-key string pass's LSD loop the sorted rows
+are sitting in `perm`'s own value block, so passing `perm` as `ra` is the obvious thing to write and
+it *looks* correct — the ranges even line up. `sort_radix_string_key_pass` normalises its buffers
+specifically to avoid it, copying the rows into `pb` so that a distinct array can be handed over. That
+copy is not redundant and must not be removed as an optimisation.
+
+**Test.** Not testable. It is undefined behaviour, so a build that happens to work proves nothing
+about the next one. Both procedures' doc-comments state the requirement at the point where it would
+be violated, which is the only defence available.
 
 ### Risk-7 — A half-applied mutation is unrecoverable
 
@@ -782,6 +839,36 @@ The branch body is `GCOVR_EXCL`'d with that reasoning recorded beside it.
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
+
+### Risk-92 — The last radix pass leaves the row array STALE, and only the string exclusion makes that safe
+
+`sort_radix_permutation` (`src/parquet_sorting_engine.f90`) determines before its pass loop which
+byte position is the last one that will execute, and has that pass scatter row indices **straight
+into `perm`** rather than into `rb` — removing that pass's key write and the whole final copy, 24
+bytes per element. The pass does not carry the images or the rows forward, so **after it, `ka` and
+`ra` hold the order from BEFORE the last pass.**
+
+That is sound only because nothing reads them again — and there is exactly one thing that would:
+`sort_radix_refine_strings`, which finishes the runs a string key's 8-byte image could not separate
+and which reads both `ka` and `ra` after the loop. A string key is therefore excluded from the direct
+write (`last_p` stays `-1`), and the final copy runs for it as before.
+
+**The rule this forbids.** *Anything new that reads `ka` or `ra` after the pass loop must either
+exclude itself from the direct write the same way, or be written to read `perm` instead.* The failure
+is quiet in the worst way: the stale arrays are a valid permutation of the right rows in nearly the
+right order, so a refine driven from them produces a plausible, subtly wrong answer rather than an
+abort or an obvious scramble.
+
+Two further states reach the same final copy and must keep doing so: a column every digit of which is
+constant executes **no pass at all**, and `nv <= 1`. Both leave `last_p` at `-1`.
+
+**Test.** Covered, and each half by a different test. Removing the string exclusion fails
+`test_radix_path_string_shapes`; running the final copy unconditionally fails three tests including
+the whole-family A/B; never running it fails four. Taking `last_p` as the LOWEST non-constant digit
+rather than the highest fails four, including the pass counter. All four were confirmed by mutation
+(`feature_sort_improvements.md` §18.6). Note that removing the `exit` after the direct write survives
+and is *correct* to survive — every later pass would `cycle` anyway, since `last_p` is by construction
+the highest executing one.
 
 ### Risk-82 — A non-nullable field that receives a Null writes definition levels that disagree with its schema
 

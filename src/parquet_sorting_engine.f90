@@ -194,7 +194,7 @@ contains
         integer :: c !! this key's three-way answer.
         !
         do k = 1, size(keys)
-            c = sort_compare_key(keys(k), a, b)
+            c = inl_compare_key(keys(k), a, b)
             if (c /= 0) then
                 less = (c < 0)
                 return
@@ -207,6 +207,8 @@ contains
         ! serial one by construction rather than by luck. Removing this line breaks all three
         ! silently -- every one of them still returns a correctly *sorted* answer.
         less = (a < b)
+    contains
+#include "parquet_sorting_engine_core.inc"
     end procedure sort_row_less
 
     module procedure sort_keys_compare
@@ -220,9 +222,11 @@ contains
         !
         c = 0
         do k = 1, nk
-            c = sort_compare_key(keys(k), a, b)
+            c = inl_compare_key(keys(k), a, b)
             if (c /= 0) return
         end do
+    contains
+#include "parquet_sorting_engine_core.inc"
     end procedure sort_keys_compare
 
     ! ---- String keys ---------------------------------------------------------------------------
@@ -320,9 +324,11 @@ contains
             do i = 1_int64, nrows
                 j = i + stride
                 if (j > nrows) j = j - nrows
-                if (sort_row_less(keys%keys, i, j)) count = count + 1_int64
+                if (inl_row_less(keys%keys, i, j)) count = count + 1_int64
             end do
         end do
+    contains
+#include "parquet_sorting_engine_core.inc"
     end procedure parquet_debug_sort_sweep_less
 
     module procedure parquet_debug_sort_sweep_compare
@@ -337,9 +343,11 @@ contains
             do i = 1_int64, nrows
                 j = i + stride
                 if (j > nrows) j = j - nrows
-                total = total + int(sort_keys_compare(keys%keys, i, j, nkeys), int64)
+                total = total + int(inl_keys_compare(keys%keys, i, j, nkeys), int64)
             end do
         end do
+    contains
+#include "parquet_sorting_engine_core.inc"
     end procedure parquet_debug_sort_sweep_compare
 
 end submodule parquet_sorting_engine ! GCOVR_EXCL_LINE

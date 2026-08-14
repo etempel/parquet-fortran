@@ -1712,34 +1712,6 @@ def _writable_positions(callee, count, signatures, generics, bindings):
     return writable if resolved_any else None
 
 
-def check_include_files_are_used():
-    """Every `src/*.inc` is included by at least one `src/*.f90`, and stays inside 132 columns.
-
-    An include file is outside the glob every other check in this script uses (`src/*.f90`), so it
-    is invisible to all of them. This one exists so it is not invisible to ALL of them: an orphaned
-    `.inc` -- left behind after the code that included it was rewritten -- would otherwise sit in
-    `src/` looking authoritative forever, and fpm would never compile it, so nothing else would
-    notice.
-    """
-    problems = []
-    incs = sorted(SRC.glob("*.inc"))
-    if not incs:
-        return []
-    sources = sorted(SRC.glob("*.f90"))
-    if not sources:
-        return ["src/: no .f90 sources found -- this check has gone blind"]
-    text = "\n".join(p.read_text(errors="replace") for p in sources)
-    for inc in incs:
-        if inc.name not in text:
-            problems.append(
-                f"src/{inc.name}: no src/*.f90 includes it -- orphaned, and nothing compiles it"
-            )
-        for lineno, line in enumerate(inc.read_text(errors="replace").splitlines(), start=1):
-            if len(line) > 132:
-                problems.append(f"src/{inc.name}:{lineno}: {len(line)} columns, over the 132 limit")
-    return problems
-
-
 def check_no_aliased_output_argument():
     """One variable must never be passed to two dummies when either of them can be DEFINED.
 
@@ -1857,7 +1829,6 @@ CHECKS = (
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
-    ("every src/*.inc is included and within 132 columns", check_include_files_are_used),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
 )
 

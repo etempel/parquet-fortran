@@ -36,30 +36,15 @@
 !!
 !! **String keys compare like `memcmp`, not like Fortran.** Fortran's own `<` on `character` blank-pads
 !! the shorter operand, so `"ab" == "ab "`; `std::string_view::compare` — which this must reproduce
-!! exactly — treats a prefix as *less*, so `"ab" < "ab "`. `compare_bytes` below does it byte by
-!! byte and then by length, and reads each byte as **unsigned**, because
-!! `char_traits<char>::compare` is `memcmp` and a byte ≥ 128 must sort high.
+!! exactly — treats a prefix as *less*, so `"ab" < "ab "`. `compare_bytes` below does it byte by byte
+!! and then by length, and reads each byte as **unsigned**, because `char_traits<char>::compare` is
+!! `memcmp` and a byte ≥ 128 must sort high.
 !!
-!! ## Where the ordering actually lives: `parquet_sorting_key_compare.inc`
+!! ## Keep the two comparators adjacent
 !!
-!! Every procedure in this file is a thin shell around `tier_of`/`cmp_key`, which are
-!! **internal procedures** textually included from `src/parquet_sorting_key_compare.inc` into each
-!! host's `contains` section. Read that file's header before changing anything here — it explains why
-!! the ordering cannot live in a shared module procedure.
-!!
-!! In one sentence: under ELF with `-fPIC`, which fpm's release profile passes to every file, a
-!! gfortran **module procedure is a global symbol and therefore interposable**, so GCC refuses to
-!! inline it — measured at four out-of-line calls per comparison and 1.3x–2.2x against the C++
-!! engine, whose helpers are `static inline`. An internal procedure gets **local** linkage and is
-!! immune. `compare_bytes` is the deliberate exception, kept out of line: it is a byte loop that can
-!! never execute on a numeric key, so inlining it into every unrolled iteration of the numeric path
-!! is pure bloat. Measured on machine A: keeping it out of line took the `str` arm from 7.64 to 4.95
-!! ns and left the numeric arms unchanged within noise.
-!!
-!! **`feature_risks.md` Risk-34 still holds, by a changed mechanism.** `sort_row_less` and
-!! `sort_keys_compare` remain one decision expressed twice, and they still cannot drift — but the
-!! guarantee is now "both include one shared source" rather than "both call one shared body". The
-!! way to break it is to reimplement the comparison in a host instead of including the file.
+!! `sort_row_less` and `sort_keys_compare` are one decision expressed twice, and `feature_risks.md`
+!! **Risk-34** is about them never drifting apart. Both walk the keys in precedence order and both
+!! delegate every actual comparison to `sort_compare_key`. A change to one is a change to the other.
 !!
 !! ## Performance shape (feature_sort.md §6 Stage 1e)
 !!
@@ -70,33 +55,138 @@
 !! may become polymorphic, and the `objdump` check in CLAUDE.md's typed-accessor-tier section is what
 !! confirms it.
 !!
-!! **One global call per comparison remains, and it is deliberate**: a caller reaching
-!! `sort_row_less` still pays an out-of-line call, because that one must stay a module procedure for
-!! `parquet_sorting_keys` to reach it at Stage 6. Stage 2 can remove even that, by having the
-!! introsort include the same file as its own internal comparator.
-!!
-!! Stage 2 is also where the value arrays get hoisted: an introsort holds one key set across millions
-!! of comparisons, so it should resolve `keys(k)%ints`/`%reals` into local `contiguous` pointers once
+!! Stage 2 is where the value arrays get hoisted: an introsort holds one key set across millions of
+!! comparisons, so it should resolve `keys(k)%ints`/`%reals` into local `contiguous` pointers once
 !! rather than re-reaching through the derived type per comparison. Doing that *here* would buy
 !! nothing — each call reaches a key exactly once — and would obscure the ordering, which is the only
 !! thing this file is for.
 submodule (parquet_sorting) parquet_sorting_engine
     implicit none
     !
+    ! ---- NaN detection: `x /= x`, deliberately NOT ieee_is_nan -------------------------------
+    !
+    ! CLAUDE.md's "Compiler & language gotchas" says to test for NaN with `ieee_is_nan` rather than
+    ! this idiom, because this one trips gfortran's -Wcompare-reals. **That convention is knowingly
+    ! broken here, and only here**, for one measured reason:
+    !
+    ! **Under ifx, `ieee_is_nan` is a call into the Intel Fortran runtime, not an instruction.** The
+    ! disassembly shows two `ieee_arithmetic_mp_for_ieee_is_nan_k8_` PLT calls per comparison, fired
+    ! only on real keys -- exactly the shape of the f64-specific penalty machine B measured (+3.45 ns
+    ! over its own i64 arm). gfortran inlines the same intrinsic to a native compare, so machine A
+    ! never saw it. `app/probe_isnan.f90` on machine B, ifx 2026.1.1, ns per test above a bare `<`:
+    !
+    !     ieee_is_nan  +2.479      x /= x  +0.034      integer bit test  +0.003
+    !
+    ! **The bit test looks best there and was tried first; it is NOT used, because the probe
+    ! mispredicts it.** In context on machine A it made the f64 arm 21% WORSE (3.52 -> 4.27 ns): on
+    ! arm64 `ieee_is_nan` is a single native `fcmp`, while the bit test needs an FP-to-integer
+    ! register move that stalls inside the comparator's dependency chain -- a cost the probe's
+    ! independent iterations hide. `x /= x` measured 3.58 ns there, i.e. baseline within noise, while
+    ! costing ifx almost nothing. It is the only one of the three that is cheap on both.
+    !
+    ! The general lesson, which is why this is written down at length: **a microbenchmark of an
+    ! isolated operation does not predict its cost inside a dependency chain.** The probe was right
+    ! about `ieee_is_nan` and wrong about its replacement.
+    !
+    ! `x /= x` is exact -- a NaN is the only value not equal to itself -- and correct for both
+    ! infinities.
+    !
+    ! **And it turns out to cost no warning either, at least here.** `fpm build --profile debug`
+    ! (which does carry `-Wall -Wextra`, checked) compiles this file with **zero** diagnostics on
+    ! gfortran 15.2. CLAUDE.md's convention says the idiom "triggers gfortran's -Wcompare-reals
+    ! warning"; that is evidently not true of a SELF-comparison on this version, whatever it may be
+    ! for two distinct operands. Do not take this as settled for every compiler -- if a build does
+    ! warn here, the answer is to suppress or accept it, NOT to restore `ieee_is_nan`, which costs
+    ! ifx ~2.5 ns per test.
+    !
 contains
 
     ! ---- The two comparators. Adjacent on purpose -- Risk-34. ----------------------------------
 
     module procedure sort_tier_of
-        tier = tier_of(key, i)
-    contains
-        include 'parquet_sorting_key_compare.inc'
+        logical :: is_null !! row `i` is null under this key.
+        logical :: is_nan  !! row `i` is a NaN under this key (real keys only).
+        !
+        ! An UNALLOCATED `valid` means "this key has no nulls at all" -- the fast path, and the
+        ! first thing a port of the C++ side gets wrong, because there the same state is an empty
+        ! vector. Every caller must be safe against it.
+        is_null = .false.
+        if (allocated(key%valid)) is_null = (key%valid(i) == 0_c_int8_t)
+        !
+        is_nan = .false.
+        ! `x /= x` rather than `ieee_is_nan` -- see this submodule's header. A deliberate, measured
+        ! exception to a project-wide convention, not an oversight.
+        if (.not. is_null .and. key%family == SK_REAL) is_nan = (key%reals(i) /= key%reals(i))
+        !
+        ! `descending` deliberately does not appear here. A descending sort still puts nulls last by
+        ! default; it does not flip them to the front.
+        if (key%nulls_first) then
+            if (is_null) then
+                tier = 0
+            else if (is_nan) then
+                tier = 1
+            else
+                tier = 2
+            end if
+        else
+            if (is_null) then
+                tier = 2
+            else if (is_nan) then
+                tier = 1
+            else
+                tier = 0
+            end if
+        end if
     end procedure sort_tier_of
 
     module procedure sort_compare_key
-        c = cmp_key(key, a, b)
-    contains
-        include 'parquet_sorting_key_compare.inc'
+        integer :: ta, tb       !! tiers of `a` and `b`.
+        integer :: value_tier   !! which tier number the VALUES occupy under this key's placement.
+        integer(int64) :: ia, ib !! integer key values.
+        real(real64) :: ra, rb   !! real key values.
+        !
+        ta = sort_tier_of(key, a)
+        tb = sort_tier_of(key, b)
+        if (ta /= tb) then
+            c = -1
+            if (ta > tb) c = 1
+            return
+        end if
+        !
+        ! Same tier. If it is not the VALUE tier then both rows are null, or both are NaN, and the
+        ! answer is EQUAL -- which is what leaves them in file order once the caller's index
+        ! tiebreaker runs. Note the value tier is 2 under `nulls_first` and 0 otherwise.
+        value_tier = 0
+        if (key%nulls_first) value_tier = 2
+        if (ta /= value_tier) then
+            c = 0
+            return
+        end if
+        !
+        c = 0
+        select case (key%family)
+        case (SK_INT)
+            ia = key%ints(a)
+            ib = key%ints(b)
+            if (ia < ib) then
+                c = -1
+            else if (ia > ib) then
+                c = 1
+            end if
+        case (SK_REAL)
+            ra = key%reals(a)
+            rb = key%reals(b)
+            if (ra < rb) then
+                c = -1
+            else if (ra > rb) then
+                c = 1
+            end if
+        case default
+            c = compare_bytes(key, a, b)
+        end select
+        !
+        ! `descending` reverses the VALUE tier only -- every early return above skipped it.
+        if (key%descending) c = -c
     end procedure sort_compare_key
 
     module procedure sort_row_less
@@ -104,7 +194,7 @@ contains
         integer :: c !! this key's three-way answer.
         !
         do k = 1, size(keys)
-            c = cmp_key(keys(k), a, b)
+            c = sort_compare_key(keys(k), a, b)
             if (c /= 0) then
                 less = (c < 0)
                 return
@@ -117,8 +207,6 @@ contains
         ! serial one by construction rather than by luck. Removing this line breaks all three
         ! silently -- every one of them still returns a correctly *sorted* answer.
         less = (a < b)
-    contains
-        include 'parquet_sorting_key_compare.inc'
     end procedure sort_row_less
 
     module procedure sort_keys_compare
@@ -132,37 +220,33 @@ contains
         !
         c = 0
         do k = 1, nk
-            c = cmp_key(keys(k), a, b)
+            c = sort_compare_key(keys(k), a, b)
             if (c /= 0) return
         end do
-    contains
-        include 'parquet_sorting_key_compare.inc'
     end procedure sort_keys_compare
 
+    ! ---- String keys ---------------------------------------------------------------------------
 
-    ! ---- String keys: deliberately NOT in the include -------------------------------------
-    !
-    ! Kept out of line, unlike tier_of/cmp_key, because inlining a byte loop into every unrolled
-    ! iteration of the NUMERIC path is pure code bloat -- it can never execute there. On a string
-    ! key the extra call is negligible beside the loop it guards.
     !> Bytewise comparison of two string-key rows: `memcmp` semantics, deliberately NOT Fortran's.
     !!
-    !! Row `k` occupies `key%data(key%offsets(k) + 1 : key%offsets(k + 1))` -- `offsets` holds
-    !! 0-based byte positions in a 1-based array, which is the layout the C++ side indexes.
+    !! Row `k` occupies `key%data(key%offsets(k) + 1 : key%offsets(k + 1))` — `offsets` holds 0-based
+    !! byte positions in a 1-based array, which is the layout the C++ side indexes directly.
     !!
     !! Two departures from Fortran's own `character` comparison, both required to match
-    !! `std::string_view::compare`: the shorter string is LESS when it is a prefix of the longer
-    !! (Fortran would blank-pad and call them equal), and bytes are read as UNSIGNED so a byte
-    !! >= 128 sorts above every ASCII one. `iand(..., 255)` guarantees the second whatever the
-    !! processor's `iachar` hands back.
-    integer function compare_bytes(key, a, b)
+    !! `std::string_view::compare`: the shorter string is **less** when it is a prefix of the longer
+    !! (Fortran would blank-pad and call them equal), and bytes are read as **unsigned** so that a
+    !! byte ≥ 128 sorts above every ASCII one. `iand(..., 255)` is what guarantees the second
+    !! regardless of whether the processor's `iachar` hands back a signed value.
+    function compare_bytes(key, a, b) result(c)
         type(sort_key_buf), intent(in) :: key !! the bound string key.
         integer(int64), intent(in) :: a       !! first row, 1-based.
         integer(int64), intent(in) :: b       !! second row, 1-based.
-        integer(int64) :: pa, pb              !! first byte of each row, 1-based into `data`.
-        integer(int64) :: na, nb              !! byte length of each row.
-        integer(int64) :: k, m                !! loop index, and the common prefix length.
-        integer :: ba, bb                     !! one byte from each row, unsigned 0..255.
+        integer :: c                          !! -1, 0 or +1.
+        !
+        integer(int64) :: pa, pb !! first byte of each row, 1-based into `data`.
+        integer(int64) :: na, nb !! byte length of each row.
+        integer(int64) :: k, m   !! loop index, and the common prefix length.
+        integer :: ba, bb        !! one byte from each row, as an unsigned 0..255.
         !
         pa = key%offsets(a) + 1_int64
         na = key%offsets(a + 1_int64) - key%offsets(a)
@@ -170,22 +254,22 @@ contains
         nb = key%offsets(b + 1_int64) - key%offsets(b)
         m = min(na, nb)
         !
-        compare_bytes = 0
+        c = 0
         do k = 0_int64, m - 1_int64
             ba = iand(iachar(key%data(pa + k)), 255)
             bb = iand(iachar(key%data(pb + k)), 255)
             if (ba /= bb) then
-                compare_bytes = -1
-                if (ba > bb) compare_bytes = 1
+                c = -1
+                if (ba > bb) c = 1
                 return
             end if
         end do
         !
         ! Equal over the common prefix: the shorter one is less.
         if (na < nb) then
-            compare_bytes = -1
+            c = -1
         else if (na > nb) then
-            compare_bytes = 1
+            c = 1
         end if
     end function compare_bytes
 

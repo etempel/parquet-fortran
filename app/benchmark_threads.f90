@@ -184,7 +184,6 @@ contains
             call make_col_name("lg", k, name)
             call schema%add_field(name, "boolean")
         end do
-        call parquet_parse_maml(schema)
     end subroutine build_schema
 
     !> Times parquet_open_writer/parquet_write_column/parquet_close_writer only -- each column

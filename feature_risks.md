@@ -149,6 +149,7 @@ something a reader is expected to have.
 | [Risk-81](#risk-81--two-individually-valid-ranges-that-describe-different-parts-of-the-file) | Two individually valid ranges that describe different parts of the file | 4 — covered |
 | [Risk-83](#risk-83--a-write-path-that-does-not-resolve-a-declared-auto-size-emits-a-sentinel-into-the-sidecar) | A write path that does not resolve a declared `auto` size emits a sentinel into the sidecar | 4 — covered |
 | [Risk-84](#risk-84--a-maml-key-matched-case-sensitively-loses-a-whole-block-in-silence) | A MAML key matched case-sensitively loses a whole block, in silence | 4 — covered |
+| [Risk-85](#risk-85--the-in-code-schema-builder-now-owns-both-parsing-and-validating-its-own-text) | The in-code schema builder now owns both parsing and validating its own text | 4 — covered |
 
 ---
 
@@ -156,7 +157,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-85**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-86**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3575,3 +3576,56 @@ all — a block that was found is only visible through something it does — so
 bogus `protected_cols:` name is still rejected, **paired with** `extra_section_lowercase_control`:
 without the lowercase twin the capitalized test would pass against a library that had stopped reading
 `extra:` altogether.
+
+### Risk-85 — The in-code schema builder now owns both parsing and validating its own text
+
+`schema%init`/`%add_field` used to write MAML *text* only, and `parquet_parse_maml` was the one
+checkpoint that turned it into `%cinfo`/`%metadata` and validated it. That checkpoint is gone for an
+in-code schema: `%init` parses its own header lines, and every `%add_field` parses its own field's
+lines through `schema_sync_appended_lines` (`src/parquet_metadata.f90`) and validates that field
+through `parquet_validate_field_rules`. Two properties now have to hold that nothing used to depend
+on, and breaking either is silent.
+
+**What breaks, first half — text without a sync.** Any future code that appends to `%maml%lines`
+without calling `schema_sync_appended_lines` leaves `%cinfo` describing a schema that its own MAML
+text no longer matches. The column exists in the text and not in the schema, so it is simply never
+written; `parquet_close_writer`'s missing-write check iterates `%cinfo` and cannot see it either.
+This is the exact bug the change removed (a `%add_field` after a parse used to do nothing, quietly),
+so reintroducing it is a regression to a known failure. **`%add_col_qc`/`%set_col_qc` are a
+deliberate, documented instance of the drift** and must stay one: a qc-maml declares `name` + `qc:`
+and no `data_type:`, which `parquet_parse_maml_lines` rejects outright, so a qc entry cannot be
+parsed by the schema parser at all — one field at a time or whole. Nothing reads `%cinfo` for a qc
+schema (`parquet_open_reader` works from `%maml`, and `parquet_load_qc_maml_file` populates nothing
+else), which is what makes it harmless there and only there.
+
+**What breaks, second half — validation that stops being shared.** `parquet_validate_field_rules`
+is called from two places: `parquet_validate_maml_internal`, once per field of a whole document, and
+`schema_sync_appended_lines`, once per `%add_field`. Inlining it back into the document validator —
+which reads as a tidy-up, since that is where it came from — silently stops validating every in-code
+schema, because such a schema may now never be validated as a document at all. A `qc_min` that is
+not convertible to the declared type, a `qc:` on a temporal column, a non-positive
+`col_size`/`array_size` and `array_size: auto` on a non-string column would all be accepted and
+carried into the written file.
+
+**The rule this forbids.** *A schema's text, its parsed state and its validation are one object with
+three faces; a change may not move one without the other two.* Concretely: a new appender to
+`%maml%lines` calls `schema_sync_appended_lines`, and per-field validation stays in one procedure
+reached by both routes. The whole-document rules (a missing `table:`, an empty `fields:`, an unknown
+section or sub-key, `extra:`/`col_map:`/`protected_cols:`) are deliberately **not** run on the
+incremental path, and that is sound only for as long as neither builder can emit them — teaching
+`%add_field` to emit an `extra:` section is what would break it.
+
+**Test.** `test_add_metadata_interleaved_with_add_field` (`test/test_metadata.f90`) builds a schema
+with `%add_field` and `%add_metadata` interleaved, asserts every field and entry survives with no
+explicit parse, and then runs a redundant `parquet_parse_maml` and asserts nothing was lost or
+duplicated — **that call is load-bearing and must not be removed as redundant**, since without it a
+parse that discards user metadata passes the test (confirmed: the mutation survived until the call
+was restored). `test_schema_is_parsed_false_after_init_alone` (`test/test_maml.f90`) pins both sides
+of the `%init`-alone/`%add_field` boundary. `test_in_code_sidecar_interleaved_metadata`
+(`test/test_writing.f90`) covers `%metadata%source_maml_lines`, the third thing kept in step, by
+writing a `write_maml=.true.` sidecar from the awkward field/metadata/field order and re-parsing it.
+The validation half is `schema_add_field_validates_field_rules` (`test/error_scenarios.f90`), whose
+negative control is a *valid* field accepted in the same process — without it the scenario would
+pass just as happily against an `%add_field` that ran the whole-document validator and rejected
+everything.
+

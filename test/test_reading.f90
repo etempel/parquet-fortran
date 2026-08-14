@@ -817,7 +817,6 @@ contains
         call schema%add_field("f64v", "float64", col_size=2)
         call schema%add_field("boolv", "boolean", col_size=2)
         call schema%add_field("strv", "string", array_size=8, col_size=2)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "i32v", i32v)
@@ -904,7 +903,6 @@ contains
         call schema%init(table="string_vector_table")
         call schema%add_field("tags", "string", array_size=12, col_size=3)
         call schema%add_field("note", "string", array_size=12)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "tags", tags)
@@ -1464,7 +1462,6 @@ contains
         call schema%add_field("f32s", "float32")
         call schema%add_field("f64s", "float64")
         call schema%add_field("bools", "boolean")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "i32v", i32v, is_valid=vmask)
@@ -1559,7 +1556,6 @@ contains
 
         call schema%init(table="vector_no_nulls_table")
         call schema%add_field("i32v", "int32", col_size=2)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "i32v", i32v)
@@ -1657,7 +1653,6 @@ contains
         call schema%add_field("logv", "boolean", col_size=2)
         call schema%add_field("strs", "string", array_size=8)
         call schema%add_field("strv", "string", col_size=2, array_size=8)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema, chunk_size=2)
         call parquet_write_column(writer, "i32s", i32s, is_valid=smask)
@@ -2806,7 +2801,6 @@ contains
         call schema%add_field("f64vec", "float64", col_size=2)
         call schema%add_field("boolvec", "boolean", col_size=2)
         call schema%add_field("strvec", "string", array_size=8, col_size=2)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id", id)
@@ -3117,7 +3111,6 @@ contains
         call schema%add_field("c_time", "time")
         call schema%add_field("c_time_ms", "time[ms]")
         call schema%add_field("c_ts", "timestamp")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "c_i32", i32)

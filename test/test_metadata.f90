@@ -12,7 +12,7 @@ module test_metadata
     use parquet_maml_base
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
-    use test_errors, only : check_scenario_exit_status
+    use test_errors, only : check_scenario_exit_status, run_error_scenario, scenario_capture_contains
     !
     implicit none
     private
@@ -119,8 +119,12 @@ contains
                 test_print_schema_info_open_failure_aborts), &
             new_unittest("print_schema_info: allow_uninitialized=.true. is a complete no-op", &
                 test_print_schema_info_allow_uninitialized_is_noop), &
-            new_unittest("add_metadata before the schema has been parsed aborts", &
-                test_add_metadata_before_parse_aborts), &
+            new_unittest("add_metadata before the schema has been initialized aborts", &
+                test_add_metadata_before_init_aborts), &
+            new_unittest("add_metadata and add_field interleave in any order, with no parse", &
+                test_add_metadata_interleaved_with_add_field), &
+            new_unittest("add_field applies the per-field rules parquet_validate_maml would", &
+                test_add_field_validates_field_rules), &
             new_unittest("clear_metadata keeps base (parsed) entries, discards user-added ones", &
                 test_clear_metadata_keeps_base_entries), &
             new_unittest("clear_metadata with no user-added entries is a no-op", &
@@ -443,7 +447,6 @@ contains
 
         call schema%init(table="votable_escape_table")
         call schema%add_field("id0", "int32", unit="a<b", info="say ""hi"" & bye", ucd="it's_a_ucd")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id0", id0)
@@ -956,7 +959,6 @@ contains
 
         call schema%init(table="empty_key_test")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
         call schema%add_metadata("", 1_int32)
 
         call check(error, size(schema%metadata%items) == schema%metadata%n_base_items, &
@@ -1000,7 +1002,6 @@ contains
         call schema%add_field("id", "int32", info="ID field")
         call schema%add_field("ra_deg", "float64", unit="deg", ucd="pos.eq.ra", info="Right ascension")
         call schema%add_field("flags", "boolean", col_size=6)
-        call parquet_parse_maml(schema)
 
         open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
         call schema%print_schema_info(unit=unit, table_name=.false.)
@@ -1077,11 +1078,9 @@ contains
         call schema1%init(table="multi_a")
         call schema1%add_field("a", "int32")
         call schema1%add_field("b", "float64")
-        call parquet_parse_maml(schema1)
 
         call schema2%init(table="multi_b")
         call schema2%add_field("c", "string", array_size=4)
-        call parquet_parse_maml(schema2)
 
         open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
         call schema1%print_schema_info(unit=unit, table_name=.false.)
@@ -1121,11 +1120,9 @@ contains
 
         call schema1%init(table="append_a")
         call schema1%add_field("x", "int32")
-        call parquet_parse_maml(schema1)
 
         call schema2%init(table="append_b")
         call schema2%add_field("y", "float32")
-        call parquet_parse_maml(schema2)
 
         call schema1%print_schema_info(filename=out_file, table_name=.false.)
         call schema2%print_schema_info(filename=out_file, header=.false., table_name=.false., dash_after_header=.false.)
@@ -1152,7 +1149,6 @@ contains
 
         call schema%init(table="empty_test")
         call schema%add_field("z", "int32")
-        call parquet_parse_maml(schema)
         call schema%set_column_unavailable()
 
         open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
@@ -1179,7 +1175,6 @@ contains
 
         call schema%init(table="my_table_x")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
 
         ! Default: table_name=.true., dash_before_header=.false. -- "Table name:" is line 1.
         open(newunit=unit, file=out_file, status="replace", action="write", form="formatted")
@@ -1312,12 +1307,131 @@ contains
             "allow_uninitialized=.true. on an uninitialized schema should not create/touch the filename= file")
     end subroutine test_print_schema_info_allow_uninitialized_is_noop
 
-    subroutine test_add_metadata_before_parse_aborts(error)
+    !> %add_metadata needs %init (or a parse) to have established the metadata table first.
+    !! The scenario runs the LEGAL "after %init, before any parse" call before the illegal one,
+    !! so a guard that fired unconditionally would fail this test rather than pass it.
+    subroutine test_add_metadata_before_init_aborts(error)
         type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
 
-        call check_scenario_exit_status(error, "schema_add_metadata_before_parse", expect_abort=.true., &
-            failure_message="add_metadata before the schema has been parsed was expected to abort")
-    end subroutine test_add_metadata_before_parse_aborts
+        call run_error_scenario("schema_add_metadata_before_init", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "add_metadata before schema%init was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "schema has no metadata table yet", found)
+        call check(error, found, "the abort should say the schema has no metadata table yet")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "metadata entries after add_metadata with no parse: 2", found)
+        call check(error, found, &
+            "the negative control (add_metadata after %init, before any parse) should have been accepted")
+    end subroutine test_add_metadata_before_init_aborts
+
+    !> %add_field writes the schema's MAML text; %add_metadata writes its parsed metadata table.
+    !! Those used to be two ends of one destructive rebuild, so they had a required order. They
+    !! no longer do: %add_field keeps %cinfo in step incrementally and a parse preserves whatever
+    !! %add_metadata contributed, so any interleaving gives the same schema -- with or without an
+    !! explicit parquet_parse_maml, which this test never calls.
+    subroutine test_add_metadata_interleaved_with_add_field(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        character(len=:), allocatable :: value
+        logical :: found
+
+        call schema%init(table="interleaved")
+        call schema%add_metadata("BEFORE_ANY_FIELD", "a")
+        call schema%add_field("x", "int32")
+        call schema%add_metadata("BETWEEN_FIELDS", "b")
+        call schema%add_field("y", "float64")
+        call schema%add_metadata("AFTER_ALL_FIELDS", "c")
+
+        call check(error, schema%get_num_fields() == 2, &
+            "both fields should be present however the add_metadata calls were interleaved")
+        if (allocated(error)) return
+        call check(error, schema%is_parsed(), &
+            "%add_field alone should leave the schema parsed, with no parquet_parse_maml call")
+        if (allocated(error)) return
+        call check(error, schema%get_column_index("y") == 2, &
+            "the field added after an add_metadata call should still be the second column")
+        if (allocated(error)) return
+
+        call schema_metadata_value(schema, "BEFORE_ANY_FIELD", value, found)
+        call check(error, found .and. value == "a", "the entry added before any field should survive")
+        if (allocated(error)) return
+        call schema_metadata_value(schema, "BETWEEN_FIELDS", value, found)
+        call check(error, found .and. value == "b", "the entry added between two fields should survive")
+        if (allocated(error)) return
+        call schema_metadata_value(schema, "AFTER_ALL_FIELDS", value, found)
+        call check(error, found .and. value == "c", "the entry added after the last field should survive")
+        if (allocated(error)) return
+
+        ! A stray explicit parse must be harmless in both directions: it must not lose the
+        ! user's entries (it used to rebuild %metadata from scratch) and must not duplicate the
+        ! base ones. This call is deliberate and load-bearing -- do not remove it as redundant.
+        call parquet_parse_maml(schema)
+        call check(error, schema%get_num_fields() == 2, "a redundant parse should not change the fields")
+        if (allocated(error)) return
+        call schema_metadata_value(schema, "BETWEEN_FIELDS", value, found)
+        call check(error, found .and. value == "b", &
+            "a redundant parse should not discard entries added before it")
+        if (allocated(error)) return
+        call check(error, schema%metadata%n_base_items == 1, &
+            "only the table: entry is a base entry; the three add_metadata ones are not")
+        if (allocated(error)) return
+        call schema%clear_metadata()
+        call check(error, size(schema%metadata%items) == 1, &
+            "clear_metadata should discard exactly the three user-added entries")
+    end subroutine test_add_metadata_interleaved_with_add_field
+
+    !> An in-code schema may now never be validated as a whole document, so %add_field runs the
+    !! per-field half of parquet_validate_maml itself -- literally the same procedure, so the two
+    !! routes cannot disagree about what a valid field is. The scenario's negative control is a
+    !! field that passes: it proves the WHOLE-document half stays skipped, since a one-field
+    !! sub-document carries no table: line and the full validator would reject every one.
+    subroutine test_add_field_validates_field_rules(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("schema_add_field_validates_field_rules", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, "a qc_min that is not integral for an int32 column should abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "parquet_schema%add_field: field 'x' has an invalid qc: min value '3.7'", found)
+        call check(error, found, "the abort should come from %add_field and name the offending bound")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "fields accepted with no whole-document validation: 1", found)
+        call check(error, found, &
+            "a valid field should still be accepted, with no whole-document validation applied to it")
+    end subroutine test_add_field_validates_field_rules
+
+    !> First %items entry whose key is `key` (parquet_get_metadata answers from a reader, not
+    !! from a schema still being built).
+    subroutine schema_metadata_value(schema, key, value, found)
+        type(parquet_schema), intent(in) :: schema !! schema to look in.
+        character(len=*), intent(in) :: key !! metadata key to find.
+        character(len=:), allocatable, intent(out) :: value !! the stored value, or "".
+        logical, intent(out) :: found !! .true. if `key` has an entry.
+        integer :: i
+
+        value = ""
+        found = .false.
+        if (.not. allocated(schema%metadata%items)) return
+        do i = 1, size(schema%metadata%items)
+            if (trim(schema%metadata%items(i)%key) == key) then
+                value = trim(schema%metadata%items(i)%value)
+                found = .true.
+                return
+            end if
+        end do
+    end subroutine schema_metadata_value
 
     !> clear_metadata truncates %items back to %n_base_items (the count recorded right after
     !! parsing), discarding only entries a later %add_metadata call added -- the base entries
@@ -1379,7 +1493,6 @@ contains
 
         call schema%init(table="clear_meta_test")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
         n_base = schema%metadata%n_base_items
 
         call schema%add_metadata("extra", 5_int32)
@@ -1428,7 +1541,6 @@ contains
 
         call schema%init(table="dup_a_test", author="Alice")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
         n_before = size(schema%metadata%items)
 
         call schema%add_metadata("author", "Bob")
@@ -1453,7 +1565,6 @@ contains
 
         call schema%init(table="dup_b_test")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
 
         call schema%add_metadata("custom_key", 1_int32)
         n_before = size(schema%metadata%items)
@@ -1485,7 +1596,6 @@ contains
 
         call schema%init(table="dup_c_test")
         call schema%add_field("id0", "int32")
-        call parquet_parse_maml(schema)
         call schema%add_metadata("DATE", "user-supplied-not-a-real-date")
 
         call parquet_open_writer(writer, "test_run/metadata_dup_writer_key.parquet", schema)
@@ -1510,7 +1620,6 @@ contains
 
         call schema%init(table="dup_warn_false_test", author="Alice")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
         n_before = size(schema%metadata%items)
 
         call schema%add_metadata("author", "Bob", warn=.false.)
@@ -1534,7 +1643,6 @@ contains
 
         call schema%init(table="datatype_scalar_table")
         call schema%add_field("id0", "int32")
-        call parquet_parse_maml(schema)
         call schema%add_metadata("m_i32", 1024_int32)
         call schema%add_metadata("m_i64", 9000000000_int64)
         call schema%add_metadata("m_f32", 0.5_real32)
@@ -1591,7 +1699,6 @@ contains
 
         call schema%init(table="datatype_array_table")
         call schema%add_field("id0", "int32")
-        call parquet_parse_maml(schema)
         call schema%add_metadata("a_i32", [1_int32, 2_int32])
         call schema%add_metadata("a_i64", [1_int64, 2_int64])
         call schema%add_metadata("a_f32", [1.0_real32, 2.0_real32])
@@ -1645,7 +1752,6 @@ contains
 
         call schema%init(table="datatype_order_table")
         call schema%add_field("id0", "int32")
-        call parquet_parse_maml(schema)
         call schema%add_metadata("NSIDE", 1024_int32)
         call schema%add_metadata("PIXTYPE", "HEALPIX")
 
@@ -1685,7 +1791,6 @@ contains
 
         call schema%init(table="datatype_votable_table")
         call schema%add_field("id0", "int32")
-        call parquet_parse_maml(schema)
         call schema%add_metadata("V_I32", 7_int32)
         call schema%add_metadata("V_I64", 8_int64)
         call schema%add_metadata("V_F32", 1.5_real32)
@@ -1737,7 +1842,6 @@ contains
 
         call schema%init(table="datatype_item_count_table")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
         n_before = size(schema%metadata%items)
 
         call schema%add_metadata("NSIDE", 1024_int32)
@@ -1766,7 +1870,6 @@ contains
 
         call schema%init(table="datatype_bool_value_table")
         call schema%add_field("id0", "int32")
-        call parquet_parse_maml(schema)
         call schema%add_metadata("B_TRUE", .true.)
         call schema%add_metadata("B_FALSE", .false.)
 

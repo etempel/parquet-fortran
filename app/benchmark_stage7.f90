@@ -265,7 +265,6 @@ contains
         call bench_whole(src, d32, d64, anint32, cand32, anint64, cand64)
         call schema%init(table="s7_9_endtoend")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
         call tick(t0)
         call parquet_open_writer(writer, OUT, schema)
         call parquet_write_column(writer, "v", src)
@@ -831,7 +830,6 @@ contains
         call schema%add_field("i64", "int64")
         call schema%add_field("date", "date")
         call schema%add_field("ts", "timestamp[us]")
-        call parquet_parse_maml(schema)
         call parquet_open_writer(writer, file, schema=schema)
         call parquet_write_column(writer, "i32", i32)
         call parquet_write_column(writer, "i64", i64)
@@ -1165,7 +1163,6 @@ contains
         end do
         call schema%init("s7_7")
         call schema%add_field("s", "string", array_size=W)
-        call parquet_parse_maml(schema)
         call parquet_open_writer(writer, file, schema=schema)
         call parquet_write_column(writer, "s", v)
         call parquet_close_writer(writer)

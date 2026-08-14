@@ -128,7 +128,7 @@ contains
             new_unittest("schema%is_init reflects state before/after schema%init", test_schema_is_init_reflects_state), &
             new_unittest("schema%is_init is .true. after a MAML parse, even without %init", &
                 test_schema_is_init_true_after_maml_parse), &
-            new_unittest("schema%is_parsed is .false. after %init alone, even though %is_init is .true.", &
+            new_unittest("schema%is_parsed is .false. after %init alone and .true. after %add_field", &
                 test_schema_is_parsed_false_after_init_alone), &
             new_unittest("schema%is_parsed is .true. after a MAML parse", &
                 test_schema_is_parsed_true_after_maml_parse), &
@@ -1030,8 +1030,6 @@ contains
         call schema%add_field("ra", "float64", qc_min=">=0", qc_max="<=360")
         call schema%add_field("flag", "boolean")
 
-        call parquet_parse_maml(schema)
-
         call check(error, size(schema%cinfo%col) == 3, "expected 3 parsed fields")
         if (allocated(error)) return
 
@@ -1084,7 +1082,6 @@ contains
         call schema%init(table="input_table")
         call schema%add_field("id0", "int32")
         call schema%add_field("ra", "float64")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id0", id0)
@@ -1275,7 +1272,6 @@ contains
             qc_min=">=0", qc_max="<360", qc_miss="Null")
         call schema%add_field("flag", "boolean")
         call schema%add_field("checked", "int32", qc_miss="")
-        call parquet_parse_maml(schema)
 
         call schema%get_field("ra", data_type=data_type, unit=unit, info=info, ucd=ucd, array_size=array_size, &
             col_size=col_size, qc_min=qc_min, qc_max=qc_max, qc_miss=qc_miss)
@@ -1310,7 +1306,6 @@ contains
         call schema%init(table="t")
         call schema%add_field("id0", "int32")
         call schema%add_field("ra", "float64")
-        call parquet_parse_maml(schema)
 
         call schema%get_field(2, name, data_type=data_type)
         call check(error, name == "ra" .and. data_type == "float64", &
@@ -1341,11 +1336,9 @@ contains
 
         call source%init(table="catalog")
         call source%add_field("obj_id", "int64", unit="count", qc_min=">=0")
-        call parquet_parse_maml(source)
 
         call target%init(table="derived")
         call target%add_field_from(source, "obj_id")
-        call parquet_parse_maml(target)
 
         call check(error, size(target%cinfo%col) == 1 .and. trim(target%cinfo%col(1)%name) == "obj_id", &
             "add_field_from did not append the copied field to the target schema")
@@ -1392,7 +1385,6 @@ contains
         call schema%add_field("ev", "timestamp")
         call schema%add_field("ev_ns", "timestamp[ns]")
         call schema%add_field("ev_utc", "timestamp[us,utc]")
-        call parquet_parse_maml(schema)
 
         ! Should not error stop: every token above is well-formed.
         call parquet_validate_maml(schema%maml)
@@ -1505,7 +1497,16 @@ contains
         call check(error, schema%is_init(), "sanity check: schema%is_init() should be .true. after %init")
         if (allocated(error)) return
         call check(error, .not. schema%is_parsed(), &
-            "schema%is_parsed() should still be .false. after %init alone (never parsed)")
+            "schema%is_parsed() should still be .false. after %init alone (no field declared yet)")
+        if (allocated(error)) return
+
+        ! The other half of the same distinction: %add_field parses its own field as it goes, so
+        ! the schema becomes parsed with no parquet_parse_maml call. %init alone stays unparsed
+        ! because a fieldless MAML is not a document -- which is what keeps %is_init() and
+        ! %is_parsed() two different questions rather than synonyms.
+        call schema%add_field("x", "int32")
+        call check(error, schema%is_parsed(), &
+            "schema%is_parsed() should be .true. after %add_field, with no parquet_parse_maml call")
     end subroutine test_schema_is_parsed_false_after_init_alone
 
     !> A schema loaded via parquet_parse_maml (from a file or an already-populated object) never
@@ -1552,7 +1553,6 @@ contains
 
         call schema%init(table="before_reset")
         call schema%add_field("old_field", "int32")
-        call parquet_parse_maml(schema)
 
         call check(error, size(schema%cinfo%col) == 1, "sanity check: 'old_field' should be parsed before the reset")
         if (allocated(error)) return
@@ -1571,7 +1571,6 @@ contains
         ! End-to-end: the old field must be genuinely gone -- a new field added after the
         ! reset should be the only declared column, and should round-trip normally.
         call schema%add_field("new_field", "int32")
-        call parquet_parse_maml(schema)
 
         call check(error, size(schema%cinfo%col) == 1 .and. trim(schema%cinfo%col(1)%name) == "new_field", &
             "after the reset, only 'new_field' should be a declared column")
@@ -1602,7 +1601,6 @@ contains
 
         call schema%init(table="clear_test")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
         call schema%add_metadata("k", 1_int32)
 
         call check(error, schema%is_init(), "sanity check: schema should be initialized before %clear")
@@ -1638,7 +1636,6 @@ contains
 
         call schema%init(table="after_clear")
         call schema%add_field("new_field", "int32")
-        call parquet_parse_maml(schema)
 
         call check(error, size(schema%cinfo%col) == 1 .and. trim(schema%cinfo%col(1)%name) == "new_field", &
             "after %clear + a plain %init, only 'new_field' should be a declared column")
@@ -1841,7 +1838,6 @@ contains
 
         call schema%init(table="col_size_auto_add_field_table")
         call schema%add_field("vec", "float32", col_size=parquet_size_auto)
-        call parquet_parse_maml(schema)
 
         call check(error, schema%cinfo%col(1)%col_size == parquet_size_auto, &
             "schema%add_field(col_size=parquet_size_auto) should parse back to parquet_size_auto, " // &
@@ -1855,7 +1851,6 @@ contains
 
         call schema%init(table="array_size_auto_add_field_table")
         call schema%add_field("txt", "string", array_size=parquet_size_auto)
-        call parquet_parse_maml(schema)
 
         call check(error, schema%cinfo%col(1)%array_size == parquet_size_auto, &
             "schema%add_field(array_size=parquet_size_auto) should parse back to parquet_size_auto, " // &
@@ -1931,7 +1926,6 @@ contains
 
         call schema%init(table="set_col_size_force_table")
         call schema%add_field("vec", "int32", col_size=3)
-        call parquet_parse_maml(schema)
 
         call schema%set_col_size("vec", 7, force=.true.)
         call check(error, schema%cinfo%col(1)%col_size == 7, &
@@ -1990,7 +1984,6 @@ contains
 
         call schema%init(table="set_array_size_force_table")
         call schema%add_field("txt", "string", array_size=8)
-        call parquet_parse_maml(schema)
 
         call schema%set_array_size("txt", 12, force=.true.)
         call check(error, schema%cinfo%col(1)%array_size == 12, &

@@ -50,6 +50,10 @@ contains
                 test_write_maml_sidecar_prune_scan_edge_cases), &
             new_unittest("write_maml=.true. appends .maml for a non-.parquet output filename", &
                 test_write_maml_sidecar_non_parquet_filename), &
+            new_unittest("an in-code schema's sidecar carries interleaved add_metadata entries", &
+                test_in_code_sidecar_interleaved_metadata), &
+            new_unittest("parquet_open_writer parses a directly-populated schema%maml itself", &
+                test_open_writer_parses_unparsed_maml), &
             new_unittest("add_metadata after parquet_parse_maml is reflected in the sidecar", &
                 test_write_maml_sidecar_with_runtime_metadata), &
             new_unittest("add_metadata inserts keyarray: before an existing extra:", &
@@ -590,6 +594,106 @@ contains
     !> (src/parquet_metadata.f90): inserting before an existing "extra:"
     !> section when there's no "keyarray:" yet, and -- when there's neither
     !> "keyarray:" nor "extra:" -- inserting before "fields:" instead.
+    !> `%maml` populated directly and never parsed -- the embedded-MAML route, where
+    !! `schema%maml = get_parquet_maml(...)` replaces reading a file. `%init`/`%add_field` never
+    !! run on that path, so nothing keeps `%cinfo` in step and it is the one remaining case
+    !! `parquet_open_writer` has to parse for itself. It does so on a LOCAL copy, which is what
+    !! keeps its `schema` argument `intent(in)`, so the caller's schema is left exactly as it was
+    !! -- asserted here, since a version that mutated the caller's copy would pass every other
+    !! check in this test.
+    subroutine test_open_writer_parses_unparsed_maml(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [7_int32, 8_int32, 9_int32]
+        integer(int32) :: got(3)
+        character(len=*), parameter :: out_file = "test_run/open_writer_unparsed_maml.parquet"
+
+        schema%maml%name = "embedded_example.maml"
+        schema%maml%lines = [character(len=32) :: &
+            "table: embedded_table", &
+            "fields:", &
+            "- name: v", &
+            "  data_type: int32" ]
+        call check(error, .not. schema%is_parsed(), &
+            "precondition: a directly-populated %maml is not parsed until something parses it")
+        if (allocated(error)) return
+
+        call parquet_open_writer(writer, out_file, schema)   ! no parquet_parse_maml call anywhere
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        call check(error, .not. schema%is_parsed(), &
+            "the writer parses a local copy, so the caller's schema should be untouched")
+        if (allocated(error)) return
+
+        call parquet_open_reader(reader, out_file)
+        call parquet_read_column(reader, "v", got)
+        call parquet_close_reader(reader)
+        call check(error, all(got == v), "the unparsed schema's column should round-trip: all(got == v)")
+    end subroutine test_open_writer_parses_unparsed_maml
+
+    !> An in-code schema's write_maml sidecar is built from %metadata%source_maml_lines, which
+    !! %init establishes and %add_field appends to as the schema grows -- there is no parse to
+    !! snapshot it. %add_metadata inserts its keyarray: block *before* fields:, so a field added
+    !! afterwards still belongs at the end of the file and the result is still valid MAML. This
+    !! test writes the awkward interleaving (field, metadata, field) and proves the sidecar both
+    !! carries the entry and re-parses, which is the assertion that it is well-formed.
+    subroutine test_in_code_sidecar_interleaved_metadata(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema, reparsed
+        type(parquet_writer) :: writer
+        integer(int32) :: a(2) = [1_int32, 2_int32]
+        integer(int32) :: b(2) = [3_int32, 4_int32]
+        character(len=*), parameter :: out_file = "test_run/in_code_sidecar_interleaved.parquet"
+        character(len=*), parameter :: sidecar = "test_run/in_code_sidecar_interleaved.maml"
+        character(len=256) :: line
+        integer :: unit, ios, idx, idx_keyarray, idx_fields, idx_b
+        logical :: exists
+
+        call schema%init(table="interleaved_sidecar")
+        call schema%add_field("a", "int32")
+        call schema%add_metadata("RUN_ID", "r7", "added between two add_field calls")
+        call schema%add_field("b", "int32")
+
+        call parquet_open_writer(writer, out_file, schema, write_maml=.true.)
+        call parquet_write_column(writer, "a", a)
+        call parquet_write_column(writer, "b", b)
+        call parquet_close_writer(writer)
+
+        inquire(file=sidecar, exist=exists)
+        call check(error, exists, "an in-code schema with write_maml=.true. should write a sidecar")
+        if (allocated(error)) return
+
+        idx = 0; idx_keyarray = 0; idx_fields = 0; idx_b = 0
+        open(newunit=unit, file=sidecar, status="old", action="read", form="formatted")
+        do
+            read(unit, '(A)', iostat=ios) line
+            if (ios /= 0) exit
+            idx = idx + 1
+            if (trim(adjustl(line)) == "keyarray:") idx_keyarray = idx
+            if (trim(adjustl(line)) == "fields:") idx_fields = idx
+            if (trim(adjustl(line)) == "- name: b") idx_b = idx
+        end do
+        close(unit)
+
+        call check(error, idx_keyarray > 0, "the sidecar should carry a synthesized keyarray: block")
+        if (allocated(error)) return
+        call check(error, idx_keyarray < idx_fields, &
+            "the keyarray: block belongs before fields:, whatever order the calls were made in")
+        if (allocated(error)) return
+        call check(error, idx_b > idx_fields, &
+            "the field added after the add_metadata call belongs inside fields:, not after keyarray:")
+        if (allocated(error)) return
+
+        ! Re-parsing is the real assertion that the sidecar is valid MAML rather than merely
+        ! containing the right lines.
+        call parquet_parse_maml(sidecar, reparsed)
+        call check(error, reparsed%get_num_fields() == 2, &
+            "the sidecar should re-parse to the same two fields the schema declared")
+    end subroutine test_in_code_sidecar_interleaved_metadata
+
     subroutine test_add_metadata_inserts_before_extra(error)
         implicit none
         type(error_type), allocatable, intent(out) :: error
@@ -1796,11 +1900,9 @@ contains
 
         call narrow_schema%init(table="chunk_size_narrow_table")
         call narrow_schema%add_field("v", "int64")
-        call parquet_parse_maml(narrow_schema)
 
         call wide_schema%init(table="chunk_size_wide_table")
         call wide_schema%add_field("v", "int64", col_size=1000)
-        call parquet_parse_maml(wide_schema)
 
         call parquet_open_writer(narrow_writer, narrow_file, narrow_schema)
         call parquet_get_chunk_size(narrow_writer, narrow_chunk_size)
@@ -2831,7 +2933,6 @@ contains
         call schema%init(table="reopen_writer_schema_enforced_table")
         call schema%add_field("id", "int32")
         call schema%add_field("other", "int32")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id", id)
@@ -2947,7 +3048,6 @@ contains
         call schema%init(table="float_to_int_boundary")
         call schema%add_field("i32", "int32")
         call schema%add_field("i64", "int64")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "i32", src32)
@@ -3018,7 +3118,6 @@ contains
         call schema%add_field("f64_from_i32", "float64")
         call schema%add_field("f64_from_i64", "float64")
         call schema%add_field("f64_from_f32", "float64")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "i32_from_i64", src_i32_from_i64)
@@ -3178,7 +3277,6 @@ contains
         call schema%add_field("f64v", "float64", col_size=2, qc_min="0", qc_max="100")
         call schema%add_field("boolv", "boolean", col_size=2)
         call schema%add_field("strv", "string", col_size=2, array_size=8, qc_min=">aa", qc_max="<zz")
-        call parquet_parse_maml(schema)
 
         ! Writer 1: every column written WITH is_valid -> the is_valid + qc
         ! (present(is_valid)) branch of each scalar/matrix writer.
@@ -3256,7 +3354,6 @@ contains
         call schema%add_field("when", "timestamp[us]")
         call schema%add_field("vec", "int32", col_size=3)
         call schema%add_field("auto_vec", "int32", col_size=parquet_size_auto)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_close_writer(writer)          ! nothing written at all
@@ -3322,7 +3419,6 @@ contains
         call schema%add_field("c_date", "date")
         call schema%add_field("c_time", "time[ms]")
         call schema%add_field("c_ts", "timestamp[us]")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "c_i32", no_i32)
@@ -3386,7 +3482,6 @@ contains
         call schema%add_field("as_i64", "int64")       ! written from int32 values
         call schema%add_field("narrowed", "int32")     ! written from float64 values
         call schema%add_field("same_kind", "int32")    ! the negative control
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_new_row_group(writer, 4_int64)
@@ -3476,7 +3571,6 @@ contains
         call schema%init(table="streaming_table")
         call schema%add_field("id", "int32")
         call schema%add_field("big_vec", "int32", col_size=3)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "id", id_values)
@@ -3641,7 +3735,6 @@ contains
 
         call schema%init(table="chunk_size_table")
         call schema%add_field("v", "int32", col_size=2)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_get_chunk_size(writer, chunk_size_before)
@@ -3705,7 +3798,6 @@ contains
 
         call schema%init(table="chunk_size_overshoot_table")
         call schema%add_field("v", "int32", col_size=100000)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_get_chunk_size(writer, chunk_size_before)
@@ -3749,7 +3841,6 @@ contains
 
         call schema%init(table="chunk_size_blown_past_table")
         call schema%add_field("v", "int32", col_size=300000)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_get_chunk_size(writer, chunk_size_before)
@@ -3804,7 +3895,6 @@ contains
         call schema%add_field("flag", "boolean")
         call schema%add_field("name", "string", array_size=8)
         call schema%add_field("day", "date")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_get_chunk_size(writer, chunk_size_before)
@@ -3898,7 +3988,6 @@ contains
         call schema%add_field("logs", "boolean")
         call schema%add_field("strs", "string", array_size=8, qc_min=">aa", qc_max="<zz")
         call schema%add_field("strv", "string", col_size=2, array_size=8, qc_min=">aa", qc_max="<zz")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema, qc=.true.)
 
@@ -3981,7 +4070,6 @@ contains
 
         call schema%init(table="string_flat_vector_chunk_table")
         call schema%add_field("strv", "string", col_size=2, array_size=8)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_new_row_group(writer, 3_int64)
@@ -4025,7 +4113,6 @@ contains
         call schema%init(table="string_chunk_null_table")
         call schema%add_field("s", "string", array_size=8)
         call schema%add_field("v", "string", col_size=2, array_size=8)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_new_row_group(writer, 3_int64)
@@ -4350,7 +4437,6 @@ contains
 
         call schema%init(table="compact_qc_table")
         call schema%add_field("name", "string", qc_min="a", qc_max="m")
-        call parquet_parse_maml(schema)
 
         call col%append_string("apple")
         call col%append_string("zebra") ! lexicographically > "m" -> qc violation (WARNING only)
@@ -4609,7 +4695,6 @@ contains
         ! queried below.
         call schema%add_field("clock_vec", "time[ms]", col_size=2)
         call schema%add_field("day", "date")
-        call parquet_parse_maml(schema)
         call parquet_validate_maml(schema%maml)
 
         call ts(1)%set(2024, 7, 16, 12, 0, 0, 123456789)   ! ns precision -- needs the declared ns unit

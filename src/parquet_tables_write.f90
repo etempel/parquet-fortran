@@ -34,14 +34,14 @@ contains
         ! structural change to the table as far as another thread is concerned, not a read.
         call table_check_not_shared(table, "parquet_write_table")
         if (present(schema)) then
-            ! A schema built in code with %init/%add_field only has MAML *text* until
-            ! parquet_parse_maml populates %cinfo -- and %get_num_fields on an unpopulated %cinfo
-            ! reads uninitialized state, which turns the write loop into a runaway allocation and
-            ! an OOM kill rather than any kind of diagnosable failure. There is no reason to make
-            ! the caller say so themselves, though: a schema that has been built but not parsed is
-            ! parsed here. It is a visible side effect (the caller's schema stays parsed
-            ! afterwards, which is what they wanted anyway), which is why `schema` is
-            ! intent(inout).
+            ! %get_num_fields on an unpopulated %cinfo reads uninitialized state, which turns the
+            ! write loop into a runaway allocation and an OOM kill rather than any kind of
+            ! diagnosable failure. A schema built with %init/%add_field keeps %cinfo in step as
+            ! it is built, and one from parquet_parse_maml obviously does -- so this only fires
+            ! for a schema whose %maml was populated directly (an embedded MAML) and never
+            ! parsed. Parsing it here rather than making the caller say so is a visible side
+            ! effect (their schema stays parsed afterwards, which is what they wanted anyway),
+            ! which is why `schema` is intent(inout).
             !
             ! A schema that was never built at all is a different mistake and still an error:
             ! parsing empty MAML text would report something about the text rather than the call.
@@ -224,9 +224,9 @@ contains
                 nfields = nfields + 1
             end associate
         end do
-        ! MAML requires at least one field, so an empty schema cannot be parsed at all -- the
-        ! caller checks `nfields` and takes the empty-file path instead of this one.
-        if (nfields > 0) call parquet_parse_maml(sch)
+        ! No parquet_parse_maml here: %init/%add_field keep %cinfo in step as the schema is
+        ! built. MAML still requires at least one field, so the caller checks `nfields` and takes
+        ! the empty-file path instead of this one.
     end subroutine build_table_schema
     !
     !> Writes a valid parquet file with no columns and no rows, for a schema-less write of a table

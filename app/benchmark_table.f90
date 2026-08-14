@@ -736,7 +736,6 @@ contains
         do i = 1, size(names)
             call s%add_field(trim(names(i)), "float64")
         end do
-        call parquet_parse_maml(s)
 
         t0 = now()
         call parquet_write_table(t, "benchmark_table_out1.parquet", s)
@@ -809,7 +808,6 @@ contains
         do i = 1, size(names)
             call s%add_field(trim(names(i)), "float64", qc_miss="Null")
         end do
-        call parquet_parse_maml(s)
 
         nrows = t%nrows()
         allocate(mask(nrows))

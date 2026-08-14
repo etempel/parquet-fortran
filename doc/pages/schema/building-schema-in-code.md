@@ -29,8 +29,7 @@ program build_schema
     call schema%add_field("ra", "float64", unit="deg", ucd="pos.eq.ra", info="Right ascension", &
         qc_min=">= 0", qc_max="<= 360")
 
-    call parquet_parse_maml(schema)                   ! turns the text above into %cinfo/%metadata
-    call schema%add_metadata("SURVEY_TILE", 42_int32) ! only legal AFTER the parse
+    call schema%add_metadata("SURVEY_TILE", 42_int32)
 
     call parquet_open_writer(writer, "targets.parquet", schema)
     call parquet_write_column(writer, "id", id)
@@ -39,11 +38,11 @@ program build_schema
 end program build_schema
 ```
 
-**That order is the one thing worth memorising**, because two of its steps fail loudly if you get
-them the wrong way round: `%add_field` must come *before* `parquet_parse_maml` (it appends to the
-schema's MAML text, which the parse consumes), and `%add_metadata` must come *after* it (the parse
-rebuilds the metadata list, so an entry added earlier would be discarded). Both `error stop` rather
-than silently doing nothing.
+**There is no separate parse step, and no required order.** `%init` and `%add_field` each parse
+what they just wrote, so the schema is ready to query, write with, or add metadata to as soon as its
+last field is declared. `%add_field` and `%add_metadata` may be interleaved however you like, and
+`parquet_parse_maml` — which is what a schema loaded from a `.maml` file needs — is not called here
+at all. Calling it anyway is harmless but does nothing.
 
 ### schema%init — starting a schema
 
@@ -113,10 +112,12 @@ the full min/max/miss enforcement picture on both sides. `qc_miss` may be set on
   had neither happen yet. Note `%add_field`'s own "call schema%init(...) before adding fields" check
   is narrower — it specifically requires `%init` to have been called, since `%add_field` only makes
   sense on a from-scratch schema, not one already populated via a MAML parse.
-- **`schema%is_parsed()`** — returns `.true.` once `schema%cinfo` is actually populated, i.e.
-  `parquet_parse_maml` has run. This is a narrower, stricter check than `%is_init()`: a from-scratch
-  schema that has only had `%init`/`%add_field` called (never parsed) reports `%is_init() == .true.`
-  but `%is_parsed() == .false.`. Use `%is_parsed()` — not `%is_init()` — to check readiness before
+- **`schema%is_parsed()`** — returns `.true.` once `schema%cinfo` is actually populated: after
+  `parquet_parse_maml` for a schema loaded from a file, and after the **first `%add_field`** for one
+  built in code. It is a narrower check than `%is_init()`, and the gap between the two is exactly
+  one case: a schema that has had `%init` but not a single `%add_field` reports
+  `%is_init() == .true.` and `%is_parsed() == .false.`, because a MAML with no fields is not a
+  document that can be parsed. Use `%is_parsed()` — not `%is_init()` — to check readiness before
   calling anything that requires a populated `%cinfo`, such as `%get_field`, `%add_field_from`, or
   `%print_schema_info` (see [Printing column info with
   schema%print_schema_info](#printing-column-info-with-schemaprint_schema_info) below).
@@ -159,9 +160,9 @@ the full min/max/miss enforcement picture on both sides. `qc_miss` may be set on
   no `qc: miss:` at all, since those mean the same thing — and as `""` only for the explicit empty
   `qc: miss:` that asks for Null validation. Feeding either straight back into `%add_field` therefore
   reproduces the same behaviour. `error stop`s if the field isn't found (by name) or
-  the index is out of range; requires `schema%cinfo` to already be populated (`parquet_parse_maml` —
-  or, for a from-scratch schema, `%init`/`%add_field` followed by `parquet_parse_maml` — must
-  already have run; a field added since the last parse isn't visible yet).
+  the index is out of range; requires `schema%cinfo` to already be populated, which means
+  `parquet_parse_maml` for a schema loaded from a file and at least one `%add_field` for one built
+  in code.
 - **`call schema%add_field_from(source_schema, name)`** — copies `name`'s full field definition from
   `source_schema` (via `%get_field`) and appends an equivalent field here via `%add_field`, so two
   schemas can share a column definition (e.g. a handful of "identity" columns — `obj_id`, `ra`,
@@ -180,9 +181,10 @@ the full min/max/miss enforcement picture on both sides. `qc_miss` may be set on
   `1..get_num_fields()`, and `%get_column_index` `error stop`s if there is no such column, so both
   answer about a real field or not at all. All three need `schema%cinfo` populated, like `%get_field`.
 
-Both `%init` and `%add_field` build the schema's underlying MAML text, so you still call
-`parquet_parse_maml(schema)` afterwards to populate `schema%cinfo`/`schema%metadata` before writing,
-exactly as for a schema loaded from disk. List-shaped top-level sections (`coauthors:`, `comments:`,
+Both `%init` and `%add_field` build the schema's underlying MAML text *and* parse what they add, so
+`schema%cinfo`/`schema%metadata` are always in step with it and no `parquet_parse_maml` call is
+needed — unlike a schema loaded from disk, which is one document arriving all at once.
+List-shaped top-level sections (`coauthors:`, `comments:`,
 `keyarray:`, `extra:`, ...) are out of scope for `%init`: use `%add_metadata` for `keyarray:`-style
 entries, or author a `.maml` file for the rest.
 
@@ -330,17 +332,17 @@ The VOTable sidecar declares the same types (`int`, `long`, `float`, `double`, `
 for everything else) instead of calling every scalar a `char` — see [The VOTable
 sidecar](../io/reading.html#reading-table-metadata-with-parquet_get_metadata).
 
-**`schema%add_metadata` must be called *after* `parquet_parse_maml`, never before** — calling it
-right after `%init`/`%add_field` but before the schema has been parsed fails with `error stop`,
-since `parquet_parse_maml` would otherwise silently discard that entry when it (re)builds
-`%metadata%items` from `%maml%lines`.
+**`schema%add_metadata` may be called at any point after `%init`** (or, for a file-loaded schema,
+after `parquet_parse_maml`), and freely interleaved with `%add_field`. What it needs is a metadata
+table to add to, which is what those two establish; calling it on a schema that has had neither
+fails with `error stop`, since the entry would be discarded by whichever of them ran next.
 
 See the [combined example](combined-example.html#maml-schema-vector-columns-and-metadata) for
 `add_metadata` used in a complete, worked write.
 
-**`call schema%clear_metadata()`** — discards every entry added by `%add_metadata` since the most
-recent `parquet_parse_maml`, keeping the base entries (the header keys, plus any real `keyarray:`
-entries) from that parse intact. A no-op if nothing has been added since the last parse.
+**`call schema%clear_metadata()`** — discards every entry added by `%add_metadata`, keeping the base
+entries (the header keys, plus any real `keyarray:` entries) the schema's own MAML declared. A no-op
+if `%add_metadata` has not been called.
 
 ## Printing column info with schema%print_schema_info
 
@@ -351,11 +353,11 @@ len ucd info` (`type`/`len` are the header labels for `data_type`/`col_size`; `i
 unpadded so no line carries trailing whitespace). Column widths are computed from the longest value
 actually present (and the header label, if printed), so each call produces its own self-contained,
 internally-aligned block — two calls for different schemas are not aligned with each other. Works
-for any parsed schema (`schema%cinfo` populated), whether built in code (`%init`/`%add_field`
-followed by `parquet_parse_maml`) or loaded straight from a `.maml` file (`parquet_parse_maml`,
-which never calls `%init`) — this readiness check is `schema%is_parsed()`, not `schema%is_init()`: a
-from-scratch schema that has only had `%init`/`%add_field` called (never parsed) has `is_init() ==
-.true.` but `is_parsed() == .false.`, and would still `error stop` here.
+for any parsed schema (`schema%cinfo` populated), whether built in code (`%init` plus at least one
+`%add_field`) or loaded straight from a `.maml` file (`parquet_parse_maml`, which never calls
+`%init`) — this readiness check is `schema%is_parsed()`, not `schema%is_init()`: a schema that has
+had `%init` and no field yet has `is_init() == .true.` but `is_parsed() == .false.`, and would still
+`error stop` here.
 
 Calling this on a schema that hasn't been parsed yet (`schema%cinfo` not populated) fails with
 `error stop "... schema is not initialized (not parsed) ..."` by default; pass

@@ -153,7 +153,6 @@ contains
         ! parquet_core: schema, table write-out and the plain reader, on the same table.
         call s%init("facade")
         call s%add_field("mass", "float64", unit="Msun")
-        call parquet_parse_maml(s)
         call parquet_write_table(t, out_file, s)
 
         call parquet_open_table(t2, out_file)
@@ -302,10 +301,9 @@ contains
     end subroutine test_readme_combined_example
 
     !> Mirrors doc/pages/schema/building-schema-in-code.md's `build_schema` program: a schema built
-    !! entirely in code, in the call order that page presents as the thing to memorise. Asserts the
-    !! round trip AND the order itself -- %add_metadata's entry surviving to the file is what proves
-    !! it was added after parquet_parse_maml rather than before, which is the ordering mistake the
-    !! example exists to prevent.
+    !! entirely in code, with no explicit parse anywhere. Asserts the round trip AND that
+    !! %add_metadata's entry reaches the file -- the call order used to matter here, and the entry
+    !! surviving is what shows it no longer does.
     subroutine test_build_schema_example(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema

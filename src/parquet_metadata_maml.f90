@@ -580,33 +580,7 @@ contains
                     cycle
                 end if ! GCOVR_EXCL_STOP
 
-                if (.not. parquet_data_type_token_valid(cinfo%col(i)%data_type)) then
-                    errors = errors // "field '" // cur_name // "' has invalid data_type '" // &
-                        trim(cinfo%col(i)%data_type) // "'; "
-                end if
-
-                if (cinfo%col(i)%col_size == size_invalid_sentinel) then
-                    errors = errors // "field '" // cur_name // &
-                        "' has an invalid col_size (must be a positive integer or 'auto'); "
-                end if
-                if (cinfo%col(i)%array_size == size_invalid_sentinel) then
-                    errors = errors // "field '" // cur_name // &
-                        "' has an invalid array_size (must be a positive integer or 'auto'); "
-                end if
-                if (cinfo%col(i)%array_size == parquet_size_auto .and. trim(cinfo%col(i)%data_type) /= "string") then
-                    errors = errors // "field '" // cur_name // &
-                        "' declares array_size: auto, which only applies to string columns; "
-                end if
-
-                ! qc: is not supported for temporal (date/time/timestamp) columns yet -- reject
-                ! it with a clear message rather than silently ignoring a declared bound.
-                select case (trim(cinfo%col(i)%data_type))
-                case ("date", "time", "timestamp")
-                    if (cinfo%col(i)%has_qc_min .or. cinfo%col(i)%has_qc_max) then
-                        errors = errors // "field '" // cur_name // "' declares qc:, which is not " // &
-                            "supported for a " // trim(cinfo%col(i)%data_type) // " column; "
-                    end if
-                end select
+                call parquet_validate_field_rules(cinfo%col(i), errors)
 
                 do j = 1, i - 1
                     if (trim(cinfo%col(j)%name) == cur_name) then
@@ -615,47 +589,6 @@ contains
                     end if
                 end do
 
-                ! qc: min: must use a lower-bound operator (>= or >) and qc:
-                ! max: an upper-bound operator (<= or <); the opposite
-                ! direction (e.g. min: '< 5') is a nonsensical bound. This is
-                ! a purely syntactic check, applied to every enforced type
-                ! (numeric and string alike); boolean's qc: is silently
-                ! ignored entirely (see the numeric block below), so it's
-                ! exempt here too.
-                if (trim(cinfo%col(i)%data_type) /= "boolean") then
-                    if (cinfo%col(i)%has_qc_min .and. cinfo%col(i)%qc_min_op(1:1) == "<") then
-                        errors = errors // "field '" // cur_name // "' has a qc: min value with a '" // &
-                            trim(cinfo%col(i)%qc_min_op) // "' operator; min: accepts only >= or > " // &
-                            "(use max: for an upper bound); "
-                    end if
-                    if (cinfo%col(i)%has_qc_max .and. cinfo%col(i)%qc_max_op(1:1) == ">") then
-                        errors = errors // "field '" // cur_name // "' has a qc: max value with a '" // &
-                            trim(cinfo%col(i)%qc_max_op) // "' operator; max: accepts only <= or < " // &
-                            "(use min: for a lower bound); "
-                    end if
-                end if
-
-                ! qc: min:/max: numeric convertibility only applies to the
-                ! numeric types; string uses its bound as a literal (nothing
-                ! to convert, so it can't fail), and boolean's qc: is always
-                ! silently ignored (never enforced), so it isn't checked here.
-                select case (trim(cinfo%col(i)%data_type))
-                case ("int32", "int64", "float32", "float64")
-                    if (cinfo%col(i)%has_qc_min) then
-                        if (.not. parquet_qc_numeric_bound( &
-                                cinfo%col(i)%qc_min_raw, cinfo%col(i)%data_type, qc_bound_value)) then
-                            errors = errors // "field '" // cur_name // "' has an invalid qc: min value '" // &
-                                trim(cinfo%col(i)%qc_min_raw) // "' for data_type " // trim(cinfo%col(i)%data_type) // "; "
-                        end if
-                    end if
-                    if (cinfo%col(i)%has_qc_max) then
-                        if (.not. parquet_qc_numeric_bound( &
-                                cinfo%col(i)%qc_max_raw, cinfo%col(i)%data_type, qc_bound_value)) then
-                            errors = errors // "field '" // cur_name // "' has an invalid qc: max value '" // &
-                                trim(cinfo%col(i)%qc_max_raw) // "' for data_type " // trim(cinfo%col(i)%data_type) // "; "
-                        end if
-                    end if
-                end select
             end do
         end if
 

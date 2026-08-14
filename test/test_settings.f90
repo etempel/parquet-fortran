@@ -1421,7 +1421,6 @@ contains
         call parquet_reset_settings()
         call schema%init(table="silent_probe")
         call schema%add_field("id", "int32", ucd="meta.id", info="Object identifier")
-        call parquet_parse_maml(schema)
 
         call delete_if_present(quiet_file)
         call delete_if_present(loud_file)
@@ -1558,7 +1557,6 @@ contains
         !
         call schema%init(table="rowgroup_estimate")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
         call parquet_open_writer(writer, path, schema)
         call parquet_get_chunk_size(writer, n)
         call parquet_write_column(writer, "v", v)

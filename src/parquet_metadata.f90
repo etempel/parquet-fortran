@@ -105,22 +105,32 @@ contains
     end procedure parquet_parse_maml_from_file
 
     module procedure parquet_parse_maml_from_object
+        type(parquet_metadata_entry), allocatable :: user_items(:)
+
         if (.not. allocated(schema%maml%lines)) &
             error stop "parquet_parse_maml: schema%maml has no loaded content " // &
                 "(use the filename form, or populate schema%maml first)" ! GCOVR_EXCL_LINE
         call parquet_validate_maml(schema%maml)
+        ! The parse is a destructive rebuild -- %cinfo and %metadata are both intent(out) on the
+        ! worker -- so anything %add_metadata contributed is lifted out first and put back
+        ! afterwards. Without this, a parse run after %add_metadata would silently drop the
+        ! user's entries, which is what used to force the "%add_metadata only after the parse"
+        ! rule. %n_base_items is exactly the boundary: everything past it is user-added.
+        call take_user_metadata(schema%metadata, user_items)
         call parquet_parse_maml_lines(schema%maml%lines, schema%cinfo, schema%metadata)
         call parquet_merge_missing_columns(schema%maml, schema%cinfo)
         schema%metadata%source_maml_lines = schema%maml%lines
+        call restore_user_metadata(schema%metadata, user_items)
     end procedure parquet_parse_maml_from_object
 
     ! ---- schema%init / schema%add_field: building a MAML from scratch -----
     ! These emit raw MAML text lines into schema%maml%lines, the same
-    ! representation parquet_parse_maml_lines below eventually parses --
-    ! %add_field validates eagerly (name/data_type/duplicate/qc) but the
-    ! result is still just text, so parquet_parse_maml must be called
-    ! afterward to populate %cinfo/%metadata, exactly as for a MAML loaded
-    ! from disk.
+    ! representation parquet_parse_maml_lines below parses -- and they keep
+    ! %cinfo/%metadata in step with that text as they go (schema%init parses
+    ! its own header lines; schema_sync_appended_lines parses each field's).
+    ! So a schema built this way needs no parquet_parse_maml call of its own,
+    ! unlike a MAML loaded from disk, and %add_field/%add_metadata may be
+    ! interleaved in any order.
 
     !> Appends one line to maml%lines, growing the (deferred-length) array and
     !> renormalizing its element length to fit. A smaller, independent copy of
@@ -150,6 +160,250 @@ contains
         tmp(n + 1) = s
         call move_alloc(tmp, maml%lines)
     end subroutine maml_push_line
+
+    !> Keeps a schema's parsed state in step with the raw MAML lines %add_field/%add_col_qc has
+    !> just appended, so that building a schema in code needs no explicit parquet_parse_maml call
+    !> at all. `n_before` is size(%maml%lines) as it stood before that call, so
+    !> %maml%lines(n_before+1:) is exactly what the one call added.
+    !>
+    !> Those lines are parsed as a minimal one-field document through parquet_parse_maml_lines --
+    !> the same worker a whole-file parse uses -- rather than through a second, hand-rolled field
+    !> parser, so the two cannot drift. Parsing one field's own lines is flat in the field count;
+    !> re-parsing the whole document once per %add_field would be quadratic.
+    !>
+    !> The WHOLE-DOCUMENT half of parquet_validate_maml is deliberately not run here, and the
+    !> per-field half is (through parquet_validate_field_rules, the same code the document
+    !> validator calls). What is skipped is exactly the set of rules that cannot fire for a
+    !> schema built this way -- a missing table:, an empty fields:, an unknown top-level section
+    !> or field sub-key, an extra: protected_cols: or col_map: naming a column that does not
+    !> exist -- because %init requires a non-empty table: and emits only known top-level keys,
+    !> %add_field rejects an empty and a duplicate name itself, and neither builder can emit an
+    !> extra: section at all. A .maml file loaded from disk still validates in full. If a future
+    !> change teaches either builder to emit extra:, col_map: or protected_cols:, that reasoning
+    !> stops holding and the whole-document call has to come back.
+    subroutine schema_sync_appended_lines(schema, n_before)
+        class(parquet_schema), intent(inout) :: schema !! schema whose %maml%lines just grew.
+        integer, intent(in) :: n_before !! size(%maml%lines) as it stood before the appending call.
+        type(parquet_column_info) :: sub_cinfo !! parsed one-field sub-document.
+        type(parquet_table_metadata) :: sub_metadata !! unused (a fields:-only document has no metadata).
+        type(parquet_column_type), allocatable :: merged(:)
+        character(len=:), allocatable :: doc(:)
+        character(len=:), allocatable :: errors, name_suffix
+        integer :: n_now, first, n_new, n_old, i, w
+
+        n_now = 0
+        if (allocated(schema%maml%lines)) n_now = size(schema%maml%lines)
+        if (n_now <= n_before) return ! nothing appended (an all-blank %add_col_qc input adds nothing)
+
+        ! A "fields:" header, if this call was the one that had to add it, belongs to the
+        ! document rather than to the field entry -- the sub-document supplies its own.
+        first = n_before + 1
+        if (parquet_maml_key_matches(trim(adjustl(schema%maml%lines(first))), "fields:")) first = first + 1
+
+        if (first <= n_now) then
+            n_new = n_now - first + 1
+            w = max(len(schema%maml%lines), 7)
+            allocate(character(len=w) :: doc(n_new + 1))
+            doc(1) = "fields:"
+            do i = 1, n_new
+                doc(i + 1) = schema%maml%lines(first + i - 1)
+            end do
+            call parquet_parse_maml_lines(doc, sub_cinfo, sub_metadata)
+
+            if (allocated(sub_cinfo%col)) then
+                if (size(sub_cinfo%col) > 0) then
+                    errors = ""
+                    do i = 1, size(sub_cinfo%col)
+                        call parquet_validate_field_rules(sub_cinfo%col(i), errors)
+                    end do
+                    if (len_trim(errors) > 0) then
+                        call maml_name_suffix(schema%maml, name_suffix)
+                        error stop "parquet_schema%add_field: " // trim(errors) // name_suffix
+                    end if
+
+                    ! See g_maml_mutex in parquet_wrapper.cpp -- same grow-and-move_alloc pattern
+                    ! as parquet_merge_missing_columns below.
+                    call parquet_maml_lock()
+                    n_old = 0
+                    if (allocated(schema%cinfo%col)) n_old = size(schema%cinfo%col)
+                    allocate(merged(n_old + size(sub_cinfo%col)))
+                    if (n_old > 0) merged(1:n_old) = schema%cinfo%col
+                    merged(n_old+1:) = sub_cinfo%col
+                    call move_alloc(merged, schema%cinfo%col)
+                    call parquet_maml_unlock()
+                end if
+            end if
+        end if
+
+        call append_source_lines(schema%metadata, schema%maml%lines, n_before + 1)
+
+    end subroutine schema_sync_appended_lines
+
+    !> Mirrors `lines(first:)` into %metadata%source_maml_lines, the verbatim MAML text a
+    !> write_maml=.true. sidecar is written from, so an in-code schema's sidecar stays complete
+    !> without an explicit parse. Appending is correct however the two arrays have diverged:
+    !> %add_metadata inserts its keyarray: block *before* fields:, so a new field entry still
+    !> belongs at the end. A no-op until schema%init has established the array.
+    !>
+    !> Takes the whole array plus a start index rather than a section, and is a module-level
+    !> helper rather than a procedure contained in its caller: passing a section of a
+    !> deferred-length allocatable character array to an assumed-length dummy declared inside a
+    !> submodule's module procedure is the shape that ICEs gfortran 15.2 (see also the
+    !> parquet_parse_protected_cols relay note in CLAUDE.md's "Nested submodule tree").
+    subroutine append_source_lines(metadata, lines, first)
+        type(parquet_table_metadata), intent(inout) :: metadata !! gains the same lines.
+        character(len=*), intent(in) :: lines(:) !! the schema's full %maml%lines.
+        integer, intent(in) :: first !! 1-based index of the first newly appended line.
+        character(len=:), allocatable :: grown(:)
+        integer :: n_have, n_new, k, newlen
+
+        if (.not. allocated(metadata%source_maml_lines)) return
+        n_new = size(lines) - first + 1
+        if (n_new <= 0) return ! GCOVR_EXCL_LINE (the caller returns early when nothing was appended)
+        n_have = size(metadata%source_maml_lines)
+        newlen = max(len(metadata%source_maml_lines), len(lines))
+        allocate(character(len=newlen) :: grown(n_have + n_new))
+        do k = 1, n_have
+            grown(k) = metadata%source_maml_lines(k)
+        end do
+        do k = 1, n_new
+            grown(n_have + k) = lines(first + k - 1)
+        end do
+        call move_alloc(grown, metadata%source_maml_lines)
+    end subroutine append_source_lines
+
+    !> Appends to `errors` every rule violation that one parsed field carries ON ITS OWN --
+    !> everything parquet_validate_maml checks about a field without looking at any other field
+    !> or at the document around it. Shared, deliberately, by the two places that need it:
+    !> parquet_validate_maml_internal (a whole .maml document, once per field) and
+    !> schema_sync_appended_lines (one field at a time, as %add_field builds a schema in code).
+    !> A second copy of these rules would let the two routes disagree about what a valid field is,
+    !> which is exactly what an in-code schema that is never explicitly parsed would then hide.
+    !>
+    !> Cross-field and whole-document rules stay with the caller: an empty or duplicate name, a
+    !> missing table:, an empty fields:, an unknown section or sub-key, extra: protected_cols:
+    !> and col_map:. %add_field enforces the name rules itself and can emit none of the rest.
+    subroutine parquet_validate_field_rules(col, errors)
+        type(parquet_column_type), intent(in) :: col !! one parsed field.
+        character(len=:), allocatable, intent(inout) :: errors !! accumulating "...; "-joined message.
+        character(len=:), allocatable :: cur_name
+        real(real64) :: qc_bound_value
+
+        cur_name = trim(col%name)
+
+        if (.not. parquet_data_type_token_valid(col%data_type)) then
+            errors = errors // "field '" // cur_name // "' has invalid data_type '" // &
+                trim(col%data_type) // "'; "
+        end if
+
+        if (col%col_size == size_invalid_sentinel) then
+            errors = errors // "field '" // cur_name // &
+                "' has an invalid col_size (must be a positive integer or 'auto'); "
+        end if
+        if (col%array_size == size_invalid_sentinel) then
+            errors = errors // "field '" // cur_name // &
+                "' has an invalid array_size (must be a positive integer or 'auto'); "
+        end if
+        if (col%array_size == parquet_size_auto .and. trim(col%data_type) /= "string") then
+            errors = errors // "field '" // cur_name // &
+                "' declares array_size: auto, which only applies to string columns; "
+        end if
+
+        ! qc: is not supported for temporal (date/time/timestamp) columns yet -- reject
+        ! it with a clear message rather than silently ignoring a declared bound.
+        select case (trim(col%data_type))
+        case ("date", "time", "timestamp")
+            if (col%has_qc_min .or. col%has_qc_max) then
+                errors = errors // "field '" // cur_name // "' declares qc:, which is not " // &
+                    "supported for a " // trim(col%data_type) // " column; "
+            end if
+        end select
+
+        ! qc: min: must use a lower-bound operator (>= or >) and qc: max: an upper-bound
+        ! operator (<= or <); the opposite direction (e.g. min: '< 5') is a nonsensical bound.
+        ! This is a purely syntactic check, applied to every enforced type (numeric and string
+        ! alike); boolean's qc: is silently ignored entirely (see the numeric block below), so
+        ! it's exempt here too.
+        if (trim(col%data_type) /= "boolean") then
+            if (col%has_qc_min .and. col%qc_min_op(1:1) == "<") then
+                errors = errors // "field '" // cur_name // "' has a qc: min value with a '" // &
+                    trim(col%qc_min_op) // "' operator; min: accepts only >= or > " // &
+                    "(use max: for an upper bound); "
+            end if
+            if (col%has_qc_max .and. col%qc_max_op(1:1) == ">") then
+                errors = errors // "field '" // cur_name // "' has a qc: max value with a '" // &
+                    trim(col%qc_max_op) // "' operator; max: accepts only <= or < " // &
+                    "(use min: for a lower bound); "
+            end if
+        end if
+
+        ! qc: min:/max: numeric convertibility only applies to the numeric types; string uses
+        ! its bound as a literal (nothing to convert, so it can't fail), and boolean's qc: is
+        ! always silently ignored (never enforced), so it isn't checked here.
+        select case (trim(col%data_type))
+        case ("int32", "int64", "float32", "float64")
+            if (col%has_qc_min) then
+                if (.not. parquet_qc_numeric_bound(col%qc_min_raw, col%data_type, qc_bound_value)) then
+                    errors = errors // "field '" // cur_name // "' has an invalid qc: min value '" // &
+                        trim(col%qc_min_raw) // "' for data_type " // trim(col%data_type) // "; "
+                end if
+            end if
+            if (col%has_qc_max) then
+                if (.not. parquet_qc_numeric_bound(col%qc_max_raw, col%data_type, qc_bound_value)) then
+                    errors = errors // "field '" // cur_name // "' has an invalid qc: max value '" // &
+                        trim(col%qc_max_raw) // "' for data_type " // trim(col%data_type) // "; "
+                end if
+            end if
+        end select
+    end subroutine parquet_validate_field_rules
+
+    !> Lifts a schema's user-added metadata entries -- everything past %n_base_items, i.e.
+    !> everything %add_metadata contributed -- out of `metadata`, ahead of a parse that is about
+    !> to rebuild it from scratch. `items` comes back unallocated when there is nothing to keep.
+    subroutine take_user_metadata(metadata, items)
+        type(parquet_table_metadata), intent(in) :: metadata !! schema metadata about to be rebuilt.
+        type(parquet_metadata_entry), allocatable, intent(out) :: items(:) !! preserved user entries.
+        integer :: n
+
+        if (.not. allocated(metadata%items)) return
+        n = size(metadata%items)
+        if (n <= metadata%n_base_items) return
+        items = metadata%items(metadata%n_base_items+1:n)
+    end subroutine take_user_metadata
+
+    !> Puts the entries take_user_metadata preserved back onto the freshly rebuilt `metadata`, in
+    !> their original order and past the new %n_base_items boundary, so %clear_metadata still
+    !> discards exactly them. Appends directly rather than re-entering %add_metadata on purpose:
+    !> a re-entry would re-run the duplicate-key check and re-print a WARNING the caller already
+    !> saw when the entry was first added (%init establishes the base entries immediately, so a
+    !> collision is reported there, not here). Each entry's keyarray: line in the write_maml
+    !> sidecar is regenerated, since %source_maml_lines was reset by the parse.
+    subroutine restore_user_metadata(metadata, items)
+        type(parquet_table_metadata), intent(inout) :: metadata !! freshly rebuilt schema metadata.
+        type(parquet_metadata_entry), allocatable, intent(in) :: items(:) !! entries to re-append.
+        type(parquet_metadata_entry), allocatable :: merged(:)
+        integer :: n_old, i
+
+        if (.not. allocated(items)) return
+        if (size(items) == 0) return ! GCOVR_EXCL_LINE (take_user_metadata never returns an empty array)
+
+        ! See g_maml_mutex in parquet_wrapper.cpp.
+        call parquet_maml_lock()
+        n_old = 0
+        if (allocated(metadata%items)) n_old = size(metadata%items)
+        allocate(merged(n_old + size(items)))
+        if (n_old > 0) merged(1:n_old) = metadata%items
+        merged(n_old+1:) = items
+        call move_alloc(merged, metadata%items)
+        call parquet_maml_unlock()
+
+        if (allocated(metadata%source_maml_lines)) then
+            do i = 1, size(items)
+                call parquet_append_keyarray_line(metadata%source_maml_lines, &
+                    trim(items(i)%key), trim(items(i)%value), trim(items(i)%description))
+            end do
+        end if
+    end subroutine restore_user_metadata
 
     ! ---- add_metadata duplicate-key warning (parquet_metadata_append_entry's shared
     ! pre-append check) -- plain contained procedures here so both parquet_metadata_base
@@ -312,6 +566,7 @@ contains
 
     module procedure schema_init
         logical :: do_force
+        type(parquet_column_info) :: header_only_cinfo !! unused (discarded -- see the parse below).
 
         do_force = .false.
         if (present(force)) do_force = force
@@ -348,6 +603,18 @@ contains
         if (present(description)) call maml_push_line(this%maml, "description: " // trim(description))
         if (present(license))     call maml_push_line(this%maml, "license: " // trim(license))
         if (present(maml_version)) call maml_push_line(this%maml, "MAML_version: " // trim(maml_version))
+
+        ! Parses the header lines just pushed straight into %metadata, so an in-code schema
+        ! carries its table:/author:/... entries from the moment it is initialized rather than
+        ! only after an explicit parquet_parse_maml. Two things depend on that: %add_metadata
+        ! can run immediately (its duplicate-key check needs the base entries to check against,
+        ! and %n_base_items must be right for %clear_metadata), and parquet_open_writer copies
+        ! %metadata%items into the file's key-value metadata whether or not a parse ever ran.
+        ! The scratch cinfo is discarded on purpose -- a header-only document has no fields:,
+        ! and letting an empty %cinfo%col through would make %is_parsed() answer .true. for a
+        ! schema that has not declared a single field yet.
+        call parquet_parse_maml_lines(this%maml%lines, header_only_cinfo, this%metadata)
+        this%metadata%source_maml_lines = this%maml%lines
 
         this%is_initialized = .true.
     end procedure schema_init
@@ -424,21 +691,25 @@ contains
         end do
     end subroutine maml_table_name
 
-    !> Guards every schema%add_metadata specific: the schema must already have been parsed
-    !> (%cinfo populated -- parquet_parse_maml has run, whether from a file/object or after an
-    !> in-code %init/%add_field build) before %add_metadata is called. Without this, an entry
-    !> added too early would be silently discarded the moment parquet_parse_maml (re)builds
-    !> %metadata%items from %maml%lines -- see parquet_parse_maml_lines's "metadata is
-    !> intent(out)" note. Not required before %init itself, nor before %add_field (which has
-    !> its own, separate "call schema%init(...) before adding fields" guard).
+    !> Guards every schema%add_metadata specific: the schema must have a metadata table to add
+    !> to, which means %init has run (an in-code schema) or parquet_parse_maml has (a schema
+    !> loaded from a file, or one whose %maml was populated directly). What it protects against
+    !> is a genuinely too-early call: %init and the file-form parse both establish %metadata
+    !> from scratch, so an entry added before either would be silently discarded rather than
+    !> merely arriving early.
+    !>
+    !> It deliberately does NOT require the schema to be parsed. An in-code schema accumulates
+    !> its entries from %init onwards and a later parquet_parse_maml preserves them (see
+    !> parquet_parse_maml_from_object), so %add_field and %add_metadata may be interleaved in
+    !> any order.
     subroutine check_schema_metadata_ready(schema)
         class(parquet_schema), intent(in) :: schema !! schema about to gain a %add_metadata entry.
         character(len=:), allocatable :: name_suffix
 
-        if (.not. allocated(schema%cinfo%col)) then
+        if (.not. schema%is_init()) then
             call maml_name_suffix(schema%maml, name_suffix)
-            error stop "parquet_schema%add_metadata: schema has not been parsed yet -- call " // &
-                "parquet_parse_maml on it before add_metadata, not after" // name_suffix
+            error stop "parquet_schema%add_metadata: schema has no metadata table yet -- call " // &
+                "schema%init(...) (or parquet_parse_maml) before add_metadata" // name_suffix
         end if
     end subroutine check_schema_metadata_ready
 
@@ -446,6 +717,7 @@ contains
         character(len=:), allocatable :: miss_low
         character(len=32) :: buf
         logical :: have_qc_min, have_qc_max, have_qc_miss
+        integer :: n_before !! size(%maml%lines) before this call appends anything.
         character(len=:), allocatable :: tlo1 !! scratch (unquote/to_lower).
         character(len=:), allocatable :: name_suffix !! scratch (maml_name_suffix).
 
@@ -483,6 +755,10 @@ contains
                 end if
             end if
         end if
+
+        ! Everything above this line only validates; from here on %maml%lines grows, and
+        ! n_before is what lets schema_sync_appended_lines see exactly this field's own lines.
+        n_before = size(this%maml%lines)
 
         if (.not. maml_line_exists(this%maml, "fields:")) call maml_push_line(this%maml, "fields:")
 
@@ -539,6 +815,8 @@ contains
                 end if
             end if
         end if
+
+        call schema_sync_appended_lines(this, n_before)
 
     contains
 
@@ -975,6 +1253,15 @@ contains
 
     end procedure schema_print_schema_info
 
+    ! %add_col_qc/%set_col_qc deliberately do NOT get schema_add_field's incremental %cinfo sync.
+    ! A qc-maml is a different dialect, not a smaller schema: its fields: entries declare a name
+    ! and a qc: block and no data_type:, which parquet_parse_maml_lines rejects outright
+    ! ("missing data_type in fields block") -- so a qc-maml has never been parsable by the
+    ! schema parser at all, whether one field at a time or whole. It is read through
+    ! parquet_parse_qc_maml instead, straight from %maml%lines, which is why
+    ! parquet_load_qc_maml_file populates %maml and nothing else. Syncing here would need either
+    ! a second field parser (which could then drift from this one) or a fabricated data_type in
+    ! %cinfo; nothing reads %cinfo for a qc schema, so neither is worth having.
     module procedure schema_add_col_qc
         call this%maml%add_col_qc(qc_input, col_name)
     end procedure schema_add_col_qc
@@ -1521,6 +1808,15 @@ contains
             call parquet_flush_keywords(metadata, keywords_value)
         end if
 
+        ! Marks how many %metadata%items exist as of this parse -- schema%clear_metadata
+        ! truncates back to this count, discarding only entries a later %add_metadata call adds.
+        ! Set here rather than at the end of the subroutine because the fields-less early return
+        ! below would otherwise skip it, leaving n_base_items at 0 and making %clear_metadata
+        ! discard the document's own entries too. Everything after this point builds cinfo%col
+        ! only; no further %items are appended.
+        metadata%n_base_items = 0
+        if (allocated(metadata%items)) metadata%n_base_items = size(metadata%items)
+
         if (n <= 0) then
             allocate(cinfo%col(0))
             call parquet_maml_unlock()
@@ -1571,11 +1867,6 @@ contains
         end block
 
         call move_alloc(tmp, cinfo%col)
-
-        ! Marks how many %metadata%items exist as of this parse -- schema%clear_metadata
-        ! truncates back to this count, discarding only entries a later %add_metadata call adds.
-        metadata%n_base_items = 0
-        if (allocated(metadata%items)) metadata%n_base_items = size(metadata%items)
 
         call parquet_maml_unlock()
     end subroutine parquet_parse_maml_lines

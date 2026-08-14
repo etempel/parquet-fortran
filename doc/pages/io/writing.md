@@ -91,13 +91,12 @@ call parquet_open_writer(writer, "data.parquet", schema, write_maml=.true.)
 ! writes data.parquet and data.maml
 ```
 
-This needs a `schema` that has been through `parquet_parse_maml`, because what it saves is the
-verbatim MAML source the schema was parsed from, not the parquet file's own parquet/VOTable-style
-header. Either form of `parquet_parse_maml` qualifies: a schema built in code with
-`schema%init`/`schema%add_field` and then parsed gets a sidecar exactly as one loaded from a
-`.maml` file does. Two things follow from that:
+This needs a `schema` carrying MAML source, because what it saves is that verbatim source rather
+than the parquet file's own parquet/VOTable-style header. Every way of getting one qualifies: a
+schema built in code with `schema%init`/`schema%add_field` gets a sidecar exactly as one loaded
+from a `.maml` file does. Two things follow from that:
 
-- Calls to `schema%add_metadata` made *after* `parquet_parse_maml` (to add extra runtime metadata,
+- Calls to `schema%add_metadata` (to add extra runtime metadata,
   as in the [combined
   example](../schema/combined-example.html#maml-schema-vector-columns-and-metadata)) each append a
   new `keyarray:` entry (`key`/`value`/`comment`) to the saved `.maml`, so runtime metadata is

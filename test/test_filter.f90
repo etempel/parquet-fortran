@@ -972,7 +972,6 @@ contains
         call schema%add_field("d", "date")
         call schema%add_field("t", "time[us]")
         call schema%add_field("ts", "timestamp[ms]")
-        call parquet_parse_maml(schema)
         call parquet_open_writer(writer, file, schema=schema)
         call parquet_write_column(writer, "d", d)
         call parquet_write_column(writer, "t", t)

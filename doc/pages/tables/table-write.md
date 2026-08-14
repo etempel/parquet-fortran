@@ -79,12 +79,12 @@ each one up in the table **by its internal name**, and writes it under the schem
 so a `col_map:` rename works exactly as it does for `parquet_open_writer`. A schema field with no
 matching table column is an error; a table column the schema does not name is simply not written.
 
-**You do not have to parse the schema yourself.** A schema built with `%init`/`%add_field` carries
-only MAML text until `parquet_parse_maml` turns it into fields; `parquet_write_table` makes that
-call for you when it has not been made. Two things follow: the schema is *left* parsed afterwards
-(that is a visible side effect, and the reason its dummy argument is `intent(inout)`), and a
-schema that was never built at all — no `%init`, no fields — is still an error, since there is
-nothing there to parse. `parquet_open_writer` still requires a parsed schema of its own.
+**You do not have to parse the schema yourself.** A schema built with `%init`/`%add_field` is
+already parsed — those two keep its fields in step with its MAML text as they go — and one whose
+`%maml` was populated directly is parsed here, on your behalf, when it has not been parsed already.
+Two things follow: such a schema is *left* parsed afterwards (that is a visible side effect, and the
+reason its dummy argument is `intent(inout)`), and a schema that was never built at all — no
+`%init`, no fields, no MAML text — is still an error, since there is nothing there to parse.
 
 **Writing a file-backed table reads what it has not read yet.** Every column the schema names is
 materialized as it is written, so `parquet_write_table` on a freshly opened table reads exactly

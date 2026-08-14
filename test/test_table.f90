@@ -319,7 +319,7 @@ contains
                 test_table_rank2_masks), &
             new_unittest("get_valid_mask spans several bitmap words, both ranks and null-free", &
                 test_valid_mask_multiword), &
-            new_unittest("parquet_write_table parses a schema the caller left unparsed", &
+            new_unittest("parquet_write_table accepts a schema built without an explicit parse", &
                 test_write_table_parses_schema), &
             new_unittest("release= leaves the table in the residency state the write found", &
                 test_write_table_release), &
@@ -566,7 +566,6 @@ contains
         call s%add_field("f32", "float32")
         call s%add_field("f64", "float64")
         call s%add_field("b", "boolean")
-        call parquet_parse_maml(s)
         call parquet_write_table(t, fo, s)
         call parquet_open_table(t2, fo)
         call check(error, t2%nrows() == NROW, "the written table should have the same row count")
@@ -1151,7 +1150,6 @@ contains
         call s%add_field("f", "float64")
         call s%add_field("fv", "float64", col_size=NW)
         call s%add_field("clean", "float64")
-        call parquet_parse_maml(s)
         call parquet_write_table(t, fo, s)
         !
         call parquet_open_table(t2, fo)
@@ -2188,7 +2186,6 @@ contains
         call s%add_field("id", "int32")
         call s%add_field("mass", "float64", unit="Msun")
         call s%add_field("name", "string", array_size=16)
-        call parquet_parse_maml(s)
         call parquet_write_table(t, fo, s)
         !
         call parquet_open_table(t2, fo)
@@ -2361,7 +2358,6 @@ contains
         mask(5) = .true.
         call s%init("masked")
         call s%add_field("i32", "int32")
-        call parquet_parse_maml(s)
         call parquet_write_table(t, fo, s, row_mask=mask)
         !
         call check(error, t%nrows() == NROW, "a row_mask write must not change the source table")
@@ -2483,7 +2479,6 @@ contains
         end do
         call s%init("metatable", survey="TESTSURVEY")
         call s%add_field("v", "float64")
-        call parquet_parse_maml(s)
         call s%add_metadata("mykey", "myvalue")
         ! Deliberately ragged, and deliberately with the SHORTEST entry first: the snapshot is a
         ! blank-padded deferred-length character array, so a copy of it that gets the length from
@@ -5439,7 +5434,6 @@ contains
         call sc%add_field("v_date", "date", col_size=NVEC)
         call sc%add_field("v_time", "time", col_size=NVEC)
         call sc%add_field("v_ts", "timestamp", col_size=NVEC)
-        call parquet_parse_maml(sc)
     end subroutine build_matrix_schema
     !
     subroutine test_kind_matrix(error)
@@ -6526,7 +6520,6 @@ contains
         end do
         call sc%init("isvalid")
         call sc%add_field("v", "float64")
-        call parquet_parse_maml(sc)
         call parquet_open_writer(w, f, sc)
         call parquet_write_column(w, "v", v, is_valid=valid)
         call parquet_close_writer(w)
@@ -6701,7 +6694,6 @@ contains
         call s%init("introspect")
         call s%add_field("v", "float64")
         call s%add_field("w", "float64")
-        call parquet_parse_maml(s)
         call parquet_open_writer(w, f, s)
         call parquet_write_column(w, "v", v, is_valid=valid)
         call parquet_write_column(w, "w", v)
@@ -6797,7 +6789,6 @@ contains
         end do
         call s%init("source")
         call s%add_field("v", "float64")
-        call parquet_parse_maml(s)
         call s%add_metadata("origin", "survey_A")
         call s%add_metadata("release", "DR3")
         call s%add_metadata("instrument", "spectro")
@@ -6807,7 +6798,6 @@ contains
         !
         call out_s%init("dest")
         call out_s%add_field("v", "float64")
-        call parquet_parse_maml(out_s)
         call out_s%add_metadata("release", "DR4")   ! the schema's own -- must win
         !
         ! Read, detach, then write: the reader is gone by the time the metadata is needed.
@@ -6876,7 +6866,6 @@ contains
         end do
         call s%init("dtcopy_source")
         call s%add_field("v", "float64")
-        call parquet_parse_maml(s)
         call s%add_metadata("NSIDE", 1024_int64)     ! int64 on the SOURCE side, deliberately
         call parquet_open_writer(w, f, s)
         call parquet_write_column(w, "v", v)
@@ -6886,7 +6875,6 @@ contains
         !     strings, so the companion arrives exactly once with the source's own token.
         call out_s%init("dtcopy_dest")
         call out_s%add_field("v", "float64")
-        call parquet_parse_maml(out_s)
         call parquet_open_table(t, f)
         call t%materialize_all()
         call parquet_write_table(t, fo, out_s, copy_metadata=.true.)
@@ -6912,7 +6900,6 @@ contains
         !     single survivor.
         call typed_s%init("dtcopy_dest_typed")
         call typed_s%add_field("v", "float64")
-        call parquet_parse_maml(typed_s)
         call typed_s%add_metadata("NSIDE", 512_int32)
         call parquet_write_table(t, fd, typed_s, copy_metadata=.true.)
         !
@@ -10296,14 +10283,13 @@ contains
         end block
     end subroutine test_prefetch_row_index
     !
-    !> `parquet_write_table` parses a schema the caller built but never parsed.
+    !> `parquet_write_table` accepts a schema the caller never called `parquet_parse_maml` on.
     !!
-    !! A schema built with `%init`/`%add_field` carries only MAML text until `parquet_parse_maml`
-    !! populates `%cinfo`; writing with it used to be an error telling the caller to make that call
-    !! themselves. There is no reason for them to: the write does it. The side effect is visible
-    !! and is part of the contract -- the caller's schema is parsed on return -- so that is checked
-    !! too. (A schema that was never built at all is still an error: scenario
-    !! `table_write_unbuilt_schema`.)
+    !! `%init`/`%add_field` keep `%cinfo` in step as the schema is built, so it is usable the moment
+    !! the last field is added. `parquet_write_table` still parses one it finds unparsed -- that is
+    !! now reached only by a schema whose `%maml` was populated directly -- and the side effect is
+    !! part of the contract, so the caller's schema being parsed on return is checked too. (A schema
+    !! that was never built at all is still an error: scenario `table_write_unbuilt_schema`.)
     subroutine test_write_table_parses_schema(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t, t2
@@ -10316,9 +10302,14 @@ contains
         call parquet_open_table(t, f)
         call s%init("autoparse")
         call s%add_field("i32", "int32")
-        call check(error, .not. s%is_parsed(), "precondition: the schema should not be parsed yet")
+        ! No parquet_parse_maml(s) here on purpose: %add_field keeps %cinfo in step as it goes,
+        ! so a schema built this way is usable immediately. This test used to assert the schema
+        ! was UNparsed here and that parquet_write_table parsed it on the caller's behalf; the
+        ! guarantee it protects -- a caller who never calls parquet_parse_maml still gets the
+        ! right file -- is unchanged, and is now met one step earlier.
+        call check(error, s%is_parsed(), &
+            "a schema built with %init/%add_field should be usable with no explicit parse")
         if (allocated(error)) return
-        ! No parquet_parse_maml(s) here on purpose.
         call parquet_write_table(t, fo, s)
         call check(error, s%is_parsed(), &
             "parquet_write_table should leave the caller's schema parsed")
@@ -10466,7 +10457,6 @@ contains
         call s%add_field("i32", "int32")
         call s%add_field("f64", "float64")
         call s%add_field("b", "boolean")
-        call parquet_parse_maml(s)
         !
         call parquet_open_table(t, f)
         call t%prefetch("i32")      ! the caller's own read -- not the write's to undo
@@ -10606,7 +10596,6 @@ contains
         call s%init("src")
         call s%add_field("id", "int32")
         call s%add_field("mass", "float64", unit="Msun")
-        call parquet_parse_maml(s)
         call parquet_open_writer(w, f, s, write_maml=.true.)
         call parquet_write_column(w, "id", id)
         call parquet_write_column(w, "mass", v)
@@ -10674,7 +10663,6 @@ contains
         call s%init("tsu")
         call s%add_field("ev", "timestamp[ns]")
         call s%add_field("clock", "time[ms]")
-        call parquet_parse_maml(s)
         call ts(1)%set(2024, 7, 16, 12, 0, 0, 123456789)   ! ns precision: only ns can hold it
         call ts(2)%set(1999, 1, 1, 0, 0, 0)
         call tm(1)%set(6, 30, 15, 500000000)
@@ -10729,7 +10717,6 @@ contains
         call s%init("wopts")
         call s%add_field("i32", "int32")
         call s%add_field("f64", "float64")
-        call parquet_parse_maml(s)
         call parquet_open_table(t, f)
         !
         ! chunk_size: 6 rows in row groups of 2 is 3 row groups, and nothing else in the call
@@ -10809,7 +10796,6 @@ contains
         extra = [(int(i, int32), i = 1, NROW)]
         call sch%init("gen")
         call sch%add_field("f64", "float64")
-        call parquet_parse_maml(sch)
         !
         ! --- every structural change bumps -----------------------------------------------------
         do op = 1, NBUMP
@@ -13060,7 +13046,6 @@ contains
         end do
         call src_s%init("source")
         call src_s%add_field("v", "float64")
-        call parquet_parse_maml(src_s)
         call src_s%add_metadata("origin", "survey_B")
         call parquet_open_writer(w, f, src_s)
         call parquet_write_column(w, "v", v)
@@ -13069,7 +13054,6 @@ contains
         ! The output schema declares NO metadata at all -- the state under test.
         call out_s%init("dest")
         call out_s%add_field("v", "float64")
-        call parquet_parse_maml(out_s)
         !
         call parquet_open_table(t, f)
         call t%materialize_all()

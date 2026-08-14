@@ -560,6 +560,14 @@ contains
         logical :: comp_ok
         logical :: use_threads_value
         logical :: overwrite_value, file_exists
+        !> The schema this writer actually reads, which is a local COPY of the caller's. It has to
+        !! be a copy because `schema` is intent(in) and a schema whose %maml was populated
+        !! directly (an embedded MAML, say) still needs parsing before %cinfo exists -- parsing a
+        !! copy is legal under intent(in) and cannot race, since no other thread can see it.
+        !! Unconditional rather than only-when-unparsed so that everything below reads one
+        !! variable; the cost is one schema copy per file opened, on a path that already copies
+        !! every column into writer%all_columns.
+        type(parquet_schema) :: eff_schema
         !> An alias derived from parquet_settings' own list, never a second copy of it: the setter
         !! and this argument check must accept exactly the same set of codecs.
         character(len=12), parameter :: valid_compressions(6) = parquet_valid_compressions
@@ -616,16 +624,28 @@ contains
             merge(1_c_int, 0_c_int, use_threads_value))
 
         if (present(schema)) then
-            if (allocated(schema%maml%name)) writer%maml_name = schema%maml%name
+            eff_schema = schema
+            if (.not. eff_schema%is_parsed()) then
+                ! A schema built with %init/%add_field is already in step with its own text, and
+                ! one loaded by parquet_parse_maml obviously is -- so this only fires for a schema
+                ! whose %maml was populated directly (the embedded-MAML route) and never parsed.
+                if (.not. allocated(eff_schema%maml%lines)) then
+                    error stop "parquet_open_writer: schema is empty -- build it with " // &
+                        "schema%init/%add_field, or load one with parquet_parse_maml (file: " // &
+                        trim(filename) // ")"
+                end if
+                call parquet_parse_maml(eff_schema)
+            end if
+            if (allocated(eff_schema%maml%name)) writer%maml_name = eff_schema%maml%name
 
-            allocate(writer%all_columns(size(schema%cinfo%col)))
-            writer%all_columns = schema%cinfo%col
-            allocate(writer%observed_string_len(size(schema%cinfo%col)))
+            allocate(writer%all_columns(size(eff_schema%cinfo%col)))
+            writer%all_columns = eff_schema%cinfo%col
+            allocate(writer%observed_string_len(size(eff_schema%cinfo%col)))
             writer%observed_string_len = 0
 
             n_enabled = 0
-            do i = 1, size(schema%cinfo%col)
-                if (schema%cinfo%col(i)%is_set) n_enabled = n_enabled + 1
+            do i = 1, size(eff_schema%cinfo%col)
+                if (eff_schema%cinfo%col(i)%is_set) n_enabled = n_enabled + 1
             end do
 
             if (n_enabled > 0) then
@@ -635,25 +655,25 @@ contains
                 k = 0
             end if
 
-            do i = 1, size(schema%cinfo%col)
-                if (schema%cinfo%col(i)%is_set) then
+            do i = 1, size(eff_schema%cinfo%col)
+                if (eff_schema%cinfo%col(i)%is_set) then
                     k = k + 1
-                    writer%enabled_columns(k) = schema%cinfo%col(i)
+                    writer%enabled_columns(k) = eff_schema%cinfo%col(i)
                     ! Registers the schema under output_name (the column's
                     ! display/file name -- equal to name unless a col_map:
                     ! entry renamed it), not the internal name, since that's
                     ! what append_column's own arguments must also use for
                     ! Arrow to line up the field with its data.
-                    call parquet_column_output_name(schema%cinfo%col(i), col_out_name)
+                    call parquet_column_output_name(eff_schema%cinfo%col(i), col_out_name)
                     call parquet_add_column_info(&
                         writer, &
                         col_out_name, &
-                        schema%cinfo%col(i)%unit, &
-                        schema%cinfo%col(i)%info, &
-                        schema%cinfo%col(i)%ucd, &
-                        schema%cinfo%col(i)%data_type, &
-                        schema%cinfo%col(i)%array_size, &
-                        schema%cinfo%col(i)%col_size )
+                        eff_schema%cinfo%col(i)%unit, &
+                        eff_schema%cinfo%col(i)%info, &
+                        eff_schema%cinfo%col(i)%ucd, &
+                        eff_schema%cinfo%col(i)%data_type, &
+                        eff_schema%cinfo%col(i)%array_size, &
+                        eff_schema%cinfo%col(i)%col_size )
                     ! A protected column may hold no Null at all (parquet_check_protected), so
                     ! its Arrow field is written NON-nullable. The C++ side is told here, once,
                     ! rather than at each write: for the mask-carrying kinds an all-.true. mask is
@@ -662,19 +682,19 @@ contains
                     ! to erase, and protection is the only signal that can make their fields
                     ! non-nullable. Registered under the OUTPUT name, like every other C++-side
                     ! column registration above.
-                    if (schema%cinfo%col(i)%is_protected) then
+                    if (eff_schema%cinfo%col(i)%is_protected) then
                         call parquet_writer_set_protected_column(writer%handle, trim(col_out_name)//char(0))
                     end if
                 end if
             end do
 
-            if (allocated(schema%metadata%items)) then
-                do i = 1, size(schema%metadata%items)
-                    call resolve_metadata_datatype(writer, schema%metadata%items, i, dt)
+            if (allocated(eff_schema%metadata%items)) then
+                do i = 1, size(eff_schema%metadata%items)
+                    call resolve_metadata_datatype(writer, eff_schema%metadata%items, i, dt)
                     call parquet_add_table_metadata(writer%handle, &
-                        trim(schema%metadata%items(i)%key)//char(0), &
-                        trim(schema%metadata%items(i)%value)//char(0), &
-                        trim(schema%metadata%items(i)%description)//char(0), &
+                        trim(eff_schema%metadata%items(i)%key)//char(0), &
+                        trim(eff_schema%metadata%items(i)%value)//char(0), &
+                        trim(eff_schema%metadata%items(i)%description)//char(0), &
                         trim(dt)//char(0))
                 end do
             end if
@@ -687,18 +707,19 @@ contains
                         "(prepared by parquet_parse_maml) to be present (file: " // trim(filename) // ")"
                 end if
                 ! No separate "schema present but not obtained from parquet_parse_maml" check here:
-                ! schema%cinfo%col (read just above, unconditionally, to populate writer%all_columns)
-                ! is only ever populated by parquet_parse_maml (object or file form), and both of
-                ! those forms unconditionally also set schema%metadata%source_maml_lines -- so by the
-                ! time a schema safely reaches this point, source_maml_lines is already allocated.
+                ! every route that populates eff_schema%cinfo%col (read just above, unconditionally,
+                ! to populate writer%all_columns) also establishes
+                ! eff_schema%metadata%source_maml_lines -- both parquet_parse_maml forms set it
+                ! outright, and schema%init sets it before %add_field starts appending to it -- so
+                ! by the time a schema safely reaches this point it is already allocated.
                 !
                 ! The sidecar file itself is not written here: a col_size:/array_size: auto field
                 ! may still be unresolved at this point (resolved later, at first write, or via
                 ! schema%set_col_size/%set_array_size) -- writing now could bake in a stale "auto"
                 ! that no longer matches the .parquet file's actual columns. parquet_close_writer
                 ! writes it instead, once every column is guaranteed resolved.
-                writer%sidecar_lines = schema%metadata%source_maml_lines
-                call parquet_prune_disabled_fields(writer%sidecar_lines, schema%cinfo)
+                writer%sidecar_lines = eff_schema%metadata%source_maml_lines
+                call parquet_prune_disabled_fields(writer%sidecar_lines, eff_schema%cinfo)
                 writer%write_maml_requested = .true.
             end if
         end if

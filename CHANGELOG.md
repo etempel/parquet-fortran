@@ -630,6 +630,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A schema built with `schema%init`/`schema%add_field` no longer needs a `parquet_parse_maml`
+  call, and its calls no longer have a required order.** Both builders now parse the MAML text
+  they write as they write it, so the schema's fields and metadata are always in step with it: a
+  schema is ready to query, write with, or add metadata to as soon as its last field is declared.
+  Three consequences a reader of 1.0.0 will notice. `schema%is_parsed()` answers `.true.` after the
+  first `%add_field` where it used to answer `.false.` until an explicit parse (after `%init`
+  alone it still answers `.false.` — a MAML with no fields is not a document). `%add_field` after a
+  parse used to append text that nothing read, so the column silently did not exist; it now takes
+  effect. And `schema%add_metadata` may be called at any point after `%init` and interleaved
+  freely with `%add_field`, where it previously had to come after the parse and aborted otherwise
+  — a parse now preserves the entries it used to discard, so a redundant `parquet_parse_maml` call
+  is harmless in both directions. `parquet_parse_maml` itself is unchanged and still required for a
+  schema loaded from a `.maml` file or one whose `%maml` was populated directly, such as an
+  embedded schema; `parquet_open_writer` and `parquet_write_table` parse that kind for you.
+
+- **`schema%add_field` now applies the per-field rules `parquet_validate_maml` applies**, using the
+  same code, so an in-code schema is validated even though it is never validated as a whole
+  document. A `qc_min`/`qc_max` that is not convertible to the declared numeric type, a `qc:` on a
+  `date`/`time`/`timestamp` column, a non-positive `col_size`/`array_size`, and `array_size: auto`
+  on a non-string column each now abort at the `%add_field` call that introduced them rather than
+  at a later parse — or, since that parse is no longer required, rather than not at all.
+
 - **`qc: miss:` now has three states, and an undeclared one no longer means "no Nulls allowed".**
   A field that declares no `qc: miss:` says nothing about Nulls, and none are checked — on the
   write side or the read side. `miss: Null`/`NA` says Nulls are expected, as before. The one form

@@ -67,7 +67,7 @@ program write_parquet_qc_example
         "    min: '>= 0'", &
         "    max: '< 360'" ]
 
-    call parquet_parse_maml(schema)
+    call parquet_parse_maml(schema)   ! %maml was populated directly, so it needs parsing
 
     call parquet_open_writer(writer, "data.parquet", schema, qc=.true., compression="zstd")
     call parquet_write_column(writer, "ra", ra, is_valid=is_valid)

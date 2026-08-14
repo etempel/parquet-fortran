@@ -906,8 +906,10 @@ program error_scenarios
         call scenario_print_schema_info_uninitialized_schema()
     case ("print_schema_info_open_failure")
         call scenario_print_schema_info_open_failure()
-    case ("schema_add_metadata_before_parse")
-        call scenario_schema_add_metadata_before_parse()
+    case ("schema_add_metadata_before_init")
+        call scenario_schema_add_metadata_before_init()
+    case ("schema_add_field_validates_field_rules")
+        call scenario_schema_add_field_validates_field_rules()
     case ("columns_data_ptr_kind_mismatch")
         call scenario_columns_data_ptr_kind_mismatch()
     case ("columns_uninitialized_append_nulls")
@@ -1731,7 +1733,6 @@ contains
         call schema%add_field("f64", "float64", col_size=3)
         call schema%add_field("lg", "boolean", col_size=3)
         call schema%add_field("str", "string", col_size=3, array_size=8)
-        call parquet_parse_maml(schema)
     end function multitype_vector_schema
 
     subroutine scenario_write_undeclared_column_int64()
@@ -2528,7 +2529,6 @@ contains
         schema = parquet_schema(table="empty_ok")
         call schema%add_field("col_a", "int32")
         call schema%add_field("col_b", "string", array_size=4)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_no_columns_written.parquet", schema)
         call parquet_close_writer(writer)
@@ -2548,7 +2548,6 @@ contains
         schema = parquet_schema(table="empty_explicit")
         call schema%add_field("col_a", "int32")
         call schema%add_field("col_b", "string", array_size=4)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_zero_length_writes.parquet", schema)
         call parquet_write_column(writer, "col_a", no_ints)
@@ -2567,7 +2566,6 @@ contains
 
         schema = parquet_schema(table="empty_masked")
         call schema%add_field("col_a", "int32")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_no_columns_masked.parquet", schema)
         call parquet_write_row_mask(writer, mask)
@@ -2584,7 +2582,6 @@ contains
         call schema%add_field("col_a", "int32")
         call schema%add_field("col_b", "int32")
         call schema%add_field("col_c", "int32")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_missing_write.parquet", schema)
         call parquet_write_column(writer, "col_a", data)
@@ -3758,7 +3755,6 @@ contains
         call schema%init(table="large_string_table")
         call schema%add_field("s", "string", array_size=10)
         call schema%add_field("v", "string", col_size=2, array_size=6)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, out_file, schema)
         call parquet_write_column(writer, "s", s_values)
@@ -5632,7 +5628,6 @@ contains
 
         call schema%init(table="row_group_overflow_table")
         call schema%add_field("v", "int32", col_size=2)
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_row_group_explicit_nrows_overflow.parquet", schema)
         call parquet_new_row_group(writer, 3)
@@ -6355,7 +6350,6 @@ contains
         call ts(2)%set(2024, 1, 31, 12, 30, 1)
         call schema%init("ts_ms")
         call schema%add_field("t", "timestamp[ms]")
-        call parquet_parse_maml(schema)
         call parquet_open_writer(writer, out_file, schema=schema)
         call parquet_write_column(writer, "t", ts)
         call parquet_close_writer(writer)
@@ -8234,7 +8228,6 @@ contains
 
         call schema%init(table="qc_miss_table")
         call schema%add_field("id", "int32", qc_miss="")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_default.parquet", schema)
         call parquet_write_column(writer, "id", values, is_valid=is_valid)
@@ -8257,7 +8250,6 @@ contains
         call schema%init(table="protect_table")
         call schema%add_field("p", "int32")
         call schema%add_field("q", "int32")
-        call parquet_parse_maml(schema)
 
         call schema%set_protected("q", .false.)  ! control: never protected -> silent
         call schema%set_protected("p")           ! protect in code (no MAML involved at all)
@@ -8284,7 +8276,6 @@ contains
         call schema%init(table="qc_miss_table")
         call schema%add_field("id", "int32")     ! no qc_miss= -- the whole point
         call schema%add_field("s", "string")     ! ditto
-        call parquet_parse_maml(schema)
 
         call svalues%append_string("apple")
         call svalues%append_null()
@@ -8306,7 +8297,6 @@ contains
 
         call schema%init(table="qc_miss_table")
         call schema%add_field("id", "int32", qc_miss="Null")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_allowed.parquet", schema)
         call parquet_write_column(writer, "id", values, is_valid=is_valid)
@@ -8324,7 +8314,6 @@ contains
 
         call schema%init(table="qc_miss_table")
         call schema%add_field("s", "string", qc_miss="")
-        call parquet_parse_maml(schema)
 
         call values%append_string("apple")
         call values%append_null()
@@ -8348,7 +8337,6 @@ contains
 
         call schema%init(table="qc_miss_table")
         call schema%add_field("d", "date", qc_miss="")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_temporal.parquet", schema)
         call parquet_write_column(writer, "d", values)
@@ -8369,7 +8357,6 @@ contains
 
         call schema%init(table="add_field_qc_table")
         call schema%add_field("ra", "int32", qc_min="0", qc_max="360")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_add_field_qc_reader.parquet", schema, qc=.false.)
         call parquet_write_column(writer, "ra", ra)
@@ -8447,7 +8434,6 @@ contains
 
         call schema%init(table="int64_overflow_table")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_int64_to_int32_overflow.parquet", schema)
         call parquet_write_column(writer, "v", values)
@@ -8465,7 +8451,6 @@ contains
 
         call schema%init(table="float_non_integral_table")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_float_to_int32_non_integral.parquet", schema)
         call parquet_write_column(writer, "v", values)
@@ -8482,7 +8467,6 @@ contains
 
         call schema%init(table="float_out_of_range_table")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_float_to_int32_out_of_range.parquet", schema)
         call parquet_write_column(writer, "v", values)
@@ -8507,7 +8491,6 @@ contains
 
         call schema%init(table="float_both_wrong_table")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_float_to_int32_both_wrong.parquet", schema)
         call parquet_write_column(writer, "v", values)
@@ -8529,7 +8512,6 @@ contains
         values(1) = ieee_value(0.0_real64, ieee_quiet_nan)
         call schema%init(table="float_nan_table")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_float_nan_to_int32.parquet", schema)
         call parquet_write_column(writer, "v", values)
@@ -8551,7 +8533,6 @@ contains
 
         call schema%init(table="float_neg_out_of_range_table")
         call schema%add_field("v", "int64")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_float_to_int64_neg_out_of_range.parquet", schema)
         call parquet_write_column(writer, "v", values)
@@ -8569,7 +8550,6 @@ contains
 
         call schema%init(table="float_non_integral_i64_table")
         call schema%add_field("v", "int64")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_float_to_int64_non_integral.parquet", schema)
         call parquet_write_column(writer, "v", values)
@@ -8587,7 +8567,6 @@ contains
 
         call schema%init(table="float_out_of_range_i64_table")
         call schema%add_field("v", "int64")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_float_to_int64_out_of_range.parquet", schema)
         call parquet_write_column(writer, "v", values)
@@ -9198,7 +9177,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("ra", "float64")
-        call parquet_parse_maml(schema)
         call schema%get_field("does_not_exist", data_type=data_type)
         print '(a)', "unexpectedly found a non-existent field via schema%get_field(name=)"
     end subroutine scenario_get_field_by_name_not_found
@@ -9210,7 +9188,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("ra", "float64")
-        call parquet_parse_maml(schema)
         call schema%get_field(5, name)
         print '(a)', "unexpectedly resolved an out-of-range index via schema%get_field(index=)"
     end subroutine scenario_get_field_by_index_out_of_range
@@ -9222,7 +9199,6 @@ contains
 
         call source%init(table="src")
         call source%add_field("ra", "float64")
-        call parquet_parse_maml(source)
 
         call target%init(table="dst")
         call target%add_field_from(source, "does_not_exist")
@@ -9236,7 +9212,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
         call schema%print_schema_info()
         print '(a)', "unexpectedly printed schema info with neither unit nor filename given"
     end subroutine scenario_print_schema_info_no_unit_no_filename
@@ -9248,7 +9223,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
 
         ! Reserve a genuinely unused unit number by opening then closing it.
         open(newunit=u, file="test_run/print_schema_info_unit_not_open_scratch.txt", status="replace")
@@ -9265,7 +9239,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
 
         open(newunit=u, file="schemas/maml_example.maml", status="old", action="read")
         call schema%print_schema_info(unit=u)
@@ -9280,7 +9253,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
 
         open(newunit=u, file="test_run/print_schema_info_mismatch_actual.txt", status="replace", &
             action="write", form="formatted")
@@ -9307,23 +9279,45 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("x", "int32")
-        call parquet_parse_maml(schema)
 
         call schema%print_schema_info(filename="test_run/no_such_subdir/print_schema_info_open_failure.txt")
         print '(a)', "unexpectedly printed schema info to a filename that could not be opened"
     end subroutine scenario_print_schema_info_open_failure
 
-    !> schema%add_metadata error stops if called before the schema has been parsed --
-    !> right after %init/%add_field but before parquet_parse_maml has populated %cinfo/
-    !> %metadata%items, which would otherwise silently discard the entry once that parse runs.
-    subroutine scenario_schema_add_metadata_before_parse()
-        type(parquet_schema) :: schema
+    !> %add_field keeps %cinfo in step incrementally instead of leaving it to an explicit
+    !! parquet_parse_maml, so the per-field rules parquet_validate_maml used to catch at parse
+    !! time have to be caught here or not at all -- an in-code schema may now never be validated
+    !! as a whole document. It runs parquet_validate_field_rules, the same code the document
+    !! validator calls, on the field it just parsed. The whole-document rules stay skipped, which
+    !! the negative control below demonstrates: a one-field sub-document has no table: line of
+    !! its own, so running the full validator on it would abort on every %add_field call ever
+    !! made.
+    subroutine scenario_schema_add_field_validates_field_rules()
+        type(parquet_schema) :: ok_schema, schema
 
+        call ok_schema%init(table="t")
+        call ok_schema%add_field("fine", "int32", qc_min="0", qc_max="10")
+        print '(a,i0)', "fields accepted with no whole-document validation: ", ok_schema%get_num_fields()
         call schema%init(table="t")
-        call schema%add_field("x", "int32")
+        call schema%add_field("x", "int32", qc_min="3.7")
+        print '(a)', "unexpectedly accepted a qc_min that is not integral for an int32 column"
+    end subroutine scenario_schema_add_field_validates_field_rules
+
+    !> %add_metadata needs a metadata table to add to, which schema%init (or a parse) is what
+    !! establishes -- before either, the entry would be discarded by whichever of them runs
+    !! next rather than merely arriving early. Adding it AFTER %init but before any parse is
+    !! deliberately legal and is covered positively by test_metadata.f90's
+    !! test_add_metadata_interleaved_with_add_field, so the negative control below runs that
+    !! call first and only then reaches the abort.
+    subroutine scenario_schema_add_metadata_before_init()
+        type(parquet_schema) :: ok_schema, schema
+
+        call ok_schema%init(table="t")
+        call ok_schema%add_metadata("k", 1_int32) ! negative control: legal, no parse in sight
+        print '(a,i0)', "metadata entries after add_metadata with no parse: ", size(ok_schema%metadata%items)
         call schema%add_metadata("k", 1_int32)
-        print '(a)', "unexpectedly added metadata to a schema that has not been parsed yet"
-    end subroutine scenario_schema_add_metadata_before_parse
+        print '(a)', "unexpectedly added metadata to a schema that has not been initialized"
+    end subroutine scenario_schema_add_metadata_before_init
 
     !> parquet_string_column: indexing out of range aborts (check_index).
     subroutine scenario_string_column_index_out_of_range()
@@ -9989,7 +9983,6 @@ contains
         call schema%init(table="time_info_table")
         call schema%add_field("day", "date")
         call schema%add_field("ev", "timestamp[us]")
-        call parquet_parse_maml(schema)
 
         call day(1)%set(2024, 7, 16)
         call day(2)%set(2024, 7, 17)
@@ -10028,7 +10021,6 @@ contains
 
         call schema%init(table="qc_miss_table")
         call schema%add_field("d", "date", qc_miss="Null")
-        call parquet_parse_maml(schema)
 
         call parquet_open_writer(writer, "test_run/error_scenario_qc_miss_temporal_allowed.parquet", schema)
         call parquet_write_column(writer, "d", values)
@@ -10574,7 +10566,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("day", "date")
-        call parquet_parse_maml(schema)
         call values(1)%set(2024, 7, 16)
 
         call parquet_open_writer(writer, "test_run/error_scenario_temporal_write_undefined.parquet", schema)
@@ -10591,7 +10582,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("ev", "timestamp", col_size=2)
-        call parquet_parse_maml(schema)
         call values(1,1)%set(2024, 7, 16, 0, 0, 0)
         call values(2,1)%set(2024, 7, 16, 0, 0, 1)
         call values(3,1)%set(2024, 7, 16, 0, 0, 2)
@@ -10610,7 +10600,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("day", "date")
-        call parquet_parse_maml(schema)
         call values(1)%set(2024, 7, 16, 0, 0, 0)
 
         call parquet_open_writer(writer, "test_run/error_scenario_temporal_write_type_mismatch.parquet", schema)
@@ -10627,7 +10616,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("day", "date")
-        call parquet_parse_maml(schema)
         call values(1)%set(2024, 7, 16)
 
         call parquet_open_writer(writer, "test_run/error_scenario_temporal_chunk_undefined.parquet", schema)
@@ -10644,7 +10632,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("ev", "timestamp", col_size=2)
-        call parquet_parse_maml(schema)
         call values(1,1)%set(2024, 7, 16, 0, 0, 0)
         call values(2,1)%set(2024, 7, 16, 0, 0, 1)
         call values(3,1)%set(2024, 7, 16, 0, 0, 2)
@@ -10663,7 +10650,6 @@ contains
 
         call schema%init(table="t")
         call schema%add_field("day", "date")
-        call parquet_parse_maml(schema)
         call values(1)%set(2024, 7, 16, 0, 0, 0)
 
         call parquet_open_writer(writer, "test_run/error_scenario_temporal_chunk_type_mismatch.parquet", schema)
@@ -11011,7 +10997,6 @@ contains
 
         call schema%init(table="set_col_size_non_positive_table")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
 
         call schema%set_col_size("v", 0)
         print '(a)', "unexpectedly accepted a non-positive col_size"
@@ -11024,7 +11009,6 @@ contains
 
         call schema%init(table="set_col_size_already_resolved_table")
         call schema%add_field("v", "int32", col_size=3)
-        call parquet_parse_maml(schema)
 
         call schema%set_col_size("v", 5)
         print '(a)', "unexpectedly overrode an already-resolved col_size without force=.true."
@@ -11036,7 +11020,6 @@ contains
 
         call schema%init(table="set_array_size_non_string_table")
         call schema%add_field("v", "int32")
-        call parquet_parse_maml(schema)
 
         call schema%set_array_size("v", 10)
         print '(a)', "unexpectedly accepted set_array_size on a non-string column"
@@ -11049,7 +11032,6 @@ contains
 
         call schema%init(table="set_array_size_non_positive_table")
         call schema%add_field("txt", "string")
-        call parquet_parse_maml(schema)
 
         call schema%set_array_size("txt", 0)
         print '(a)', "unexpectedly accepted a non-positive array_size"
@@ -11063,7 +11045,6 @@ contains
 
         call schema%init(table="set_array_size_already_resolved_table")
         call schema%add_field("txt", "string", array_size=8)
-        call parquet_parse_maml(schema)
 
         call schema%set_array_size("txt", 12)
         print '(a)', "unexpectedly overrode an already-resolved array_size without force=.true."
@@ -12588,7 +12569,6 @@ contains
         call s%init("wmiss")
         call s%add_field("id", "int32")
         call s%add_field("absent", "float64")
-        call parquet_parse_maml(s)
         call parquet_write_table(t, "test_run/es_table_wmiss_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table missing a schema column"
     end subroutine scenario_table_write_missing_column
@@ -12602,7 +12582,6 @@ contains
         call parquet_open_table(t, "test/fixtures/map_list_types.parquet")
         call s%init("wunsupported")
         call s%add_field("map_col", "int32")
-        call parquet_parse_maml(s)
         call parquet_write_table(t, "test_run/es_table_wunsupported_out.parquet", s)   ! -> aborts
         print '(a)', "unexpectedly wrote a table's unsupported column"
     end subroutine scenario_table_write_unsupported_column
@@ -12617,7 +12596,6 @@ contains
         call parquet_open_table(t, "test_run/es_table_nowr_in.parquet")
         call s%init("nowr")
         call s%add_field("id", "int32")
-        call parquet_parse_maml(s)
         call parquet_write_table(t, "test_run/es_table_nowr_out.parquet", s)
         call parquet_write_table(t, "test_run/es_table_nowr_out.parquet", s, overwrite=.false.)   ! -> aborts
         print '(a)', "unexpectedly overwrote an existing file with overwrite=.false."
@@ -12690,7 +12668,6 @@ contains
         v = [1.0_real64, 2.0_real64, 3.0_real64]
         call s%init("meta_src")
         call s%add_field("v", "float64")
-        call parquet_parse_maml(s)
         call s%add_metadata("origin", "survey_A")
         call parquet_open_writer(w, fname, s)
         call parquet_write_column(w, "v", v)
@@ -14796,7 +14773,6 @@ contains
 
         call s%init(table="dt_collision_table")
         call s%add_field("id0", "int32")
-        call parquet_parse_maml(s)
         call s%add_metadata("NSIDE", 1024_int32)
         if (collide) call s%add_metadata("NSIDE.datatype", "user_supplied")
 

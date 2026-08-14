@@ -795,7 +795,6 @@ contains
         call schema%init(table="t")
         call schema%add_field("id", "int32")
         call schema%add_field("clock", "time[ms]")
-        call parquet_parse_maml(schema)
         call parquet_validate_maml(schema%maml)
         do i = 1, 4
             call clock(i)%set(0, 0, sec(i))

@@ -310,7 +310,9 @@ contains
             new_unittest("a chunked parquet_string_column write raises array_size: auto for a longer later chunk", &
                 test_compact_chunk_array_size_auto_grows), &
             new_unittest("a parquet_string_column write longer than the declared array_size is accepted, " // &
-                "and the sidecar reports what was written", test_compact_write_exceeds_declared_array_size) &
+                "and the sidecar reports what was written", test_compact_write_exceeds_declared_array_size), &
+            new_unittest("the reconciled array_size reaches the file's own metadata, not just the sidecar", &
+                test_reconciled_array_size_reaches_file_metadata) &
             ]
         !
     end subroutine collect_tests_parquet_writing
@@ -5895,5 +5897,82 @@ contains
             "a declaration the data does NOT exceed must survive unchanged (8) -- the control " // &
             "that rules out overwriting every declaration with the measured width")
     end subroutine test_compact_write_exceeds_declared_array_size
+    !> The reconciled array_size must reach the FILE's own key-value metadata, not just the sidecar.
+    !>
+    !> parquet_reconcile_string_sizes settles a string column's reported array_size at close, and it
+    !> has to update two independent places: writer%all_columns (which the sidecar MAML is rewritten
+    !> from) and the C++-side column_metadata (which becomes the file's own
+    !> `column.<name>.array_size` key). Every other array_size test here reads the sidecar back, so
+    !> all of them pass while the second update does nothing at all.
+    !>
+    !> That is not hypothetical. The metadata update is addressed BY NAME, and the call resolving
+    !> that name once aliased one variable onto its own `intent(out)` dummy -- freeing the storage
+    !> the name was read from. On glibc the freed read segfaulted at close; on macOS it came back
+    !> blank, so the update matched no column and returned quietly, leaving `array_size: -1` in the
+    !> file while the sidecar looked perfect. The whole suite passed. Writing the sidecar is
+    !> deliberately NOT enabled here: this file's metadata is then the only thing that can answer.
+    !>
+    !> `within` is the negative control, and it is the one that makes the other two mean anything --
+    !> a declaration the data does not exceed must survive untouched, so the test cannot pass
+    !> against an implementation that stamps a measured width over every column.
+    subroutine test_reconciled_array_size_reaches_file_metadata(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_string_column) :: auto_col, over, within
+        character(len=*), parameter :: out_file = "test_run/test_array_size_file_metadata.parquet"
+        integer(int32) :: auto_size, over_size, within_size
+
+        call auto_col%append_string("alpha")
+        call auto_col%append_string("gamma12")            ! 7 characters, declared auto
+        call over%append_string("short")
+        call over%append_string("a_twenty_char_value!")   ! 20 characters, declared 5
+        call within%append_string("abc")
+        call within%append_string("de")                   ! 3 characters, declared 8
+
+        schema%maml%name = "array_size_file_metadata.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: array_size_file_metadata_table", &
+            "fields:", &
+            "- name: auto_col", &
+            "  data_type: string", &
+            "  array_size: auto", &
+            "- name: over", &
+            "  data_type: string", &
+            "  array_size: 5", &
+            "- name: within", &
+            "  data_type: string", &
+            "  array_size: 8" ]
+        call parquet_parse_maml(schema)
+
+        ! No write_maml= here on purpose -- with no sidecar, the file's own metadata is the only
+        ! place the answer can come from.
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "auto_col", auto_col)
+        call parquet_write_column(writer, "over", over)
+        call parquet_write_column(writer, "within", within)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file)
+        ! The -1 defaults are the unresolved parquet_size_auto sentinel and are what a skipped
+        ! update leaves behind, so a default that survives fails the check rather than hiding.
+        call parquet_get_metadata(reader, "column.auto_col.array_size", auto_size, default=-1_int32)
+        call parquet_get_metadata(reader, "column.over.array_size", over_size, default=-1_int32)
+        call parquet_get_metadata(reader, "column.within.array_size", within_size, default=-1_int32)
+        call parquet_close_reader(reader)
+
+        call check(error, auto_size == 7, &
+            "expected the file's own column.auto_col.array_size to report the resolved width (7); " // &
+            "-1 means the close-time reconciliation never reached the file metadata")
+        if (allocated(error)) return
+        call check(error, over_size == 20, &
+            "expected the file's own column.over.array_size to report what was actually written " // &
+            "(20), not the declaration it exceeded (5)")
+        if (allocated(error)) return
+        call check(error, within_size == 8, &
+            "expected a declaration the data does NOT exceed to survive unchanged in the file " // &
+            "metadata (8) -- the control that rules out stamping a measured width over every column")
+    end subroutine test_reconciled_array_size_reaches_file_metadata
     !
 end module test_writing

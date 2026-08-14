@@ -1507,6 +1507,306 @@ def check_maml_keys_case_insensitive():
     return problems
 
 
+def _logical_lines(path):
+    """Yield (lineno of the first physical line, joined code) with comments and `&` folded away."""
+    out = []
+    buf = ""
+    start = None
+    for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
+        code = strip_comment(raw).strip()
+        if not code and not buf:
+            continue
+        if start is None:
+            start = lineno
+        if code.endswith("&"):
+            buf += code[:-1] + " "
+            continue
+        buf += code
+        if buf.strip():
+            out.append((start, buf.strip()))
+        buf = ""
+        start = None
+    return out
+
+
+def _split_args(text):
+    """Split an argument list on its TOP-LEVEL commas, respecting nesting and quotes."""
+    parts, depth, cur, quote = [], 0, "", None
+    for ch in text:
+        if quote:
+            cur += ch
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            cur += ch
+        elif ch in "([":
+            depth += 1
+            cur += ch
+        elif ch in ")]":
+            depth -= 1
+            cur += ch
+        elif ch == "," and depth == 0:
+            parts.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        parts.append(cur.strip())
+    return parts
+
+
+#: A procedure header, with or without an argument list. Three shapes have to parse or the frame
+#: stack unwinds against the wrong procedure and later signatures are silently misattributed:
+#:   - `[pure|elemental|module ...] subroutine NAME(args)`
+#:   - a TYPED function, `[module] logical function NAME(args)` / `integer(int64) function ...`
+#:     -- over a hundred of these, and omitting the type prefix leaves every one unparsed;
+#:   - `module procedure NAME`, the abbreviated implementation form, whose `end procedure` must
+#:     pop the frame it opened. It carries no argument list, so it is recorded as a frame but
+#:     never as a SIGNATURE -- the interface body in parquet_core.f90 is the canonical one, and
+#:     letting the empty form overwrite it is what made this check miss every generic.
+_PROC_PREFIX = r"(?:(?:pure|impure|elemental|recursive|non_recursive|module)\s+)*"
+_TYPE_PREFIX = r"(?:(?:integer|real|logical|complex|character|double\s+precision|type|class)" \
+               r"(?:\s*\([^)]*\))?\s+)?"
+_PROC_OPEN = re.compile(
+    r"^" + _PROC_PREFIX + r"(?:"
+    r"subroutine\s+([a-z_]\w*)\s*(?:\(([^)]*)\))?"
+    r"|" + _TYPE_PREFIX + r"function\s+([a-z_]\w*)\s*(?:\(([^)]*)\))?"
+    r"|(procedure)\s+([a-z_]\w*)\s*$"
+    r")",
+    re.I,
+)
+_PROC_CLOSE = re.compile(r"^end\s*(?:subroutine|function|procedure)\b", re.I)
+_INTENT = re.compile(r"\bintent\s*\(\s*(in\s*out|out|in)\s*\)", re.I)
+#: `interface <generic>` opening a NAMED generic (a bare `interface` is a plain interface block).
+_GENERIC_OPEN = re.compile(r"^(?:abstract\s+)?interface\s+([a-z_]\w*)\s*$", re.I)
+_GENERIC_MEMBER = re.compile(r"^module\s+procedure\s+([a-z_]\w*)\s*$", re.I)
+#: A type-bound binding: `procedure :: name => impl`, `generic :: name => impl1, impl2`, and the
+#: bare `procedure :: name` form whose binding name IS the procedure name. Missing that last form
+#: is what left `col%append_buffers` unresolvable when this check was first written.
+_BINDING = re.compile(r"^(?:generic|procedure)\s*(?:,[^:(]*)?::\s*(.+)$", re.I)
+#: `call name(...)` or `call obj%binding(...)`.
+_CALL = re.compile(r"\bcall\s+([a-z_]\w*(?:%[a-z_]\w*)*)\s*\(", re.I)
+#: An actual argument that is a plain variable reference -- the only kind that can alias.
+_PLAIN_ACTUAL = re.compile(r"^[a-z_]\w*(?:%[a-z_]\w*)*$", re.I)
+_KEYWORD_ACTUAL = re.compile(r"^([a-z_]\w*)\s*=(?!=|>)\s*(.*)$", re.I)
+
+
+def _fortran_signatures(paths):
+    """Index every procedure, named generic and type-bound binding across `paths`.
+
+    Returns (signatures, generics, bindings, unbalanced):
+      signatures  name -> (ordered dummy names, {dummy: "in"|"out"|"inout"})
+      generics    generic name -> [specific names]
+      bindings    binding name -> [implementation names]
+      unbalanced  parser-failure messages -- a file whose frames did not all close
+
+    Interface bodies and full definitions both land in `signatures`; they agree on dummy names by
+    construction here (a submodule that restates an interface restates it verbatim), so their
+    intents are merged rather than treated as a conflict.
+
+    `unbalanced` is what stops this going quietly wrong: a header shape the regex does not know
+    pushes no frame, its `end` pops somebody else's, and every later signature in that file is
+    attributed to the wrong procedure -- producing both false negatives and false positives with
+    nothing to show for it. Two such shapes were live when the check was written.
+    """
+    signatures, generics, bindings, unbalanced = {}, {}, {}, []
+    for path in paths:
+        stack = []
+        generic_name = None
+        for _, code in _logical_lines(path):
+            generic_open = _GENERIC_OPEN.match(code)
+            if generic_open:
+                generic_name = generic_open.group(1).lower()
+                continue
+            if re.match(r"^end\s*interface\b", code, re.IGNORECASE):
+                generic_name = None
+                continue
+            member = _GENERIC_MEMBER.match(code)
+            if member and generic_name and not stack:
+                generics.setdefault(generic_name, []).append(member.group(1).lower())
+                continue
+            binding = _BINDING.match(code)
+            if binding and not stack:
+                declared = binding.group(1)
+                if "=>" in declared:
+                    name, _, targets = declared.partition("=>")
+                    bindings.setdefault(name.strip().lower(), []).extend(
+                        t.strip().lower() for t in _split_args(targets)
+                    )
+                else:
+                    for name in _split_args(declared):
+                        bare = name.strip().lower()
+                        if bare:
+                            bindings.setdefault(bare, []).append(bare)
+                continue
+            if _PROC_CLOSE.match(code):
+                if stack:
+                    name, dummies, intents, abbreviated = stack.pop()
+                    if not abbreviated:
+                        previous = signatures.get(name)
+                        if previous is None or previous[0] != dummies:
+                            signatures[name] = (dummies, intents)
+                        else:
+                            merged = dict(previous[1])
+                            merged.update(intents)
+                            signatures[name] = (dummies, merged)
+                continue
+            opened = _PROC_OPEN.match(code)
+            if opened:
+                abbreviated = bool(opened.group(5))
+                name = (opened.group(1) or opened.group(3) or opened.group(6)).lower()
+                raw_args = opened.group(2) or opened.group(4) or ""
+                dummies = [d.strip().lower() for d in _split_args(raw_args) if d.strip()]
+                stack.append([name, dummies, {}, abbreviated])
+                continue
+            if stack and "::" in code:
+                found = _INTENT.search(code)
+                if found:
+                    intent = found.group(1).lower().replace(" ", "")
+                    for declared in _split_args(code.split("::", 1)[1]):
+                        bare = declared.split("(")[0].split("=")[0].strip().lower()
+                        if bare:
+                            stack[-1][2][bare] = intent
+        if stack:
+            unbalanced.append(
+                "%s: %d procedure header(s) left unclosed (%s) -- the signature parser in "
+                "check_no_aliased_output_argument has lost track of this file, so its intents "
+                "are unreliable. Fix the parser rather than the source."
+                % (path.name, len(stack), ", ".join(frame[0] for frame in stack[:3]))
+            )
+    return signatures, generics, bindings, unbalanced
+
+
+def _writable_positions(callee, count, signatures, generics, bindings):
+    """Which of `count` actual-argument positions can the callee DEFINE? None if unresolvable.
+
+    Returns a dict {position: intent} covering only the positions whose dummy is intent(out) or
+    intent(inout). A generic or a type-bound binding is resolved against every candidate specific
+    and the answers unioned, so a position counts as writable if ANY specific can write it.
+    """
+    if "%" in callee:
+        candidates = bindings.get(callee.rsplit("%", 1)[1])
+        offset = 1  # the passed-object dummy is implicit at the call site
+    else:
+        candidates = generics.get(callee) or ([callee] if callee in signatures else None)
+        offset = 0
+    if not candidates:
+        return None
+    writable = {}
+    resolved_any = False
+    for specific in candidates:
+        for name in generics.get(specific, [specific]):
+            signature = signatures.get(name)
+            if signature is None:
+                continue
+            resolved_any = True
+            dummies, intents = signature
+            for position in range(count):
+                index = position + offset
+                if index < len(dummies):
+                    intent = intents.get(dummies[index])
+                    if intent in ("out", "inout"):
+                        writable[position] = intent
+    return writable if resolved_any else None
+
+
+def check_no_aliased_output_argument():
+    """One variable must never be passed to two dummies when either of them can be DEFINED.
+
+    F2018 15.5.2.13 forbids it, and no compiler here diagnoses it. The shape that shipped was
+
+        call parquet_resolve_output_name(writer, outname, outname)
+
+    whose dummies are `character(len=*), intent(in) :: name` and `character(len=:), allocatable,
+    intent(out) :: output_name`. `intent(out)` on an allocatable deallocates it ON ENTRY, so the
+    callee's own `intent(in)` dummy is left pointing at freed memory and the `trim(name)` inside it
+    reads it. On macOS the block read back as blanks, so the column name became "" and the metadata
+    update it guarded silently matched nothing and did nothing; on CI's glibc the same read
+    segfaulted inside parquet_get_enabled_column_index. One bug, one silent failure and one crash,
+    depending only on the allocator.
+
+    Nothing else can catch this. It compiles clean, and the whole suite passed on the machine where
+    it merely produced the wrong answer.
+
+    Scope: an actual that is a plain variable reference, which is the only kind that can alias. The
+    check is deliberately built the other way round from "resolve every call" -- duplicates are
+    found FIRST (there are single digits of them tree-wide) and only then resolved, so an
+    unresolvable callee is REPORTED rather than skipped. Resolving every call site instead would
+    leave thousands unresolved behind an [ok], which is exactly how a static check goes blind (see
+    CLAUDE.md, "A static check that enumerates names goes stale silently"). Overlap between a
+    parent and its own component (`f(t%cache, t%cache%reader)`) is a related hazard this does NOT
+    cover -- see CLAUDE.md's "A component and its parent cannot both be actual arguments of one
+    call", where the shipped API takes an optional argument specifically to avoid it.
+    """
+    problems = []
+    sources = sorted(SRC.glob("*.f90")) + sorted(TEST.glob("*.f90"))
+    if not sources:
+        return ["src/ and test/: no .f90 sources found -- this check has gone blind"]
+    signatures, generics, bindings, unbalanced = _fortran_signatures(sources)
+    problems.extend(unbalanced)
+    if not signatures:
+        return ["no procedure signatures parsed -- this check has gone blind"]
+    for source in sources:
+        rel = source.relative_to(REPO_ROOT)
+        for lineno, code in _logical_lines(source):
+            for call in _CALL.finditer(code):
+                depth, end = 0, None
+                for i in range(call.end() - 1, len(code)):
+                    if code[i] == "(":
+                        depth += 1
+                    elif code[i] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
+                if end is None:
+                    continue
+                actuals = _split_args(code[call.end():end])
+                # Keyword arguments are mapped by position too: a repeated actual is what matters,
+                # and every duplicate found here so far is positional.
+                plain = []
+                for position, actual in enumerate(actuals):
+                    keyword = _KEYWORD_ACTUAL.match(actual)
+                    text = keyword.group(2).strip() if keyword else actual
+                    plain.append(text.lower() if _PLAIN_ACTUAL.match(text) else None)
+                repeated = {a for a in plain if a and plain.count(a) > 1}
+                if not repeated:
+                    continue
+                callee = call.group(1).lower()
+                writable = _writable_positions(
+                    callee, len(actuals), signatures, generics, bindings
+                )
+                for actual in sorted(repeated):
+                    positions = [i for i, a in enumerate(plain) if a == actual]
+                    if writable is None:
+                        problems.append(
+                            "%s:%d: `call %s` passes '%s' at argument positions %s, and this "
+                            "check cannot resolve %s to check its dummies' intents. Argument "
+                            "aliasing is only legal when NEITHER dummy is ever defined "
+                            "(F2018 15.5.2.13) -- confirm that by hand, and give the callee a "
+                            "signature this check can find."
+                            % (rel, lineno, callee, actual,
+                               [p + 1 for p in positions], callee)
+                        )
+                        continue
+                    written = {p: writable[p] for p in positions if p in writable}
+                    if written:
+                        problems.append(
+                            "%s:%d: `call %s` passes '%s' at argument positions %s, where "
+                            "position(s) %s are intent(%s). One variable given to two dummies "
+                            "when either can be defined is illegal (F2018 15.5.2.13) and is not "
+                            "diagnosed -- an allocatable intent(out) dummy is deallocated on "
+                            "entry, leaving the other dummy pointing at freed memory. Use a "
+                            "separate variable for the input."
+                            % (rel, lineno, callee, actual, [p + 1 for p in positions],
+                               [p + 1 for p in sorted(written)],
+                               "/".join(sorted(set(written.values()))))
+                        )
+    return problems
+
+
 CHECKS = (
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("MAML block headers are matched case-insensitively", check_maml_keys_case_insensitive),
@@ -1529,6 +1829,7 @@ CHECKS = (
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
+    ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
 )
 
 

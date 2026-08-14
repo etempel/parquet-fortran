@@ -388,7 +388,8 @@ contains
     subroutine parquet_reconcile_string_sizes(writer)
         type(parquet_writer), intent(inout) :: writer !! writer being closed.
         integer :: i, k, resolved
-        character(len=:), allocatable :: outname
+        character(len=:), allocatable :: colname !! internal column name; must NOT be outname, see below.
+        character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
 
         if (.not. writer%is_schema_enforced) return
         if (.not. allocated(writer%all_columns) .or. .not. allocated(writer%observed_string_len)) return
@@ -405,10 +406,14 @@ contains
             end if
 
             writer%all_columns(i)%array_size = resolved
-            outname = trim(writer%all_columns(i)%name)
-            k = parquet_get_enabled_column_index(writer, outname)
+            colname = trim(writer%all_columns(i)%name)
+            k = parquet_get_enabled_column_index(writer, colname)
             if (k > 0) writer%enabled_columns(k)%array_size = resolved
-            call parquet_resolve_output_name(writer, outname, outname)
+            ! colname and outname must stay SEPARATE variables. parquet_resolve_output_name's
+            ! output_name dummy is allocatable intent(out), so it is deallocated on entry --
+            ! passing one variable as both arguments frees the very storage its own intent(in)
+            ! `name` dummy points at, and the trim(name) inside it then reads freed memory.
+            call parquet_resolve_output_name(writer, colname, outname)
             call parquet_update_column_metadata_size(writer%handle, trim(outname)//char(0), &
                 int(writer%all_columns(i)%col_size, kind=c_long_long), int(resolved, kind=c_long_long))
         end do

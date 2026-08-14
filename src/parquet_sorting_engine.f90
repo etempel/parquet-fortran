@@ -257,4 +257,51 @@ contains
         c = sort_keys_compare(keys%keys, a, b, nkeys)
     end procedure parquet_debug_sort_keys_compare
 
+    ! The two sweeps below must stay loop-for-loop identical to their C++ twins
+    ! (`parquet_debug_sort_sweep_less_cpp` / `_compare_cpp`, src/parquet_wrapper.cpp). They exist so
+    ! app/benchmark_sort_comparator.f90 can time the COMPARATOR rather than the cost of reaching it,
+    ! and their agreeing checksums are what prove the two arms did the same work. Two details are
+    ! load-bearing and neither is obvious:
+    !
+    !   * `stride` is computed once per REP. Inside the inner loop it would be a `mod` on a runtime
+    !     divisor, i.e. an integer division -- around 6 ns on x86-64, against a comparator costing a
+    !     few. CLAUDE.md records a benchmark whose entire reported floor turned out to be exactly
+    !     this mistake.
+    !   * The wrapping step is `j = i + stride` with one conditional subtraction, which is why
+    !     `stride` is kept in `[1, nrows-1]`: a larger stride would need a loop, not a subtraction.
+
+    module procedure parquet_debug_sort_sweep_less
+        integer(int64) :: rep, i, j, stride
+        !
+        count = -1_int64
+        if (.not. allocated(keys%keys)) return
+        if (nrows < 2_int64) return
+        count = 0_int64
+        do rep = 0_int64, nreps - 1_int64
+            stride = 1_int64 + mod(rep, nrows - 1_int64)
+            do i = 1_int64, nrows
+                j = i + stride
+                if (j > nrows) j = j - nrows
+                if (sort_row_less(keys%keys, i, j)) count = count + 1_int64
+            end do
+        end do
+    end procedure parquet_debug_sort_sweep_less
+
+    module procedure parquet_debug_sort_sweep_compare
+        integer(int64) :: rep, i, j, stride
+        !
+        total = -1_int64
+        if (.not. allocated(keys%keys)) return
+        if (nrows < 2_int64) return
+        total = 0_int64
+        do rep = 0_int64, nreps - 1_int64
+            stride = 1_int64 + mod(rep, nrows - 1_int64)
+            do i = 1_int64, nrows
+                j = i + stride
+                if (j > nrows) j = j - nrows
+                total = total + int(sort_keys_compare(keys%keys, i, j, nkeys), int64)
+            end do
+        end do
+    end procedure parquet_debug_sort_sweep_compare
+
 end submodule parquet_sorting_engine ! GCOVR_EXCL_LINE

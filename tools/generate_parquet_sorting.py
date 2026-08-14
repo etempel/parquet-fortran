@@ -339,6 +339,8 @@ module parquet_sorting
     ! mentioned in any doc/pages/ guide -- see feature_sort.md section 7.4.
     public :: parquet_debug_sort_row_less
     public :: parquet_debug_sort_keys_compare
+    public :: parquet_debug_sort_sweep_less
+    public :: parquet_debug_sort_sweep_compare
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -1448,6 +1450,29 @@ def emit_engine_interfaces(w):
     w("            integer, intent(in) :: nkeys           !! leading engine keys taking part.")
     w("            integer :: c                           !! -1, 0 or +1.")
     w("        end function parquet_debug_sort_keys_compare")
+    w("        !> Test-only: sweeps `nreps` passes of `nrows` comparisons and returns a checksum.")
+    w("        !!")
+    w("        !! For app/benchmark_sort_comparator.f90, which needs the comparator's own cost rather")
+    w("        !! than the cost of reaching it: at ~5 ns per comparison a per-call harness measures")
+    w("        !! its own overhead. The C++ twin is `parquet_debug_sort_sweep_less_cpp` in")
+    w("        !! src/parquet_wrapper.cpp and the two loops are deliberately identical, down to the")
+    w("        !! stride walk — their checksums must agree, which is what proves they did the same")
+    w("        !! work. Neither uses `mod` on a runtime divisor: that is an integer division, and it")
+    w("        !! would cost more than the comparison being timed.")
+    w("        module function parquet_debug_sort_sweep_less(keys, nrows, nreps) result(count)")
+    w("            type(pf_sort_keys), intent(in) :: keys  !! the built key set.")
+    w("            integer(int64), intent(in) :: nrows     !! rows to walk per pass.")
+    w("            integer(int64), intent(in) :: nreps     !! passes.")
+    w("            integer(int64) :: count                 !! how many pairs compared less; -1 if unusable.")
+    w("        end function parquet_debug_sort_sweep_less")
+    w("        !> Test-only: the same sweep for the tie-free comparator, summing its answers.")
+    w("        module function parquet_debug_sort_sweep_compare(keys, nrows, nreps, nkeys) result(total)")
+    w("            type(pf_sort_keys), intent(in) :: keys  !! the built key set.")
+    w("            integer(int64), intent(in) :: nrows     !! rows to walk per pass.")
+    w("            integer(int64), intent(in) :: nreps     !! passes.")
+    w("            integer, intent(in) :: nkeys            !! leading engine keys taking part.")
+    w("            integer(int64) :: total                 !! sum of the answers; -1 if unusable.")
+    w("        end function parquet_debug_sort_sweep_compare")
     w("    end interface")
     w("    !")
 

@@ -7251,6 +7251,61 @@ extern "C"
 		return sort_keys_compare(h->keys, a, b, static_cast<size_t>(nkeys));
 	}
 
+	// ---- Batched sweeps, for the Stage 1e comparator benchmark (TEST-ONLY) ----------------------
+	//
+	// The two hooks above cross bind(C) once per comparison, which is fine for a conformance test
+	// and useless for a measurement: the crossing costs more than the comparator does, so a per-call
+	// timing would be a timing of the crossing. These do the whole sweep inside one call, so the
+	// crossing amortises to nothing and what is left is the comparator.
+	//
+	// app/benchmark_sort_comparator.f90 runs a Fortran loop of IDENTICAL shape against
+	// parquet_debug_sort_sweep_* in parquet_sorting, so the two arms differ only in whose comparator
+	// runs. Keep the two loops identical if either is touched -- their returned checksums must
+	// match, which is what proves they did the same work.
+	//
+	// The stride walk is deliberate: `j = i + stride` with one conditional subtraction, never
+	// `mod(i + stride, nrows)`. A runtime-divisor `mod` compiles to an integer division (~6 ns on
+	// x86-64), which in a loop measuring a ~5 ns comparator would be most of the measurement --
+	// CLAUDE.md records a benchmark where exactly that was the entire reported floor.
+	int64_t parquet_debug_sort_sweep_less_cpp(void *handle, int64_t nrows, int64_t nreps)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty() || nrows < 2) return -1;
+		SortRowLess less{&h->keys};
+		int64_t count = 0;
+		for (int64_t rep = 0; rep < nreps; ++rep)
+		{
+			int64_t stride = 1 + (rep % (nrows - 1)); // once per REP, not per comparison
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				int64_t j = i + stride;
+				if (j >= nrows) j -= nrows;
+				if (less(i, j)) ++count;
+			}
+		}
+		return count;
+	}
+
+	int64_t parquet_debug_sort_sweep_compare_cpp(void *handle, int64_t nrows, int64_t nreps,
+		int64_t nkeys)
+	{
+		auto *h = static_cast<SortBuilderHandle *>(handle);
+		if (h->keys.empty() || nrows < 2) return -1;
+		if (nkeys < 0) nkeys = 0;
+		int64_t sum = 0;
+		for (int64_t rep = 0; rep < nreps; ++rep)
+		{
+			int64_t stride = 1 + (rep % (nrows - 1));
+			for (int64_t i = 0; i < nrows; ++i)
+			{
+				int64_t j = i + stride;
+				if (j >= nrows) j -= nrows;
+				sum += sort_keys_compare(h->keys, i, j, static_cast<size_t>(nkeys));
+			}
+		}
+		return sum;
+	}
+
 	// Writes the first `count` entries of the 1-BASED permutation into `perm_out` (which the caller
 	// sized to `count`, not to nrows). `count` is clamped to nrows, so asking for more elements than
 	// exist returns all of them rather than failing -- pf_partial_sort's documented behaviour.

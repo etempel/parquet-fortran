@@ -80,6 +80,7 @@ To generate the executables:
 | `benchmark_colindex` | `app/benchmark_colindex.f90` | Driven by `tools/benchmark_colindex.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_stage7` | `app/benchmark_stage7.f90` | Driven by `tools/benchmark_stage7.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_sort_engine` | `app/benchmark_sort_engine.f90` | Driven by `tools/benchmark_sort_engine.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `benchmark_sort_comparator` | `app/benchmark_sort_comparator.f90` | Driven by `tools/benchmark_sort_comparator.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_strings` | `app/benchmark_strings.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_string_threads` | `app/benchmark_string_threads.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `test_large_scale` | `app/test_large_scale.f90` | Driven by `tools/test_large_scale.sh` — see [Other tools/ helpers](#other-tools-helpers). |
@@ -457,6 +458,38 @@ tools/benchmark_sort_engine.sh                                  # every mode, de
 tools/benchmark_sort_engine.sh --mode=threads                   # the thread ladder alone
 SIZES=50000000 FAMILIES=f64,i64lo tools/benchmark_sort_engine.sh --mode=argsort
 PERM=64 tools/benchmark_sort_engine.sh --mode=argsort           # the int64 permutation path
+```
+
+`tools/benchmark_sort_comparator.sh` answers a narrower question than the harness above: what does
+**one comparison** cost, in the Fortran comparator core (`src/parquet_sorting_engine.f90`) and in
+the C++ one it is replacing? It drives `app/benchmark_sort_comparator.f90` over five fixtures
+(`i64`, `f64`, `f64` with NaNs, `str`, `multi3`), timing each both ways.
+
+It is a separate harness rather than a mode of `benchmark_sort_engine.sh` on purpose: its arms are
+per-**call** nanoseconds where that one's are per-**element**, and mixing the two invites a reader
+to compare figures that are not the same kind of number.
+
+Three things about reading its output. Both arms are **batched** — a per-call harness would cross
+`bind(C)` once per comparison and would have measured the crossing, not the comparison. The two
+loops are written identically and each returns a **checksum**; if they disagree the arms did
+different work, so the program says so and exits nonzero, and no timing from that run may be
+quoted. And the `control` row is a plain array sum neither comparator can influence, so its
+movement between two *builds* is code layout rather than cost.
+
+The wrapper also runs the `objdump` descriptor-block check from `feature_sort.md` Stage 1e. That
+check is **x86-64-specific** — the relocation it greps for cannot exist on arm64, so on an Apple
+Silicon machine it prints `SKIPPED` rather than a zero that would prove nothing.
+
+| variable | default | meaning |
+|---|---|---|
+| `ROWS` | `4096` | rows per pass. Keep the fixture **in cache** — raising this until it spills L2 turns the run into a bandwidth test that will read as a comparator regression. |
+| `REPS` | `4096` | passes; `ROWS*REPS` is the comparison count per timed sweep (~16.7M by default). |
+| `ROUNDS` | `5` | timed rounds per arm; the **minimum** is reported, being the round least disturbed. |
+
+```bash
+tools/benchmark_sort_comparator.sh                              # the default sweep
+tools/benchmark_sort_comparator.sh --rows=8192 --reps=8192      # a larger working set
+ROUNDS=9 tools/benchmark_sort_comparator.sh                     # more rounds on a busy machine
 ```
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and

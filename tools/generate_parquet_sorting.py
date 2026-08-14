@@ -341,9 +341,58 @@ module parquet_sorting
     public :: parquet_debug_sort_keys_compare
     public :: parquet_debug_sort_sweep_less
     public :: parquet_debug_sort_sweep_compare
+    public :: parquet_debug_use_fortran_sort_engine
+    public :: parquet_debug_using_fortran_sort_engine
+    public :: parquet_debug_set_sort_depth_limit
+    public :: parquet_debug_sort_heapsort_calls
+    public :: parquet_debug_set_sort_track_shift
+    public :: parquet_debug_sort_max_insertion_shift
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
+    !
+    ! ---- Stage 2 engine selection: TEST-ONLY SCAFFOLDING, deleted at the Stage 6 cutover --------
+    !
+    ! feature_sort.md's Stage 2 requires BOTH engines to stay reachable, so that the conformance
+    ! tests and the A/B benchmark can run them over the same data through the same public entry
+    ! point. It is deliberately NOT a `parquet_settings` knob: that module admits a setting only
+    ! when it changes how fast, how large or how loud the library runs and never what it ANSWERS,
+    ! and an engine selector is exactly a second way to get a different answer should the two ever
+    ! disagree. It is also why these are `parquet_debug_*` and absent from README.md's API overview.
+    !
+    ! Both are process-global saved state, which is why the `sorting` and `sort` suites must stay
+    ! excluded from test-drive's per-test parallelism (test/run_tester.f90) -- they already are.
+    logical, save :: dbg_fortran_engine = .false. !! .true. routes `drive_engine` to the Fortran sort.
+    !> Overrides the introsort's depth limit; NEGATIVE restores the computed `2*floor(log2(n))`.
+    !!
+    !! Zero forces the heapsort fallback on the first partition, which is otherwise unreachable from
+    !! any fixture a test can build: median-of-three pivoting means ordinary data never approaches a
+    !! depth of `2*log2(n)`, so without this hook a whole algorithm arm would ship untested and every
+    !! mutation to it would survive. CLAUDE.md's "A SIZE THRESHOLD is the same trap wearing different
+    !! clothes" is the general form of this.
+    integer, save :: dbg_sort_depth_limit = -1
+    !> Heapsort fallbacks entered since the depth limit was last set, for the test that forces one.
+    !!
+    !! A hook that FORCES a state needs a way to prove the state took effect, or the test it enables
+    !! passes just as happily against a hook that does nothing -- both paths answer identically here,
+    !! so no assertion on the permutation can tell them apart. This is the `had_index` shape from
+    !! `feature_risks.md` Risk-75. It costs one increment per heapsort call, i.e. at most O(log n)
+    !! per sort and never anything per comparison.
+    integer(int64), save :: dbg_sort_heapsort_calls = 0_int64
+    !> .true. makes the introsort's final insertion pass record how far it moved anything.
+    !!
+    !! **This is what stops the final insertion pass from masking a broken heapsort.** That pass is a
+    !! complete sort, so a heapsort that orders nothing still yields a correctly sorted answer --
+    !! confirmed by mutation testing, where a sift-down with its comparison inverted survived the
+    !! whole suite. What it cannot fake is the invariant the quicksort is supposed to establish: that
+    !! no element is more than `SORT_INSERTION_CUTOFF` positions LEFT of where it belongs. Measuring
+    !! the largest shift is how a test sees that, at one comparison per ELEMENT (not per shift) and
+    !! only when armed.
+    !!
+    !! Meaningful single-threaded only, exactly like the C++ comparison counter it parallels.
+    logical, save :: dbg_sort_track_shift = .false.
+    !> Largest distance the final insertion pass moved any element since the tracker was armed.
+    integer(int64), save :: dbg_sort_max_shift = 0_int64
     !
     ! ---- Internal key families ----
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
@@ -1423,11 +1472,26 @@ def emit_engine_interfaces(w):
     w("            integer, intent(in) :: nkeys              !! leading keys taking part.")
     w("            integer :: c                              !! -1, 0 or +1.")
     w("        end function sort_keys_compare")
+    w("        !> Fills `perm` with the 1-based permutation that puts rows `1..n` in key order.")
+    w("        !!")
+    w("        !! The serial half of the pure-Fortran engine (feature_sort.md Stage 2): an INTROSORT")
+    w("        !! -- quicksort with median-of-three pivoting, a depth-limited heapsort fallback and a")
+    w("        !! final insertion pass -- ordering by `sort_row_less` and nothing else.")
+    w("        !!")
+    w("        !! **It is unstable, and that is why it is correct.** `sort_row_less` ends with a row")
+    w("        !! index tiebreaker, so no two distinct rows compare equal and every correct sorting")
+    w("        !! algorithm produces the SAME permutation -- the stable one. Switching this to a merge")
+    w("        !! sort to \"make it stable\" would buy a temporary buffer and change no answer.")
+    w("        module subroutine sort_comparison_permutation(keys, n, perm)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.")
+    w("            integer(int64), intent(in) :: n           !! rows to order.")
+    w("            integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.")
+    w("        end subroutine sort_comparison_permutation")
     w("    end interface")
     w("    !")
     w("    ! ---- Test-only access to the comparator core (parquet_sorting_engine) ----")
     w("    interface")
-    w("        !> Test-only: what the Fortran SORT comparator says about one pair of rows.")
+    w("        !> Test-only view of what the Fortran SORT comparator says about one pair of rows.")
     w("        !!")
     w("        !! Public only because it has to be: `sort_key_buf` is private to this module, so a")
     w("        !! test cannot reach `sort_row_less` any other way, and the C++-side hook convention")
@@ -1439,7 +1503,7 @@ def emit_engine_interfaces(w):
     w("            integer(int64), intent(in) :: b        !! second row, 1-based.")
     w("            logical :: less                        !! .true. when `a` sorts before `b`.")
     w("        end function parquet_debug_sort_row_less")
-    w("        !> Test-only: what the Fortran TIE-FREE comparator says about one pair of rows.")
+    w("        !> Test-only view of what the Fortran TIE-FREE comparator says about one pair of rows.")
     w("        !!")
     w("        !! Same reasoning as `parquet_debug_sort_row_less`. `nkeys` counts ENGINE keys and is")
     w("        !! clamped to how many the set holds; note a `parquet_timestamp` key binds as two.")
@@ -1450,7 +1514,7 @@ def emit_engine_interfaces(w):
     w("            integer, intent(in) :: nkeys           !! leading engine keys taking part.")
     w("            integer :: c                           !! -1, 0 or +1.")
     w("        end function parquet_debug_sort_keys_compare")
-    w("        !> Test-only: sweeps `nreps` passes of `nrows` comparisons and returns a checksum.")
+    w("        !> Test-only sweep of `nreps` passes of `nrows` comparisons, returning a checksum.")
     w("        !!")
     w("        !! For app/benchmark_sort_comparator.f90, which needs the comparator's own cost rather")
     w("        !! than the cost of reaching it: at ~5 ns per comparison a per-call harness measures")
@@ -1465,7 +1529,7 @@ def emit_engine_interfaces(w):
     w("            integer(int64), intent(in) :: nreps     !! passes.")
     w("            integer(int64) :: count                 !! how many pairs compared less; -1 if unusable.")
     w("        end function parquet_debug_sort_sweep_less")
-    w("        !> Test-only: the same sweep for the tie-free comparator, summing its answers.")
+    w("        !> Test-only twin of that sweep for the tie-free comparator, summing its answers.")
     w("        module function parquet_debug_sort_sweep_compare(keys, nrows, nreps, nkeys) result(total)")
     w("            type(pf_sort_keys), intent(in) :: keys  !! the built key set.")
     w("            integer(int64), intent(in) :: nrows     !! rows to walk per pass.")
@@ -1473,6 +1537,47 @@ def emit_engine_interfaces(w):
     w("            integer, intent(in) :: nkeys            !! leading engine keys taking part.")
     w("            integer(int64) :: total                 !! sum of the answers; -1 if unusable.")
     w("        end function parquet_debug_sort_sweep_compare")
+    w("        !> Test-only switch routing `pf_argsort` and friends to the Fortran engine, or back to C++.")
+    w("        !!")
+    w("        !! Stage 2 scaffolding, deleted at the Stage 6 cutover. Both engines answer identically")
+    w("        !! -- that is what the conformance tests assert -- so this changes timing and nothing")
+    w("        !! else, which is exactly why it is a debug hook rather than a setting.")
+    w("        module subroutine parquet_debug_use_fortran_sort_engine(on)")
+    w("            logical, intent(in) :: on !! .true. selects the Fortran engine.")
+    w("        end subroutine parquet_debug_use_fortran_sort_engine")
+    w("        !> Test-only reader for which engine `drive_engine` would use right now.")
+    w("        module function parquet_debug_using_fortran_sort_engine() result(on)")
+    w("            logical :: on !! .true. when the Fortran engine is selected.")
+    w("        end function parquet_debug_using_fortran_sort_engine")
+    w("        !> Test-only override for the introsort's depth limit; NEGATIVE restores the computed one.")
+    w("        !!")
+    w("        !! Zero makes the very first oversized range fall back to heapsort, which is the only")
+    w("        !! way to reach that arm from a test-sized fixture. Has no effect on the C++ engine.")
+    w("        !! Also ZEROES the heapsort counter, so a test arms and reads in the obvious order.")
+    w("        module subroutine parquet_debug_set_sort_depth_limit(n)")
+    w("            integer, intent(in) :: n !! forced depth limit, or a negative value to restore.")
+    w("        end subroutine parquet_debug_set_sort_depth_limit")
+    w("        !> Test-only count of heapsort fallbacks since `parquet_debug_set_sort_depth_limit`.")
+    w("        !!")
+    w("        !! What makes the forced-fallback test non-vacuous: the quicksort and heapsort paths")
+    w("        !! answer identically, so only this counter can say which one ran.")
+    w("        module function parquet_debug_sort_heapsort_calls() result(n)")
+    w("            integer(int64) :: n !! heapsort fallbacks entered.")
+    w("        end function parquet_debug_sort_heapsort_calls")
+    w("        !> Test-only arming of the final insertion pass's largest-shift tracker, zeroing it too.")
+    w("        !!")
+    w("        !! Off by default, because armed it writes process-global state from an ordinary sort.")
+    w("        module subroutine parquet_debug_set_sort_track_shift(on)")
+    w("            logical, intent(in) :: on !! .true. arms the tracker.")
+    w("        end subroutine parquet_debug_set_sort_track_shift")
+    w("        !> Test-only reader for how far the insertion pass moved anything since it was armed.")
+    w("        !!")
+    w("        !! Must not exceed `SORT_INSERTION_CUTOFF` after a correct sort — that is the whole")
+    w("        !! invariant the quicksort exists to establish, and the only observable that a defect")
+    w("        !! in the partition or the heapsort has not simply been repaired by the insertion pass.")
+    w("        module function parquet_debug_sort_max_insertion_shift() result(n)")
+    w("            integer(int64) :: n !! largest shift, in positions.")
+    w("        end function parquet_debug_sort_max_insertion_shift")
     w("    end interface")
     w("    !")
 
@@ -2076,6 +2181,15 @@ contains
             perm(ik) = ik
         end do
         if (nrows < 2_int64) return
+        if (dbg_fortran_engine) then
+            ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. The Fortran engine is
+            ! serial for now (Stage 4 threads it), so `threads` is deliberately ignored, and that
+            ! costs the A/B nothing: the C++ engine's own answer is bit-identical at every thread
+            ! count, because its comparator is a total order. A serial Fortran permutation and a
+            ! threaded C++ one must therefore still match element for element.
+            call sort_comparison_permutation(keys, nrows, perm)
+            return
+        end if
         call resolve_thread_count(threads, nrows, nthreads)
         if (size(keys) == 1) then
             ! One key needs no builder at all: the one-shot entry points BORROW the buffer that

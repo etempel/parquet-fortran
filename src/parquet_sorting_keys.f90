@@ -780,6 +780,15 @@ contains
             perm(ik) = ik
         end do
         if (nrows < 2_int64) return
+        if (dbg_fortran_engine) then
+            ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. The Fortran engine is
+            ! serial for now (Stage 4 threads it), so `threads` is deliberately ignored, and that
+            ! costs the A/B nothing: the C++ engine's own answer is bit-identical at every thread
+            ! count, because its comparator is a total order. A serial Fortran permutation and a
+            ! threaded C++ one must therefore still match element for element.
+            call sort_comparison_permutation(keys, nrows, perm)
+            return
+        end if
         call resolve_thread_count(threads, nrows, nthreads)
         if (size(keys) == 1) then
             ! One key needs no builder at all: the one-shot entry points BORROW the buffer that

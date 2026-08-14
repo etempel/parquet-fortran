@@ -454,11 +454,19 @@ permutation is verified before its timing is accepted** (it must be a permutatio
 arm has no nulls or NaNs it must actually order the input), because a fast wrong answer is the one
 failure mode a benchmark will happily report as a win.
 
+`ENGINE=cpp|fortran` selects which sort engine to measure — the shipped C++ one, or the pure-Fortran
+engine `feature_sort.md` is building, which the library reaches only through a debug hook until that
+work is cut over. An A/B is two runs of the script differing in nothing else. The two engines return
+identical permutations, so the printed checksum must match across the pair; a checksum that moves
+means the two runs did not see the same data and neither figure is comparable. The header line
+reports the engine the *library* says it will use rather than the value asked for.
+
 ```bash
 tools/benchmark_sort_engine.sh                                  # every mode, default sweep
 tools/benchmark_sort_engine.sh --mode=threads                   # the thread ladder alone
 SIZES=50000000 FAMILIES=f64,i64lo tools/benchmark_sort_engine.sh --mode=argsort
 PERM=64 tools/benchmark_sort_engine.sh --mode=argsort           # the int64 permutation path
+ENGINE=fortran tools/benchmark_sort_engine.sh --mode=argsort    # the Fortran engine's own figures
 ```
 
 `tools/benchmark_sort_comparator.sh` answers a narrower question than the harness above: what does

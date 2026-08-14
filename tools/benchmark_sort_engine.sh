@@ -63,6 +63,11 @@
 #   SEED=20260814   PRNG seed. The generator is xorshift64, so the same seed gives the same data on
 #                    every compiler -- which is what makes a gfortran figure and an ifx figure
 #                    comparable at all. Do not change it between the two arms of a comparison.
+#   ENGINE=cpp      Which sort engine to measure: cpp (the shipped one) or fortran
+#                    (feature_sort.md's Stage 2 engine, reached through a debug hook). The two
+#                    answer identically -- test/test_sorting.f90 asserts that -- so this changes
+#                    timing and nothing else, and an A/B is two runs of this script differing only
+#                    here. Do not change anything else between them.
 #   TAG=            Extra build-tree suffix, when you need two trees for one compiler.
 #
 # Output goes to stdout; redirect it per the run sheet. Build trees go under test_run/, which is
@@ -82,6 +87,7 @@ PERM="${PERM:-32}"
 THREADS="${THREADS-64}"
 STRWIDTH="${STRWIDTH:-16}"
 SEED="${SEED:-20260814}"
+ENGINE="${ENGINE:-cpp}"
 TAG="${TAG:-}"
 
 MODES=(argsort dist ops)
@@ -99,6 +105,7 @@ for arg in "$@"; do
         --threads=*)         THREADS="${arg#*=}" ;;
         --strwidth=*)        STRWIDTH="${arg#*=}" ;;
         --seed=*)            SEED="${arg#*=}" ;;
+        --engine=*)          ENGINE="${arg#*=}" ;;
         --tag=*)             TAG="${arg#*=}" ;;
         -h|--help)
             # Print the leading comment block, however long it grows. A hard-coded line range
@@ -180,6 +187,7 @@ echo "  families    : $FAMILIES        (argsort)"
 echo "                $DIST_FAMILIES        (dist)"
 echo "                $THREAD_FAMILIES        (threads)"
 echo "  perm kind   : int$PERM      rounds: $ROUNDS      seed: $SEED"
+echo "  sort engine : $ENGINE"
 echo "  threads     : ${THREADS:-omp_get_max_threads()}      OMP_NUM_THREADS=${OMP_NUM_THREADS:-(unset)}"
 echo "  date        : $(date -u '+%Y-%m-%dT%H:%M:%SZ')  host: $(hostname)"
 echo "=============================================================================="
@@ -253,6 +261,7 @@ for m in "${MODES[@]}"; do
     fpm run benchmark_sort_engine --profile release -- \
         --mode="$m" --sizes="$SIZES" --families="$(families_for "$m")" --dists="$DISTS" \
         --rounds="$ROUNDS" --perm="$PERM" --strwidth="$STRWIDTH" --seed="$SEED" \
+        --engine="$ENGINE" \
         "${THREADS_ARG[@]}"
     echo
 done

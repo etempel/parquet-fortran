@@ -74,6 +74,7 @@ program benchmark_sort_engine
     integer :: strwidth = 16                   !! declared width of a string key's elements.
     integer :: threads_hi = -1                 !! high thread count; -1 = omp_get_max_threads().
     integer(int64) :: seed_arg = 20260814_int64
+    character(len=:), allocatable :: engine !! "cpp" or "fortran": which sort engine to measure.
 
     integer(int64), allocatable :: sizes(:)
     integer(int64) :: checksum = 0_int64
@@ -788,6 +789,14 @@ contains
         write(output_unit,'(a)') "benchmark_sort_engine -- baseline harness for feature_sort.md"
         write(output_unit,'(a)') "=============================================================================="
         write(output_unit,'(a,a)')    "  mode        : ", mode
+        ! Printed, and printed from the LIBRARY rather than from `engine`, so the line reports what
+        ! the library will actually do rather than what was asked for -- CLAUDE.md's "a build-flag-
+        ! selected benchmark must PRINT which variant it is", applied to a runtime switch.
+        if (parquet_debug_using_fortran_sort_engine()) then
+            write(output_unit,'(a)')  "  sort engine : FORTRAN (feature_sort.md Stage 2)"
+        else
+            write(output_unit,'(a)')  "  sort engine : C++ (the shipped one)"
+        end if
         write(output_unit,'(a,a)')    "  families    : ", families
         write(output_unit,'(a,a)')    "  dists       : ", dists
         write(output_unit,'(a,a)')    "  sizes       : ", sizes_arg
@@ -993,6 +1002,7 @@ contains
         families = "i32,i64,i64lo,f32,f64,str,multi2,multi3"
         dists = "rand,sorted,reverse,organ,equal,null001,null10,nan"
         sizes_arg = "1000,10000,100000,1000000,5000000,20000000"
+        engine = "cpp"
         !
         do i = 1, command_argument_count()
             call get_command_argument(i, arg)
@@ -1015,6 +1025,7 @@ contains
             case ("--strwidth"); read(val, *, iostat=ios) strwidth
             case ("--threads");  read(val, *, iostat=ios) threads_hi
             case ("--seed");     read(val, *, iostat=ios) seed_arg
+            case ("--engine");   engine = val
             case default
                 write(error_unit,'(a)') "benchmark_sort_engine: unknown option '"//key//"'"
                 call usage()
@@ -1026,6 +1037,13 @@ contains
             end if
         end do
         !
+        if (engine /= "cpp" .and. engine /= "fortran") then
+            write(error_unit,'(a)') "benchmark_sort_engine: --engine must be cpp or fortran"
+            error stop 2
+        end if
+        ! Selecting the engine here rather than per arm: every arm below must run on ONE engine, or
+        ! a figure could be filed against the wrong one with nothing in the output to say so.
+        call parquet_debug_use_fortran_sort_engine(engine == "fortran")
         if (permkind /= 32 .and. permkind /= 64) then
             write(error_unit,'(a)') "benchmark_sort_engine: --perm must be 32 or 64"
             error stop 2
@@ -1060,6 +1078,7 @@ contains
         write(output_unit,'(a)') "  --strwidth=16                         string key element width"
         write(output_unit,'(a)') "  --threads=N                           high thread count (default: max)"
         write(output_unit,'(a)') "  --seed=N                              PRNG seed"
+        write(output_unit,'(a)') "  --engine=cpp|fortran                  which sort engine to measure"
         write(output_unit,'(a)') ""
         write(output_unit,'(a)') "Drive this with tools/benchmark_sort_engine.sh, never a bare fpm run:"
         write(output_unit,'(a)') "without --profile release every number here is meaningless."

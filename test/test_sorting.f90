@@ -213,7 +213,19 @@ contains
             new_unittest("engine: string keys match the C++ comparators", test_engine_conf_str), &
             new_unittest("engine: variable-length strings compare like memcmp", test_engine_conf_varstr), &
             new_unittest("engine: multi-key and the nkeys prefix match the C++ comparators", &
-                test_engine_conf_multi) &
+                test_engine_conf_multi), &
+            new_unittest("engine: the Fortran/C++ engine selector really switches engines", &
+                test_fortran_engine_switches), &
+            new_unittest("engine: the Fortran sort matches the C++ one on every family and size", &
+                test_fortran_engine_ab_families), &
+            new_unittest("engine: the Fortran sort matches on degenerate input shapes", &
+                test_fortran_engine_adversarial), &
+            new_unittest("engine: the forced heapsort fallback matches the C++ sort", &
+                test_fortran_engine_heapsort_fallback), &
+            new_unittest("engine: the depth-limit hook really reaches the heapsort fallback", &
+                test_fortran_engine_depth_limit_bites), &
+            new_unittest("engine: the quicksort leaves every element within the insertion cutoff", &
+                test_fortran_engine_presort_invariant) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -5633,5 +5645,413 @@ contains
         end do
         call parquet_sort_builder_free(builder)
     end subroutine test_engine_conf_multi
+    !
+    ! ============================================================================================
+    ! Stage 2 conformance -- feature_sort.md section 6 Stage 2
+    ! ============================================================================================
+    !
+    ! Stage 1 proved the two comparators agree pair by pair. These prove the two SORTS agree
+    ! permutation by permutation, which is a different claim: a correct comparator driven by a
+    ! defective sort still returns a sorted answer whenever the defect only reorders equal elements
+    ! -- and under `sort_row_less` there are no equal elements, so the two engines' permutations
+    ! must be identical element for element or one of them is wrong.
+    !
+    ! Both engines are reached through the ordinary public entry point (`pf_argsort`), switched by
+    ! `parquet_debug_use_fortran_sort_engine`. That is deliberate: it tests the wiring in
+    ! `drive_engine` as well as the algorithm, which a direct call into the engine would not.
+    !
+    !> Arms the C++ comparison counter; see `arm_sort_comparisons` in test_sort.f90 for the full why.
+    subroutine engine_arm_comparisons()
+        interface
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero arms and zeroes the counter.
+            end subroutine count_cmp
+        end interface
+        call count_cmp(1)
+    end subroutine engine_arm_comparisons
+    !
+    !> C++ comparisons counted since the last `engine_arm_comparisons`, then disarms the counter.
+    integer(int64) function engine_comparisons() result(n)
+        interface
+            function got_cmp() bind(C, name="parquet_debug_get_sort_comparisons") result(k)
+                use iso_c_binding, only : c_long_long
+                integer(c_long_long) :: k !! comparisons since the counter was armed.
+            end function got_cmp
+            subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero arms and zeroes the counter.
+            end subroutine count_cmp
+        end interface
+        n = int(got_cmp(), int64)
+        call count_cmp(0)
+    end function engine_comparisons
+    !
+    !> Argsorts one key set down BOTH engines and requires the two permutations to be identical.
+    !!
+    !! The permutation-validity check afterwards is not redundant with the equality: two engines
+    !! broken in the same way would agree with each other, and only "names every row exactly once"
+    !! notices. It is the cheapest independent oracle available here.
+    subroutine engine_ab(error, label, keys, n)
+        type(error_type), allocatable, intent(inout) :: error !! set on the first disagreement.
+        character(len=*), intent(in) :: label                 !! names the fixture in every message.
+        class(pf_sort_keys), intent(in) :: keys               !! the key set to sort by.
+        integer(int64), intent(in) :: n                       !! rows.
+        integer(int64), allocatable :: pc(:) !! the C++ engine's permutation.
+        integer(int64), allocatable :: pf(:) !! the Fortran engine's permutation.
+        logical, allocatable :: seen(:)      !! which rows the Fortran permutation named.
+        integer(int64) :: k                  !! walk index.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_argsort(keys, pc)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_argsort(keys, pf)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, size(pf, kind=int64) == n, label // ": the Fortran permutation is the wrong length")
+        if (allocated(error)) return
+        call check(error, size(pc, kind=int64) == n, label // ": the C++ permutation is the wrong length")
+        if (allocated(error)) return
+        call check(error, all(pf == pc), label // ": the Fortran permutation differs from the C++ one")
+        if (allocated(error)) return
+        !
+        allocate(seen(max(n, 1_int64)))
+        seen = .false.
+        do k = 1_int64, n
+            if (pf(k) < 1_int64 .or. pf(k) > n) then
+                call check(error, .false., label // ": the Fortran permutation holds an out-of-range row")
+                return
+            end if
+            seen(pf(k)) = .true.
+        end do
+        call check(error, all(seen(1:n)), label // ": the Fortran permutation does not name every row once")
+    end subroutine engine_ab
+    !
+    !> The switch really switches: the C++ engine counts comparisons, the Fortran one cannot.
+    !!
+    !! **Without this every other Stage 2 test is potentially vacuous.** They assert that two
+    !! permutations agree, and if `parquet_debug_use_fortran_sort_engine` did nothing at all -- a
+    !! flag never read, a branch placed after the return, a regenerated file that lost the wiring --
+    !! both halves would be the C++ engine and every one of them would pass while testing nothing.
+    !! That is `feature_risks.md` Risk-35's failure mode exactly.
+    !!
+    !! The counter lives inside the C++ comparator, so it can only move when the C++ comparator
+    !! runs. The key is real-valued with distinct values so that the integer counting fast path --
+    !! which performs zero comparisons by construction -- declines it and the C++ arm must count.
+    subroutine test_fortran_engine_switches(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        integer(int64), parameter :: n = 64_int64
+        real(real64) :: v(n)
+        type(pf_sort_keys) :: keys
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: cmp_cpp, cmp_fortran, k
+        !
+        do k = 1_int64, n
+            v(k) = real(mod(k * 37_int64, n), real64) + 0.5_real64
+        end do
+        call keys%add(v)
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call check(error, .not. parquet_debug_using_fortran_sort_engine(), &
+            "the engine selector must report the C++ engine after being cleared")
+        if (allocated(error)) return
+        call engine_arm_comparisons()
+        call pf_argsort(keys, perm)
+        cmp_cpp = engine_comparisons()
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call check(error, parquet_debug_using_fortran_sort_engine(), &
+            "the engine selector must report the Fortran engine after being set")
+        if (allocated(error)) then
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            return
+        end if
+        call engine_arm_comparisons()
+        call pf_argsort(keys, perm)
+        cmp_fortran = engine_comparisons()
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, cmp_cpp > 0_int64, &
+            "the C++ arm counted no comparisons, so the counter is not measuring what it should")
+        if (allocated(error)) return
+        call check(error, cmp_fortran == 0_int64, &
+            "the Fortran arm reached the C++ comparator, so the engine selector did not switch")
+    end subroutine test_fortran_engine_switches
+    !
+    !> Both engines, every key family, over sizes spanning the insertion cutoff and the recursion.
+    !!
+    !! The sizes are chosen against the algorithm rather than at random: 2 and 5 never leave the
+    !! final insertion pass, 16 is exactly `SORT_INSERTION_CUTOFF`, 17 is the first size that
+    !! partitions at all, and 257/1000 recurse several levels deep. A sweep that used only round
+    !! numbers would miss the cutoff boundary, which is where an off-by-one in the loop condition
+    !! lives.
+    !!
+    !! The integer key is deliberately LOW-CARDINALITY, which sends the C++ arm down its integer
+    !! counting fast path while the Fortran arm compares its way there. The two engines then reach
+    !! the same permutation by genuinely different routes, which is a stronger check than two
+    !! comparison sorts agreeing.
+    subroutine test_fortran_engine_ab_families(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: sizes(6) = [2_int64, 5_int64, 16_int64, 17_int64, 257_int64, 1000_int64]
+        integer(int64), allocatable :: vi(:)
+        real(real64), allocatable :: vr(:)
+        character(len=4), allocatable :: vs(:)
+        logical, allocatable :: valid(:)
+        type(pf_sort_keys) :: keys
+        integer(int64) :: n, k
+        integer :: is, id, inf
+        logical :: desc, nf
+        character(len=32) :: nstr
+        character(len=:), allocatable :: tag
+        !
+        do is = 1, size(sizes)
+            n = sizes(is)
+            allocate(vi(n), vr(n), vs(n), valid(n))
+            do k = 1_int64, n
+                vi(k) = mod(k * 5_int64, 8_int64)
+                vr(k) = real(mod(k * 7_int64, 11_int64), real64)
+                ! Every thirteenth row is a NaN, so the middle tier is populated at every size from
+                ! 17 upward -- and absent below it, which is itself worth covering.
+                if (mod(k, 13_int64) == 0_int64) vr(k) = ieee_value(1.0_real64, ieee_quiet_nan)
+                write (nstr, "(i0)") mod(k * 3_int64, 17_int64)
+                vs(k) = trim(nstr)
+                valid(k) = (mod(k, 5_int64) /= 0_int64)
+            end do
+            write (nstr, "(i0)") n
+            do id = 0, 1
+                do inf = 0, 1
+                    desc = (id == 1)
+                    nf = (inf == 1)
+                    tag = " n=" // trim(nstr) // " desc=" // merge("T", "F", desc) // &
+                        " nf=" // merge("T", "F", nf)
+                    !
+                    call keys%clear()
+                    call keys%add(vi, descending=desc, nulls_first=nf, is_valid=valid)
+                    call engine_ab(error, "int" // tag, keys, n)
+                    if (allocated(error)) return
+                    !
+                    call keys%clear()
+                    call keys%add(vr, descending=desc, nulls_first=nf, is_valid=valid)
+                    call engine_ab(error, "real" // tag, keys, n)
+                    if (allocated(error)) return
+                    !
+                    call keys%clear()
+                    call keys%add(vs, descending=desc, nulls_first=nf, is_valid=valid)
+                    call engine_ab(error, "str" // tag, keys, n)
+                    if (allocated(error)) return
+                    !
+                    ! Multi-key, with the null-bearing key SECOND: the tier test has to be applied
+                    ! per key rather than per row, and a sort that hoisted it would still agree with
+                    ! the C++ engine on every single-key fixture above.
+                    call keys%clear()
+                    call keys%add(vi, descending=desc)
+                    call keys%add(vr, nulls_first=nf, is_valid=valid)
+                    call keys%add(vs, descending=.not. desc)
+                    call engine_ab(error, "multi" // tag, keys, n)
+                    if (allocated(error)) return
+                end do
+            end do
+            deallocate(vi, vr, vs, valid)
+        end do
+    end subroutine test_fortran_engine_ab_families
+    !
+    !> The input shapes a quicksort degenerates on, at a size where degenerating would be visible.
+    !!
+    !! Already-sorted, reverse-sorted, all-equal and organ-pipe are not exotic -- they are what real
+    !! column data looks like -- and each is a classic O(n^2) trapdoor for a naive pivot choice. This
+    !! asserts the ANSWER rather than the running time, because a correctness test cannot see a
+    !! quadratic sort; what it does catch is a median-of-three or a partition that mishandles a run
+    !! of equal elements, which is the same code the degenerate shapes exercise.
+    subroutine test_fortran_engine_adversarial(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 2000_int64
+        integer(int64) :: v(n)
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k
+        integer :: shape_id
+        character(len=16) :: label
+        !
+        do shape_id = 1, 4
+            select case (shape_id)
+            case (1)
+                label = "sorted"
+                do k = 1_int64, n
+                    v(k) = k
+                end do
+            case (2)
+                label = "reversed"
+                do k = 1_int64, n
+                    v(k) = n - k + 1_int64
+                end do
+            case (3)
+                label = "all-equal"
+                v = 7_int64
+            case default
+                label = "organ-pipe"
+                do k = 1_int64, n
+                    v(k) = min(k, n - k + 1_int64)
+                end do
+            end select
+            ! The counting fast path would take the C++ arm for every one of these -- they are all
+            ! dense small ranges -- so it is turned off, leaving both arms comparison sorts over the
+            ! same degenerate shape. That is the comparison this test is for.
+            call parquet_set_sort_counting_path(.false.)
+            call keys%clear()
+            call keys%add(v)
+            call engine_ab(error, trim(label), keys, n)
+            call parquet_set_sort_counting_path(.true.)
+            if (allocated(error)) return
+        end do
+    end subroutine test_fortran_engine_adversarial
+    !
+    !> The heapsort fallback, forced, must produce the same permutation as the quicksort path.
+    !!
+    !! **It is unreachable without the hook.** Median-of-three pivoting plus a limit of
+    !! `2*floor(log2(n))` means ordinary data never approaches the depth at which the fallback fires,
+    !! so every mutation to `sort_heapsort`/`sort_sift_down` would survive the whole suite. Forcing
+    !! the limit to zero makes the very first oversized range heapsort instead.
+    !!
+    !! Both halves of the A/B run under the forced limit, and the C++ engine ignores it entirely --
+    !! so the C++ arm is an unchanged reference and any difference is the fallback's.
+    subroutine test_fortran_engine_heapsort_fallback(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 500_int64
+        real(real64) :: v(n)
+        logical :: valid(n)
+        type(pf_sort_keys) :: keys
+        integer(int64) :: k
+        integer :: id
+        logical :: desc
+        !
+        do k = 1_int64, n
+            v(k) = real(mod(k * 31_int64, 97_int64), real64)
+            if (mod(k, 29_int64) == 0_int64) v(k) = ieee_value(1.0_real64, ieee_quiet_nan)
+            valid(k) = (mod(k, 11_int64) /= 0_int64)
+        end do
+        !
+        ! The negative control: the same fixture through the ordinary quicksort path first. If the
+        ! forced-limit run below were silently taking that same path, this pair would still pass --
+        ! but `test_fortran_engine_depth_limit_bites` is what rules that out.
+        call keys%clear()
+        call keys%add(v, is_valid=valid)
+        call engine_ab(error, "heap control", keys, n)
+        if (allocated(error)) return
+        !
+        call parquet_debug_set_sort_depth_limit(0)
+        do id = 0, 1
+            desc = (id == 1)
+            call keys%clear()
+            call keys%add(v, descending=desc, is_valid=valid)
+            call engine_ab(error, "heapsort desc=" // merge("T", "F", desc), keys, n)
+            if (allocated(error)) then
+                call parquet_debug_set_sort_depth_limit(-1)
+                return
+            end if
+        end do
+        call parquet_debug_set_sort_depth_limit(-1)
+    end subroutine test_fortran_engine_heapsort_fallback
+    !
+    !> The quicksort must leave every element within the cutoff of its place — not merely sortable.
+    !!
+    !! **This is the only test in the suite that can see a broken heapsort.** The final insertion
+    !! pass is a complete sort, so it repairs whatever `sort_introsort_loop` leaves behind and the
+    !! permutation comes out correct either way — mutation testing confirmed it, with a sift-down
+    !! whose comparison was inverted surviving every conformance test above. What that cannot fake is
+    !! the invariant the quicksort exists to establish, and the largest shift the insertion pass
+    !! performs is that invariant made visible.
+    !!
+    !! It is one-sided, and deliberately not more: an insertion pass only moves elements leftward, so
+    !! a defect that leaves an element slightly too far RIGHT is invisible here. That case was
+    !! measured (a partition returning `cut + 1`) and found to be genuinely correct at O(1) amortised
+    !! extra cost, so there is nothing to catch — see the engine's own notes.
+    !!
+    !! Asserted on both paths — the ordinary quicksort and the forced heapsort fallback — because
+    !! they establish it by entirely different means, and the fallback establishes it exactly (it
+    !! leaves the range fully ordered, so a correct heapsort shifts nothing at all).
+    subroutine test_fortran_engine_presort_invariant(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        integer(int64), parameter :: n = 1500_int64
+        integer(int64), parameter :: cutoff = 16_int64 !! SORT_INSERTION_CUTOFF; private to the engine.
+        real(real64) :: v(n)
+        type(pf_sort_keys) :: keys
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, shift_quick, shift_heap
+        !
+        do k = 1_int64, n
+            v(k) = real(mod(k * 7919_int64, 4001_int64), real64)
+        end do
+        call keys%add(v)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        !
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(keys, perm)
+        shift_quick = parquet_debug_sort_max_insertion_shift()
+        !
+        call parquet_debug_set_sort_depth_limit(0)
+        call parquet_debug_set_sort_track_shift(.true.)
+        call pf_argsort(keys, perm)
+        shift_heap = parquet_debug_sort_max_insertion_shift()
+        !
+        call parquet_debug_set_sort_track_shift(.false.)
+        call parquet_debug_set_sort_depth_limit(-1)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        ! Nonzero on the way up as well as bounded on the way down: a tracker that never fired would
+        ! satisfy the bound trivially, and this fixture is scrambled enough that the insertion pass
+        ! must have something to do.
+        call check(error, shift_quick > 0_int64, &
+            "the largest-shift tracker recorded nothing, so it is not measuring the insertion pass")
+        if (allocated(error)) return
+        call check(error, shift_quick <= cutoff, &
+            "the quicksort left an element further than the insertion cutoff from its place")
+        if (allocated(error)) return
+        call check(error, shift_heap == 0_int64, &
+            "the forced heapsort fallback left the range unordered for the insertion pass to repair")
+    end subroutine test_fortran_engine_presort_invariant
+    !
+    !> The depth-limit hook must actually change which code runs, or the test above proves nothing.
+    !!
+    !! **Both paths answer identically -- that is the point of them -- so no assertion on the
+    !! permutation can tell them apart.** A hook that forced nothing would leave
+    !! `test_fortran_engine_heapsort_fallback` comparing the quicksort path against itself, passing
+    !! while covering none of `sort_heapsort`/`sort_sift_down`. The heapsort call counter is the only
+    !! observable that separates them, which is why it exists.
+    !!
+    !! Both directions are asserted, because a counter that only ever went up would satisfy the
+    !! forced half on its own.
+    subroutine test_fortran_engine_depth_limit_bites(error)
+        type(error_type), allocatable, intent(out) :: error !! set on failure.
+        integer(int64), parameter :: n = 300_int64
+        integer(int64) :: v(n)
+        type(pf_sort_keys) :: keys
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: k, heap_normal, heap_forced
+        !
+        ! High-cardinality, so the C++ side would decline the counting path anyway; the Fortran side
+        ! has no counting path at all yet, so this only has to be a size that partitions.
+        do k = 1_int64, n
+            v(k) = mod(k * 17_int64, 251_int64)
+        end do
+        call keys%add(v)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        !
+        ! The computed limit, i.e. what ships: 2*floor(log2(300)) = 16, which 300 random-ish rows
+        ! come nowhere near. Setting -1 both restores the computed limit and zeroes the counter.
+        call parquet_debug_set_sort_depth_limit(-1)
+        call pf_argsort(keys, perm)
+        heap_normal = parquet_debug_sort_heapsort_calls()
+        !
+        call parquet_debug_set_sort_depth_limit(0)
+        call pf_argsort(keys, perm)
+        heap_forced = parquet_debug_sort_heapsort_calls()
+        call parquet_debug_set_sort_depth_limit(-1)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, heap_normal == 0_int64, &
+            "the ordinary path entered the heapsort fallback, so the depth limit is far too small")
+        if (allocated(error)) return
+        call check(error, heap_forced > 0_int64, &
+            "forcing the depth limit to zero did not reach the heapsort fallback")
+    end subroutine test_fortran_engine_depth_limit_bites
     !
 end module test_sorting

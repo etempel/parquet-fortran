@@ -150,6 +150,7 @@ something a reader is expected to have.
 | [Risk-83](#risk-83--a-write-path-that-does-not-resolve-a-declared-auto-size-emits-a-sentinel-into-the-sidecar) | A write path that does not resolve a declared `auto` size emits a sentinel into the sidecar | 4 — covered |
 | [Risk-84](#risk-84--a-maml-key-matched-case-sensitively-loses-a-whole-block-in-silence) | A MAML key matched case-sensitively loses a whole block, in silence | 4 — covered |
 | [Risk-85](#risk-85--the-in-code-schema-builder-now-owns-both-parsing-and-validating-its-own-text) | The in-code schema builder now owns both parsing and validating its own text | 4 — covered |
+| [Risk-86](#risk-86--a-defective-quicksort-still-returns-a-correctly-sorted-answer) | A defective quicksort still returns a correctly sorted answer | 4 — covered |
 
 ---
 
@@ -157,7 +158,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-86**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-87**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3629,3 +3630,42 @@ negative control is a *valid* field accepted in the same process — without it 
 pass just as happily against an `%add_field` that ran the whole-document validator and rejected
 everything.
 
+### Risk-86 — A defective quicksort still returns a correctly sorted answer
+
+`sort_comparison_permutation` (`src/parquet_sorting_engine.f90`, `feature_sort.md` Stage 2) ends with
+a **final insertion pass over the whole range**, exactly as `std::sort` does. Insertion sort is a
+complete sorting algorithm, so whatever `sort_introsort_loop` leaves behind — however wrong — comes
+out correctly ordered. **Every defect above that pass is therefore a performance defect and not a
+wrong answer**, which is precisely what makes it invisible: the permutation is right, the conformance
+tests against the C++ engine pass, and only a benchmark would ever notice.
+
+This was measured rather than reasoned about. Of thirteen mutations applied to the engine, two
+survived the entire suite, and one of them was **a sift-down with its comparison inverted** — i.e. a
+completely non-functional heapsort, an entire algorithm arm, with nothing failing anywhere. The other
+was a partition returning `cut + 1`, which survives because it is genuinely correct (it displaces one
+element per partition slightly rightward, which the insertion pass repairs in O(1) amortised work).
+
+The engine is currently reached only when `parquet_debug_use_fortran_sort_engine(.true.)` selects it;
+**at the Stage 6 cutover it becomes the shipped sort for every `pf_argsort`/`pf_sort` call**, at which
+point this stops being a property of scaffolding.
+
+**The rule this forbids.** *Anything that changes where elements sit before the final insertion pass
+must be mutation-tested against the presort invariant, never against the answer alone.* A correctness
+test cannot grade this code. Concretely: a new pivot strategy, a different partition scheme, a
+three-way partition, a threaded chunk sort (Stage 4) and any change to the heapsort all need the
+invariant asserted, and an equality test against the C++ engine will not substitute for it. The
+corollary for anyone tempted to simplify: **the final insertion pass is not merely an optimisation
+for small ranges — it is the safety net that makes every other defect here quiet**, so removing it
+would be a large behavioural change disguised as a cleanup.
+
+**Test.** `test_fortran_engine_presort_invariant` (`test/test_sorting.f90`) arms
+`parquet_debug_set_sort_track_shift` and asserts the largest distance the insertion pass moves any
+element is at most `SORT_INSERTION_CUTOFF` — the invariant the quicksort exists to establish — and
+that a forced heapsort fallback moves nothing at all, since it leaves its range fully ordered. It
+also asserts the tracker recorded something nonzero, without which a tracker that never fired would
+satisfy the bound trivially. It is **one-sided by construction and the code says so**: an insertion
+pass only ever moves elements leftward, so a defect leaving an element too far *right* is invisible
+to it — the one measured instance of that class was shown to be correct rather than merely
+undetected. `test_fortran_engine_depth_limit_bites` is what proves the forced-fallback half is not
+vacuous, via `parquet_debug_sort_heapsort_calls`, since both paths answer identically and no
+assertion on a permutation can tell them apart.

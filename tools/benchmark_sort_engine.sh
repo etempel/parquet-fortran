@@ -9,22 +9,56 @@
 #   tools/benchmark_sort_engine.sh                        # every mode, default sweep
 #   tools/benchmark_sort_engine.sh --mode=argsort         # one mode
 #   tools/benchmark_sort_engine.sh --mode=threads
+#   tools/benchmark_sort_engine.sh --mode=argsort --sizes=1000000
 #   PERM=64 tools/benchmark_sort_engine.sh --mode=argsort # the int64 permutation path
 #
-# Config (env-overridable, matching this repo's other tools/*.sh scripts):
-#   SIZES=...       Comma-separated row counts. Default 1000..20000000. The largest entry decides
+# Every setting below is available BOTH as an environment variable and as a --flag of the same
+# name, and the flag wins. The run sheet writes them as flags (`--sizes=1000000`), so a sheet
+# command has to work as written -- an earlier version of this script accepted only the
+# environment form and rejected every such line with "unknown argument", which turns a documented
+# step into a deviation the runner has to invent a workaround for.
+#
+# Config (env-overridable; the matching --flag overrides the environment):
+#   SIZES=...       Comma-separated row counts. Default 1000..5000000. The largest entry decides
 #                    peak memory: roughly n*8 for the values plus n*4 (PERM=32) or n*8 (PERM=64)
 #                    for the permutation, plus whatever the engine allocates internally -- which
 #                    for the current C++ engine is up to three more n-element buffers, so budget
 #                    ~40 bytes/row at PERM=32 and ~48 at PERM=64.
-#   FAMILIES=...    Key families. Default all eight.
+#                    It also decides RUNTIME, and by more than anything else here: measured on
+#                    machine B, n=2e7 was 92% of the whole sweep's timed seconds against 7% for
+#                    n=5e6 and 1% for everything at or below 1e6, because the serial arms are
+#                    superlinear in n and every mode but `argsort` runs at the LARGEST size only.
+#                    Adding one entry above 5e6 therefore costs far more than it looks. Large-n
+#                    behaviour has its own dedicated run in the sheet (SIZES=50000000 over a
+#                    reduced family list), which is where it belongs -- do not restore a big
+#                    entry here to get it.
+#   FAMILIES=...    Key families for `argsort`, the main baseline table. Default all eight.
+#   DIST_FAMILIES=  Key families for `dist`. Default f64,i64lo,str -- one comparator-path family,
+#                    one counting-path family and the string path. `dist` asks whether the SHAPE
+#                    of the input changes the cost, and it multiplies eight distributions by every
+#                    family at the largest size, so running all eight families here costs more
+#                    than the entire size ladder while answering the same question three times.
+#                    Set it to "$FAMILIES" for the exhaustive form.
+#   THREAD_FAMILIES= Key families for `threads`. Default f64,i64lo,str, for the same reason: the
+#                    thread ladder is one figure per family per rung. i64lo is deliberately in the
+#                    list -- the counting path barely threads at all, and seeing that flat line
+#                    next to f64's is the point of the mode.
 #   DISTS=...       Input distributions for --mode=dist. Default all eight.
-#   ROUNDS=5        Max rounds per figure; the program lowers it for the largest sizes and REPORTS
-#                    the count it used, because best-of-1 and best-of-5 are different numbers.
+#   ROUNDS=3        Max rounds per figure; the program lowers it for the largest sizes and REPORTS
+#                    the count it used, because best-of-1 and best-of-3 are different numbers.
 #   PERM=32         32 or 64: which permutation kind to ask the library for. Not cosmetic -- the
 #                    int32 specifics allocate an int64 permutation and narrow it into a second
 #                    array, so the two paths differ by one full O(n) allocation and copy.
-#   THREADS=        High thread count. Empty = omp_get_max_threads().
+#   THREADS=64      High thread count: the threaded column of every mode, and the top rung of the
+#                    `threads` ladder. Empty = omp_get_max_threads().
+#                    64 rather than the machine maximum because on machine B (384 logical cores,
+#                    two sockets) 64 threads has been measured FASTER than 384 -- past roughly one
+#                    socket the merge phase is crossing NUMA nodes and SMT siblings are sharing a
+#                    core's load/store units, so the extra threads cost more than they add. This
+#                    also caps OMP_NUM_THREADS (below), so nothing in the run quietly opens a
+#                    384-thread region behind the engine's back.
+#                    Set THREADS= (empty) to restore "use every core the machine has", which is
+#                    what a run investigating the scaling limit itself wants.
 #   STRWIDTH=16     Declared width of a string key's elements.
 #   SEED=20260814   PRNG seed. The generator is xorshift64, so the same seed gives the same data on
 #                    every compiler -- which is what makes a gfortran figure and an ifx figure
@@ -38,12 +72,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SIZES="${SIZES:-1000,10000,100000,1000000,5000000,20000000}"
+SIZES="${SIZES:-1000,10000,100000,1000000,5000000}"
 FAMILIES="${FAMILIES:-i32,i64,i64lo,f32,f64,str,multi2,multi3}"
+DIST_FAMILIES="${DIST_FAMILIES:-f64,i64lo,str}"
+THREAD_FAMILIES="${THREAD_FAMILIES:-f64,i64lo,str}"
 DISTS="${DISTS:-rand,sorted,reverse,organ,equal,null001,null10,nan}"
-ROUNDS="${ROUNDS:-5}"
+ROUNDS="${ROUNDS:-3}"
 PERM="${PERM:-32}"
-THREADS="${THREADS:-}"
+THREADS="${THREADS-64}"
 STRWIDTH="${STRWIDTH:-16}"
 SEED="${SEED:-20260814}"
 TAG="${TAG:-}"
@@ -52,9 +88,23 @@ MODES=(argsort dist ops)
 want_mode=""
 for arg in "$@"; do
     case "$arg" in
-        --mode=*) want_mode="${arg#--mode=}" ;;
+        --mode=*)            want_mode="${arg#*=}" ;;
+        --sizes=*)           SIZES="${arg#*=}" ;;
+        --families=*)        FAMILIES="${arg#*=}" ;;
+        --dist-families=*)   DIST_FAMILIES="${arg#*=}" ;;
+        --thread-families=*) THREAD_FAMILIES="${arg#*=}" ;;
+        --dists=*)           DISTS="${arg#*=}" ;;
+        --rounds=*)          ROUNDS="${arg#*=}" ;;
+        --perm=*)            PERM="${arg#*=}" ;;
+        --threads=*)         THREADS="${arg#*=}" ;;
+        --strwidth=*)        STRWIDTH="${arg#*=}" ;;
+        --seed=*)            SEED="${arg#*=}" ;;
+        --tag=*)             TAG="${arg#*=}" ;;
         -h|--help)
-            sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            # Print the leading comment block, however long it grows. A hard-coded line range
+            # here (it used to be `sed -n '2,34p'`) silently truncates or overruns the help the
+            # first time anyone edits the header, and nothing reports it.
+            awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         *)
@@ -65,7 +115,11 @@ for arg in "$@"; do
 done
 if [[ -n "$want_mode" ]]; then
     case "$want_mode" in
-        argsort|dist|ops|threads|all) MODES=("$want_mode") ;;
+        # `all` is expanded here rather than passed through to the program's own `all` mode: one
+        # process can only be given one family list, and the whole point of DIST_FAMILIES is that
+        # `dist` gets a different one from `argsort`. Expanding keeps the scope cut in every path.
+        all) MODES=(argsort dist ops) ;;
+        argsort|dist|ops|threads) MODES=("$want_mode") ;;
         *)
             echo "benchmark_sort_engine.sh: unknown mode '$want_mode'" >&2
             echo "  one of: argsort dist ops threads all" >&2
@@ -77,6 +131,19 @@ fi
 if [[ "$PERM" != "32" && "$PERM" != "64" ]]; then
     echo "benchmark_sort_engine.sh: PERM must be 32 or 64 (got '$PERM')" >&2
     exit 2
+fi
+if [[ -n "$THREADS" && ! "$THREADS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "benchmark_sort_engine.sh: THREADS must be a positive integer or empty (got '$THREADS')" >&2
+    exit 2
+fi
+
+# Cap the OpenMP runtime as well as the engine's own thread argument. Asking the engine for 64
+# threads while the runtime still reports 384 available leaves every region this harness does not
+# pass a count to -- and every one the library opens internally -- running at the machine maximum,
+# which is exactly the configuration the cap exists to avoid measuring. An OMP_NUM_THREADS the
+# caller exported deliberately wins; say so in the banner either way.
+if [[ -n "$THREADS" ]]; then
+    export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$THREADS}"
 fi
 
 # --- one build tree per (compiler, perm kind, tag) ----------------------------------------------
@@ -93,15 +160,27 @@ else
     echo "benchmark_sort_engine.sh: using the FPM_BUILD_DIR you set: $FPM_BUILD_DIR" >&2
 fi
 
+# The family list is per mode, so the banner has to name the one each mode will actually use --
+# otherwise a `dist` table covering three families reads as a run that lost five of them.
+families_for() {
+    case "$1" in
+        dist)    echo "$DIST_FAMILIES" ;;
+        threads) echo "$THREAD_FAMILIES" ;;
+        *)       echo "$FAMILIES" ;;
+    esac
+}
+
 echo "=============================================================================="
 echo "benchmark_sort_engine.sh"
 echo "  build tree  : $FPM_BUILD_DIR"
 echo "  fortran     : ${FPM_FC:-gfortran (fpm default)}"
 echo "  modes       : ${MODES[*]}"
 echo "  sizes       : $SIZES"
-echo "  families    : $FAMILIES"
+echo "  families    : $FAMILIES        (argsort)"
+echo "                $DIST_FAMILIES        (dist)"
+echo "                $THREAD_FAMILIES        (threads)"
 echo "  perm kind   : int$PERM      rounds: $ROUNDS      seed: $SEED"
-echo "  threads     : ${THREADS:-omp_get_max_threads()}"
+echo "  threads     : ${THREADS:-omp_get_max_threads()}      OMP_NUM_THREADS=${OMP_NUM_THREADS:-(unset)}"
 echo "  date        : $(date -u '+%Y-%m-%dT%H:%M:%SZ')  host: $(hostname)"
 echo "=============================================================================="
 echo
@@ -172,7 +251,7 @@ THREADS_ARG=()
 
 for m in "${MODES[@]}"; do
     fpm run benchmark_sort_engine --profile release -- \
-        --mode="$m" --sizes="$SIZES" --families="$FAMILIES" --dists="$DISTS" \
+        --mode="$m" --sizes="$SIZES" --families="$(families_for "$m")" --dists="$DISTS" \
         --rounds="$ROUNDS" --perm="$PERM" --strwidth="$STRWIDTH" --seed="$SEED" \
         "${THREADS_ARG[@]}"
     echo

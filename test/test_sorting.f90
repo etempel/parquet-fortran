@@ -6054,6 +6054,9 @@ contains
         call check(error, parquet_debug_sort_split_buckets() > 1_int64, &
             "Design B must actually split this key, or every assertion here is vacuous")
         if (allocated(error)) return
+        call check(error, parquet_debug_sort_design() == 2_int64, &
+            "a well-spread key must take Design B")
+        if (allocated(error)) return
         !
         ! **The decline, on data rather than on a forced flag.** A key with very few distinct values
         ! puts almost every row in one bucket, which is exactly the shape machine B measured Design B
@@ -6067,6 +6070,13 @@ contains
         call pf_argsort(lowcard, got, threads=4)
         call check(error, parquet_debug_sort_split_buckets() == 0_int64, &
             "a low-cardinality key must decline Design B's split")
+        if (allocated(error)) return
+        ! **The fallback, and the assertion that makes it worth having.** Before Design A existed a
+        ! declining key fell all the way back to the SERIAL loop, which is what machine B measured
+        ! costing 2.10-2.57x at 64 threads. Asserting only the decline above would pass just as well
+        ! against that.
+        call check(error, parquet_debug_sort_design() == 1_int64, &
+            "declining Design B must fall back to Design A, not to the serial loop")
         if (allocated(error)) return
         call check(error, all(got == lref), "declining the split must not change the answer")
         if (allocated(error)) return

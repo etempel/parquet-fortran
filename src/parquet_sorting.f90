@@ -103,6 +103,7 @@ module parquet_sorting
     public :: parquet_debug_sort_radix_passes
     public :: parquet_debug_sort_threads_used
     public :: parquet_debug_sort_split_buckets
+    public :: parquet_debug_sort_design
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -219,6 +220,13 @@ module parquet_sorting
     !! Zero is the informative value, not a missing one: it is what a decline looks like, and a
     !! decline is a normal outcome on a low-cardinality key.
     integer(int64), save :: dbg_sort_split_buckets = 0_int64
+    !> Which parallel radix design ran on the last build: 0 serial, 1 Design A, 2 Design B.
+    !!
+    !! Stage 4. All three produce the SAME permutation — the comparator is a total order, so exactly
+    !! one answer is correct — which means no assertion on `perm` can tell them apart. Design A is
+    !! reached only when Design B declines, so without this a test of the fallback is testing nothing:
+    !! it would pass identically against an engine that ran B, ran A, or ran neither.
+    integer(int64), save :: dbg_sort_design = 0_int64
     !
     ! ---- Internal key families ----
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
@@ -5911,6 +5919,14 @@ module parquet_sorting
         module function parquet_debug_sort_split_buckets() result(n)
             integer(int64) :: n !! buckets in the last split; 0 if Design B declined.
         end function parquet_debug_sort_split_buckets
+        !> Test-only report of which parallel radix design ran: 0 serial, 1 A, 2 B.
+        !!
+        !! The three answer identically by construction, so this is the only way a test of the
+        !! Design A fallback can be non-vacuous -- A is reached only when B declines, and an
+        !! assertion on the permutation cannot distinguish A, B and the serial loop.
+        module function parquet_debug_sort_design() result(n)
+            integer(int64) :: n !! 0 serial, 1 Design A, 2 Design B.
+        end function parquet_debug_sort_design
     end interface
     !
 end module parquet_sorting ! GCOVR_EXCL_LINE

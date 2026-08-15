@@ -98,6 +98,8 @@ module parquet_sorting
     public :: parquet_debug_set_sort_track_shift
     public :: parquet_debug_sort_max_insertion_shift
     public :: parquet_debug_set_sort_radix_min_rows
+    public :: parquet_debug_set_sort_task_floor
+    public :: parquet_debug_set_sort_split_min_card
     public :: parquet_debug_set_sort_radix_fail_alloc
     public :: parquet_debug_reset_sort_radix_passes
     public :: parquet_debug_sort_radix_passes
@@ -163,6 +165,22 @@ module parquet_sorting
     !! describes. Both are the `feature_risks.md` Risk-49 shape -- a size threshold hiding a code
     !! path from the tests written for everything else.
     integer(int64), save :: dbg_sort_radix_min_rows = -1_int64
+    !> Overrides the balanced split's smallest task size; NEGATIVE restores `SORT_TASK_FLOOR`.
+    !!
+    !! Risk-49 again, and the sharpest instance of it in this module: the floor binds only when
+    !! `nv / team` falls below it, i.e. small `n` with a large team, which is precisely the regime
+    !! no fixture in the suite reaches -- so the constant ships unexercised rather than merely
+    !! untuned. It is also the reason a value for it cannot be measured by rebuilding: a crossover
+    !! sits inside this project's 11-16% cross-build noise floor, so the sweep has to happen in one
+    !! binary, which is what this hook is for.
+    integer(int64), save :: dbg_sort_task_floor = -1_int64
+    !> Overrides the distinct-value count the split digit must reach; NEGATIVE restores
+    !! `SORT_SPLIT_MIN_CARD`.
+    !!
+    !! Selects between the two designs at a fixed cardinality, so the sweep that locates the real
+    !! crossover -- where refined Design B stops beating Design A -- can run without a rebuild per
+    !! point. Set it to 0 to force Design B onto every key, or to `huge` to force Design A.
+    integer(int64), save :: dbg_sort_split_min_card = -1_int64
     !> Which of the radix path's scratch allocations should report failure: 0 none, 1 the main
     !! buffers, 2 the deep string refine's.
     !!
@@ -5911,6 +5929,28 @@ module parquet_sorting
         module subroutine parquet_debug_set_sort_radix_min_rows(n)
             integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
         end subroutine parquet_debug_set_sort_radix_min_rows
+        !> Test-only override for the balanced split's task floor; NEGATIVE restores the
+        !! built-in `SORT_TASK_FLOOR`.
+        !!
+        !! The floor binds only when `nv / team` falls below it -- small `n` with a large
+        !! team -- which no fixture in the suite reaches, so without this the constant is
+        !! unexercised rather than merely untuned. Also the sweep instrument: a crossover
+        !! cannot be located by rebuilding, because it sits inside this project's cross-build
+        !! noise floor. Has no effect on the C++ engine.
+        module subroutine parquet_debug_set_sort_task_floor(n)
+            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
+        end subroutine parquet_debug_set_sort_task_floor
+        !> Test-only override for the split's minimum distinct-value count; NEGATIVE restores
+        !! the built-in `SORT_SPLIT_MIN_CARD`.
+        !!
+        !! Selects the design at a fixed cardinality: 0 forces refined Design B onto every
+        !! key, a huge value forces Design A. Both directions are needed -- one keeps Design
+        !! A's own coverage non-vacuous on keys that would otherwise take the split, the
+        !! other reaches the split from low-cardinality fixtures. Has no effect on the C++
+        !! engine.
+        module subroutine parquet_debug_set_sort_split_min_card(n)
+            integer(int64), intent(in) :: n !! forced cardinality floor, or negative to restore.
+        end subroutine parquet_debug_set_sort_split_min_card
         !> Test-only forcing of an allocation failure in the radix path, to reach its fallbacks.
         !!
         !! Selects WHICH allocation fails, because the two are in series and a single flag

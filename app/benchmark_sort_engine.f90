@@ -77,10 +77,21 @@ program benchmark_sort_engine
     integer :: rounds = 5                      !! rounds per figure; the best is kept.
     integer :: permkind = 32                   !! 32 or 64: which permutation kind to ask for.
     integer :: strwidth = 16                   !! declared width of a string key's elements.
+    integer :: card_spread = 0
+    !! How the low-cardinality values are spread: 0 packs them into `0..card-1`, 1 multiplies by a
+    !! stride, 2 hashes them. See the fold in `shape_i` -- 0 cannot reach the balanced split at all,
+    !! and 1 and 2 differ in whether the distinct values have a structured bit pattern.
+    integer(int64) :: card_n = 10_int64
+    !! Distinct values the low-cardinality families (`i64lo`, and the primary key of
+    !! `multi2`/`multi3`) fold onto. Swept to locate `SORT_SPLIT_MIN_CARD`, whose whole job is to
+    !! decide, from the key's distinct-value count, whether the balanced split can reach a balanced
+    !! state at all -- so a benchmark that cannot vary cardinality cannot see that constant.
     integer :: threads_hi = -1                 !! high thread count; -1 = omp_get_max_threads().
     integer(int64) :: seed_arg = 20260814_int64
     character(len=:), allocatable :: engine !! "cpp" or "fortran": which sort engine to measure.
     integer(int64) :: radix_min !! forced radix row floor; NEGATIVE leaves the shipped one in force.
+    integer(int64) :: split_min_card !! forced split cardinality floor; NEGATIVE leaves the shipped one.
+    integer(int64) :: task_floor !! forced split task floor; NEGATIVE leaves the shipped one in force.
     integer :: inner = 1 !! argsort repetitions INSIDE one timed region; see time_argsort.
 
     integer(int64), allocatable :: sizes(:)
@@ -659,9 +670,35 @@ contains
         ! has no order to preserve, is folded with a modulus.
         if (lowcard) then
             if (dst == "rand") then
-                v = iand(v, huge(1_int64)) - iand(v, huge(1_int64)) / 10_int64 * 10_int64
+                v = iand(v, huge(1_int64)) - iand(v, huge(1_int64)) / card_n * card_n
             else if (dst /= "equal") then
-                v = min(9_int64, max(0_int64, (v - 1_int64) * 10_int64 / max(n, 1_int64)))
+                v = min(card_n - 1_int64, max(0_int64, (v - 1_int64) * card_n / max(n, 1_int64)))
+            end if
+            ! **Cardinality and DIGIT SPREAD are independent, and only the second reaches the
+            ! balanced split.** The fold above leaves `card_n` distinct values packed into 0..card-1,
+            ! so for any card <= 256 the key varies in ONE byte, `dsplit` is 0 and
+            ! `sort_radix_design_b` returns before it ever consults `SORT_SPLIT_MIN_CARD` -- measured
+            ! directly: Design A runs at every cardinality from 2 to 256 even with the floor forced
+            ! to 0. Multiplying by a stride spreads the same number of distinct values across the
+            ! full int64 range, which is what makes the high digits vary and the split reachable.
+            ! Default OFF, so the shipped `i64lo` family keeps the exact values every earlier figure
+            ! was taken on.
+            !
+            ! Two spreads, because the FIRST one's bit pattern turned out to be load-bearing.
+            ! `=1` multiplies the bucket index by a stride, which makes every distinct value a
+            ! multiple of `huge/card` -- a highly structured pattern, and Design A's cost was
+            ! measured spiking 3x at scattered cardinalities (56 at 32 threads; 72, 88, 112 at 64)
+            ! and nowhere else, reproducibly in both traversal directions. That is a property of
+            ! the fixture's bits, not of cardinality, so a crossover fitted on it alone would be
+            ! fitted on an artifact. `=2` runs the bucket index through a splitmix64 finalizer
+            ! instead, giving `card` pseudo-random distinct values -- what a real low-cardinality
+            ! wide key (a hash, an id) actually looks like.
+            if (card_n > 1_int64) then
+                if (card_spread == 1) then
+                    v = v * (huge(1_int64) / card_n)
+                else if (card_spread == 2) then
+                    v = iand(mix64(v + 1_int64), huge(1_int64))
+                end if
             end if
         end if
     end function shape_i
@@ -851,6 +888,9 @@ contains
         write(output_unit,'(a,i0)')   "  rounds (max): ", rounds
         write(output_unit,'(a,i0)')   "  perm kind   : int", permkind
         write(output_unit,'(a,i0)')   "  str width   : ", strwidth
+        write(output_unit,'(a,i0,a,i0)') "  lowcard     : ", card_n, "   spread: ", card_spread
+        write(output_unit,'(a,i0,a)') "  split card  : ", split_min_card, "   (negative = shipped)"
+        write(output_unit,'(a,i0,a)') "  task floor  : ", task_floor, "   (negative = shipped)"
         write(output_unit,'(a,i0)')   "  max threads : ", thi()
         write(output_unit,'(a,i0)')   "  pf_sort_threads() : ", pf_sort_threads()
         write(output_unit,'(a,i0)')   "  seed        : ", seed_arg
@@ -979,6 +1019,43 @@ contains
         v = iand(st, huge(1_int64))
     end function next_u63
 
+    !> Splitmix64's finalizer: an invertible bit mixer, so distinct inputs give distinct outputs.
+    !!
+    !! Used to turn a small bucket index into a pseudo-random 64-bit value, which is what gives a
+    !! low-cardinality key the bit pattern a real one (a hash, an id) has. Invertibility is the
+    !! property that matters here -- it guarantees the fixture really has `card` distinct values,
+    !! so a measured cardinality is the cardinality asked for. Written with `ishft`/`ieor` only
+    !! except for the two multiplies, which are the mixer's own and are allowed to wrap: `ibits`
+    !! keeps the result inside int64 rather than relying on overflow, which Fortran leaves
+    !! undefined.
+    function mix64(x) result(v)
+        integer(int64), intent(in) :: x !! value to mix.
+        integer(int64) :: v             !! the mixed value.
+        !
+        v = ieor(x, ishft(x, -30))
+        v = mul_wrap(v, -4658895280553007687_int64)
+        v = ieor(v, ishft(v, -27))
+        v = mul_wrap(v, -7723592293110705685_int64)
+        v = ieor(v, ishft(v, -31))
+    end function mix64
+
+    !> 64-bit multiply that wraps instead of overflowing, done in 32-bit halves.
+    !!
+    !! Fortran leaves integer overflow undefined, and ifx traps it under some settings, so the
+    !! mixer above cannot simply write `a * b`. Splitting both operands into 32-bit halves keeps
+    !! every partial product inside the type and discards the bits above 64 exactly as a wrapping
+    !! multiply would.
+    function mul_wrap(a, b) result(v)
+        integer(int64), intent(in) :: a !! left operand.
+        integer(int64), intent(in) :: b !! right operand.
+        integer(int64) :: v             !! low 64 bits of `a * b`.
+        integer(int64) :: al, ah, bl, bh
+        !
+        al = ibits(a, 0, 32); ah = ibits(a, 32, 32)
+        bl = ibits(b, 0, 32); bh = ibits(b, 32, 32)
+        v = ishft(ibits(al * bh + ah * bl + ishft(al * bl, -32), 0, 32), 32) + ibits(al * bl, 0, 32)
+    end function mul_wrap
+
     !> .true. when a distribution is meaningful for a family (NaN only for the real families).
     function dist_applies(fam, dst) result(ok)
         character(len=*), intent(in) :: fam !! key family.
@@ -1053,6 +1130,8 @@ contains
         sizes_arg = "1000,10000,100000,1000000,5000000,20000000"
         engine = "cpp"
         radix_min = -1_int64
+        split_min_card = -1_int64
+        task_floor = -1_int64
         !
         do i = 1, command_argument_count()
             call get_command_argument(i, arg)
@@ -1074,10 +1153,14 @@ contains
             case ("--rounds");   read(val, *, iostat=ios) rounds
             case ("--perm");     read(val, *, iostat=ios) permkind
             case ("--strwidth"); read(val, *, iostat=ios) strwidth
+            case ("--card");     read(val, *, iostat=ios) card_n
+            case ("--card-spread"); read(val, *, iostat=ios) card_spread
             case ("--threads");  read(val, *, iostat=ios) threads_hi
             case ("--seed");     read(val, *, iostat=ios) seed_arg
             case ("--engine");   engine = val
             case ("--radix-min-rows"); read(val, *, iostat=ios) radix_min
+            case ("--split-min-card"); read(val, *, iostat=ios) split_min_card
+            case ("--task-floor");     read(val, *, iostat=ios) task_floor
             case ("--inner");    read(val, *, iostat=ios) inner
             case default
                 write(error_unit,'(a)') "benchmark_sort_engine: unknown option '"//key//"'"
@@ -1100,6 +1183,15 @@ contains
         ! Same reasoning: set once, for every arm, so no figure can be filed against a floor
         ! other than the one the banner reports. Negative leaves the shipped floor alone.
         call parquet_debug_set_sort_radix_min_rows(radix_min)
+        ! Same reasoning again for the two balanced-split thresholds. Both are swept by RE-RUNNING
+        ! one binary rather than rebuilding, because a crossover sits inside this project's
+        ! 11-16% cross-build noise floor and a rebuild ladder cannot resolve one.
+        call parquet_debug_set_sort_split_min_card(split_min_card)
+        call parquet_debug_set_sort_task_floor(task_floor)
+        if (card_n < 1_int64) then
+            write(error_unit,'(a)') "benchmark_sort_engine: --card must be >= 1"
+            error stop 2
+        end if
         if (permkind /= 32 .and. permkind /= 64) then
             write(error_unit,'(a)') "benchmark_sort_engine: --perm must be 32 or 64"
             error stop 2
@@ -1129,6 +1221,10 @@ contains
         write(output_unit,'(a)') "  --mode=argsort|dist|ops|threads|all   (default all)"
         write(output_unit,'(a)') "  --families=i32,i64,i64lo,f32,f64,str,multi2,multi3"
         write(output_unit,'(a)') "  --dists=rand,sorted,reverse,organ,equal,null001,null10,nan"
+        write(output_unit,'(a)') "  --card=N              distinct values the i64lo/multi primary folds onto"
+        write(output_unit,'(a)') "  --card-spread=1       spread those values across int64 (reaches the split)"
+        write(output_unit,'(a)') "  --split-min-card=N    force SORT_SPLIT_MIN_CARD (0 = always split)"
+        write(output_unit,'(a)') "  --task-floor=N        force SORT_TASK_FLOOR"
         write(output_unit,'(a)') "  --thread-dist=rand   (the one distribution --mode=threads sweeps)"
         write(output_unit,'(a)') "  --sizes=1000,10000,...                row counts to sweep"
         write(output_unit,'(a)') "  --rounds=5                            max rounds per figure"

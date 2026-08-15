@@ -6065,16 +6065,30 @@ contains
             "a well-spread key must take Design B")
         if (allocated(error)) return
         !
-        ! **The decline, on data rather than on a forced flag.** A key with very few distinct values
-        ! puts almost every row in one bucket, which is exactly the shape machine B measured Design B
-        ! losing 2.10-2.57x on, so the balance test must route it away. Asserting the answer as well
-        ! matters: a decline that changed the permutation would be a far worse bug than a decline
-        ! that should not have happened.
+        ! **The decline, forced through the hook rather than through data — and it has to be.** The
+        ! floor is `max(2, nt / 8)`, so at the 4 threads this test uses it is 2, and a 3-distinct-
+        ! value key is now ACCEPTED. That is deliberate: machine B measured Design B 3.44x FASTER
+        ! than Design A on exactly this shape (cardinality 3, 4 threads, values spread across the
+        ! int64 range, which `real64` 0.0/1.0/2.0 bit patterns are). The 2.10-2.57x loss this test
+        ! was written around was measured on the PRE-REFINEMENT Design B, which could not subdivide
+        ! an oversized bucket; refinement is what made low-cardinality keys viable, and the flat
+        ! floor of 16 outlived the problem it was guarding.
+        !
+        ! So the decline is reached by forcing the floor above the fixture's cardinality. The
+        ! assertions below are unchanged in meaning: a declining key must fall back to Design A and
+        ! must not change the answer. **If the floor is ever removed entirely, delete the forcing
+        ! and this whole block with it — do not weaken it into a decline-on-data test at a larger
+        ! team, which would make it a test of the thread count rather than of the fallback.**
         do k = 1, size(v)
             lowcard(k) = real(mod(k, 3), real64)
         end do
+        call parquet_debug_set_sort_split_min_card(16_int64)
         call pf_argsort(lowcard, lref, threads=1)
         call pf_argsort(lowcard, got, threads=4)
+        ! Reset BEFORE asserting. The hook is process-global and every `check` below can `return`,
+        ! which would leak a forced floor into every later test in this suite -- and the leak would
+        ! show up as an unrelated test asserting the wrong design, far from here.
+        call parquet_debug_set_sort_split_min_card(-1_int64)
         call check(error, parquet_debug_sort_split_buckets() == 0_int64, &
             "a low-cardinality key must decline Design B's split")
         if (allocated(error)) return
@@ -6086,6 +6100,18 @@ contains
             "declining Design B must fall back to Design A, not to the serial loop")
         if (allocated(error)) return
         call check(error, all(got == lref), "declining the split must not change the answer")
+        if (allocated(error)) return
+        !
+        ! **The other half of the same fixture: with the shipped floor, this key is ACCEPTED.**
+        ! Without this the block above would pass just as well against a floor that declines
+        ! everything, which is precisely the defect the flat 16 turned out to be. `max(2, nt/8)` is
+        ! 2 at four threads, and this key has three distinct values, so the split must run — and
+        ! must still give the serial permutation exactly.
+        call pf_argsort(lowcard, got, threads=4)
+        call check(error, parquet_debug_sort_design() == 2_int64, &
+            "at the shipped floor a 3-value key must now TAKE the split: max(2, nt/8) is 2 here")
+        if (allocated(error)) return
+        call check(error, all(got == lref), "accepting the split must not change the answer either")
         if (allocated(error)) return
         !
         !

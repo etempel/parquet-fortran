@@ -1640,17 +1640,42 @@ contains
         integer(int64) :: nbuckets   !! how many buckets at `dsplit` are non-empty.
         integer(int64) :: maxcard    !! most non-empty buckets any digit at or below `dsplit` has.
         integer(int64) :: b, nb, m, target, spent, budget, sub_biggest
+        integer(int64) :: mincard   !! resolved `SORT_SPLIT_MIN_CARD`, after any debug override.
+        integer(int64) :: floor_task !! resolved `SORT_TASK_FLOOR`, after any debug override.
         integer :: team, ios, i, ntask, head, d, maxtask
         logical :: insrc !! which buffer pair this refinement's output landed in.
         !> Never subdivide below this. A task smaller than this costs more in split overhead and
         !! per-task histogram rebuilds than the balance it buys.
         integer(int64), parameter :: SORT_TASK_FLOOR = 4096_int64
-        !> Distinct values the split digit's column must reach before refinement is worth
-        !! attempting. **Refinement subdivides; it cannot manufacture distinctions the key does not
-        !! have**, so a key with a handful of distinct values ends up with one thread holding most
-        !! of the rows however many digits are burned looking for a split. That is the shape machine
-        !! B measured Design B losing 2.10-2.57x on, and it is what this sends to Design A instead.
-        integer(int64), parameter :: SORT_SPLIT_MIN_CARD = 16_int64
+        !> Divisor in the distinct-value floor `max(2, nt / SORT_SPLIT_CARD_PER_THREAD)`: the split
+        !! digit's column must reach that many distinct values before refinement is worth attempting.
+        !!
+        !! **Refinement subdivides; it cannot manufacture distinctions the key does not have**, so a
+        !! key with too few distinct values for the team leaves one thread holding most of the rows
+        !! however many digits are burned looking for a split — and the wider the team, the more
+        !! distinct values it takes before that stops happening. Hence a floor that scales with `nt`
+        !! rather than the flat 16 this replaced.
+        !!
+        !! **The flat 16 was reasoned, never measured, and was wrong by up to 5.95x.** Measured on
+        !! machine B over cardinality 2..128 x team 4..64, with the low-cardinality values HASHED
+        !! across the int64 range (see below): the flat floor's worst case is 5.95x under ifx and
+        !! 2.25x under gfortran, with geometric means of 1.675 and 1.278 — i.e. it was declining a
+        !! split that wins 2-5x on ordinary low-cardinality wide keys. This form's worst case is
+        !! 1.50x (ifx) / 1.12x (gfortran), geometric means 1.019 / 1.006, and it was the best of
+        !! eleven candidate forms on BOTH metrics under BOTH compilers — so there is no
+        !! ifx-versus-gfortran trade-off to weigh here; they agree on the ranking and differ only in
+        !! how much the old constant cost.
+        !!
+        !! **Two things a future measurement of this must get right, because the first version of
+        !! this one got both wrong.** A low-cardinality key whose values are PACKED into `0..card-1`
+        !! never reaches this test at all — every distinction lives in the lowest byte, so `dsplit`
+        !! is 0 and the guard above returns first; forcing this floor to 0 changes nothing for such a
+        !! key, at any cardinality, which is what the negative control showed. And a key whose
+        !! distinct values are a STRIDE apart is equally unrepresentative in the other direction: it
+        !! leaves only the top byte varying, so Design A finishes in one pass and beats the split by
+        !! 3-4x at cardinalities where a realistic key loses by 2-8%. Only hashed values exercise the
+        !! comparison a real column presents.
+        integer(int64), parameter :: SORT_SPLIT_CARD_PER_THREAD = 8_int64
         !
         done = .false.
         if (dsplit < 1) return
@@ -1680,7 +1705,9 @@ contains
             end do
             if (nb > maxcard) maxcard = nb
         end do
-        if (maxcard < SORT_SPLIT_MIN_CARD) return
+        mincard = max(2_int64, int(nt, int64) / SORT_SPLIT_CARD_PER_THREAD)
+        if (dbg_sort_split_min_card >= 0_int64) mincard = dbg_sort_split_min_card
+        if (maxcard < mincard) return
         team = nt
         ! **Task-list capacity, sized from the TEAM rather than fixed.** At most `team` tasks can
         ! exceed a fair share at any moment, and one refinement turns a task into at most 256, so
@@ -1755,7 +1782,9 @@ contains
         ! a 4-core team asks for tasks of `nv / 4` and refines almost nothing, a 64-core team asks
         ! for `nv / 64` and refines whatever is above it.
         target = nv / int(team, int64)
-        if (target < SORT_TASK_FLOOR) target = SORT_TASK_FLOOR
+        floor_task = SORT_TASK_FLOOR
+        if (dbg_sort_task_floor >= 0_int64) floor_task = dbg_sort_task_floor
+        if (target < floor_task) target = floor_task
         budget = 4_int64 * nv
         spent = 0_int64
         head = 0
@@ -3432,6 +3461,14 @@ contains
     module procedure parquet_debug_set_sort_radix_min_rows
         dbg_sort_radix_min_rows = n
     end procedure parquet_debug_set_sort_radix_min_rows
+
+    module procedure parquet_debug_set_sort_task_floor
+        dbg_sort_task_floor = n
+    end procedure parquet_debug_set_sort_task_floor
+
+    module procedure parquet_debug_set_sort_split_min_card
+        dbg_sort_split_min_card = n
+    end procedure parquet_debug_set_sort_split_min_card
 
     module procedure parquet_debug_set_sort_radix_fail_alloc
         dbg_sort_radix_fail_alloc = which

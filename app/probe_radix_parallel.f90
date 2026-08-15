@@ -11,9 +11,24 @@
 !!   A  LSD, per-thread-per-bucket offsets, one synchronised scatter per digit.
 !!   B  one parallel MSD split on the top digit, then the remaining digits per bucket, threads
 !!      taking whole buckets independently with no further synchronisation.
-!!   C  design A over a NARROW key (32-bit range), i.e. four active digits instead of eight.
+!!   B16  the same, splitting on TWO digits (65536 buckets), to test whether the bucket count is
+!!      the scaling ceiling. It is not -- it is 5x worse at 128 threads.
 !!
-!! Delete with the investigation.
+!! Key shapes (`--narrow`, `--lowcard`, `--prefix`, default wide). The last two are NOT the same
+!! test: `lowcard` has few distinct keys overall, while `prefix` has plenty of variation sitting
+!! below a split digit that carries only four values -- the shape a string column with a common
+!! stem produces, and Design B's predicted worst case.
+!!
+!! **Two rules this file has already broken once each, so do not undo either:**
+!!   1. **Ping-pong by PARITY, never by swapping the buffers.** A swap is O(n) per pass, the engine
+!!      does not do it (`move_alloc`), and Design B never called it -- so it was charged to the
+!!      baseline and to A while B escaped, inflating every ratio here. See radix_serial's header
+!!      and feature_sort_parallel.md section 2.4.
+!!   2. **Rebuild the per-thread histogram every pass.** Reusing one across passes gives a silently
+!!      wrong permutation from two threads upward. See lsd_pass_par.
+!!
+!! Kept in the repository rather than deleted with the investigation: the scaling questions have to
+!! be re-askable whenever the engine or the machine changes.
 program probe_radix_parallel
     use iso_fortran_env, only : int32, int64, real64, output_unit
     use omp_lib
@@ -64,9 +79,24 @@ program probe_radix_parallel
     call time_arm(k0, r0, ka, ra, kb, rb, n, reps, 0, 0, tser)
     kref = ka
     rref = ra
-    write (output_unit, '(a)') "  design  threads     ms      ns/elem   speedup   check"
-    write (output_unit, '(a,i7,f9.3,f11.3,f10.2,a)') "  serial ", 1, tser * 1.0e3_real64, &
-        tser * 1.0e9_real64 / real(n, real64), 1.0_real64, "   --"
+    write (output_unit, '(a)') "  design  threads     ms      ns/elem   speedup  per-core   check"
+    write (output_unit, '(a,i7,f9.3,f11.3,f10.2,f10.3,a)') "  serial ", 1, tser * 1.0e3_real64, &
+        tser * 1.0e9_real64 / real(n, real64), 1.0_real64, 1.0_real64, "   --"
+    ! **The tie-down.** A benchmark that reimplements library code is untested code, so one of its
+    ! rows must reproduce a figure measured independently on the real thing or it is three confident
+    ! numbers about nothing. The serial arm above is the histogram plus the scatter passes, which
+    ! feature_sort_parallel.md section 3 measures inside the engine itself at 2.22 + 12.56 = 14.78
+    ! ns/element for a full-range int64 key at n = 1e6 on machine B (its 16.59 radix total less the
+    ! 1.23 tier split and 0.59 image build, neither of which this probe does). A large gap means
+    ! this probe is measuring something the engine does not -- which is exactly what happened before
+    ! the buffer swap was removed, when this arm read 26.19 against that 14.78. See section 2.4.
+    ! Only at the size and shape the reference figure was taken at: the serial arm's cost per element
+    ! changes with the working set (610 MiB at n = 2e7 against 30 MiB at n = 1e6), so quoting the
+    ! comparison at another n would be the kind of confidently wrong number this check exists to stop.
+    if (trim(shape_in) == "wide" .and. n == 1000000_int64) write (output_unit, '(a,f7.2,a)') &
+        "  tie-down: on machine B (ifx, n = 1e6, wide) the engine's own histogram + scatter cost " // &
+        "is 14.78 ns/elem; this arm reads ", tser * 1.0e9_real64 / real(n, real64), &
+        " -- a large gap invalidates every ratio below."
     !
     tl = [1, 2, 4, 8, 16, 32, 64, 96, 128, 192, 256, 384, 512, 768]
     do i = 1, size(tl)
@@ -138,6 +168,8 @@ contains
                 shape_in = "narrow"
             else if (a(1:9) == "--lowcard") then
                 shape_in = "lowcard"
+            else if (a(1:8) == "--prefix") then
+                shape_in = "prefix"
             else if (a(1:12) == "--firsttouch") then
                 firsttouch = .true.
             else if (a(1:7) == "--cols=") then
@@ -305,7 +337,10 @@ contains
         integer(int64), intent(in) :: n
         character(len=*), intent(in) :: shape_in
         integer(int64) :: s, i
+        integer(int64) :: prefix_top !! the two constant top bytes of the "prefix" shape.
         !
+        ! Built rather than written as a literal so the two bytes are readable: 104 = "h", 116 = "t".
+        prefix_top = ior(ishft(104_int64, 56), ishft(116_int64, 48))
         s = 88172645463325252_int64
         do i = 1_int64, n
             s = ieor(s, ishft(s, 13))
@@ -317,9 +352,28 @@ contains
                 ! the shape most real integer columns already have.
                 k(i) = iand(s, 4294967295_int64)
             case ("lowcard")
-                ! 1000 distinct values: a category code, a status flag, a small identifier. The
-                ! shape that tests whether a bucket decomposition can stay load balanced.
+                ! 1024 distinct values: a category code, a status flag, a small identifier. The
+                ! shape that tests whether a bucket decomposition can stay load balanced. 1024 is
+                ! the number that matters, not a round 1000: it puts exactly FOUR distinct values
+                ! in digit 1, which is the split digit, and four buckets is the whole of section
+                ! 6.3's argument.
                 k(i) = iand(s, 1023_int64)
+            case ("prefix")
+                ! A SHARED-PREFIX key: the packed 8-byte prefix image of a string column whose
+                ! values begin alike -- URLs, paths, identifiers with a common stem. Two constant
+                ! top bytes ("ht"), then a third carrying only four distinct stems, then five bytes
+                ! that vary freely.
+                !
+                ! This is Design B's predicted worst case and the shape `lowcard` does NOT model:
+                ! lowcard tests low CARDINALITY (few distinct keys overall), this tests a low-
+                ! cardinality SPLIT DIGIT sitting above plenty of variation below it. The most
+                ! significant varying digit is 5 and it offers four buckets, so at most four
+                ! threads have anything to do however many are asked for -- while the per-bucket
+                ! work below it stays large. Strings are in scope for the parallel engine, so this
+                ! is the arm that decides between Design A, a deeper prefix split, and recursive
+                ! re-splitting.
+                k(i) = ior(prefix_top, ior(ishft(iand(ishft(s, -50), 3_int64), 40), &
+                    iand(s, 1099511627775_int64)))
             case default
                 k(i) = s
             end select
@@ -416,8 +470,8 @@ contains
         real(real64), intent(in) :: tpar, tser
         integer(int64), intent(in) :: n
         !
-        write (output_unit, '(a,i7,f9.3,f11.3,f10.2)') "  " // tag, nt, tpar * 1.0e3_real64, &
-            tpar * 1.0e9_real64 / real(n, real64), tser / tpar
+        write (output_unit, '(a,i7,f9.3,f11.3,f10.2,f10.3)') "  " // tag, nt, tpar * 1.0e3_real64, &
+            tpar * 1.0e9_real64 / real(n, real64), tser / tpar, (tser / tpar) / real(nt, real64)
     end subroutine report_path
     !
     subroutine report(tag, nt, tpar, tser, n, ka, ra, kref, rref)
@@ -430,8 +484,14 @@ contains
         !
         ok = "  OK  "
         if (any(ka(1:n) /= kref(1:n)) .or. any(ra(1:n) /= rref(1:n))) ok = " WRONG"
-        write (output_unit, '(a,i7,f9.3,f11.3,f10.2,a)') "  " // tag, nt, tpar * 1.0e3_real64, &
-            tpar * 1.0e9_real64 / real(n, real64), tser / tpar, "  " // ok
+        ! `per-core` is the speedup divided by the thread count -- the efficiency fraction. It is
+        ! printed because the supported configurations include a SMALL team on a large machine (a
+        ! user's own outer parallel region handing each sort perhaps 8 threads), and a headline
+        ! speedup at 64 threads says nothing about that regime. A design that is 46x at 64 threads
+        ! and one that is 46x at 64 threads after scaling badly to 8 look identical without it.
+        write (output_unit, '(a,i7,f9.3,f11.3,f10.2,f10.3,a)') "  " // tag, nt, tpar * 1.0e3_real64, &
+            tpar * 1.0e9_real64 / real(n, real64), tser / tpar, &
+            (tser / tpar) / real(nt, real64), "  " // ok
     end subroutine report
     !
     !> The MSD bucket of `v`: one digit, or two combined into a 16-bit index.
@@ -457,13 +517,33 @@ contains
     !
     ! ---- Serial reference: the shape src/parquet_sorting_engine.f90 uses today ------------------
     !
+    !> **This routine PING-PONGS BY PARITY and must never go back to swapping the buffers.**
+    !!
+    !! It previously exchanged the contents of both pairs after every executed pass, with a comment
+    !! claiming the cost was "counted in every arm equally, so it cannot bias a ratio". That was
+    !! wrong twice over. The library does not do it at all -- `sort_radix_permutation` ping-pongs
+    !! with three `move_alloc` calls, which move no data -- and Design B never called it either,
+    !! because `lsd_range` already ping-pongs by parity. So the swap was charged to the BASELINE and
+    !! to Design A while Design B escaped it, which inflated every speedup in this probe and B's
+    !! most. It came to ~1.43 ns/element/pass, 64 bytes/element of traffic per pass, 512 bytes over
+    !! eight passes that the engine never moves -- enough to make this probe's serial arm 1.58x the
+    !! engine's own measured radix. See feature_sort_parallel.md section 2.4.
+    !!
+    !! `move_alloc` is not available here because these are dummy arrays, but it is not needed:
+    !! tracking which pair is live costs one logical and one branch per pass. The final copy back is
+    !! conditional and happens at most once; the engine avoids even that by letting its last pass
+    !! write straight into the output.
     subroutine radix_serial(ka, ra, kb, rb, n)
         integer(int64), intent(inout) :: ka(:), ra(:), kb(:), rb(:)
         integer(int64), intent(in) :: n
-        integer(int64) :: hist(0:255, 0:7), off(0:255)
-        integer(int64) :: j, b, t, u
+        integer(int64) :: hist(0:255, 0:7)
+        integer(int64) :: j, b, u
         integer :: p
+        logical :: in_b !! .true. when the live data is in the kb/rb pair.
         !
+        ! All eight histograms in one read, exactly as the engine does. This is the GLOBAL histogram
+        ! and it stays valid across passes because the multiset of key values never changes; only a
+        ! PER-THREAD histogram goes stale after a reordering (section 6.1).
         hist = 0_int64
         do j = 1_int64, n
             u = ka(j)
@@ -473,41 +553,55 @@ contains
                 u = ishft(u, -8)
             end do
         end do
+        in_b = .false.
         do p = 0, 7
-            b = dig(ka(1), p)
+            ! Any element answers the pass-skip question: if every row agrees on digit p then
+            ! element 1 speaks for all of them, and if they do not then the count differs from n
+            ! whichever element is read. It has to come from the LIVE pair, though.
+            if (in_b) then
+                b = dig(kb(1), p)
+            else
+                b = dig(ka(1), p)
+            end if
             if (hist(b, p) == n) cycle
-            t = 1_int64
-            do b = 0_int64, 255_int64
-                off(b) = t
-                t = t + hist(b, p)
-            end do
-            do j = 1_int64, n
-                b = dig(ka(j), p)
-                kb(off(b)) = ka(j)
-                rb(off(b)) = ra(j)
-                off(b) = off(b) + 1_int64
-            end do
-            call swap_halves(ka, ra, kb, rb, n)
+            if (in_b) then
+                call lsd_pass_serial(kb, rb, ka, ra, n, p, hist(:, p))
+            else
+                call lsd_pass_serial(ka, ra, kb, rb, n, p, hist(:, p))
+            end if
+            in_b = .not. in_b
         end do
+        if (in_b) then
+            do j = 1_int64, n
+                ka(j) = kb(j)
+                ra(j) = rb(j)
+            end do
+        end if
     end subroutine radix_serial
     !
-    !> Exchange the contents of the two pairs. A copy rather than `move_alloc` because these are
-    !! dummy arrays here; the library uses `move_alloc` and pays nothing. Counted in every arm
-    !! equally, so it cannot bias a ratio.
-    subroutine swap_halves(ka, ra, kb, rb, n)
-        integer(int64), intent(inout) :: ka(:), ra(:), kb(:), rb(:)
+    !> One serial stable LSD pass over digit `p`, reading `(sk, sr)` and writing `(dk, dr)`.
+    !! The caller swaps the argument order to flip parity, so there is one copy of this loop
+    !! rather than one per parity.
+    subroutine lsd_pass_serial(sk, sr, dk, dr, n, p, cnt)
+        integer(int64), intent(in) :: sk(:), sr(:)      !! the live pair.
+        integer(int64), intent(inout) :: dk(:), dr(:)   !! the partner pair, overwritten.
         integer(int64), intent(in) :: n
-        integer(int64) :: j, x
+        integer, intent(in) :: p                        !! which byte.
+        integer(int64), intent(in) :: cnt(0:255)        !! this digit's global histogram.
+        integer(int64) :: off(0:255), j, b, t
         !
-        do j = 1_int64, n
-            x = ka(j)
-            ka(j) = kb(j)
-            kb(j) = x
-            x = ra(j)
-            ra(j) = rb(j)
-            rb(j) = x
+        t = 1_int64
+        do b = 0_int64, 255_int64
+            off(b) = t
+            t = t + cnt(b)
         end do
-    end subroutine swap_halves
+        do j = 1_int64, n
+            b = dig(sk(j), p)
+            dk(off(b)) = sk(j)
+            dr(off(b)) = sr(j)
+            off(b) = off(b) + 1_int64
+        end do
+    end subroutine lsd_pass_serial
     !
     ! ---- Design A: LSD, per-thread-per-bucket offsets -------------------------------------------
     !
@@ -522,86 +616,109 @@ contains
         integer(int64), intent(inout) :: ka(:), ra(:), kb(:), rb(:)
         integer(int64), intent(in) :: n
         integer, intent(in) :: nt
-        integer(int64), allocatable :: hist(:,:,:) !! (bucket, digit, thread)
-        integer(int64), allocatable :: cur(:,:)    !! (bucket, thread) output cursor
-        integer(int64) :: j, b, t, u, lo, hi
-        integer :: p, tid
+        integer(int64), allocatable :: hist(:,:) !! (bucket, thread), REBUILT every pass.
+        integer(int64), allocatable :: cur(:,:)  !! (bucket, thread) output cursor.
+        integer(int64) :: j
+        integer :: p
+        logical :: in_b  !! .true. when the live data is in the kb/rb pair.
+        logical :: moved !! .false. when the pass was skipped, so parity does not flip.
         !
-        allocate(hist(0:255, 0:7, 0:nt-1), cur(0:255, 0:nt-1))
+        ! Two dimensions, not three: only the current digit's counts are ever live, because they
+        ! are rebuilt every pass anyway (see lsd_pass_par). The 3-D form allocated eight slabs and
+        ! used one.
+        allocate(hist(0:255, 0:nt-1), cur(0:255, 0:nt-1))
         !
+        ! Parity, not swapping -- see radix_serial's header for what this cost when it was a swap.
+        in_b = .false.
         do p = 0, 7
-            ! **The per-thread histogram must be rebuilt EVERY pass, and this is the single most
-            ! important structural difference from the serial code.** Serially all eight histograms
-            ! can be built in one read of `ka`, because the multiset of values never changes. Here
-            ! they cannot: after a pass, thread t's contiguous chunk holds a DIFFERENT set of rows
-            ! than it held when a global histogram was built, so a per-thread count taken before the
-            ! reordering describes the wrong rows. Building them up front and reusing them across
-            ! passes produces a silently wrong permutation from two threads upward -- confirmed by
-            ! this probe's own equality check, which is why the check is here.
-            !
-            ! The consequence is a real cost: a parallel LSD pass is TWO synchronised phases (count,
-            ! then scatter) and reads `ka` twice, where a serial pass is one phase and one read.
-            !$omp parallel num_threads(nt) default(shared) private(tid, lo, hi, j, b)
-            tid = omp_get_thread_num()
-            lo = 1_int64 + (n * int(tid, int64)) / int(nt, int64)
-            hi = (n * int(tid + 1, int64)) / int(nt, int64)
-            hist(:, p, tid) = 0_int64
-            do j = lo, hi
-                b = dig(ka(j), p)
-                hist(b, p, tid) = hist(b, p, tid) + 1_int64
-            end do
-            !$omp end parallel
-            !
-            ! The pass-skip test, unchanged: a digit every row agrees on cannot reorder anything.
-            b = dig(ka(1), p)
-            u = 0_int64
-            do t = 0_int64, int(nt - 1, int64)
-                u = u + hist(b, p, t)
-            end do
-            if (u == n) cycle
-            !
-            ! Serial prefix over (bucket, thread). 256*nt entries -- 16384 at nt = 64, against n
-            ! rows, so it is not a scaling term until n gets small.
-            u = 1_int64
-            do b = 0_int64, 255_int64
-                do t = 0_int64, int(nt - 1, int64)
-                    cur(b, t) = u
-                    u = u + hist(b, p, t)
-                end do
-            end do
-            !
-            !$omp parallel num_threads(nt) default(shared) private(tid, lo, hi, j, b)
-            tid = omp_get_thread_num()
-            lo = 1_int64 + (n * int(tid, int64)) / int(nt, int64)
-            hi = (n * int(tid + 1, int64)) / int(nt, int64)
-            do j = lo, hi
-                b = dig(ka(j), p)
-                kb(cur(b, tid)) = ka(j)
-                rb(cur(b, tid)) = ra(j)
-                cur(b, tid) = cur(b, tid) + 1_int64
-            end do
-            !$omp end parallel
-            call swap_halves_par(ka, ra, kb, rb, n, nt)
+            if (in_b) then
+                call lsd_pass_par(kb, rb, ka, ra, n, nt, p, hist, cur, moved)
+            else
+                call lsd_pass_par(ka, ra, kb, rb, n, nt, p, hist, cur, moved)
+            end if
+            if (moved) in_b = .not. in_b
         end do
+        if (in_b) then
+            !$omp parallel do num_threads(nt) default(shared) private(j) schedule(static)
+            do j = 1_int64, n
+                ka(j) = kb(j)
+                ra(j) = rb(j)
+            end do
+            !$omp end parallel do
+        end if
     end subroutine radix_lsd_parallel
     !
-    subroutine swap_halves_par(ka, ra, kb, rb, n, nt)
-        integer(int64), intent(inout) :: ka(:), ra(:), kb(:), rb(:)
+    !> One parallel stable LSD pass over digit `p`, reading `(sk, sr)` and writing `(dk, dr)`.
+    !! `moved` reports whether it scattered at all, so the caller knows whether to flip parity.
+    subroutine lsd_pass_par(sk, sr, dk, dr, n, nt, p, hist, cur, moved)
+        integer(int64), intent(in) :: sk(:), sr(:)          !! the live pair.
+        integer(int64), intent(inout) :: dk(:), dr(:)       !! the partner pair, overwritten.
         integer(int64), intent(in) :: n
-        integer, intent(in) :: nt
-        integer(int64) :: j, x, y
+        integer, intent(in) :: nt, p
+        integer(int64), intent(inout) :: hist(0:,0:), cur(0:,0:) !! (bucket, thread); scratch.
+        logical, intent(out) :: moved
+        integer(int64) :: j, b, t, u, lo, hi
+        integer :: tid
         !
-        !$omp parallel do num_threads(nt) default(shared) private(j, x, y) schedule(static)
-        do j = 1_int64, n
-            x = ka(j)
-            ka(j) = kb(j)
-            kb(j) = x
-            y = ra(j)
-            ra(j) = rb(j)
-            rb(j) = y
+        ! **The per-thread histogram must be rebuilt EVERY pass, and this is the single most
+        ! important structural difference from the serial code.** Serially all eight histograms
+        ! can be built in one read, because the multiset of values never changes. Here they
+        ! cannot: after a pass, thread t's contiguous chunk holds a DIFFERENT set of rows than it
+        ! held when a global histogram was built, so a per-thread count taken before the
+        ! reordering describes the wrong rows. Building them up front and reusing them across
+        ! passes produces a silently wrong permutation from two threads upward -- confirmed by
+        ! this probe's own equality check, which is why the check is here.
+        !
+        ! The consequence is a real cost: a parallel LSD pass is TWO synchronised phases (count,
+        ! then scatter) and reads the key array twice, where a serial pass is one phase and one
+        ! read. That, not the buffer handling, is why Design A starts behind the serial reference.
+        !$omp parallel num_threads(nt) default(shared) private(tid, lo, hi, j, b)
+        tid = omp_get_thread_num()
+        lo = 1_int64 + (n * int(tid, int64)) / int(nt, int64)
+        hi = (n * int(tid + 1, int64)) / int(nt, int64)
+        hist(:, tid) = 0_int64
+        do j = lo, hi
+            b = dig(sk(j), p)
+            hist(b, tid) = hist(b, tid) + 1_int64
         end do
-        !$omp end parallel do
-    end subroutine swap_halves_par
+        !$omp end parallel
+        !
+        ! The pass-skip test, unchanged: a digit every row agrees on cannot reorder anything.
+        b = dig(sk(1), p)
+        u = 0_int64
+        do t = 0_int64, int(nt - 1, int64)
+            u = u + hist(b, t)
+        end do
+        if (u == n) then
+            moved = .false.
+            return
+        end if
+        !
+        ! Serial prefix over (bucket, thread) -- **BUCKET major, THREAD minor, and that ordering is
+        ! what makes the answer stable**: within a bucket, thread 0's rows precede thread 1's, and
+        ! within a thread the input order survives. 256*nt entries -- 16384 at nt = 64, against n
+        ! rows, so it is not a scaling term until n gets small.
+        u = 1_int64
+        do b = 0_int64, 255_int64
+            do t = 0_int64, int(nt - 1, int64)
+                cur(b, t) = u
+                u = u + hist(b, t)
+            end do
+        end do
+        !
+        !$omp parallel num_threads(nt) default(shared) private(tid, lo, hi, j, b)
+        tid = omp_get_thread_num()
+        lo = 1_int64 + (n * int(tid, int64)) / int(nt, int64)
+        hi = (n * int(tid + 1, int64)) / int(nt, int64)
+        do j = lo, hi
+            b = dig(sk(j), p)
+            dk(cur(b, tid)) = sk(j)
+            dr(cur(b, tid)) = sr(j)
+            cur(b, tid) = cur(b, tid) + 1_int64
+        end do
+        !$omp end parallel
+        moved = .true.
+    end subroutine lsd_pass_par
     !
     ! ---- Design B: one MSD split, then whole buckets in parallel --------------------------------
     !

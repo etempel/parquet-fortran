@@ -218,6 +218,8 @@ contains
                 test_fortran_engine_switches), &
             new_unittest("engine: the Fortran sort matches the C++ one on every family and size", &
                 test_fortran_engine_ab_families), &
+            new_unittest("engine: the Fortran engine matches C++ on every operation that is not a sort", &
+                test_fortran_engine_ab_operations), &
             new_unittest("engine: the Fortran sort matches on degenerate input shapes", &
                 test_fortran_engine_adversarial), &
             new_unittest("engine: the radix path really runs, and only above its floor", &
@@ -5900,6 +5902,211 @@ contains
             deallocate(vi, vr, vs, valid)
         end do
     end subroutine test_fortran_engine_ab_families
+    !
+    !> **Stage 5: every operation that is NOT a full sort, C++ engine against Fortran engine.**
+    !!
+    !! `engine_ab` above covers `pf_argsort`. These six reach engine procedures of their own, and
+    !! every one of them was unreachable from the Fortran engine before Stage 5 — so without this
+    !! test the six new procedures would be dead code that the suite reports as passing.
+    !!
+    !! **The fixtures carry DUPLICATES deliberately.** Four of the six — is_sorted, the run flags,
+    !! search and merge — turn on rows comparing EQUAL, which is the one relation the sort
+    !! comparator's index tiebreaker destroys. A fixture of distinct values passes just as happily
+    !! against an implementation that reached for the wrong comparator, so it would test nothing
+    !! about the decision this stage's engine procedures actually have to make.
+    subroutine test_fortran_engine_ab_operations(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        !> **60 rows, not a dozen.** `sort_nth_index`'s quickselect only loops while the surviving
+        !! range exceeds `SORT_INSERTION_CUTOFF` (16), so a fixture at or below that size runs
+        !! straight into the final insertion sort and never partitions at all — a deliberate
+        !! off-by-one in the side selection survived a 12-row version of this test for exactly that
+        !! reason. `feature_risks.md` Risk-49 is the general form: a size threshold is a fast path
+        !! wearing different clothes.
+        integer(int32) :: v(60)
+        integer(int32), parameter :: sa(5) = [3, 10, 10, 21, 40] !! ordered, with a tie inside it.
+        integer(int32), parameter :: sb(4) = [1, 10, 22, 40]     !! ordered, and ties across sa.
+        integer(int32), parameter :: targets(5) = [2, 3, 10, 22, 99] !! absent, first, tied, mid, past-end.
+        integer(int32), parameter :: counts(5) = [1, 2, 16, 17, 60]  !! partial counts, spanning the cutoff.
+        !> Two keys whose FIRST alone has duplicates, so grouping by a prefix shorter than the key
+        !! list is a different question from grouping by all of it. Every single-key fixture makes
+        !! `group_keys` and `size(keys)` equal, which is why one is needed here.
+        integer(int32), parameter :: g1(8) = [2, 1, 2, 1, 3, 2, 1, 3]
+        integer(int32), parameter :: g2(8) = [9, 4, 7, 6, 1, 5, 8, 2]
+        !> A merge tie the OUTPUT can see. `pf_merge` returns values, so two equal integers are
+        !! indistinguishable however the tie was broken — which let "take from the second range"
+        !! survive a first version of this test. Negative zero compares equal to positive zero and
+        !! is still a different value, so it reveals which input the element came from.
+        real(real64), parameter :: za(2) = [-0.0_real64, 3.0_real64]
+        real(real64), parameter :: zb(2) = [0.0_real64, 4.0_real64]
+        integer(int32), allocatable :: cp(:), fp(:) !! per-engine value results.
+        real(real64), allocatable :: cz(:), fz(:)   !! per-engine merged reals.
+        integer, allocatable :: cr(:), fr(:)        !! per-engine ranks.
+        integer(int64), allocatable :: cperm(:), fperm(:), coff(:), foff(:) !! per-engine grouping.
+        type(pf_sort_keys) :: gk                    !! the two-key set.
+        integer(int32) :: cv, fv                    !! per-engine nth value.
+        integer(int64) :: ci, fi                    !! per-engine nth index.
+        integer(int64) :: cl, fl, ch, fh            !! per-engine lower/upper bounds.
+        integer :: cc, fc                           !! per-engine distinct counts.
+        logical :: cok, fok                         !! per-engine is_sorted answers.
+        integer :: k                                !! sweep index.
+        character(len=32) :: kstr
+        !
+        ! Duplicates every third row or so, and no order at all: run detection and the tie rules
+        ! need repeated values, and the select paths need the input not to be already sorted.
+        do k = 1, size(v)
+            v(k) = int(mod(k * 37, 23), int32)
+        end do
+        !
+        ! ---- partial: drive_engine_partial -> sort_partial_permutation ----
+        do k = 1, size(counts)
+            write (kstr, "(i0)") counts(k)
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call pf_partial_sort(v, cp, counts(k))
+            call parquet_debug_use_fortran_sort_engine(.true.)
+            call pf_partial_sort(v, fp, counts(k))
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call check(error, size(cp) == size(fp), &
+                "partial count=" // trim(kstr) // ": the two engines returned different lengths")
+            if (allocated(error)) return
+            call check(error, all(cp == fp), &
+                "partial count=" // trim(kstr) // ": the Fortran engine disagreed with the C++ one")
+            if (allocated(error)) return
+        end do
+        !
+        ! ---- nth: engine_nth_index -> sort_nth_index. Every rank, so the quickselect's narrowing is
+        ! exercised from both ends and not only in the middle.
+        do k = 1, size(v)
+            write (kstr, "(i0)") k
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call pf_nth_element(v, k, cv, ci)
+            call parquet_debug_use_fortran_sort_engine(.true.)
+            call pf_nth_element(v, k, fv, fi)
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call check(error, cv == fv, &
+                "nth rank=" // trim(kstr) // ": the two engines returned different values")
+            if (allocated(error)) return
+            ! The INDEX too, not just the value: under the index tiebreaker exactly one row holds
+            ! each rank, so a disagreement here on the duplicated 10s and 40s is a real defect that
+            ! comparing values alone would miss.
+            call check(error, ci == fi, &
+                "nth rank=" // trim(kstr) // ": the two engines returned different row indices")
+            if (allocated(error)) return
+        end do
+        !
+        ! ---- is_sorted: engine_is_sorted -> sort_is_sorted. Both answers, since a procedure that
+        ! always says .true. passes a one-sided test.
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_is_sorted(v, cok)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_is_sorted(v, fok)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call check(error, (.not. cok) .and. (cok .eqv. fok), &
+            "is_sorted on unordered input: both engines must answer .false.")
+        if (allocated(error)) return
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_is_sorted(sa, cok)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_is_sorted(sa, fok)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call check(error, cok .and. (cok .eqv. fok), &
+            "is_sorted on ordered input WITH A TIE: both engines must answer .true.")
+        if (allocated(error)) return
+        !
+        ! ---- run detection: engine_build_runs -> sort_build_runs_permutation ----
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_unique_count(v, cc)
+        call pf_unique(v, cp)
+        call pf_rank(v, cr)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_unique_count(v, fc)
+        call pf_unique(v, fp)
+        call pf_rank(v, fr)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call check(error, cc == fc, "unique_count: the two engines disagreed")
+        if (allocated(error)) return
+        call check(error, size(cp) == size(fp), "unique: the two engines returned different lengths")
+        if (allocated(error)) return
+        call check(error, all(cp == fp), "unique: the two engines returned different distinct values")
+        if (allocated(error)) return
+        call check(error, all(cr == fr), "rank: the two engines returned different ranks")
+        if (allocated(error)) return
+        !
+        ! ---- run detection with a GROUP PREFIX SHORTER than the key list ----
+        ! The only shape in which `group_keys` and `size(keys)` differ, and therefore the only one
+        ! that can catch a run-detection pass which quietly used every key: with `group_nkeys=1` the
+        ! rows sharing a `g1` value are one group however much `g2` differs inside it.
+        call gk%clear()
+        call gk%add(g1)
+        call gk%add(g2)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_argsort(gk, cperm, group_offsets=coff, group_nkeys=1)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_argsort(gk, fperm, group_offsets=foff, group_nkeys=1)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call check(error, all(cperm == fperm), &
+            "grouped argsort: the two engines returned different permutations")
+        if (allocated(error)) return
+        call check(error, size(coff) == size(foff), &
+            "grouped argsort: the two engines found different numbers of groups")
+        if (allocated(error)) return
+        call check(error, all(coff == foff), &
+            "grouped argsort: the two engines put the group boundaries in different places")
+        if (allocated(error)) return
+        ! Absolute, not just an A/B: three distinct g1 values means three groups, plus the sentinel.
+        ! Without this, both engines counting by all four keys would agree with each other on eight.
+        call check(error, size(foff) == 4, &
+            "grouping by a one-key prefix of a two-key sort must find exactly three groups")
+        if (allocated(error)) return
+        !
+        ! ---- search: engine_search -> sort_search_position. `assume_sorted` keeps this on the
+        ! binary-search path rather than letting the call sort first.
+        do k = 1, size(targets)
+            write (kstr, "(i0)") targets(k)
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call pf_lower_bound(sa, targets(k), cl, assume_sorted=.true.)
+            call pf_upper_bound(sa, targets(k), ch, assume_sorted=.true.)
+            call parquet_debug_use_fortran_sort_engine(.true.)
+            call pf_lower_bound(sa, targets(k), fl, assume_sorted=.true.)
+            call pf_upper_bound(sa, targets(k), fh, assume_sorted=.true.)
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            call check(error, cl == fl, &
+                "lower_bound target=" // trim(kstr) // ": the two engines disagreed")
+            if (allocated(error)) return
+            call check(error, ch == fh, &
+                "upper_bound target=" // trim(kstr) // ": the two engines disagreed")
+            if (allocated(error)) return
+        end do
+        !
+        ! ---- merge: engine_merge -> sort_merge_permutation. The two inputs share the values 10 and
+        ! 40, so the tie rule (take from the FIRST input) is what the comparison actually tests.
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_merge(sa, sb, cp)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_merge(sa, sb, fp)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call check(error, size(cp) == size(fp), "merge: the two engines returned different lengths")
+        if (allocated(error)) return
+        call check(error, all(cp == fp), "merge: the Fortran engine disagreed with the C++ one")
+        if (allocated(error)) return
+        !
+        ! ---- merge, with a tie the OUTPUT can distinguish ----
+        ! `-0.0` and `+0.0` compare EQUAL and are different values, so this is what makes the tie
+        ! rule observable at all through an API that returns values rather than indices. Taking the
+        ! first range's element on a tie is `std::merge`'s stability guarantee and the reason
+        ! `pf_merge` agrees with `pf_sort` of the concatenation element for element.
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call pf_merge(za, zb, cz)
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_merge(za, zb, fz)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call check(error, all(cz == fz), "merge of reals: the two engines disagreed on the values")
+        if (allocated(error)) return
+        call check(error, sign(1.0_real64, fz(1)) < 0.0_real64, &
+            "merge must take the FIRST range's element on a tie: -0.0 from a, not +0.0 from b")
+        if (allocated(error)) return
+        call check(error, sign(1.0_real64, cz(1)) < 0.0_real64, &
+            "the C++ engine must break the merge tie the same way, or the two have diverged")
+    end subroutine test_fortran_engine_ab_operations
     !
     !> The input shapes a quicksort degenerates on, at a size where degenerating would be visible.
     !!

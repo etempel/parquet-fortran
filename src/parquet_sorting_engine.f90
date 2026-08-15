@@ -1974,6 +1974,224 @@ contains
         end do
     end subroutine sort_sift_down
 
+    ! ---- The operations that are not a full sort (feature_sort.md Stage 5) ---------------------
+    !
+    ! Six operations that answer something other than "order every row". Not one of them writes a
+    ! comparison out again: each routes through `sort_row_less` or `sort_keys_compare`, so the
+    ! ordering rule keeps appearing exactly once (feature_risks.md Risk-34).
+    !
+    ! **Which of the two comparators an operation takes is a correctness decision, not a style one.**
+    ! `sort_row_less` carries the row-index tiebreaker and is for ORDERING -- partial selection and
+    ! nth. `sort_keys_compare` does not, and is for everything that has to recognise "these two rows
+    ! are EQUAL": is_sorted, the run flags, binary search and merge. Under the tiebreaker no two
+    ! distinct rows are ever equal, so using it in those four would silently answer a different
+    ! question -- run detection would report every row as its own group, and a search would never
+    ! find a match. The C++ engine draws the same line for the same reason.
+
+    !> The first `count` entries of the sorted permutation, by heap selection.
+    !!
+    !! `std::partial_sort`'s algorithm, which is what the C++ engine calls: build a max-heap of the
+    !! first `count` rows, then walk the rest replacing the root whenever a row beats it, then sort
+    !! the heap. **Not a full sort truncated** -- that distinction is asserted by a test counting
+    !! comparisons, so a "simplification" to sort-then-take would be caught.
+    !!
+    !! The heap phases are written out rather than reusing `sort_heapsort`, which builds AND sorts in
+    !! one call and would also bump `dbg_sort_heapsort_calls` -- an observable that belongs to the
+    !! introsort's depth fallback and would stop meaning that.
+    module procedure sort_partial_permutation
+        integer(int64), allocatable :: heap(:) !! the `count` best rows so far, as a max-heap.
+        integer(int64) :: i, k                 !! scan cursor, then heap index.
+        !
+        if (count < 1_int64 .or. n < 1_int64) return
+        allocate(heap(count))
+        do k = 1_int64, count
+            heap(k) = k
+        end do
+        do k = count / 2_int64, 1_int64, -1_int64
+            call sort_sift_down(keys, heap, 1_int64, k, count)
+        end do
+        ! The root is the WORST of the current best `count`, so one comparison per remaining row is
+        ! enough to reject it. That is what makes this O(n + count log count) rather than O(n log n).
+        do i = count + 1_int64, n
+            if (sort_row_less(keys, i, heap(1))) then
+                heap(1) = i
+                call sort_sift_down(keys, heap, 1_int64, 1_int64, count)
+            end if
+        end do
+        do k = count, 2_int64, -1_int64
+            call sort_swap(heap, 1_int64, k)
+            call sort_sift_down(keys, heap, 1_int64, 1_int64, k - 1_int64)
+        end do
+        perm(1:count) = heap(1:count)
+    end procedure sort_partial_permutation
+
+    !> The row index a full sort would place at 1-based rank `nth`, by quickselect.
+    !!
+    !! `std::nth_element`'s introselect, over the same `sort_partition` the introsort uses: partition,
+    !! keep only the side holding `nth`, and stop at the insertion cutoff. Everything outside the
+    !! surviving range is already separated correctly by the partitions, so insertion-sorting just
+    !! that range puts rank `nth` in its place.
+    !!
+    !! The depth fallback is the shared `sort_heapsort`, which is the right call here -- it really is
+    !! the introsort's fallback doing its job -- and it does bump `dbg_sort_heapsort_calls`.
+    module procedure sort_nth_index
+        integer(int64), allocatable :: work(:) !! the permutation being narrowed.
+        integer(int64) :: lo, hi, cut, k       !! the surviving range, the partition point, a cursor.
+        integer :: depth                       !! remaining depth before the heapsort fallback.
+        !
+        idx = 0_int64
+        if (n < 1_int64 .or. nth < 1_int64 .or. nth > n) return
+        allocate(work(n))
+        do k = 1_int64, n
+            work(k) = k
+        end do
+        lo = 1_int64
+        hi = n
+        depth = 2 * sort_ilog2(n)
+        if (dbg_sort_depth_limit >= 0) depth = dbg_sort_depth_limit
+        do while (hi - lo + 1_int64 > SORT_INSERTION_CUTOFF)
+            if (depth == 0) then
+                call sort_heapsort(keys, work, lo, hi)
+                exit
+            end if
+            depth = depth - 1
+            cut = sort_partition(keys, work, lo, hi)
+            if (nth >= cut) then
+                lo = cut
+            else
+                hi = cut - 1_int64
+            end if
+        end do
+        call sort_insertion(keys, work, lo, hi)
+        idx = work(nth)
+    end procedure sort_nth_index
+
+    !> Are rows `1 .. n` already in order under every key?
+    !!
+    !! `sort_keys_compare`, so two adjacent rows that compare EQUAL are in order.
+    !!
+    !! **`sort_row_less` would happen to give the same answer here, and that is a coincidence worth
+    !! not relying on.** Its tiebreaker orders by ascending row index, and this scan walks rows in
+    !! ascending index order, so on an equal-comparing pair it reports "in order" too — a mutation
+    !! swapping one for the other survives every fixture. The agreement is a property of the scan
+    !! direction, not of the operation: anything walking a permutation instead of the rows
+    !! themselves (which is what run detection does, one procedure below) gets a different answer
+    !! from the two. Keep the comparator that matches the question being asked.
+    module procedure sort_is_sorted
+        integer(int64) :: i !! the row being compared against its predecessor.
+        !
+        answer = .true.
+        do i = 2_int64, n
+            if (sort_keys_compare(keys, i - 1_int64, i, size(keys)) > 0) then
+                answer = .false.
+                return
+            end if
+        end do
+    end procedure sort_is_sorted
+
+    !> Sorts, then flags where the runs of EQUAL rows begin.
+    !!
+    !! One pass rather than a sort followed by a separate comparison pass, because the callers
+    !! (`pf_unique`, `pf_rank`) need both and building the permutation twice would double the cost.
+    !!
+    !! `group_keys` is how many LEADING keys decide a tie, and it is the only thing here that does not
+    !! use every key -- the sort always orders by all of them. That asymmetry is the point: it
+    !! produces "grouped by field, ordered by magnitude within each group" from a single pass.
+    !! `tie(1)` is always 0; the first row starts a run by definition.
+    module procedure sort_build_runs_permutation
+        integer(int64) :: k !! output position.
+        !
+        call sort_build_permutation(keys, n, perm)
+        if (n < 1_int64) return
+        tie(1) = 0_c_int8_t
+        do k = 2_int64, n
+            ! `int()` because `sort_keys_compare` takes a default-kind `nkeys` and the drivers carry
+            ! the group width as int64. A key count cannot overflow int32, and the callee clamps it
+            ! to `size(keys)` anyway.
+            if (sort_keys_compare(keys, perm(k - 1_int64), perm(k), int(group_keys)) == 0) then
+                tie(k) = 1_c_int8_t
+            else
+                tie(k) = 0_c_int8_t
+            end if
+        end do
+    end procedure sort_build_runs_permutation
+
+    !> Binary search for the target row, which the caller has APPENDED as row `n_search + 1`.
+    !!
+    !! **That appending is the whole design and must survive any rewrite.** The target is compared by
+    !! the very same `sort_keys_compare` over the very same key layout, so there is no
+    !! compare-a-row-against-a-value arm to keep in step with the sort -- which is what makes drift
+    !! structurally impossible rather than merely tested for (`feature_risks.md` Risk-34).
+    !!
+    !! `upper` selects the first position the target is ordered before; otherwise the first position
+    !! not ordered before the target. The result is a 1-based insertion point in `1 .. n_search+1`.
+    module procedure sort_search_position
+        integer(int64) :: lo, hi, mid !! the half-open search window, 0-based, and its midpoint.
+        integer(int64) :: target      !! 1-based row index of the appended target.
+        integer :: c                  !! comparison of the midpoint row against the target.
+        logical :: before             !! .true. when the midpoint is ordered before the answer.
+        !
+        target = n_search + 1_int64
+        lo = 0_int64
+        hi = max(n_search, 0_int64)
+        do while (lo < hi)
+            mid = lo + (hi - lo) / 2_int64
+            c = sort_keys_compare(keys, mid + 1_int64, target, size(keys))
+            if (upper) then
+                before = c <= 0
+            else
+                before = c < 0
+            end if
+            if (before) then
+                lo = mid + 1_int64
+            else
+                hi = mid
+            end if
+        end do
+        pos = lo + 1_int64
+    end procedure sort_search_position
+
+    !> Merges two already-ordered ranges -- rows `1 .. na` and `na+1 .. n` -- into one permutation.
+    !!
+    !! `<= 0` takes from the FIRST range on a tie, which is `std::merge`'s own stability guarantee and
+    !! what makes `pf_merge` agree with `pf_sort` of the concatenation element for element. Note this
+    !! is one of the places where the two comparators would happen to agree -- every row of the first
+    !! range has a lower index than every row of the second, so the tiebreaker would break the tie the
+    !! same way -- but `sort_keys_compare` is used anyway, because the agreement is a property of how
+    !! the caller happens to lay the ranges out and not of the operation.
+    module procedure sort_merge_permutation
+        integer(int64) :: i, j, k !! cursors into the first range, the second, and the output.
+        integer(int64) :: na_c    !! `na` clamped into 0..n.
+        !
+        ! Clamped exactly as the C++ entry point clamps it, and for a sharper reason here: an `na`
+        ! above `n` would send the first drain loop past the end of `perm`, which Fortran will not
+        ! catch without bounds checking.
+        na_c = max(0_int64, min(na, n))
+        i = 1_int64
+        j = na_c + 1_int64
+        k = 0_int64
+        do while (i <= na_c .and. j <= n)
+            k = k + 1_int64
+            if (sort_keys_compare(keys, i, j, size(keys)) <= 0) then
+                perm(k) = i
+                i = i + 1_int64
+            else
+                perm(k) = j
+                j = j + 1_int64
+            end if
+        end do
+        do while (i <= na_c)
+            k = k + 1_int64
+            perm(k) = i
+            i = i + 1_int64
+        end do
+        do while (j <= n)
+            k = k + 1_int64
+            perm(k) = j
+            j = j + 1_int64
+        end do
+    end procedure sort_merge_permutation
+
     ! ---- Test-only access to the two comparators -----------------------------------------------
     !
     ! These exist so `test/test_sorting.f90` can ask the Fortran engine what it thinks, one row pair

@@ -1563,6 +1563,67 @@ def emit_engine_interfaces(w):
     w("            integer(int64), intent(in) :: hi         !! largest valid key value.")
     w("            integer(int64), intent(inout) :: perm(:) !! receives `n` 1-based row indices.")
     w("        end subroutine sort_counting_permutation")
+    w("        !> The first `count` entries of the sorted permutation, by heap selection.")
+    w("        !!")
+    w("        !! `std::partial_sort`'s algorithm, not a full sort truncated -- a test counts")
+    w("        !! comparisons to hold that apart. Everything past `count` in `perm` is untouched.")
+    w("        module subroutine sort_partial_permutation(keys, n, count, perm)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.")
+    w("            integer(int64), intent(in) :: n           !! rows available.")
+    w("            integer(int64), intent(in) :: count       !! leading entries to order.")
+    w("            integer(int64), intent(inout) :: perm(:)  !! receives `count` 1-based row indices.")
+    w("        end subroutine sort_partial_permutation")
+    w("        !> The row a full sort would place at 1-based rank `nth`, by quickselect.")
+    w("        !!")
+    w("        !! Deterministic because the comparator is a total order: there is exactly one row at")
+    w("        !! that rank, so this and a full sort cannot disagree. `idx` is 0 for an out-of-range")
+    w("        !! rank, which every caller has already rejected.")
+    w("        module subroutine sort_nth_index(keys, n, nth, idx)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.")
+    w("            integer(int64), intent(in) :: n           !! rows.")
+    w("            integer(int64), intent(in) :: nth         !! 1-based rank wanted.")
+    w("            integer(int64), intent(out) :: idx        !! 1-based row index at that rank.")
+    w("        end subroutine sort_nth_index")
+    w("        !> Are rows `1..n` already in order under every key?")
+    w("        !!")
+    w("        !! Over `sort_keys_compare`, so adjacent EQUAL rows are in order — the tiebreaker would")
+    w("        !! turn this into \"is the row index ascending\".")
+    w("        module function sort_is_sorted(keys, n) result(answer)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.")
+    w("            integer(int64), intent(in) :: n           !! rows.")
+    w("            logical :: answer                         !! .true. when already ordered.")
+    w("        end function sort_is_sorted")
+    w("        !> Sorts, then flags where the runs of EQUAL rows begin. `tie(1)` is always 0.")
+    w("        !!")
+    w("        !! `group_keys` is how many LEADING keys decide a tie; the sort itself always uses every")
+    w("        !! key. That asymmetry is what produces \"grouped by field, ordered within group\".")
+    w("        module subroutine sort_build_runs_permutation(keys, n, group_keys, perm, tie)")
+    w("            type(sort_key_buf), intent(in) :: keys(:)  !! the keys, in precedence order.")
+    w("            integer(int64), intent(in) :: n            !! rows.")
+    w("            integer(int64), intent(in) :: group_keys   !! leading keys that decide a tie.")
+    w("            integer(int64), intent(inout) :: perm(:)   !! receives `n` 1-based row indices.")
+    w("            integer(c_int8_t), intent(inout) :: tie(:) !! 1 where a row ties with its predecessor.")
+    w("        end subroutine sort_build_runs_permutation")
+    w("        !> Binary search for the target row, which the caller APPENDED as row `n_search + 1`.")
+    w("        !!")
+    w("        !! **Preserve the appending.** It is what removes any compare-a-row-against-a-value arm")
+    w("        !! and so makes drift from the sort comparator structurally impossible — Risk-34.")
+    w("        module function sort_search_position(keys, n_search, upper) result(pos)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys; row n_search+1 is the target.")
+    w("            integer(int64), intent(in) :: n_search    !! rows being searched.")
+    w("            logical, intent(in) :: upper              !! .true. for upper_bound.")
+    w("            integer(int64) :: pos                     !! 1-based insertion point in 1..n_search+1.")
+    w("        end function sort_search_position")
+    w("        !> Merges the already-ordered ranges `1..na` and `na+1..n` into one permutation.")
+    w("        !!")
+    w("        !! Ties take from the FIRST range, which is `std::merge`'s stability guarantee and what")
+    w("        !! makes `pf_merge` agree with `pf_sort` of the concatenation element for element.")
+    w("        module subroutine sort_merge_permutation(keys, n, na, perm)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.")
+    w("            integer(int64), intent(in) :: n           !! total rows across both ranges.")
+    w("            integer(int64), intent(in) :: na          !! rows in the first range.")
+    w("            integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.")
+    w("        end subroutine sort_merge_permutation")
     w("    end interface")
     w("    !")
     w("    ! ---- Test-only access to the comparator core (parquet_sorting_engine) ----")
@@ -2333,6 +2394,10 @@ contains
             perm(ik) = ik
         end do
         if (count < 1_int64 .or. nrows < 2_int64) return
+        if (dbg_fortran_engine) then
+            call sort_partial_permutation(keys, nrows, count, perm)
+            return
+        end if
         if (size(keys) == 1) then
             call engine_one_shot_partial(keys(1), nrows, count, perm)
             return
@@ -2356,6 +2421,10 @@ contains
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
+        end if
+        if (dbg_fortran_engine) then
+            call sort_nth_index(keys, nrows, nth, idx)
+            return
         end if
         if (size(keys) == 1) then
             call engine_one_shot_nth(keys(1), nrows, nth, idx)
@@ -2438,6 +2507,10 @@ contains
         end if
         answer = .true.
         if (nrows < 2_int64) return
+        if (dbg_fortran_engine) then
+            answer = sort_is_sorted(keys, nrows)
+            return
+        end if
         if (size(keys) == 1) then
             call engine_one_shot_is_sorted(keys(1), nrows, answer)
             return
@@ -2931,6 +3004,10 @@ contains
         ! sentinel, so the C++ side obeys rather than interprets what a prefix of zero would mean.
         gek = int(size(keys), int64)
         if (present(group_ekeys)) gek = int(group_ekeys, int64)
+        if (dbg_fortran_engine) then
+            call sort_build_runs_permutation(keys, nrows, gek, perm, tie)
+            return
+        end if
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)
@@ -2989,6 +3066,10 @@ contains
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
+        if (dbg_fortran_engine) then
+            pos = sort_search_position(keys, n_search, upper)
+            return
+        end if
         wflag = merge(1_c_int8_t, 0_c_int8_t, upper)
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
@@ -3015,6 +3096,10 @@ contains
             perm(k) = k
         end do
         if (nrows < 2_int64) return
+        if (dbg_fortran_engine) then
+            call sort_merge_permutation(keys, nrows, na, perm)
+            return
+        end if
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)

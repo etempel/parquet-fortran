@@ -824,6 +824,10 @@ contains
             perm(ik) = ik
         end do
         if (count < 1_int64 .or. nrows < 2_int64) return
+        if (dbg_fortran_engine) then
+            call sort_partial_permutation(keys, nrows, count, perm)
+            return
+        end if
         if (size(keys) == 1) then
             call engine_one_shot_partial(keys(1), nrows, count, perm)
             return
@@ -847,6 +851,10 @@ contains
         if (size(keys) < 1) then
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
+        end if
+        if (dbg_fortran_engine) then
+            call sort_nth_index(keys, nrows, nth, idx)
+            return
         end if
         if (size(keys) == 1) then
             call engine_one_shot_nth(keys(1), nrows, nth, idx)
@@ -929,6 +937,10 @@ contains
         end if
         answer = .true.
         if (nrows < 2_int64) return
+        if (dbg_fortran_engine) then
+            answer = sort_is_sorted(keys, nrows)
+            return
+        end if
         if (size(keys) == 1) then
             call engine_one_shot_is_sorted(keys(1), nrows, answer)
             return
@@ -1422,6 +1434,10 @@ contains
         ! sentinel, so the C++ side obeys rather than interprets what a prefix of zero would mean.
         gek = int(size(keys), int64)
         if (present(group_ekeys)) gek = int(group_ekeys, int64)
+        if (dbg_fortran_engine) then
+            call sort_build_runs_permutation(keys, nrows, gek, perm, tie)
+            return
+        end if
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)
@@ -1480,6 +1496,10 @@ contains
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
+        if (dbg_fortran_engine) then
+            pos = sort_search_position(keys, n_search, upper)
+            return
+        end if
         wflag = merge(1_c_int8_t, 0_c_int8_t, upper)
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
@@ -1506,6 +1526,10 @@ contains
             perm(k) = k
         end do
         if (nrows < 2_int64) return
+        if (dbg_fortran_engine) then
+            call sort_merge_permutation(keys, nrows, na, perm)
+            return
+        end if
         builder = parquet_sort_builder_new(nrows)
         do ik = 1, size(keys)
             call engine_add_key(builder, keys(ik), nrows)

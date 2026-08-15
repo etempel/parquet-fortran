@@ -5647,6 +5647,67 @@ module parquet_sorting
             integer(int64), intent(in) :: hi         !! largest valid key value.
             integer(int64), intent(inout) :: perm(:) !! receives `n` 1-based row indices.
         end subroutine sort_counting_permutation
+        !> The first `count` entries of the sorted permutation, by heap selection.
+        !!
+        !! `std::partial_sort`'s algorithm, not a full sort truncated -- a test counts
+        !! comparisons to hold that apart. Everything past `count` in `perm` is untouched.
+        module subroutine sort_partial_permutation(keys, n, count, perm)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+            integer(int64), intent(in) :: n           !! rows available.
+            integer(int64), intent(in) :: count       !! leading entries to order.
+            integer(int64), intent(inout) :: perm(:)  !! receives `count` 1-based row indices.
+        end subroutine sort_partial_permutation
+        !> The row a full sort would place at 1-based rank `nth`, by quickselect.
+        !!
+        !! Deterministic because the comparator is a total order: there is exactly one row at
+        !! that rank, so this and a full sort cannot disagree. `idx` is 0 for an out-of-range
+        !! rank, which every caller has already rejected.
+        module subroutine sort_nth_index(keys, n, nth, idx)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+            integer(int64), intent(in) :: n           !! rows.
+            integer(int64), intent(in) :: nth         !! 1-based rank wanted.
+            integer(int64), intent(out) :: idx        !! 1-based row index at that rank.
+        end subroutine sort_nth_index
+        !> Are rows `1..n` already in order under every key?
+        !!
+        !! Over `sort_keys_compare`, so adjacent EQUAL rows are in order — the tiebreaker would
+        !! turn this into "is the row index ascending".
+        module function sort_is_sorted(keys, n) result(answer)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+            integer(int64), intent(in) :: n           !! rows.
+            logical :: answer                         !! .true. when already ordered.
+        end function sort_is_sorted
+        !> Sorts, then flags where the runs of EQUAL rows begin. `tie(1)` is always 0.
+        !!
+        !! `group_keys` is how many LEADING keys decide a tie; the sort itself always uses every
+        !! key. That asymmetry is what produces "grouped by field, ordered within group".
+        module subroutine sort_build_runs_permutation(keys, n, group_keys, perm, tie)
+            type(sort_key_buf), intent(in) :: keys(:)  !! the keys, in precedence order.
+            integer(int64), intent(in) :: n            !! rows.
+            integer(int64), intent(in) :: group_keys   !! leading keys that decide a tie.
+            integer(int64), intent(inout) :: perm(:)   !! receives `n` 1-based row indices.
+            integer(c_int8_t), intent(inout) :: tie(:) !! 1 where a row ties with its predecessor.
+        end subroutine sort_build_runs_permutation
+        !> Binary search for the target row, which the caller APPENDED as row `n_search + 1`.
+        !!
+        !! **Preserve the appending.** It is what removes any compare-a-row-against-a-value arm
+        !! and so makes drift from the sort comparator structurally impossible — Risk-34.
+        module function sort_search_position(keys, n_search, upper) result(pos)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys; row n_search+1 is the target.
+            integer(int64), intent(in) :: n_search    !! rows being searched.
+            logical, intent(in) :: upper              !! .true. for upper_bound.
+            integer(int64) :: pos                     !! 1-based insertion point in 1..n_search+1.
+        end function sort_search_position
+        !> Merges the already-ordered ranges `1..na` and `na+1..n` into one permutation.
+        !!
+        !! Ties take from the FIRST range, which is `std::merge`'s stability guarantee and what
+        !! makes `pf_merge` agree with `pf_sort` of the concatenation element for element.
+        module subroutine sort_merge_permutation(keys, n, na, perm)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+            integer(int64), intent(in) :: n           !! total rows across both ranges.
+            integer(int64), intent(in) :: na          !! rows in the first range.
+            integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
+        end subroutine sort_merge_permutation
     end interface
     !
     ! ---- Test-only access to the comparator core (parquet_sorting_engine) ----

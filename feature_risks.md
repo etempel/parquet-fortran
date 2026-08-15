@@ -157,70 +157,16 @@ something a reader is expected to have.
 | [Risk-90](#risk-90--the-narrow-integer-bias-is-safe-in-exactly-one-direction-and-its-guard-cannot-be-tested) | The narrow-integer bias is safe in exactly ONE direction, and its guard cannot be tested | 3 — not testable |
 | [Risk-91](#risk-91--sort_radix_refine_strings-reads-one-array-while-permuting-another-and-nothing-diagnoses-passing-the-same-one) | `sort_radix_refine_strings` reads one array while permuting another, and nothing diagnoses passing the same one | 3 — not testable |
 | [Risk-92](#risk-92--the-last-radix-pass-leaves-the-row-array-stale-and-only-the-string-exclusion-makes-that-safe) | The last radix pass leaves the row array STALE, and only the string exclusion makes that safe | 4 — covered |
-| [Risk-93](#risk-93--an-intermittent-hang-inside-the-fortran-sort-engines-threaded-histogram-mechanism-unknown) | An intermittent hang inside the Fortran sort engine's threaded histogram, mechanism UNKNOWN | 1 — new |
+| [Risk-93](#risk-93--the-test-log-names-a-different-test-from-the-one-that-is-stuck) | The test log names a DIFFERENT test from the one that is stuck | 3 — not testable |
 
 ---
 
 ## 1. New risks
 
-A risk lands in this section when it is first identified — before anyone has
+*Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
 (**Risk-94**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
-
-### Risk-93 — An intermittent hang inside the Fortran sort engine's threaded histogram, mechanism UNKNOWN
-
-**What was actually observed, once.** During the Stage 6 engine flip's own test run on machine A, a
-sort of a 2000-element array sat for over 456 seconds. `sample` on the live process gave
-
-```
-test_merge_size_sweep -> pf_argsort -> drive_engine -> sort_build_permutation_impl
-  -> sort_radix_permutation -> sort_radix_hist_threaded -> libgomp -> _pthread_mutex_firstfit_lock_slow
-```
-
-`sort_radix_hist_threaded` (`src/parquet_sorting_engine.f90`) contains one plain
-`!$omp parallel num_threads(nt)` with no lock, no `critical` and no explicit barrier, so the stack
-points at libgomp's team management rather than at anything this library holds.
-
-**The obvious explanation is REFUTED, and it is recorded here so nobody spends the afternoon on it
-again.** The first write-up of this entry blamed nesting — an explicit `threads=` honoured inside a
-caller's parallel region, where the previous C++ engine used `std::thread` and cost nothing. Two
-independent facts kill it:
-
-- The `sorting` suite is excluded from test-drive's per-test parallelism
-  (`suite_is_safe_to_parallelize`, `test/run_tester.f90`), so test-drive's
-  `!$omp parallel do ... if (parallel_)` is **inactive** there and `omp_in_parallel()` is `.false.`
-  inside it. The hang had no enclosing active region at all.
-- Nested parallelism is off by default, so a nested region is serialized to a team of one and no
-  team is created. Measured with the probe below: the nested arm runs in **0.010 s** by default and
-  **1.13 s** under `OMP_MAX_ACTIVE_LEVELS=4`, which is what creating the teams actually costs.
-
-**It did not reproduce.** `app/probe_sort_team_churn.f90` mimics `test_merge_size_sweep` exactly —
-every size 2..400 at every thread count 2..8, the engine floor forced down so the teams really open.
-**83,790 sorts at top level with the team size cycling, and 25 further rounds with nesting forced on,
-all completed.** So this is one observation, not a reproducible defect, and the mechanism is
-**unestablished**. Candidates still open: a libgomp team-pool pathology reachable only from some
-particular process state (the full suite has run Arrow, several OpenMP suites and ~700 error-scenario
-subprocesses before reaching this point), or severe machine oversubscription at that moment.
-
-**One quantitative result worth keeping, because it is solid and useful.** Team creation costs
-**~183 us** per `!$omp parallel` on this machine — 0.512 s for 2793 sorts of at most 400 elements,
-where the sorting itself is microseconds. That independently validates section 14's engine floor of
-`max(32768, 2048*nt)`: below it a team costs far more than the sort it parallelises.
-
-**Why it stays in the register despite not reproducing.** A hang is not a wrong answer, but it fails
-the register's real test: a green run is not evidence of absence. It also presents at whichever test
-the scheduler was running rather than the one that provoked it — the log's last "Starting" line named
-a *different* test from the stack, because test-drive prints before dispatching. Anyone diagnosing
-this from the log rather than from a live stack will investigate the wrong test, which is exactly
-what happened the first time.
-
-**Test.** Not yet triaged, and it should not be given a test until the mechanism is known — a test
-for an unreproducible hang would be a test that passes for unknown reasons. Note the shape when it
-comes: a hang is not a failed assertion, so it needs a watchdog or an out-of-process scenario with a
-timeout; test-drive has none of its own. `app/probe_sort_team_churn.f90` is the starting point, and
-its negative result is part of the evidence rather than a gap in it.
-
 
 ## 2. Risks with a proposed testing scenario
 
@@ -891,6 +837,39 @@ The branch body is `GCOVR_EXCL`'d with that reasoning recorded beside it.
   branch live, and the entry moves to section 2 with a test the moment that happens.
 - **Do not "simplify" the two checks into one.** They are asking different questions: the first is
   about what the table has been told the column is, the second about what it actually holds.
+
+### Risk-93 — The test log names a DIFFERENT test from the one that is stuck
+
+test-drive prints its `Starting <name>` line *before* dispatching, and runs the tests of a
+parallelisable suite inside its own `!$omp parallel do`. So when a run wedges, the last `Starting`
+line in the log names whichever test the scheduler had reached — **not** the one on the stack.
+Diagnose a hang from a live stack (`sample <pid>` on macOS, `eu-stack`/`gdb` on Linux), never from
+the log's tail.
+
+**Provenance, and why it is filed rather than fixed.** Found while diagnosing a one-off stall during
+the Stage 6 engine flip: a 2000-element sort sat over 456 s inside `sort_radix_hist_threaded`'s
+`!$omp parallel`, under `libgomp` in `_pthread_mutex_firstfit_lock_slow`. The log blamed a different
+test, and an hour went into the wrong hypothesis because of it.
+
+**That stall was investigated and left unexplained; it is most likely environmental.** Nesting was
+refuted twice — the `sorting` suite is excluded from test-drive's parallelism, so the enclosing
+region is inactive and `omp_in_parallel()` is `.false.`; and nested regions are serialised by default,
+creating no team at all. It did not reproduce in **83,790** sorts mimicking the offending test, nor in
+25 rounds under `OMP_MAX_ACTIVE_LEVELS=4`, nor in any full-suite run since, and the machine was
+running several processes at the time. The one fact that does not fit the environmental story: it was
+blocked *acquiring a mutex* rather than waiting on a condition, which is deadlock-shaped. Reopen only
+on a recurrence, and capture **machine state** (load, concurrent processes) rather than more sorts —
+sorts have been shown not to be the variable.
+
+**One measurement from that investigation is worth keeping.** Opening an OpenMP team costs **~183 us**
+on machine A — 0.512 s for 2793 sorts of at most 400 elements, where the sorting itself is
+microseconds. That is several times what sorting 32,000 elements costs end to end, and it means
+section 14's engine floor of `max(32768, 2048*nt)` is not conservative: it is roughly where a team
+starts paying for itself.
+
+**Test.** None possible for the logging trap — it is a property of a dependency's output, and a test
+asserting that a log is misleading would be asserting the bug rather than guarding against it.
+
 
 ## 4. Risks already covered, kept for what they still forbid
 

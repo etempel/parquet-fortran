@@ -352,6 +352,7 @@ module parquet_sorting
     public :: parquet_debug_reset_sort_radix_passes
     public :: parquet_debug_sort_radix_passes
     public :: parquet_debug_sort_threads_used
+    public :: parquet_debug_sort_split_buckets
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -457,6 +458,17 @@ module parquet_sorting
     !! this one, and that repointing is the whole of Group 2 in `feature_sort.md` §6 Stage 6, 6a --
     !! the three failures that reversed the stage ordering. Repoint them; do not delete them.
     integer(int64), save :: dbg_sort_threads_used = 1_int64
+    !> Buckets Design B's split produced on the last permutation build; 0 means B did not run.
+    !!
+    !! Stage 4, and the same reasoning as `dbg_sort_threads_used`: Design B and the serial LSD loop
+    !! produce the SAME permutation by construction, so no assertion on `perm` can say which ran.
+    !! Every test of the split -- that it happens at all, that a hostile key declines it, that the
+    !! balance test and the bucket cap fire -- needs this, and would otherwise pass against an engine
+    !! that quietly never took the parallel path.
+    !!
+    !! Zero is the informative value, not a missing one: it is what a decline looks like, and a
+    !! decline is a normal outcome on a low-cardinality key.
+    integer(int64), save :: dbg_sort_split_buckets = 0_int64
     !
     ! ---- Internal key families ----
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
@@ -1805,6 +1817,16 @@ def emit_engine_interfaces(w):
     w("        module function parquet_debug_sort_threads_used() result(n)")
     w("            integer(int64) :: n !! threads resolved for the last build; 1 means serial.")
     w("        end function parquet_debug_sort_threads_used")
+    w("        !> Test-only count of buckets Design B's split produced; 0 means it did not run.")
+    w("        !!")
+    w("        !! Design B and the serial LSD loop answer identically by construction, so this is the")
+    w("        !! only way to tell which one ran -- and therefore the only way any test of the split,")
+    w("        !! the bucket cap or the balance test can be non-vacuous. Zero is informative rather")
+    w("        !! than missing: it is exactly what a declined split looks like, which is the normal")
+    w("        !! outcome on a low-cardinality key.")
+    w("        module function parquet_debug_sort_split_buckets() result(n)")
+    w("            integer(int64) :: n !! buckets in the last split; 0 if Design B declined.")
+    w("        end function parquet_debug_sort_split_buckets")
     w("    end interface")
     w("    !")
 

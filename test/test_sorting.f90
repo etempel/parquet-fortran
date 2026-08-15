@@ -5938,6 +5938,16 @@ contains
         !! integer key on value RANGE and the counting path is serial and untouched by Stage 4 —
         !! an integer fixture would test nothing here.
         real(real64) :: v(4000)
+        real(real64) :: lowcard(4000) !! three distinct values: the shape that must DECLINE the split.
+        !> A FULL-RANGE int64 key, because Design B needs its top varying byte to be well spread and
+        !! `v` above is not: a bounded-range real's high bytes are its exponent, which takes only a
+        !! handful of values, so the split there is skewed and the balance test declines it. That is
+        !! correct behaviour and is why this arm needs a different key rather than a looser threshold.
+        integer(int64) :: wide(4000)
+        integer(int64) :: spread_vals(200)            !! the distinct values `wide` cycles through.
+        integer(int64) :: xs                          !! xorshift state, so the spread is reproducible.
+        integer(int64), allocatable :: wref(:)        !! the wide key's serial answer.
+        integer(int64), allocatable :: lref(:)        !! the low-cardinality key's serial answer.
         integer(int64), allocatable :: ref(:), got(:) !! serial reference, and one threaded arm.
         integer(int64), allocatable :: cpp(:)         !! the C++ engine's answer, as a cross-check.
         integer, parameter :: arms(4) = [2, 3, 4, 8]  !! 3 is deliberate: not a divisor of 4000.
@@ -5982,8 +5992,13 @@ contains
             if (allocated(error)) return
             call check(error, all(got == ref), trim(kstr))
             if (allocated(error)) return
+            ! A RANGE, not an equality, because the engine clamps to `omp_get_num_procs()` — asking
+            ! for more threads than the machine has is what dragged a parallel sort back to serial
+            ! speed on machine A. The lower bound is what keeps this a vacuity control: a policy that
+            ! silently refuses to thread reports 1 and fails here.
             write (kstr, '(a,i0)') "a team must actually be opened at threads=", arms(k)
-            call check(error, threads_seen(k) == int(arms(k), int64), trim(kstr))
+            call check(error, threads_seen(k) >= 2_int64 .and. threads_seen(k) <= int(arms(k), int64), &
+                trim(kstr))
             if (allocated(error)) return
         end do
         !
@@ -6003,6 +6018,57 @@ contains
             "a row floor above the fixture must refuse the team")
         if (allocated(error)) return
         call check(error, all(got == ref), "refusing the team must not change the answer")
+        if (allocated(error)) return
+        !
+        !
+        ! **Design B, the MSD split.** It answers identically to the serial LSD loop by construction,
+        ! so `parquet_debug_sort_split_buckets` is the only thing that can say which path ran — and
+        ! every assertion above would hold just as well against an engine that never split at all.
+        ! **200 distinct values, each repeated 20 times — the repetition is load-bearing.** A plain
+        ! xorshift fill makes every key distinct, and then the final order is fully determined by the
+        ! key alone: the split's STABILITY becomes unobservable, and a mutation reversing the order
+        ! threads contribute within a bucket survives the whole test. It did, on the first version of
+        ! this fixture. Ties are what make the row-index tiebreaker the only correct answer, and
+        ! therefore what makes an unstable split a WRONG one rather than merely a different one.
+        !
+        ! Spread over the full int64 range so the top byte still takes ~200 of its 256 values, which
+        ! is what Design B's balance test needs in order to accept the key at all.
+        xs = 88172645463325252_int64
+        do k = 1, 200
+            xs = ieor(xs, ishft(xs, 13))
+            xs = ieor(xs, ishft(xs, -7))
+            xs = ieor(xs, ishft(xs, 17))
+            spread_vals(k) = xs
+        end do
+        do k = 1, size(wide)
+            wide(k) = spread_vals(mod(k - 1, 200) + 1)
+        end do
+        call force_parallel_threshold(1_int64)
+        call pf_argsort(wide, wref, threads=1)
+        call check(error, parquet_debug_sort_split_buckets() == 0_int64, &
+            "one thread must not split: Design B needs a team, and T=1 is the serial path")
+        if (allocated(error)) return
+        call pf_argsort(wide, got, threads=4)
+        call check(error, all(got == wref), "Design B must give the serial permutation exactly")
+        if (allocated(error)) return
+        call check(error, parquet_debug_sort_split_buckets() > 1_int64, &
+            "Design B must actually split this key, or every assertion here is vacuous")
+        if (allocated(error)) return
+        !
+        ! **The decline, on data rather than on a forced flag.** A key with very few distinct values
+        ! puts almost every row in one bucket, which is exactly the shape machine B measured Design B
+        ! losing 2.10-2.57x on, so the balance test must route it away. Asserting the answer as well
+        ! matters: a decline that changed the permutation would be a far worse bug than a decline
+        ! that should not have happened.
+        do k = 1, size(v)
+            lowcard(k) = real(mod(k, 3), real64)
+        end do
+        call pf_argsort(lowcard, lref, threads=1)
+        call pf_argsort(lowcard, got, threads=4)
+        call check(error, parquet_debug_sort_split_buckets() == 0_int64, &
+            "a low-cardinality key must decline Design B's split")
+        if (allocated(error)) return
+        call check(error, all(got == lref), "declining the split must not change the answer")
         if (allocated(error)) return
         !
         call force_parallel_threshold(0_int64)

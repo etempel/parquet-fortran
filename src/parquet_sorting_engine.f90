@@ -426,6 +426,17 @@ contains
             ! may pass any `threads=` it likes, including a silly one, so the clamp belongs here --
             ! at the point the region is opened -- rather than in the policy layer.
             nt = int(min(nthreads, int(huge(0), int64)))
+#ifdef _OPENMP
+            ! **Never more threads than the machine has processors** (`feature_sort_parallel.md` §11
+            ! step 6, §7.2). Measured on machine A, full-range int64, n = 5e6: without this clamp
+            ! `threads=64` on eight cores costs **19.59 ns/element against 6.48 at 32** -- i.e. an
+            ! already-parallel sort dragged back to its serial speed by oversubscription alone. The
+            ! clamp belongs HERE, where the region is opened, rather than in `resolve_thread_count`:
+            ! an explicit `threads=` is the caller saying what they want, and they are entitled to
+            ! name a silly number without the policy layer second-guessing it everywhere else.
+            if (nt > omp_get_num_procs()) nt = omp_get_num_procs()
+            if (nt < 1) nt = 1
+#endif
         end if
         call sort_build_permutation_impl(keys, n, perm, nt)
     end procedure sort_build_permutation_threaded
@@ -452,6 +463,10 @@ contains
         ! was called and a test can never read a figure left behind by an earlier sort. Nothing else
         ! can observe the team size -- see `parquet_debug_sort_threads_used`.
         dbg_sort_threads_used = int(nt, int64)
+        ! Cleared per build, not merely set on success: "0 means Design B did not run" is the
+        ! documented contract, and without this a decline would report whatever the PREVIOUS sort's
+        ! split produced. A test asserting a decline would then pass or fail on call order.
+        dbg_sort_split_buckets = 0_int64
         ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so the one-line form would
         ! run the candidate's O(n) range scan even with the counting path switched off -- and would
         ! define `lo`/`hi` as a side effect while doing it. CLAUDE.md records both halves of this.
@@ -927,6 +942,276 @@ contains
         if (t64 < rem) jhi = jhi + 1_int64
     end subroutine sort_chunk_bounds
 
+    !> One stable scatter of `lo..hi` on digit `p`, from one buffer pair into another.
+    !!
+    !! `off` enters holding each bucket's next free slot and leaves advanced past what was written,
+    !! which is what lets a caller drive several ranges through the same cursor array.
+    subroutine sort_radix_scatter(sk, sr, dk, dr, lo, hi, p, off)
+        integer(int64), intent(in) :: sk(:), sr(:)    !! source images and rows.
+        integer(int64), intent(inout) :: dk(:), dr(:) !! destination images and rows.
+        integer(int64), intent(in) :: lo, hi          !! source range, inclusive.
+        integer, intent(in) :: p                      !! byte position, 0 = least significant.
+        integer(int64), intent(inout) :: off(0:255)   !! per-bucket output cursors, 1-based.
+        integer(int64) :: j, b
+        !
+        do j = lo, hi
+            b = iand(ishft(sk(j), -8 * p), 255_int64)
+            dk(off(b)) = sk(j)
+            dr(off(b)) = sr(j)
+            off(b) = off(b) + 1_int64
+        end do
+    end subroutine sort_radix_scatter
+
+    !> The same scatter, but the rows land straight in `perm` and the images are not carried.
+    !!
+    !! Saves the destination write and the final copy on whichever pass is known to be the last one
+    !! that reorders anything — the same trick the serial loop plays with `last_p`, applied per
+    !! bucket. Leaves the source's row array STALE, so nothing may read it afterwards.
+    subroutine sort_radix_emit(sk, sr, lo, hi, p, off, perm, base)
+        integer(int64), intent(in) :: sk(:), sr(:)   !! source images and rows.
+        integer(int64), intent(in) :: lo, hi         !! source range, inclusive.
+        integer, intent(in) :: p                     !! byte position, 0 = least significant.
+        integer(int64), intent(inout) :: off(0:255)  !! per-bucket output cursors, 1-based.
+        integer(int64), intent(inout) :: perm(:)     !! receives the row indices.
+        integer(int64), intent(in) :: base           !! added to every cursor before writing.
+        integer(int64) :: j, b
+        !
+        do j = lo, hi
+            b = iand(ishft(sk(j), -8 * p), 255_int64)
+            perm(base + off(b)) = sr(j)
+            off(b) = off(b) + 1_int64
+        end do
+    end subroutine sort_radix_emit
+
+    !> One bucket's serial LSD over digits `0 .. dmax`, ending with its rows written into `perm`.
+    !!
+    !! **This is the whole of Design B's second phase, and it is deliberately SERIAL.** Buckets are
+    !! disjoint and are handed out one per thread, so the parallelism is across buckets; threading
+    !! inside one as well would nest two levels for no reason and re-introduce the synchronisation
+    !! the decomposition exists to remove.
+    !!
+    !! Every row in `lo..hi` agrees on the split digit and on every digit above it, so ordering them
+    !! by digits `0..dmax` orders them completely. Correct because each pass is stable and the
+    !! caller's split was stable, so rows equal on all eight digits keep the order they arrived in —
+    !! which, at the top of the chain, is file order.
+    !!
+    !! Ping-pongs between the two buffer pairs **by parity over the SUB-RANGE**, never by
+    !! `move_alloc`: the buffers are shared with every other bucket running concurrently, so
+    !! exchanging them is not available here even though the serial path does exactly that.
+    subroutine sort_radix_bucket(ka, ra, kb, rb, lo, hi, dmax, perm, base)
+        integer(int64), intent(inout) :: ka(:), ra(:) !! the split's output; this bucket's input.
+        integer(int64), intent(inout) :: kb(:), rb(:) !! scratch; this bucket's range only.
+        integer(int64), intent(in) :: lo, hi          !! this bucket's range, inclusive.
+        integer, intent(in) :: dmax                   !! highest digit to order by; 0..dmax.
+        integer(int64), intent(inout) :: perm(:)      !! receives this bucket's row indices.
+        integer(int64), intent(in) :: base            !! `perm` offset for index `lo`.
+        !
+        integer(int64) :: bh(0:255, 0:7) !! this bucket's own histograms, one per digit.
+        integer(int64) :: off(0:255)     !! per-bucket output cursors within this range.
+        integer(int64) :: m, j, b, u, t
+        integer :: p, lastp
+        logical :: src_is_a !! .true. while `ka`/`ra` hold this bucket's current state.
+        !
+        m = hi - lo + 1_int64
+        if (m <= 0_int64) return
+        if (m == 1_int64) then
+            perm(base + lo) = ra(lo)
+            return
+        end if
+        ! All the histograms this bucket needs in ONE read of its images, mirroring the whole-column
+        ! build above. `dmax` is at most 6 here (the split digit is at least 1 and is excluded), so
+        ! this is never the full 2048 counters.
+        bh = 0_int64
+        do j = lo, hi
+            u = ka(j)
+            do p = 0, dmax
+                b = iand(u, 255_int64)
+                bh(b, p) = bh(b, p) + 1_int64
+                u = ishft(u, -8)
+            end do
+        end do
+        ! The last pass that will actually run, so it can write into `perm` and skip its own scatter.
+        lastp = -1
+        do p = dmax, 0, -1
+            b = iand(ishft(ka(lo), -8 * p), 255_int64)
+            if (bh(b, p) /= m) then
+                lastp = p
+                exit
+            end if
+        end do
+        if (lastp < 0) then
+            ! Every digit below the split is constant across this bucket: it is already ordered.
+            do j = lo, hi
+                perm(base + j) = ra(j)
+            end do
+            return
+        end if
+        src_is_a = .true.
+        do p = 0, dmax
+            if (src_is_a) then
+                b = iand(ishft(ka(lo), -8 * p), 255_int64)
+            else
+                b = iand(ishft(kb(lo), -8 * p), 255_int64)
+            end if
+            if (bh(b, p) == m) cycle
+            t = lo
+            do b = 0_int64, 255_int64
+                off(b) = t
+                t = t + bh(b, p)
+            end do
+            if (p == lastp) then
+                if (src_is_a) then
+                    call sort_radix_emit(ka, ra, lo, hi, p, off, perm, base)
+                else
+                    call sort_radix_emit(kb, rb, lo, hi, p, off, perm, base)
+                end if
+                return
+            end if
+            if (src_is_a) then
+                call sort_radix_scatter(ka, ra, kb, rb, lo, hi, p, off)
+            else
+                call sort_radix_scatter(kb, rb, ka, ra, lo, hi, p, off)
+            end if
+            src_is_a = .not. src_is_a
+        end do
+    end subroutine sort_radix_bucket
+
+#ifdef _OPENMP
+    !> Design B — one synchronised MSD split, then every bucket sorted alone by one thread.
+    !!
+    !! `feature_sort_parallel.md` §11 steps 2 and 3. Splits on `dsplit`, the most significant digit
+    !! that VARIES, so the buckets are already in order and each one only needs digits `0..dsplit-1`.
+    !!
+    !! **Declines rather than aborts**, by returning `done = .false.` with `perm` untouched, on any of
+    !! four conditions — a failed allocation, one bucket, no digit below the split, or a failed
+    !! balance test. Every one of them leaves the serial LSD loop to do the whole job, so a decline
+    !! costs time and never an answer.
+    !!
+    !! **The balance test is what machine B's report makes load-bearing.** A key whose split digit has
+    !! few distinct values gets 1.39–1.85× here where Design A gets 2.70–4.74×, and B's run-to-run
+    !! spread on such a key reaches 96.5% — so declining is not a marginal call. Today a decline falls
+    !! back to the serial loop; when Design A lands (§11 step 4) it becomes the fallback instead.
+    !!
+    !! **Stability, which is the whole correctness argument.** The split's prefix runs bucket-major
+    !! and thread-minor, so within one bucket the rows arrive in thread order and, within a thread, in
+    !! their original order — i.e. exactly their order before the split. Each bucket's LSD is stable in
+    !! turn, so rows equal on every digit keep file order and the row-index tiebreaker never has to be
+    !! consulted. Get the prefix nesting backwards and the sort still *works*, producing a valid order
+    !! that is not the unique correct one, which the A/B tests catch and a spot check would not.
+    subroutine sort_radix_design_b(ka, ra, kb, rb, nv, dsplit, hist, nt, perm, value_base, done)
+        integer(int64), intent(inout) :: ka(:), ra(:) !! the images and rows to order.
+        integer(int64), intent(inout) :: kb(:), rb(:) !! the partner buffers; scratch afterwards.
+        integer(int64), intent(in) :: nv              !! value-tier rows, occupying `1..nv`.
+        integer, intent(in) :: dsplit                 !! the digit to split on; at least 1.
+        integer(int64), intent(in) :: hist(0:255, 0:7) !! whole-column histograms; nothing has moved.
+        integer, intent(in) :: nt                     !! team size for the split pass.
+        integer(int64), intent(inout) :: perm(:)      !! receives the ordered row indices.
+        integer(int64), intent(in) :: value_base      !! `perm` offset of the value tier.
+        logical, intent(out) :: done                  !! .false. when this declined and did nothing.
+        !
+        integer(int64), allocatable :: scnt(:,:) !! per-thread split cursors, `(bucket, thread)`.
+        integer(int64) :: blo(0:255), bhi(0:255) !! each bucket's range in the split's output.
+        integer(int64) :: nbuckets   !! how many buckets at `dsplit` are non-empty.
+        integer(int64) :: biggest    !! rows in the largest of them.
+        integer(int64) :: j, b, t, c_lo, c_hi
+        integer :: tid, tt, team, ios
+        !> Decline when the largest bucket exceeds `nv / (team * this)`. Named rather than a literal
+        !! because the value is REASONED, not measured (`feature_sort_parallel.md` §15.1 item 3), and
+        !! because machine B's report makes what it selects matter: 2.10–2.57× at 64 threads.
+        integer(int64), parameter :: SORT_SPLIT_BALANCE = 2_int64
+        !
+        done = .false.
+        if (dsplit < 1) return
+        !
+        nbuckets = 0_int64
+        biggest = 0_int64
+        do b = 0_int64, 255_int64
+            if (hist(b, dsplit) > 0_int64) nbuckets = nbuckets + 1_int64
+            if (hist(b, dsplit) > biggest) biggest = hist(b, dsplit)
+        end do
+        ! One bucket means the split digit does not vary after all, which `dsplit`'s derivation should
+        ! already have excluded -- kept because reaching the bucket loop with a single bucket would
+        ! serialise the whole sort behind one thread while looking like it had parallelised.
+        if (nbuckets < 2_int64) return
+        !
+        ! **The bucket-count cap.** Threads beyond the number of non-empty buckets have nothing to
+        ! take. It makes no sort faster; it stops the engine opening a team it cannot feed, which is
+        ! the cost that grows with the machine. The SPLIT pass is row-parallel and is deliberately
+        ! left at the full `nt` -- only the bucket loop has this ceiling.
+        team = nt
+        if (int(team, int64) > nbuckets) team = int(nbuckets)
+        !
+        ! **The balance test.** Reasoned, not measured (`feature_sort_parallel.md` §15.1 item 3), and
+        ! now the thing that routes a hostile key away from a design that handles it badly.
+        if (biggest * int(team, int64) * SORT_SPLIT_BALANCE > nv) return
+        !
+        allocate(scnt(0:255, 0:nt - 1), stat=ios)
+        if (ios /= 0) return
+        !
+        ! Per-thread counts of the split digit. Costs one extra read of `ka`, and is deliberately NOT
+        ! taken from the histogram build's own per-thread array even though nothing has moved since:
+        ! that array exists only when the threaded histogram path ran, and coupling the two would make
+        ! a decline there silently disable this. §6.1's rule -- rebuild after any reordering -- is
+        ! satisfied either way, since the split is the first thing to move anything.
+        ! Load-bearing, and NO TEST CAN CATCH ITS REMOVAL: `allocate` leaves the contents undefined,
+        ! but in practice the allocator hands back zeroed pages, so deleting this line survives the
+        ! suite while leaving the engine one unlucky allocation away from a corrupted permutation.
+        ! Confirmed by mutation. Same class as the uninitialised-value trap CLAUDE.md documents under
+        ! "An intermittent test failure has THREE causes".
+        scnt = 0_int64
+        !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, j, b)
+        tid = omp_get_thread_num()
+        call sort_chunk_bounds(nv, nt, tid, c_lo, c_hi)
+        do j = c_lo, c_hi
+            b = iand(ishft(ka(j), -8 * dsplit), 255_int64)
+            scnt(b, tid) = scnt(b, tid) + 1_int64
+        end do
+        !$omp end parallel
+        !
+        ! **Bucket major, thread minor.** This nesting is the stability of the whole design; see the
+        ! doc-comment above for what swapping it silently costs.
+        t = 1_int64
+        do b = 0_int64, 255_int64
+            blo(b) = t
+            do tt = 0, nt - 1
+                j = scnt(b, tt)
+                scnt(b, tt) = t
+                t = t + j
+            end do
+            bhi(b) = t - 1_int64
+        end do
+        !
+        ! The split scatter. Each thread walks its own chunk and advances only its own cursor column,
+        ! so the shared `scnt` carries no race and needs no atomic.
+        !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, j, b)
+        tid = omp_get_thread_num()
+        call sort_chunk_bounds(nv, nt, tid, c_lo, c_hi)
+        do j = c_lo, c_hi
+            b = iand(ishft(ka(j), -8 * dsplit), 255_int64)
+            kb(scnt(b, tid)) = ka(j)
+            rb(scnt(b, tid)) = ra(j)
+            scnt(b, tid) = scnt(b, tid) + 1_int64
+        end do
+        !$omp end parallel
+        deallocate(scnt)
+        dbg_sort_radix_passes = dbg_sort_radix_passes + 1_int64
+        dbg_sort_split_buckets = nbuckets
+        !
+        ! Phase 2. `schedule(dynamic)` because bucket sizes vary by orders of magnitude on real data
+        ! and a static split would leave every thread waiting on whichever drew the largest. The
+        ! buffer roles swap: the split's OUTPUT (`kb`/`rb`) is each bucket's input, and `ka`/`ra`
+        ! become its scratch. Ranges are disjoint, so no per-thread allocation is needed at all.
+        !$omp parallel do num_threads(team) default(shared) private(b) schedule(dynamic)
+        do b = 0_int64, 255_int64
+            if (hist(b, dsplit) > 0_int64) then
+                call sort_radix_bucket(kb, rb, ka, ra, blo(b), bhi(b), dsplit - 1, perm, value_base)
+            end if
+        end do
+        !$omp end parallel do
+        done = .true.
+    end subroutine sort_radix_design_b
+#endif
+
     !> Fills `perm` by a stable LSD radix sort over ONE key. See this section's banner for why the
     !! result is the permutation `sort_comparison_permutation` would have produced.
     !!
@@ -957,6 +1242,7 @@ contains
         integer :: tt  !! walk index over threads when the per-thread histograms are reduced.
         integer(int64) :: c_lo, c_hi !! one thread's chunk of the image array, inclusive.
         logical :: hist_done !! .true. once the histogram is built, by whichever of the two paths.
+        logical :: did_b     !! .true. once Design B has ordered every bucket and written `perm`.
         integer(int64), allocatable :: ra(:), rb(:) !! the row indices travelling with them.
         integer(int64), allocatable :: tmp(:)       !! `move_alloc` intermediary for the swap.
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
@@ -1153,7 +1439,26 @@ contains
                     end if
                 end do
             end if
+            ! **Design B, tried before the serial loop and falling straight through when it declines.**
+            ! Excluded for a STRING key on the same grounds `last_p` excludes it: the refine below
+            ! reads the sorted `ka`/`ra`, which the split's buffer swap and the per-bucket emit both
+            ! leave stale. `feature_sort_parallel.md` §11 step 5 is where strings get this properly,
+            ! and its argument -- rows in different buckets differ in the split byte, so no
+            ! shared-prefix run can straddle a boundary -- is why that is a real step and not a wish.
+            did_b = .false.
+#ifdef _OPENMP
+            if (nt > 1 .and. .not. is_str .and. last_p >= 1) then
+                call sort_radix_design_b(ka, ra, kb, rb, nv, last_p, hist, nt, perm, value_base, did_b)
+            end if
+#endif
             do p = 0, 7
+                ! Design B ordered every bucket and wrote `perm` itself, so the serial loop has
+                ! nothing left to do. Deliberately an `exit` rather than an early RETURN from the
+                ! procedure: the two non-value tiers are written after this loop, and returning here
+                ! would leave every NaN and every null row unwritten -- with `ok = .true.` claiming
+                ! otherwise. `last_p >= 1` is a preconditon of Design B running, so the `last_p < 0`
+                ! copy below is already skipped, and `is_str` excludes the string refine.
+                if (did_b) exit
                 ! A byte position every row agrees on cannot reorder anything. This is what makes a
                 ! key narrower than 64 bits cost proportionately less -- an int32 or a float32 key
                 ! leaves its top bytes constant and skips those passes outright, and the narrow-range
@@ -2486,6 +2791,10 @@ contains
     module procedure parquet_debug_sort_threads_used
         n = dbg_sort_threads_used
     end procedure parquet_debug_sort_threads_used
+
+    module procedure parquet_debug_sort_split_buckets
+        n = dbg_sort_split_buckets
+    end procedure parquet_debug_sort_split_buckets
 
     module procedure parquet_debug_sort_sweep_compare
         integer(int64) :: rep, i, j, stride

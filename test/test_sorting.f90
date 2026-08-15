@@ -7636,9 +7636,16 @@ contains
                 scrambled = .false.
                 v = 42_int64
             case (5)
+                ! **The range is deliberately narrow relative to `n`, and that is load-bearing.**
+                ! The counting path is admitted only when the value range is under 0.3 * n (and the
+                ! sort is serial) -- see `sort_build_permutation_impl`. This fixture's job is the
+                ! SIGN CROSSING in the range scan, not a wide range, so it spans zero inside that
+                ! bound: 61 distinct values against n = 500. Widening it back past 150 makes
+                ! `expect_counting` false and this fixture silently stops testing the counting path
+                ! at all, which is how it failed when the rule was introduced.
                 name = "spans-zero"
                 do k = 1_int64, n
-                    v(k) = mod(k * 11_int64, 201_int64) - 100_int64
+                    v(k) = mod(k * 11_int64, 61_int64) - 30_int64
                 end do
             case (6)
                 name = "all-negative"

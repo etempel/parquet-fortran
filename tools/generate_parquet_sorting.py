@@ -2505,12 +2505,27 @@ contains
         ! of an empty array. The engine is not called at all below two rows, so nothing downstream
         ! needs the one-element floor the extraction buffers use.
         allocate(perm(nrows))
-        ! Resolved BEFORE the identity fill, not after, so the fill can be threaded too. It is one
-        ! of three whole-column serial loops that together were 48% of a 64-thread end-to-end sort
-        ! before they were threaded -- see `app/benchmark_sort_tail.f90`, which sizes each one.
+        ! Resolved BEFORE any identity fill, so a fill can be threaded. It was one of three
+        ! whole-column serial loops that together were 48% of a 64-thread end-to-end sort before
+        ! they were threaded -- see `app/benchmark_sort_tail.f90`, which sizes each one.
         call resolve_thread_count(threads, nrows, nthreads)
-        call fill_identity(perm, nrows, nthreads)
-        if (nrows < 2_int64) return
+        if (nrows < 2_int64) then
+            ! Zero or one row: the identity IS the answer and no engine runs.
+            call fill_identity(perm, nrows, nthreads)
+            return
+        end if
+        ! **The Fortran engine gets NO identity fill, and that is checked rather than assumed.**
+        ! Each of its four paths establishes `perm` itself: the counting and radix paths write
+        ! every slot directly, `sort_comparison_permutation` opens with its own `perm(k) = k`
+        ! loop, and `sort_radix_multi_permutation` fills before its first key. Filling here as
+        ! well was an extra whole-column pass on every sort -- around 0.3-0.4 ns/element, which on
+        ! a counting-path sort is a large share of the total.
+        !
+        ! **A new Fortran-engine path must fill `perm` itself, or restore a fill here.** A path
+        ! that reads `perm` expecting the identity will usually still pass its tests, because a
+        ! fresh allocation reads back as zeros -- the trap CLAUDE.md records under 'An intermittent
+        ! test failure has THREE causes'. Verified against that by running the whole suite under an
+        ! LD_PRELOAD malloc filling every block with 0xFF.
         if (dbg_fortran_engine) then
             ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. **Stage 4 made this
             ! branch honour `threads`**, and the resolution above is deliberately SHARED with the
@@ -2524,6 +2539,9 @@ contains
             call sort_build_permutation_threaded(keys, nrows, nthreads, perm)
             return
         end if
+        ! The C++ engine's contract for `perm` cannot be checked from this side, so it keeps the
+        ! fill it has always had.
+        call fill_identity(perm, nrows, nthreads)
         if (size(keys) == 1) then
             ! One key needs no builder at all: the one-shot entry points BORROW the buffer that
             ! was just extracted, so this saves a handle allocation and a second copy of every

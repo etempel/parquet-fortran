@@ -22,6 +22,8 @@ program benchmark_sort_tail
     real(real64), allocatable :: v(:)
     integer(int64), allocatable :: vi(:)
     character(len=16) :: family !! which key type to time: f64, i64 or i64lo.
+    integer(int64) :: vrange    !! integer key values are folded onto 0..vrange-1; 0 = full range.
+    logical :: counting         !! .false. forces the radix path so the two can be compared.
     logical :: serial_policy    !! .true. caps the AUTOMATIC thread count to 1.
     integer(int64), allocatable :: perm64(:)
     integer(int32), allocatable :: perm32(:)
@@ -31,7 +33,7 @@ program benchmark_sort_tail
     logical :: use_fortran !! .true. selects the pure-Fortran engine; .false. the shipped C++ one.
     real(real64) :: t0, t1, t_ex, t_en, t_na, t_e2e, b_ex, b_en, b_na, b_e2e
     !
-    call read_args(n, reps, maxthreads, use_fortran, family, serial_policy)
+    call read_args(n, reps, maxthreads, use_fortran, family, serial_policy, vrange, counting)
     ! Without this the shipped C++ comparison engine answers, which is a different measurement
     ! entirely -- it costs 313 ns/element serially where the Fortran radix costs 22.
     call parquet_debug_use_fortran_sort_engine(use_fortran)
@@ -41,6 +43,9 @@ program benchmark_sort_tail
     ! exists there reads as innocent. Same reason the table layer's own parallel paths see it: inside
     ! a parallel region `pf_sort_threads()` answers 1 by design.
     if (serial_policy) call parquet_set_sort_threads(1)
+    ! The counting path is SERIAL by design, so which of the two paths wins is a function of the team
+    ! size as well as of the value range -- that is the whole point of sweeping both here.
+    call parquet_set_sort_counting_path(counting)
     allocate(v(n), vi(n))
     s = 88172645463325252_int64
     do i = 1_int64, n
@@ -49,7 +54,9 @@ program benchmark_sort_tail
         ! `i64lo` folds onto 10 distinct values with a modulus, matching
         ! `benchmark_sort_engine`'s own low-cardinality fixture -- that is what puts the engine on
         ! its counting fast path, which is serial by design and so is the control arm here.
-        if (family == "i64lo") then
+        if (vrange > 0_int64) then
+            vi(i) = iand(s, huge(1_int64)) - iand(s, huge(1_int64)) / vrange * vrange
+        else if (family == "i64lo") then
             vi(i) = iand(s, huge(1_int64)) - iand(s, huge(1_int64)) / 10_int64 * 10_int64
         else
             vi(i) = s
@@ -63,6 +70,7 @@ program benchmark_sort_tail
         "   omp_get_num_procs() = ", omp_get_num_procs()
     write (output_unit, '(a,l1,a,a,a,l1)') "  fortran engine = ", use_fortran, &
         "   family = ", trim(family), "   serial auto-policy = ", serial_policy
+    write (output_unit, '(a,i0,a,l1)') "  value range = ", vrange, "   counting path = ", counting
     write (output_unit, '(a)') "  all figures ns/element, best of reps"
     write (output_unit, '(a)') ""
     write (output_unit, '(a)') "  thr    extract     engine     narrow   sum(tail+eng)   end-to-end  design buckets"
@@ -124,13 +132,15 @@ contains
         r = t * 1.0e9_real64 / real(n, real64)
     end function ns
     !
-    subroutine read_args(n, reps, maxthreads, use_fortran, family, serial_policy)
+    subroutine read_args(n, reps, maxthreads, use_fortran, family, serial_policy, vrange, counting)
         integer(int64), intent(out) :: n          !! rows.
         integer, intent(out) :: reps              !! timed repetitions; the best is kept.
         integer, intent(out) :: maxthreads        !! highest thread count on the ladder.
         logical, intent(out) :: use_fortran       !! .false. selects the shipped C++ engine.
         character(len=*), intent(out) :: family   !! f64, i64 or i64lo.
         logical, intent(out) :: serial_policy     !! .true. caps the automatic thread count to 1.
+        integer(int64), intent(out) :: vrange     !! fold integer keys onto 0..vrange-1; 0 = off.
+        logical, intent(out) :: counting          !! .false. forces the radix path.
         character(len=64) :: a
         integer :: i
         !
@@ -140,6 +150,8 @@ contains
         use_fortran = .true.
         family = "f64"
         serial_policy = .false.
+        vrange = 0_int64
+        counting = .true.
         do i = 1, command_argument_count()
             call get_command_argument(i, a)
             if (a(1:4) == "--n=") then
@@ -154,6 +166,10 @@ contains
                 family = a(10:)
             else if (a(1:9) == "--serial") then
                 serial_policy = .true.
+            else if (a(1:8) == "--range=") then
+                read (a(9:), *) vrange
+            else if (a(1:14) == "--no-counting") then
+                counting = .false.
             end if
         end do
     end subroutine read_args

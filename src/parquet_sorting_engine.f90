@@ -471,10 +471,63 @@ contains
         ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so the one-line form would
         ! run the candidate's O(n) range scan even with the counting path switched off -- and would
         ! define `lo`/`hi` as a side effect while doing it. CLAUDE.md records both halves of this.
-        if (parquet_get_sort_counting_path()) then
+        ! **The team test comes FIRST, before the candidate's O(n) range scan.** The scan walks every
+        ! row to find `lo`/`hi`, and a threaded sort is going to decline whatever it finds -- so
+        ! testing `nt` afterwards spends a whole extra pass over the column to reach a decision that
+        ! was already made. Measured: it cost 0.6 ns/element of a 4.4 ns sort (ifx, n = 5e6,
+        ! range/n = 2e-4, 4 threads) before the tests were nested this way.
+        !
+        ! Nested rather than `.and.`-ed, for the reason CLAUDE.md records: Fortran does not
+        ! short-circuit, so the one-line form would run the scan anyway and define `lo`/`hi` as a side
+        ! effect while doing it.
+        if (nt <= 1) then
+            if (parquet_get_sort_counting_path()) then
             if (sort_counting_candidate(keys, n, lo, hi)) then
-                call sort_counting_permutation(keys(1), n, lo, hi, perm)
-                return
+                ! **The counting sort is SERIAL, so whether it wins is a function of the TEAM, not
+                ! of the value range alone.** `sort_counting_candidate` answers the range question;
+                ! this answers the team one, and it is deliberately here rather than inside the
+                ! candidate because `hi - lo` is only safe to compute once the candidate has bounded
+                ! it -- a key holding values near both ends of int64 overflows the subtraction, which
+                ! is why the candidate itself compares in the rearranged form.
+                !
+                ! **Measured on machine B at n = 5e6, both compilers, counting against radix**
+                ! (ns/element, end-to-end). The two compilers do NOT agree about the middle of this
+                ! space, and the disagreement inverts:
+                !
+                !   range/n    ifx 1/4/16/64 thr                gfortran 1/4/16/64 thr
+                !   2e-6       5.00 5.42 4.31 5.67 (counting)   10.80 6.60 5.34 5.15
+                !              10.99 2.76 0.88 0.41 (radix)     19.51 11.14 6.48 4.80
+                !   0.80       19.93 19.00 18.99 18.67          30.25 26.12 24.78 24.75
+                !              14.11 4.63 2.24 3.43             30.65 17.36 9.89 10.08
+                !
+                ! ifx wants radix from 4 threads at EVERY range; gfortran wants counting almost
+                ! everywhere, because its radix carries a per-element constant about 5x ifx's (see
+                ! feature_sort_report.md section 11.3, which tracks that gap as an open defect). No
+                ! single threshold is optimal for both, so **the maintainer's decision is to weight
+                ! ifx** -- recorded here because a future reader looking only at gfortran numbers
+                ! would otherwise read this rule as simply wrong.
+                !
+                ! The rule below follows the physical fact that the counting sort IS a serial
+                ! algorithm: it is admitted only when nothing else can be, and only while its O(range)
+                ! term stays small against its O(n) one. The 0.3 threshold is measured at one thread,
+                ! where ifx and gfortran AGREE -- ifx counting/radix is 12.23/12.79 at range/n = 0.2
+                ! and 14.64/14.17 at 0.4, so the crossover sits between them, and gfortran's 1-thread
+                ! numbers put it no lower.
+                !
+                ! **Verified at both `--profile release` and fpm's default flags, on both compilers**
+                ! (the default gives gfortran no -O at all and ifx its own -O2, so the two are not
+                ! affected equally). The decision does not change with the profile; only the
+                ! magnitudes do, and counting degrades MORE without -O than the radix does.
+                !
+                ! What this costs gfortran, stated plainly: in the small-range, many-thread band
+                ! (range/n around 1e-4) it gives up to 2.5x, because there its radix is slow enough
+                ! that a serial counting sort still wins. Closing 11.3 would remove that cost and let
+                ! this rule be optimal for both.
+                if (hi - lo < n / 10_int64 * 3_int64) then
+                    call sort_counting_permutation(keys(1), n, lo, hi, perm)
+                    return
+                end if
+            end if
             end if
         end if
         ! Tried AFTER the counting path, never before it: on a narrow-range integer key the

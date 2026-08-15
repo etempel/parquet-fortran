@@ -73,6 +73,15 @@
 !! taken now — and if it is ever taken, the hoisted comparator must be generated from the same source
 !! as this one, not written twice.
 submodule (parquet_sorting) parquet_sorting_engine
+#ifdef _OPENMP
+    ! Stage 4. Guarded because a build without OpenMP must still COMPILE, not merely run serially:
+    ! machine A's flang ships no `omp_lib.mod` at all, so an unguarded `use` here fails the build
+    ! outright rather than taking the serial fallback the guards exist to provide. This project has
+    ! shipped exactly that defect once, in `materialize_marked_parallel` (src/parquet_tables_read.f90),
+    ! where it was invisible on both compilers that always supply the flag. Every `!$omp` construct
+    ! below is guarded to match, and a flang build is the check that they all are.
+    use omp_lib
+#endif
     implicit none
     !
     !> Ranges of this size or smaller are left to the final insertion pass, as `std::sort` does.
@@ -390,10 +399,59 @@ contains
     ! is why the two paths can be A/B'd for equality at all.
 
     module procedure sort_build_permutation
+        ! A forwarder rather than a copy, deliberately: this and `sort_build_permutation_threaded`
+        ! must not be able to drift into answering differently, and the cheapest guarantee of that
+        ! is that there is exactly one body for both to share.
+        call sort_build_permutation_impl(keys, n, perm, 1)
+    end procedure sort_build_permutation
+
+    module procedure sort_build_permutation_threaded
+        use parquet_settings, only : parquet_get_sort_parallel_min_rows
+        integer :: nt !! the team this build will actually open.
+        !
+        ! Two clauses, and both need the DATA to decide, which is why they live here rather than in
+        ! `resolve_thread_count` with the rest of the thread policy.
+        !
+        ! **One thread is the SERIAL path, not a team of one.** The bucket-decomposed engine costs
+        ! 0.85x of serial on one thread at n = 1e6 and only reaches 1.02x at n = 2e7
+        ! (`feature_sort_parallel.md` §2.7), so a team of one is a regression at every row count --
+        ! and at every row count a test can afford, by the wider of those two margins.
+        !
+        ! **The row floor** is where a team stops paying for itself at all. It is a published
+        ! setting rather than a constant precisely because its right value is a property of the
+        ! machine: this was tuned on eight arm64 cores and has no claim on 192 x86 ones.
+        nt = 1
+        if (nthreads > 1_int64 .and. n >= parquet_get_sort_parallel_min_rows()) then
+            ! Clamped into default INTEGER, which is what every OpenMP clause below takes. A caller
+            ! may pass any `threads=` it likes, including a silly one, so the clamp belongs here --
+            ! at the point the region is opened -- rather than in the policy layer.
+            nt = int(min(nthreads, int(huge(0), int64)))
+        end if
+        call sort_build_permutation_impl(keys, n, perm, nt)
+    end procedure sort_build_permutation_threaded
+
+    !> The engine's one body: the counting fast path where it applies, then the radix, then the
+    !! introsort — using `nt` threads in the phases that can take them.
+    !!
+    !! **The counting path and the introsort stay serial, deliberately.** The counting path is
+    !! already 1.5–1.85x faster than the C++ one at 3.4 ns/element, so a thread team could plausibly
+    !! cost more than the work it divides; `feature_sort_parallel.md` §11 step 7 sequences it last
+    !! and gates it on a measurement of a real table sort rather than on the argument that it looks
+    !! parallelisable. The introsort is the out-of-memory fallback and is reached only when the radix
+    !! could not allocate, which is not a path worth threading.
+    subroutine sort_build_permutation_impl(keys, n, perm, nt)
         use parquet_settings, only : parquet_get_sort_counting_path
+        type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+        integer(int64), intent(in) :: n           !! rows to order.
+        integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
+        integer, intent(in) :: nt                 !! team size; 1 is the serial path.
         integer(int64) :: lo, hi !! the counting path's value range, carried from the candidate test.
         logical :: did_radix     !! .false. when the radix path declined for want of memory.
         !
+        ! Recorded here rather than in either entry point, so the counter is current whichever one
+        ! was called and a test can never read a figure left behind by an earlier sort. Nothing else
+        ! can observe the team size -- see `parquet_debug_sort_threads_used`.
+        dbg_sort_threads_used = int(nt, int64)
         ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so the one-line form would
         ! run the candidate's O(n) range scan even with the counting path switched off -- and would
         ! define `lo`/`hi` as a side effect while doing it. CLAUDE.md records both halves of this.
@@ -411,14 +469,14 @@ contains
             ! nothing has been written to `perm` and the comparison sort below finishes the job --
             ! it needs no scratch at all. See sort_radix_permutation for why this is not an abort.
             if (size(keys) == 1) then
-                call sort_radix_permutation(keys, n, perm, did_radix)
+                call sort_radix_permutation(keys, n, perm, did_radix, nt)
             else
                 call sort_radix_multi_permutation(keys, n, perm, did_radix)
             end if
             if (did_radix) return
         end if
         call sort_comparison_permutation(keys, n, perm)
-    end procedure sort_build_permutation
+    end subroutine sort_build_permutation_impl
 
     module procedure sort_counting_candidate
         use parquet_settings, only : parquet_get_sort_counting_bucket_limit
@@ -705,11 +763,16 @@ contains
     !! It is optional rather than defaulted to 0 because 0 is not a no-op: subtracting nothing
     !! leaves a negative value's pattern above every positive one under UNSIGNED comparison, which
     !! is precisely what the sign flip exists to fix.
-    subroutine sort_radix_images(key, rows, m, out, bias)
+    subroutine sort_radix_images_range(key, rows, jlo, jhi, out, bias)
         type(sort_key_buf), intent(in) :: key  !! the bound key.
-        integer(int64), intent(in) :: rows(:)  !! the rows to image, 1-based; `1..m` are read.
-        integer(int64), intent(in) :: m        !! how many of `rows` to image.
-        integer(int64), intent(out) :: out(:)  !! receives `m` images, to be compared as UNSIGNED.
+        integer(int64), intent(in) :: rows(:)  !! the rows to image, 1-based; `jlo..jhi` are read.
+        integer(int64), intent(in) :: jlo      !! first entry of `rows` to image.
+        integer(int64), intent(in) :: jhi      !! last entry to image; `jhi < jlo` images nothing.
+        integer(int64), intent(inout) :: out(:)
+        !! receives images at `jlo..jhi`, to be compared as UNSIGNED. `intent(inout)` rather than
+        !! `intent(out)` precisely BECAUSE this writes a sub-range: under `intent(out)` a compiler
+        !! may take the whole array as undefined on entry, which is false for every chunk but one
+        !! when a team splits the build (`sort_radix_images_threaded`).
         integer(int64), intent(in), optional :: bias
         !! subtracted from an INTEGER key's value instead of flipping its sign bit. The caller must
         !! have established that every row imaged satisfies `bias <= v` and `v - bias < 2^32`.
@@ -734,18 +797,18 @@ contains
                 ! unsigned order and the value order all coincide -- which is all the radix needs.
                 ! Its top four bytes are then zero (or, under `descending`, all ones), constant
                 ! across the column either way, so the pass-skip drops four of the eight passes.
-                do j = 1_int64, m
+                do j = jlo, jhi
                     out(j) = ieor(key%ints(rows(j)) - bias, dmask)
                 end do
             else
                 ! Flipping the sign bit turns signed order into unsigned order.
                 imask = ieor(SORT_SIGN_BIT, dmask)
-                do j = 1_int64, m
+                do j = jlo, jhi
                     out(j) = ieor(key%ints(rows(j)), imask)
                 end do
             end if
         case (SK_REAL)
-            do j = 1_int64, m
+            do j = jlo, jhi
                 x = key%reals(rows(j))
                 ! -0.0 and +0.0 compare EQUAL under `<`, so they must share ONE image here or this
                 ! path would order a pair `sort_compare_key` calls equal. Everything else is the
@@ -764,7 +827,7 @@ contains
                 out(j) = ieor(t, dmask)
             end do
         case default
-            do j = 1_int64, m
+            do j = jlo, jhi
                 ! The leading bytes, big-endian, zero-padded. No sign flip: already unsigned.
                 p0 = key%offsets(rows(j)) + 1_int64
                 ln = key%offsets(rows(j) + 1_int64) - key%offsets(rows(j))
@@ -781,7 +844,88 @@ contains
                 out(j) = ieor(t, dmask)
             end do
         end select
+    end subroutine sort_radix_images_range
+
+    !> The whole image build over `rows(1:m)`, unchanged for every existing caller.
+    !!
+    !! A one-line forwarder onto the range form so the body exists once. Kept as a separate entry
+    !! point because three of the four call sites have no team to offer and no reason to acquire one.
+    subroutine sort_radix_images(key, rows, m, out, bias)
+        type(sort_key_buf), intent(in) :: key  !! the bound key.
+        integer(int64), intent(in) :: rows(:)  !! the rows to image, 1-based; `1..m` are read.
+        integer(int64), intent(in) :: m        !! how many of `rows` to image.
+        integer(int64), intent(inout) :: out(:) !! receives `m` images, to be compared as UNSIGNED.
+        integer(int64), intent(in), optional :: bias !! see `sort_radix_images_range`.
+        !
+        call sort_radix_images_range(key, rows, 1_int64, m, out, bias)
     end subroutine sort_radix_images
+
+    !> The image build split across a team of `nt` — Stage 4, `feature_sort_parallel.md` §11 step 1.
+    !!
+    !! Embarrassingly parallel and the easiest phase in the engine to thread: every row's image
+    !! depends on that row alone, chunks are contiguous and disjoint, and no chunk reads another's
+    !! output. So there is no reduction, no ordering subtlety and nothing to serialise.
+    !!
+    !! **The shape here is load-bearing and is the one both compilers accept.** `key` crosses into
+    !! the region as a shared, read-only actual argument; nothing is CONSTRUCTED inside it.
+    !! `sort_key_buf` has five allocatable components (`ints`, `reals`, `offsets`, `data`, `valid`),
+    !! which puts it squarely in the class where ifx segfaults on a `block`-local declaration inside a
+    !! parallel region, while gfortran is the one that mishandles a `private()` copy — the two forbid
+    !! opposite shapes, so a type in the intersection can use neither. Declaring no instance at all
+    !! sidesteps both. See `feature_sort_parallel.md` §11 step 3 and `feature_risks.md` Risk-45.
+    !!
+    !! Falls back to the identical serial code when there is no team or no OpenMP, so the answer
+    !! cannot depend on either.
+    subroutine sort_radix_images_threaded(key, rows, m, out, nt, bias)
+        type(sort_key_buf), intent(in) :: key   !! the bound key.
+        integer(int64), intent(in) :: rows(:)   !! the rows to image, 1-based; `1..m` are read.
+        integer(int64), intent(in) :: m         !! how many of `rows` to image.
+        integer(int64), intent(inout) :: out(:) !! receives `m` images, to be compared as UNSIGNED.
+        integer, intent(in) :: nt               !! team size; 1 runs the serial path.
+        integer(int64), intent(in), optional :: bias !! see `sort_radix_images_range`.
+#ifdef _OPENMP
+        integer :: tid          !! this thread's index in the team, 0-based.
+        integer(int64) :: c_lo, c_hi !! this thread's chunk of `rows`, inclusive.
+        !
+        if (nt > 1) then
+            !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi)
+            tid = omp_get_thread_num()
+            call sort_chunk_bounds(m, nt, tid, c_lo, c_hi)
+            if (c_hi >= c_lo) call sort_radix_images_range(key, rows, c_lo, c_hi, out, bias)
+            !$omp end parallel
+            return
+        end if
+#endif
+        call sort_radix_images_range(key, rows, 1_int64, m, out, bias)
+    end subroutine sort_radix_images_threaded
+
+    !> Splits `1..m` into `nt` contiguous, near-equal chunks and returns chunk `tid`'s bounds.
+    !!
+    !! **Contiguous, never strided.** Every phase this splits is memory-bound and walks its input
+    !! sequentially, so a strided split would give each thread the same number of elements and a
+    !! fraction of the bandwidth.
+    !!
+    !! **The first `rem` chunks take one extra element** rather than the remainder being left to the
+    !! last chunk. At the thread counts this work targets that is the difference between a balanced
+    !! split and one thread carrying up to `nt - 1` extra elements while the rest wait for it.
+    !!
+    !! Returns `jhi < jlo` — an EMPTY chunk — whenever `nt > m`. That is a normal outcome, not an
+    !! error, and every caller must test for it rather than assume each thread gets work.
+    pure subroutine sort_chunk_bounds(m, nt, tid, jlo, jhi)
+        integer(int64), intent(in) :: m !! elements to split, indexed `1..m`.
+        integer, intent(in) :: nt       !! number of chunks; must be at least 1.
+        integer, intent(in) :: tid      !! which chunk, 0-based.
+        integer(int64), intent(out) :: jlo !! first element of this chunk.
+        integer(int64), intent(out) :: jhi !! last element; `jhi < jlo` when this chunk is empty.
+        integer(int64) :: base, rem, t64
+        !
+        t64 = int(tid, int64)
+        base = m / int(nt, int64)
+        rem = m - base * int(nt, int64)
+        jlo = t64 * base + min(t64, rem) + 1_int64
+        jhi = jlo + base - 1_int64
+        if (t64 < rem) jhi = jhi + 1_int64
+    end subroutine sort_chunk_bounds
 
     !> Fills `perm` by a stable LSD radix sort over ONE key. See this section's banner for why the
     !! result is the permutation `sort_comparison_permutation` would have produced.
@@ -800,13 +944,19 @@ contains
     !! first touch, so `stat=` never sees it; the fallback works where allocation failure is really
     !! reported (macOS, and Linux with overcommit restricted). Where it cannot help, the honest
     !! answer is `parquet_set_sort_radix_path(.false.)`, which declines the scratch up front.
-    subroutine sort_radix_permutation(keys, n, perm, ok)
+    subroutine sort_radix_permutation(keys, n, perm, ok, nt)
         type(sort_key_buf), intent(in) :: keys(:) !! the keys; exactly one, per `sort_radix_candidate`.
         integer(int64), intent(in) :: n           !! rows to order.
         integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
         logical, intent(out) :: ok                !! .false. when the scratch could not be allocated.
+        integer, intent(in) :: nt                 !! team size; 1 runs every phase serially.
         !
         integer(int64), allocatable :: ka(:), kb(:) !! key images, ping-ponged between passes.
+        integer(int64), allocatable :: thist(:,:,:) !! per-thread histograms, `(bucket, byte, thread)`.
+        integer :: tid !! this thread's index within the team, 0-based.
+        integer :: tt  !! walk index over threads when the per-thread histograms are reduced.
+        integer(int64) :: c_lo, c_hi !! one thread's chunk of the image array, inclusive.
+        logical :: hist_done !! .true. once the histogram is built, by whichever of the two paths.
         integer(int64), allocatable :: ra(:), rb(:) !! the row indices travelling with them.
         integer(int64), allocatable :: tmp(:)       !! `move_alloc` intermediary for the swap.
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
@@ -904,9 +1054,9 @@ contains
         ! costs one extra sequential read of `ra` and removes `nv` calls, each of which carried a
         ! family dispatch. Every row handed over is a value-tier row by construction.
         if (narrow) then
-            call sort_radix_images(keys(1), ra, nv, ka, vmin)
+            call sort_radix_images_threaded(keys(1), ra, nv, ka, nt, vmin)
         else
-            call sort_radix_images(keys(1), ra, nv, ka)
+            call sort_radix_images_threaded(keys(1), ra, nv, ka, nt)
         end if
         !
         ! Where each block starts. Deliberately free of `descending`, exactly as the counting path
@@ -925,14 +1075,57 @@ contains
         if (nv > 1_int64) then
             ! All eight histograms in one read of `ka`, rather than one read per pass.
             hist = 0_int64
-            do j = 1_int64, nv
-                u = ka(j)
-                do p = 0, 7
-                    b = iand(u, 255_int64)
-                    hist(b, p) = hist(b, p) + 1_int64
-                    u = ishft(u, -8)
+            hist_done = .false.
+#ifdef _OPENMP
+            ! **A per-thread histogram plus one reduction, never an atomic update.** The reduction
+            ! touches 2048 counters per thread and runs once; an atomic would run eight times per
+            ! ROW, on the hottest loop in the phase. The per-thread array is allocated BEFORE the
+            ! region for the reason spelled out in `sort_radix_images_threaded` -- nothing may be
+            ! constructed inside a parallel region here.
+            !
+            ! A failed allocation DECLINES to the serial loop below rather than aborting, exactly as
+            ! the scratch allocations do: the serial path is a complete answer, so a failure here
+            ! costs speed and nothing else. This also means `nt > 1` never *guarantees* the threaded
+            ! path ran, which is why the pass counter and the threads-used counter measure different
+            ! things and both exist.
+            if (nt > 1) then
+                allocate(thist(0:255, 0:7, 0:nt - 1), stat=ios)
+                if (ios == 0) then
+                    thist = 0_int64
+                    !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, j, p, b, u)
+                    tid = omp_get_thread_num()
+                    call sort_chunk_bounds(nv, nt, tid, c_lo, c_hi)
+                    do j = c_lo, c_hi
+                        u = ka(j)
+                        do p = 0, 7
+                            b = iand(u, 255_int64)
+                            thist(b, p, tid) = thist(b, p, tid) + 1_int64
+                            u = ishft(u, -8)
+                        end do
+                    end do
+                    !$omp end parallel
+                    do tt = 0, nt - 1
+                        do p = 0, 7
+                            do b = 0_int64, 255_int64
+                                hist(b, p) = hist(b, p) + thist(b, p, tt)
+                            end do
+                        end do
+                    end do
+                    deallocate(thist)
+                    hist_done = .true.
+                end if
+            end if
+#endif
+            if (.not. hist_done) then
+                do j = 1_int64, nv
+                    u = ka(j)
+                    do p = 0, 7
+                        b = iand(u, 255_int64)
+                        hist(b, p) = hist(b, p) + 1_int64
+                        u = ishft(u, -8)
+                    end do
                 end do
-            end do
+            end if
             allocate(kb(nv), rb(nv), stat=ios)
             ! Nothing has been written to `perm` yet, so returning here really is a clean decline
             ! rather than a half-finished sort. Keep any future allocation ahead of the first
@@ -2289,6 +2482,10 @@ contains
     module procedure parquet_debug_sort_radix_passes
         n = dbg_sort_radix_passes
     end procedure parquet_debug_sort_radix_passes
+
+    module procedure parquet_debug_sort_threads_used
+        n = dbg_sort_threads_used
+    end procedure parquet_debug_sort_threads_used
 
     module procedure parquet_debug_sort_sweep_compare
         integer(int64) :: rep, i, j, stride

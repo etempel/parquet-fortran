@@ -780,16 +780,20 @@ contains
             perm(ik) = ik
         end do
         if (nrows < 2_int64) return
+        call resolve_thread_count(threads, nrows, nthreads)
         if (dbg_fortran_engine) then
-            ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. The Fortran engine is
-            ! serial for now (Stage 4 threads it), so `threads` is deliberately ignored, and that
-            ! costs the A/B nothing: the C++ engine's own answer is bit-identical at every thread
-            ! count, because its comparator is a total order. A serial Fortran permutation and a
-            ! threaded C++ one must therefore still match element for element.
-            call sort_build_permutation(keys, nrows, perm)
+            ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. **Stage 4 made this
+            ! branch honour `threads`**, and the resolution above is deliberately SHARED with the
+            ! C++ path below rather than repeated here, so the two engines are handed the same
+            ! number by the same procedure and an A/B compares engines rather than policies.
+            !
+            ! The A/B stays valid at every thread count for a reason that is about the ordering and
+            ! not about either implementation: both comparators end in a row-index tiebreaker, so no
+            ! two distinct rows compare equal, exactly one permutation is correct, and a threaded
+            ! answer that differs from a serial one is WRONG rather than merely different.
+            call sort_build_permutation_threaded(keys, nrows, nthreads, perm)
             return
         end if
-        call resolve_thread_count(threads, nrows, nthreads)
         if (size(keys) == 1) then
             ! One key needs no builder at all: the one-shot entry points BORROW the buffer that
             ! was just extracted, so this saves a handle allocation and a second copy of every

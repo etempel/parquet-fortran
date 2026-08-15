@@ -351,6 +351,7 @@ module parquet_sorting
     public :: parquet_debug_set_sort_radix_fail_alloc
     public :: parquet_debug_reset_sort_radix_passes
     public :: parquet_debug_sort_radix_passes
+    public :: parquet_debug_sort_threads_used
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -432,6 +433,30 @@ module parquet_sorting
     !! recursion -- it is a measure of the LSD loop's work, which is what those optimisations move.
     !! One increment per pass, i.e. at most eight per key and never anything per element.
     integer(int64), save :: dbg_sort_radix_passes = 0_int64
+    !> Threads the engine's permutation build actually opened on its last call; 1 means serial.
+    !!
+    !! Stage 4, and the same `had_index` shape as `dbg_sort_radix_passes` above (`feature_risks.md`
+    !! Risk-75). It is the ONLY thing that can tell a threaded build from a serial one, because the
+    !! permutation is bit-identical either way: `sort_row_less` is a total order, so exactly one
+    !! correct answer exists and no assertion on `perm` can see the team size. Without this counter
+    !! every threading test is vacuous, and a policy bug that silently never threads -- the easiest
+    !! one to write -- passes the whole suite.
+    !!
+    !! Records what the policy RESOLVED, not `omp_get_num_threads()` from inside the region. The two
+    !! differ when the runtime gives a smaller team than asked for, and it is the decision under test
+    !! here, not the runtime's response to it.
+    !!
+    !! **It has a C++ TWIN, and the two are not interchangeable.**
+    !! `parquet_debug_get_sort_threads_used` (`src/parquet_wrapper.cpp`, reached by a local `bind(C)`
+    !! interface in `test/test_settings.f90`, `test/test_sorting.f90` and `test/test_diagnostics.f90`)
+    !! answers for the **C++** engine; this one answers for the **Fortran** engine. Neither can see
+    !! the other, which is deliberate -- a single shared counter would have to be written across the
+    !! `bind(C)` boundary by whichever engine ran, and Stage 6 exists to remove that boundary.
+    !!
+    !! So the tests reading the C++ twin are exactly the ones the Stage 6 cutover has to repoint at
+    !! this one, and that repointing is the whole of Group 2 in `feature_sort.md` §6 Stage 6, 6a --
+    !! the three failures that reversed the stage ordering. Repoint them; do not delete them.
+    integer(int64), save :: dbg_sort_threads_used = 1_int64
     !
     ! ---- Internal key families ----
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
@@ -1538,6 +1563,26 @@ def emit_engine_interfaces(w):
     w("            integer(int64), intent(in) :: n           !! rows to order.")
     w("            integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.")
     w("        end subroutine sort_build_permutation")
+    w("        !> THE engine entry point when a thread count is available -- Stage 4.")
+    w("        !!")
+    w("        !! Answers **bit-identically to `sort_build_permutation` at every thread count**, and")
+    w("        !! that is a property of the ordering rather than of the implementation: `sort_row_less`")
+    w("        !! ends in a row-index tiebreaker, so no two distinct rows compare equal, exactly one")
+    w("        !! permutation is correct, and every correct algorithm must produce it. A threading bug")
+    w("        !! therefore shows up as a WRONG permutation, never as a differently-ordered valid one.")
+    w("        !!")
+    w("        !! `nthreads` is a resolved count, never a sentinel -- `resolve_thread_count` has already")
+    w("        !! applied the caller's `threads=`, the automatic policy and the in-parallel rule. This")
+    w("        !! procedure applies only the two clauses that need the DATA to decide: the row floor")
+    w("        !! (`parquet_get_sort_parallel_min_rows`), below which a team costs more than it saves,")
+    w("        !! and one thread meaning the plain serial path. Both are observable through")
+    w("        !! `parquet_debug_sort_threads_used`, which is the only way a test can see either.")
+    w("        module subroutine sort_build_permutation_threaded(keys, n, nthreads, perm)")
+    w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.")
+    w("            integer(int64), intent(in) :: n           !! rows to order.")
+    w("            integer(int64), intent(in) :: nthreads    !! resolved thread count; 1 sorts serially.")
+    w("            integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.")
+    w("        end subroutine sort_build_permutation_threaded")
     w("        !> Whether the single-key integer counting sort applies, and over what value range.")
     w("        !!")
     w("        !! `lo`/`hi` are the key's range over its VALID rows only — a null row's value slot")
@@ -1747,6 +1792,19 @@ def emit_engine_interfaces(w):
     w("        module function parquet_debug_sort_radix_passes() result(n)")
     w("            integer(int64) :: n !! passes executed.")
     w("        end function parquet_debug_sort_radix_passes")
+    w("        !> Test-only count of threads the engine's last permutation build opened; 1 = serial.")
+    w("        !!")
+    w("        !! What makes any Stage 4 threading test non-vacuous. The permutation is bit-identical")
+    w("        !! at every thread count -- the comparator is a total order, so there is exactly one")
+    w("        !! correct answer -- which means no assertion on `perm` can distinguish a threaded run")
+    w("        !! from a serial one. A policy that silently refuses to thread is therefore invisible")
+    w("        !! to every other test in the suite, and is the easiest Stage 4 bug to write.")
+    w("        !!")
+    w("        !! Reports the RESOLVED count, not the team the runtime actually granted. Has no")
+    w("        !! effect on, and says nothing about, the C++ engine.")
+    w("        module function parquet_debug_sort_threads_used() result(n)")
+    w("            integer(int64) :: n !! threads resolved for the last build; 1 means serial.")
+    w("        end function parquet_debug_sort_threads_used")
     w("    end interface")
     w("    !")
 
@@ -2350,16 +2408,20 @@ contains
             perm(ik) = ik
         end do
         if (nrows < 2_int64) return
+        call resolve_thread_count(threads, nrows, nthreads)
         if (dbg_fortran_engine) then
-            ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. The Fortran engine is
-            ! serial for now (Stage 4 threads it), so `threads` is deliberately ignored, and that
-            ! costs the A/B nothing: the C++ engine's own answer is bit-identical at every thread
-            ! count, because its comparator is a total order. A serial Fortran permutation and a
-            ! threaded C++ one must therefore still match element for element.
-            call sort_build_permutation(keys, nrows, perm)
+            ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. **Stage 4 made this
+            ! branch honour `threads`**, and the resolution above is deliberately SHARED with the
+            ! C++ path below rather than repeated here, so the two engines are handed the same
+            ! number by the same procedure and an A/B compares engines rather than policies.
+            !
+            ! The A/B stays valid at every thread count for a reason that is about the ordering and
+            ! not about either implementation: both comparators end in a row-index tiebreaker, so no
+            ! two distinct rows compare equal, exactly one permutation is correct, and a threaded
+            ! answer that differs from a serial one is WRONG rather than merely different.
+            call sort_build_permutation_threaded(keys, nrows, nthreads, perm)
             return
         end if
-        call resolve_thread_count(threads, nrows, nthreads)
         if (size(keys) == 1) then
             ! One key needs no builder at all: the one-shot entry points BORROW the buffer that
             ! was just extracted, so this saves a handle allocation and a second copy of every

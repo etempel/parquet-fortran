@@ -220,6 +220,8 @@ contains
                 test_fortran_engine_ab_families), &
             new_unittest("engine: the Fortran engine matches C++ on every operation that is not a sort", &
                 test_fortran_engine_ab_operations), &
+            new_unittest("engine: the Fortran engine threads without changing its answer", &
+                test_fortran_engine_threading), &
             new_unittest("engine: the Fortran sort matches on degenerate input shapes", &
                 test_fortran_engine_adversarial), &
             new_unittest("engine: the radix path really runs, and only above its floor", &
@@ -5914,6 +5916,110 @@ contains
     !! comparator's index tiebreaker destroys. A fixture of distinct values passes just as happily
     !! against an implementation that reached for the wrong comparator, so it would test nothing
     !! about the decision this stage's engine procedures actually have to make.
+    !> Stage 4: the Fortran engine's threaded permutation equals its serial one and the C++ one.
+    !>
+    !> **The equality assertions are the whole correctness gate, and they are strong for a reason
+    !> that is about the ORDERING rather than about this test.** `sort_row_less` ends in a row-index
+    !> tiebreaker, so no two distinct rows compare equal, exactly one permutation is correct, and
+    !> every correct algorithm must produce it. A threading defect therefore cannot hide as a
+    !> differently-ordered-but-valid answer: any disagreement here is a wrong answer.
+    !>
+    !> **Without the `threads_seen` control the whole test would be vacuous**, and vacuous in the
+    !> direction that passes: if the policy silently refused to thread, every arm would run the same
+    !> serial code and every equality would hold. The permutation cannot reveal the team size —
+    !> that is precisely what the tiebreaker guarantees — so `parquet_debug_sort_threads_used` is the
+    !> only observable that can, and it is asserted in BOTH directions (a team was really opened, and
+    !> the two refusal clauses really refuse).
+    subroutine test_fortran_engine_threading(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        !> Large enough that every arm's chunk split is non-trivial: at 8 threads a 4000-row fixture
+        !! gives 500 rows per chunk, so an off-by-one in `sort_chunk_bounds` moves real rows rather
+        !! than falling in an empty tail. Real values, because `sort_counting_candidate` accepts an
+        !! integer key on value RANGE and the counting path is serial and untouched by Stage 4 —
+        !! an integer fixture would test nothing here.
+        real(real64) :: v(4000)
+        integer(int64), allocatable :: ref(:), got(:) !! serial reference, and one threaded arm.
+        integer(int64), allocatable :: cpp(:)         !! the C++ engine's answer, as a cross-check.
+        integer, parameter :: arms(4) = [2, 3, 4, 8]  !! 3 is deliberate: not a divisor of 4000.
+        integer(int64) :: threads_seen(size(arms))    !! what the policy resolved on each arm.
+        integer :: k
+        character(len=96) :: kstr !! long enough for the longest message below, plus the arm number.
+        !
+        ! Ties every seventh row, and no pre-existing order: a chunk boundary falling inside a run
+        ! of equal keys is where a split that loses stability would show, and the tiebreaker is what
+        ! must keep the answer unique there.
+        do k = 1, size(v)
+            v(k) = real(mod(k * 37, 571), real64) + real(mod(k, 7), real64) * 0.5_real64
+        end do
+        ! The C++ engine first, while it is still the default, so the cross-check is taken against
+        ! an engine this test has not touched the settings of.
+        call pf_argsort(v, cpp, threads=4)
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        ! Both floors have to come down together or the fixture reaches neither path: the radix floor
+        ! gates the only phase Stage 4 threads, and the parallel floor gates threading itself. A
+        ! fixture big enough to clear the production values of both would be far too slow for a unit
+        ! test — `feature_risks.md` Risk-49 in its usual form.
+        call parquet_debug_set_sort_radix_min_rows(2_int64)
+        ! **1, not 0.** `parquet_set_sort_parallel_min_rows(0)` stores zero but
+        ! `parquet_get_sort_parallel_min_rows()` maps any value <= 0 back to the built-in 8192, so a
+        ! floor of 0 is the DEFAULT floor and would refuse this 4000-row fixture outright. The
+        ! positive assertions below caught exactly that; the negative control could not have, because
+        ! it would have been asserting a refusal that was already happening for the wrong reason.
+        call force_parallel_threshold(1_int64)
+        !
+        call pf_argsort(v, ref, threads=1)
+        call check(error, fortran_threads_used() == 1_int64, &
+            "threads=1 must resolve to the serial path, not a team of one")
+        if (allocated(error)) return
+        !
+        do k = 1, size(arms)
+            call pf_argsort(v, got, threads=arms(k))
+            threads_seen(k) = fortran_threads_used()
+            write (kstr, '(a,i0,a)') "the Fortran engine at threads=", arms(k), &
+                " must give the serial permutation exactly"
+            call check(error, size(got) == size(ref), trim(kstr) // " (size)")
+            if (allocated(error)) return
+            call check(error, all(got == ref), trim(kstr))
+            if (allocated(error)) return
+            write (kstr, '(a,i0)') "a team must actually be opened at threads=", arms(k)
+            call check(error, threads_seen(k) == int(arms(k), int64), trim(kstr))
+            if (allocated(error)) return
+        end do
+        !
+        ! The cross-engine check. Kept separate from the loop above because a disagreement here and
+        ! a disagreement there mean different things: this one says the two ENGINES differ, which is
+        ! a Stage 1 conformance failure, not a Stage 4 threading one.
+        call check(error, size(cpp) == size(ref) .and. all(cpp == ref), &
+            "the Fortran engine's threaded answer must equal the C++ engine's")
+        if (allocated(error)) return
+        !
+        ! **The negative control for the row floor.** Raising it above the fixture must send the
+        ! same call back to the serial path — without this, a policy that ignored the floor entirely
+        ! would pass every assertion above.
+        call force_parallel_threshold(int(size(v), int64) + 1_int64)
+        call pf_argsort(v, got, threads=8)
+        call check(error, fortran_threads_used() == 1_int64, &
+            "a row floor above the fixture must refuse the team")
+        if (allocated(error)) return
+        call check(error, all(got == ref), "refusing the team must not change the answer")
+        if (allocated(error)) return
+        !
+        call force_parallel_threshold(0_int64)
+        call parquet_debug_set_sort_radix_min_rows(-1_int64)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+    end subroutine test_fortran_engine_threading
+    !
+    !> How many threads the **Fortran** engine's last permutation build resolved; 1 means serial.
+    !>
+    !> The twin of `threads_used` above, which answers for the C++ engine. The two counters cannot
+    !> see each other — see `parquet_debug_sort_threads_used`'s own doc-comment for why that is
+    !> deliberate, and for which tests the Stage 6 cutover has to repoint from one to the other.
+    function fortran_threads_used() result(n)
+        integer(int64) :: n !! threads resolved for the last Fortran-engine build.
+        n = parquet_debug_sort_threads_used()
+    end function fortran_threads_used
+    !
     subroutine test_fortran_engine_ab_operations(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         !> **60 rows, not a dozen.** `sort_nth_index`'s quickselect only loops while the surviving

@@ -101,6 +101,7 @@ module parquet_sorting
     public :: parquet_debug_set_sort_radix_fail_alloc
     public :: parquet_debug_reset_sort_radix_passes
     public :: parquet_debug_sort_radix_passes
+    public :: parquet_debug_sort_threads_used
     !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
@@ -182,6 +183,30 @@ module parquet_sorting
     !! recursion -- it is a measure of the LSD loop's work, which is what those optimisations move.
     !! One increment per pass, i.e. at most eight per key and never anything per element.
     integer(int64), save :: dbg_sort_radix_passes = 0_int64
+    !> Threads the engine's permutation build actually opened on its last call; 1 means serial.
+    !!
+    !! Stage 4, and the same `had_index` shape as `dbg_sort_radix_passes` above (`feature_risks.md`
+    !! Risk-75). It is the ONLY thing that can tell a threaded build from a serial one, because the
+    !! permutation is bit-identical either way: `sort_row_less` is a total order, so exactly one
+    !! correct answer exists and no assertion on `perm` can see the team size. Without this counter
+    !! every threading test is vacuous, and a policy bug that silently never threads -- the easiest
+    !! one to write -- passes the whole suite.
+    !!
+    !! Records what the policy RESOLVED, not `omp_get_num_threads()` from inside the region. The two
+    !! differ when the runtime gives a smaller team than asked for, and it is the decision under test
+    !! here, not the runtime's response to it.
+    !!
+    !! **It has a C++ TWIN, and the two are not interchangeable.**
+    !! `parquet_debug_get_sort_threads_used` (`src/parquet_wrapper.cpp`, reached by a local `bind(C)`
+    !! interface in `test/test_settings.f90`, `test/test_sorting.f90` and `test/test_diagnostics.f90`)
+    !! answers for the **C++** engine; this one answers for the **Fortran** engine. Neither can see
+    !! the other, which is deliberate -- a single shared counter would have to be written across the
+    !! `bind(C)` boundary by whichever engine ran, and Stage 6 exists to remove that boundary.
+    !!
+    !! So the tests reading the C++ twin are exactly the ones the Stage 6 cutover has to repoint at
+    !! this one, and that repointing is the whole of Group 2 in `feature_sort.md` §6 Stage 6, 6a --
+    !! the three failures that reversed the stage ordering. Repoint them; do not delete them.
+    integer(int64), save :: dbg_sort_threads_used = 1_int64
     !
     ! ---- Internal key families ----
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
@@ -5622,6 +5647,26 @@ module parquet_sorting
             integer(int64), intent(in) :: n           !! rows to order.
             integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
         end subroutine sort_build_permutation
+        !> THE engine entry point when a thread count is available -- Stage 4.
+        !!
+        !! Answers **bit-identically to `sort_build_permutation` at every thread count**, and
+        !! that is a property of the ordering rather than of the implementation: `sort_row_less`
+        !! ends in a row-index tiebreaker, so no two distinct rows compare equal, exactly one
+        !! permutation is correct, and every correct algorithm must produce it. A threading bug
+        !! therefore shows up as a WRONG permutation, never as a differently-ordered valid one.
+        !!
+        !! `nthreads` is a resolved count, never a sentinel -- `resolve_thread_count` has already
+        !! applied the caller's `threads=`, the automatic policy and the in-parallel rule. This
+        !! procedure applies only the two clauses that need the DATA to decide: the row floor
+        !! (`parquet_get_sort_parallel_min_rows`), below which a team costs more than it saves,
+        !! and one thread meaning the plain serial path. Both are observable through
+        !! `parquet_debug_sort_threads_used`, which is the only way a test can see either.
+        module subroutine sort_build_permutation_threaded(keys, n, nthreads, perm)
+            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
+            integer(int64), intent(in) :: n           !! rows to order.
+            integer(int64), intent(in) :: nthreads    !! resolved thread count; 1 sorts serially.
+            integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
+        end subroutine sort_build_permutation_threaded
         !> Whether the single-key integer counting sort applies, and over what value range.
         !!
         !! `lo`/`hi` are the key's range over its VALID rows only — a null row's value slot
@@ -5831,6 +5876,19 @@ module parquet_sorting
         module function parquet_debug_sort_radix_passes() result(n)
             integer(int64) :: n !! passes executed.
         end function parquet_debug_sort_radix_passes
+        !> Test-only count of threads the engine's last permutation build opened; 1 = serial.
+        !!
+        !! What makes any Stage 4 threading test non-vacuous. The permutation is bit-identical
+        !! at every thread count -- the comparator is a total order, so there is exactly one
+        !! correct answer -- which means no assertion on `perm` can distinguish a threaded run
+        !! from a serial one. A policy that silently refuses to thread is therefore invisible
+        !! to every other test in the suite, and is the easiest Stage 4 bug to write.
+        !!
+        !! Reports the RESOLVED count, not the team the runtime actually granted. Has no
+        !! effect on, and says nothing about, the C++ engine.
+        module function parquet_debug_sort_threads_used() result(n)
+            integer(int64) :: n !! threads resolved for the last build; 1 means serial.
+        end function parquet_debug_sort_threads_used
     end interface
     !
 end module parquet_sorting ! GCOVR_EXCL_LINE

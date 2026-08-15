@@ -94,7 +94,7 @@ module pf_probe_int_rule
     integer, parameter :: pf_int128_present = 1 / merge(1, 0, k128 > 0)
 #endif
 
-    integer, parameter :: NARM = 10
+    integer, parameter :: NARM = 12
 
     ! Ranges used by the timed arms.  10**6 fits in 32 bits (the common case); 4*10**12 does not.
     !
@@ -183,17 +183,41 @@ contains
         hi = a1 * b1 + w2 + c
     end subroutine mulhilo64
 
-    !> `2**64 mod s` for `s >= 1` -- Lemire's rejection threshold. Cold path only.
+    !> `2**64 mod s` for every width `s` read as UNSIGNED -- Lemire's rejection threshold. Cold path.
     !!
-    !! Every intermediate is held inside `[0, s)`, so nothing here can overflow for any `s` up to
-    !! `huge(int64)` and no unsigned reasoning is needed. That is deliberate rather than tidy: the
+    !! Two regimes, and the first one is why this function is not just the doubling loop below.
+    !!
+    !! **`s >= 2**63`** (`s` negative as a signed `integer(int64)`). A range that wide is reachable
+    !! from the public API -- `pf_random_int_at(seed, i, -huge(int64), huge(int64))` has width
+    !! `2**64 - 1` -- and every signed operation below is then meaningless: `mod(h, s)` reduces
+    !! modulo `|s|`, and the doubling comparison reads a negative `s` as small. Measured: the
+    !! doubling form answers wrongly for 67% of the widths in this regime, by up to a factor of two,
+    !! and an over-large threshold rejects candidates that are the *sole* preimage of a range value,
+    !! so that value can then never be returned at all -- up to 50% of the requested range at
+    !! `s ~ (2/3)*2**64`, and `hi` itself at `s = 2**64 - 1`. It is the exact opposite of the
+    !! exactness option 3 is adopted for, and it is silent. Handled first, and directly: for these
+    !! widths `2**64 - s <= 2**63 <= s`, so the remainder *is* `2**64 - s`, with no reduction to do.
+    !!
+    !! **`s < 2**63`.** The doubling form, with every intermediate held inside `[0, s)`, so nothing
+    !! can overflow and no unsigned reasoning is needed. That is deliberate rather than tidy: the
     !! obvious spelling -- subtract `s` from the unsigned pattern `2**64 - s` until it fits -- is a
     !! signed overflow, and gfortran 14.2.1 at `-O3` without `-fwrapv` turns it into an infinite
     !! loop. It is the same class of fault as feature_random.md B.2, met while writing this probe.
     pure function umod_2p64(s) result(t)
-        integer(int64), intent(in) :: s  !! range width, `1 <= s <= huge(int64)`
-        integer(int64) :: t              !! `2**64 mod s`, in `[0, s)`
+        integer(int64), intent(in) :: s  !! range width read as unsigned, `1 <= s <= 2**64 - 1`
+        integer(int64) :: t              !! `2**64 mod s`, in `[0, s)` read as unsigned
         integer(int64) :: a, h, r
+        if (s < 0_int64) then
+            ! s >= 2**63 unsigned.  `-s` is the pattern for 2**64 - s and is representable for every
+            ! such s except s == 2**63 exactly, where negation would overflow -- and where the
+            ! answer is 0 anyway, since 2**63 divides 2**64.  So that value is taken out first.
+            if (s == -huge(1_int64) - 1_int64) then
+                t = 0_int64
+            else
+                t = -s
+            end if
+            return
+        end if
         a = -s                              ! the two's-complement pattern for 2**64 - s
         h = ishft(a, -1)                    ! floor((2**64 - s) / 2); logical shift, so >= 0
         r = mod(h, s)                       ! in [0, s)
@@ -443,6 +467,83 @@ contains
         k = a + h
     end function int3_gen
 
+    !> OPTION 3 with the Q2 option (iii) range arithmetic: the width and the offset computed
+    !! OVERFLOW-FREE in `int128` instead of relying on two's-complement wrapping.
+    !!
+    !! feature_random_stage0.md §20.3 established that `s = hi - lo + 1` and `k = lo + high64(x*s)`
+    !! both depend on wrapping once the requested width reaches `2**63`, under BOTH candidate rules,
+    !! and that route (e) does not fix them -- it widens the Philox multiply, not the range
+    !! arithmetic. §26's Q2 chose option (iii), "remove it under route (e)", on the strength of
+    !! "`int128` should be far cheaper" than the 32-bit-halves form's measured **+12.8%** -- and
+    !! records that **the option actually chosen has never been priced**. This arm prices it.
+    !!
+    !! The two changes, and why neither can overflow:
+    !!
+    !!   * the width is formed as `int128`, where `hi - lo + 1` is exact for every `int64` pair
+    !!     (it reaches `2**64`, which `int128` holds with 63 bits to spare), and is then converted
+    !!     to the `int64` bit pattern the rest of the rule reads as unsigned. The conversion is
+    !!     branched rather than masked because subtracting `2**64` is only representable on the
+    !!     wide side; `s128 == 2**64` lands on `s == 0`, which is step 2's full-range case.
+    !!   * the offset adds `a` to the *unsigned* value of `high64(x*s)` in `int128` and narrows
+    !!     once. `iand(..., 2**64 - 1)` recovers the unsigned value from a sign-extended pattern
+    !!     with no branch, and the sum is in `[a, b]` by construction, so the narrowing is exact.
+    !!
+    !! Where there is no 128-bit kind -- ifx, permanently -- option (iii) IS the shipped wrapping
+    !! form (Q2 keeps option (i) there as the documented fallback), so this arm compiles to a
+    !! duplicate of `int3_gen` and measures that build's own arm-to-arm floor instead. That is
+    !! deliberate: a duplicate arm is a useful control, and it must not be read as a price.
+    elemental function int3_gen_of(seed, i, lo, hi) result(k)
+        integer(int64), intent(in) :: seed  !! the seed
+        integer(int64), intent(in) :: i     !! the stream label
+        integer(int64), intent(in) :: lo    !! inclusive lower bound
+        integer(int64), intent(in) :: hi    !! inclusive upper bound
+        integer(int64) :: k                 !! uniform integer in [lo,hi]
+        integer(int64) :: k0, k1, c0, c1, c2, c3, o0, o1, o2, o3
+        integer(int64) :: x, s, h, l, t, a, b, n
+#ifdef PF_INT128
+        integer(k128) :: s128
+#endif
+        a = lo; b = hi
+        if (a > b) then
+            t = a; a = b; b = t
+        end if
+#ifdef PF_INT128
+        s128 = int(b, k128) - int(a, k128) + 1_k128
+        if (s128 >= ishft(1_k128, 63)) then
+            s = int(s128 - ishft(1_k128, 64), int64)
+        else
+            s = int(s128, int64)
+        end if
+#else
+        s = b - a + 1_int64
+#endif
+        call key_of(seed, k0, k1)
+        call ctr_of(i, 0_int64, c0, c1, c2, c3)
+        call blk10(k0, k1, c0, c1, c2, c3, o0, o1, o2, o3)
+        x = u64_of(o0, o1)
+        if (s == 0_int64) then
+            k = x
+            return
+        end if
+        call mulhilo64(x, s, h, l)
+        if (ult(l, s)) then
+            t = umod_2p64(s)
+            n = 0_int64
+            do while (ult(l, t))
+                n = n + 1_int64
+                call blk10(iand(k0 + n * RT0, M32), iand(k1 + n * RT1, M32), &
+                           c0, c1, c2, c3, o0, o1, o2, o3)
+                x = u64_of(o0, o1)
+                call mulhilo64(x, s, h, l)
+            end do
+        end if
+#ifdef PF_INT128
+        k = int(int(a, k128) + iand(int(h, k128), ishft(1_k128, 64) - 1_k128), int64)
+#else
+        k = a + h
+#endif
+    end function int3_gen_of
+
     !> OPTION 3, 32-bit-range fast path: the full product in two 32x32 products instead of four.
     elemental function int3_fast(seed, i, lo, hi) result(k)
         integer(int64), intent(in) :: seed  !! the seed
@@ -600,6 +701,8 @@ contains
         case (8);  nm = "L3GW  opt3 Lemire gen,   range 4e12"
         case (9);  nm = "L3Gnr opt3 gen,  NO reject (control)"
         case (10); nm = "L3Fnr opt3 fast, NO reject (control)"
+        case (11); nm = "L3Go  opt3 gen, Q2(iii), range 1e6"
+        case (12); nm = "L3GWo opt3 gen, Q2(iii), range 4e12"
         case default; nm = "?"
         end select
     end function arm_name
@@ -660,6 +763,14 @@ contains
         case (10)
             do j = 1, n
                 dk(j) = int3_fast_nr(seed, base + int(j, int64), LO_N, HI_N)
+            end do
+        case (11)
+            do j = 1, n
+                dk(j) = int3_gen_of(seed, base + int(j, int64), LO_N, HI_N)
+            end do
+        case (12)
+            do j = 1, n
+                dk(j) = int3_gen_of(seed, base + int(j, int64), LO_W, HI_W)
             end do
         end select
     end subroutine fill_arm
@@ -722,21 +833,24 @@ contains
         end do
         call report("cross-impl: blk10 == blk10_strict over 5x64x4", ok, nfail)
 
-        ! (3) umod_2p64 against a slow shift-and-subtract reference.
+        ! (3) umod_2p64 against a slow shift-and-subtract reference.  Widths 16-25 sit at or above
+        !     2**63, which is the regime an earlier version of this sweep never reached.
         ok = .true.
-        do i = 1, 40
+        do i = 1, 60
             s = test_width(i)
             t = umod_2p64(s)
             tref = umod_2p64_ref(s)
             if (t /= tref) ok = .false.
+            ! A threshold at or above the width would reject every candidate, i.e. hang.
+            if (.not. ult(t, s) .and. s /= 1_int64) ok = .false.
         end do
-        call report("umod_2p64 == slow reference over 40 widths", ok, nfail)
+        call report("umod_2p64 == slow reference over 60 widths (incl. >= 2**63)", ok, nfail)
 
         ! (4) The Lemire accept/reject decision against an exact reference, on crafted x values
         !     straddling the threshold.  This is the branch that is essentially never taken at the
         !     ranges the timed arms use, so nothing else would exercise it.
         ok = .true.
-        do i = 1, 40
+        do i = 1, 60
             s = test_width(i)
             t = umod_2p64(s)
             do j = -2, 2
@@ -746,6 +860,24 @@ contains
             end do
         end do
         call report("Lemire reject decision == exact reference", ok, nfail)
+
+        ! (4a) End-to-end on a range wider than 2**63, which is where the threshold's wide branch
+        !      is load-bearing.  Asserts containment and, by completing at all, termination -- an
+        !      over-large threshold can reject every candidate and spin forever.
+        ok = .true.
+        do i = 1, 5
+            seedv = seed_of(i)
+            do j = -50, 50
+                kv = int3_gen(seedv, int(j, int64), -huge(1_int64), huge(1_int64))
+                if (kv < -huge(1_int64)) ok = .false.
+                kv = int3_gen(seedv, int(j, int64), -6148914691236517205_int64, &
+                                                     6148914691236517205_int64)
+                if (kv < -6148914691236517205_int64 .or. kv > 6148914691236517205_int64) ok = .false.
+                kv = int1_gen(seedv, int(j, int64), -huge(1_int64), huge(1_int64))
+                if (kv < -huge(1_int64)) ok = .false.
+            end do
+        end do
+        call report("wide ranges (width >= 2**63): contained and terminating", ok, nfail)
 
         ! (5) Range containment for every rule, including the swap and the degenerate range.
         ok = .true.
@@ -786,6 +918,67 @@ contains
             end do
         end do
         call report("fast path == general path, both rules", ok, nfail)
+
+        ! (6a) Q2 option (iii): the overflow-free width/offset arm against the shipped wrapping
+        !      form.  The two regimes are graded differently, and that is the point.
+        !
+        !      Below 2**63 the shipped form has no overflow, so the two MUST agree and a
+        !      disagreement is a defect in the new arm -- a gate failure.
+        !
+        !      At or above 2**63 the shipped form's own `hi - lo + 1` and `lo + high64` are the
+        !      signed overflows §20.3 identified, so a disagreement there is the compiler
+        !      exploiting them.  That is a FINDING about the build, not a harness error, and it is
+        !      reported without blocking the timing -- the timed arms use widths of 1e6 and 4e12,
+        !      nowhere near this regime.  Machine C sees exactly this under gfortran 15.2 at
+        !      `fpm install --profile release`, with the overflow-free arm agreeing with
+        !      arbitrary-precision truth and the shipped form not.
+        ok = .true.
+        do i = 1, 60
+            s = test_width(i)
+            if (s <= 0_int64) cycle              ! wide widths are covered by the explicit pairs
+            lov = 0_int64
+            hiv = s - 1_int64
+            do j = 1, 60
+                if (int3_gen_of(seed_of(1 + mod(j, 5)), int(j, int64), lov, hiv) /= &
+                    int3_gen(seed_of(1 + mod(j, 5)), int(j, int64), lov, hiv)) ok = .false.
+            end do
+        end do
+        call report("Q2(iii) == shipped rule for widths below 2**63", ok, nfail)
+
+        ok = .true.
+        do i = 1, 7
+            select case (i)
+            case (1); lov = -huge(1_int64);          hiv = huge(1_int64)        ! width 2**64 - 1
+            case (2); lov = -huge(1_int64);          hiv = huge(1_int64) - 1    ! width 2**64 - 2
+            case (3); lov = 0_int64;                 hiv = huge(1_int64)        ! width 2**63
+            case (4); lov = -1_int64;                hiv = huge(1_int64)        ! width 2**63 + 1
+            case (5); lov = -huge(1_int64) - 1;      hiv = huge(1_int64) - 1    ! width 2**64 - 1
+            case (6); lov = -huge(1_int64) - 1;      hiv = 0_int64              ! width 2**63 + 1
+            case (7); lov = -huge(1_int64) - 1;      hiv = huge(1_int64)        ! width 0 (full)
+            end select
+            do j = 1, 300
+                kv = int3_gen_of(12345_int64, int(j, int64), lov, hiv)
+                if (kv < lov .or. kv > hiv) call report("Q2(iii) stays in range", .false., nfail)
+                if (kv /= int3_gen(12345_int64, int(j, int64), lov, hiv)) then
+                    if (ok) then
+                        write (*, "(a)") "  [ !! ] the shipped WRAPPING range arithmetic disagrees &
+                                         &with the overflow-free form at a width >= 2**63"
+                        write (*, "(a,i0,a,i0,a,i0)") "         lo=", lov, " hi=", hiv, " i=", j
+                        write (*, "(a,i0)") "         overflow-free (correct by construction): ", kv
+                        write (*, "(a,i0)") "         shipped wrapping form                  : ", &
+                            int3_gen(12345_int64, int(j, int64), lov, hiv)
+                        write (*, "(a)") "         This is §20.3's undefined behaviour being &
+                                         &exploited: Q2 option (i) is unsafe on this build."
+                    end if
+                    ok = .false.
+                end if
+            end do
+        end do
+        if (ok) then
+            call report("Q2(iii) == shipped rule for widths >= 2**63", .true., nfail)
+        else
+            write (*, "(a)") "  [ !! ] REPORTED, NOT COUNTED AS A GATE FAILURE -- see the note above."
+        end if
 
         ! (7) The retry path must actually fire.  A range just above 2**63 rejects about a quarter
         !     of the time, so this exercises the loop the timed arms never enter.
@@ -863,9 +1056,17 @@ contains
     end function seed_of
 
     !> A spread of range widths for the threshold and decision tests, including awkward ones.
+    !!
+    !! Cases 16-25 have an unsigned value `>= 2**63`, i.e. they are NEGATIVE as signed `int64`.
+    !! They are the regime `umod_2p64`'s wide branch exists for, and an earlier version of this
+    !! function stopped at `huge(int64)` -- so every width it offered was one the signed doubling
+    !! form happened to handle, and the defect that form has above `2**63` was invisible to a
+    !! self-test that looked exhaustive. These widths are reachable from the public API: case 16 is
+    !! `pf_random_int_at(seed, i, -huge(int64), huge(int64))`, which feature_random.md §13.4
+    !! already requires an edge test for.
     pure function test_width(i) result(s)
-        integer, intent(in) :: i  !! index 1..40
-        integer(int64) :: s       !! a range width >= 1
+        integer, intent(in) :: i  !! index 1..60
+        integer(int64) :: s       !! a range width >= 1, read as UNSIGNED (may be negative)
         select case (i)
         case (1);  s = 1_int64
         case (2);  s = 2_int64
@@ -882,18 +1083,52 @@ contains
         case (13); s = huge(1_int64)
         case (14); s = huge(1_int64) - 1_int64
         case (15); s = 6148914691236517206_int64        ! ~ 2**64/3: rejects about a third of the time
+        ! ---- widths at or above 2**63, negative as signed int64 ----
+        case (16); s = -1_int64                         ! 2**64 - 1 : lo = -huge, hi = huge
+        case (17); s = -2_int64                         ! 2**64 - 2
+        case (18); s = -3_int64                         ! 2**64 - 3
+        case (19); s = -huge(1_int64)                   ! 2**63 + 1
+        case (20); s = -huge(1_int64) - 1_int64         ! exactly 2**63; remainder is 0
+        case (21); s = -huge(1_int64) + 1_int64         ! 2**63 + 2
+        case (22); s = -6148914691236517205_int64       ! ~ (2/3)*2**64: the worst case for the
+        case (23); s = -6148914691236517206_int64       !   defect the wide branch fixes
+        case (24); s = -1000000007_int64                ! 2**64 - 1000000007
+        case (25); s = -4611686018427387904_int64       ! 1.5 * 2**63
         case default; s = int(i, int64) * 987654321_int64 + 17_int64
         end select
     end function test_width
 
     !> `2**64 mod s` by repeated shift-and-subtract; slow, obviously correct, reference only.
+    !!
+    !! Honest note on how independent this really is, because it was not independent enough once.
+    !! The doubling loop shares `umod_2p64`'s signed-arithmetic assumption exactly, so before the
+    !! `s >= 2**63` regime was handled, BOTH functions returned nonsense there (this one returned
+    !! -1 for `s = 2**64 - 1`, where the answer is 1) -- two implementations agreeing on a wrong
+    !! answer because they shared the assumption that was wrong. That is the same lesson as
+    !! feature_random.md D.1 one level down: "independent" means independent *on the axis the fault
+    !! lives on*, and the axis here is signed-versus-unsigned, not the reduction algorithm. So the
+    !! wide branch below is derived a different way from `umod_2p64`'s -- via the offset from
+    !! `2**63` rather than via negation -- which is also what keeps it free of overflow.
     pure function umod_2p64_ref(s) result(t)
-        integer(int64), intent(in) :: s  !! range width, >= 1
+        integer(int64), intent(in) :: s  !! range width read as unsigned, >= 1
         integer(int64) :: t              !! `2**64 mod s`
+        integer(int64) :: m
         integer :: b
+        if (s < 0_int64) then
+            ! s >= 2**63 unsigned.  Write s = 2**63 + m with m = s - (-2**63) in [0, 2**63):
+            ! that subtraction cannot overflow, and 2**64 - s = 2**63 - m, which is representable
+            ! for every m >= 1.  m == 0 is s == 2**63, whose remainder is 0.
+            m = s - (-huge(1_int64) - 1_int64)
+            if (m == 0_int64) then
+                t = 0_int64
+            else
+                t = huge(1_int64) - (m - 1_int64)      ! = 2**63 - m, computed without overflow
+            end if
+            return
+        end if
         ! Builds 2**64 mod s by starting from 2**0 mod s and doubling modulo s sixty-four times.
         ! Every intermediate stays inside [0, s), so nothing can overflow and no unsigned reasoning
-        ! is needed at all -- a completely different route from umod_2p64, which is the point.
+        ! is needed at all -- a different route from umod_2p64's, which is the point.
         t = mod(1_int64, s)
         do b = 1, 64
             if (t >= s - t) then
@@ -987,6 +1222,8 @@ contains
         case (8);  k = int3_gen(seed, i, LO_W, HI_W)
         case (9);  k = int3_gen_nr(seed, i, LO_N, HI_N)
         case (10); k = int3_gen_nr(seed, i, LO_N, HI_N)
+        case (11); k = int3_gen(seed, i, LO_N, HI_N)
+        case (12); k = int3_gen(seed, i, LO_W, HI_W)
         case default; k = 0_int64
         end select
     end function ref_value
@@ -1107,7 +1344,10 @@ program probe_random_int_rule
     end do
     write (*, "(a)") ""
 
-    ! Keep the buffers live so nothing above can be eliminated.
+    ! Keep the buffers live so nothing above can be eliminated.  Arm 10 is re-run first so the
+    ! printed checksum stays comparable with every earlier run of this probe: it is the value the
+    ! summing loop would have seen when arm 10 was the last arm, and adding arms must not move it.
+    call fill_arm(10, SEED, 0_int64, NA, du, dk)
     chk = 0_int64
     cm = 0_int64
     do a = 1, NA
@@ -1122,6 +1362,10 @@ program probe_random_int_rule
         "   opt3 gen  ", ns(6, 1)
     write (*, "(a,f7.3,a,f7.3)") "  range 4e12, general path:        opt1 gen  ", ns(5, 1), &
         "   opt3 gen  ", ns(8, 1)
+    write (*, "(a)") ""
+    write (*, "(a)") "--- Q2 option (iii): overflow-free width/offset against the shipped wrapping form ---"
+    write (*, "(a,f7.3,a,f7.3)") "  range 1e6 :   shipped ", ns(6, 1), "   Q2(iii) ", ns(11, 1)
+    write (*, "(a,f7.3,a,f7.3)") "  range 4e12:   shipped ", ns(8, 1), "   Q2(iii) ", ns(12, 1)
     write (*, "(a)") ""
     write (*, "(a)") "--- attribution: what the rejection branch itself costs ---"
     write (*, "(a,f7.3)") "  opt3 fast - opt3 fast(no reject) : ", ns(7, 1) - ns(10, 1)

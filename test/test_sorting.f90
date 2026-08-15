@@ -255,7 +255,9 @@ contains
             new_unittest("engine: the refinement floor scales with the team and declines small tasks", &
                 test_engine_refine_floor), &
             new_unittest("engine: the threading floor scales with the team and declines small columns", &
-                test_engine_thread_floor) &
+                test_engine_thread_floor), &
+            new_unittest("engine: a small team still takes the counting path on a narrow range", &
+                test_counting_small_team) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -386,6 +388,67 @@ contains
         call check(error, used_forced >= 2_int64, &
             "forcing the floor to 1 must make the small column thread, or the serial check is vacuous")
     end subroutine test_engine_thread_floor
+    !
+    !> A small team must still take the SERIAL counting sort when the value range is narrow enough.
+    !!
+    !! **The defect this closes.** The counting path used to be admitted only at `nt <= 1`, so the
+    !! moment a team existed a low-cardinality integer key fell counting -> radix -> Design B
+    !! declines -> Design A, and landed slower than the serial sort it had just refused. Machine A
+    !! measured 2.0x at two threads on gfortran; machine B reproduced 1.46x under ifx, which is what
+    !! established it as a real defect rather than an instance of the gfortran radix gap that
+    !! `feature_sort_report.md` section 11.3 tracks.
+    !!
+    !! **The `nt = 4` arm is not decoration.** The ceiling is 2 because that is where the compilers
+    !! stop agreeing -- from four threads ifx's radix wins and gfortran's does not -- so a test that
+    !! only proved counting is reachable with a team would pass just as happily against a ceiling of
+    !! 64, which would be a large regression under ifx.
+    !!
+    !! **The forced-ceiling arm is the vacuity control.** With the ceiling at 1 the same key at the
+    !! same team must reach the radix; without that, the first assertion would pass against an engine
+    !! that never reaches the radix here for some unrelated reason.
+    subroutine test_counting_small_team(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64) :: v(40000)
+        integer(int64), allocatable :: ref(:), got2(:), got4(:), gotold(:)
+        integer(int64) :: d2, d4, dold, i
+        !
+        ! 40000 rows clears the engine's own floor (max(32768, 2048*nt)) so a team really opens, and
+        ! ten distinct values put the range six orders of magnitude below the n/100 the rule allows
+        ! at two threads.
+        do i = 1_int64, 40000_int64
+            v(i) = mod(i * 7_int64, 10_int64)
+        end do
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_argsort(v, ref, threads=1)
+        call pf_argsort(v, got2, threads=2)
+        d2 = parquet_debug_sort_design()
+        call pf_argsort(v, got4, threads=4)
+        d4 = parquet_debug_sort_design()
+        call parquet_debug_set_sort_counting_max_threads(1_int64)
+        call pf_argsort(v, gotold, threads=2)
+        dold = parquet_debug_sort_design()
+        !
+        ! Restored before the assertions: each `check` can `return`, and this suite shares a process
+        ! with the settings suite.
+        call parquet_debug_set_sort_counting_max_threads(-1_int64)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, d2 == 0_int64, &
+            "two threads on a narrow range must take the counting path, not fall through to a design")
+        if (allocated(error)) return
+        call check(error, dold /= 0_int64, &
+            "forcing the ceiling to 1 must reach a radix design, or the check above is vacuous")
+        if (allocated(error)) return
+        call check(error, d4 /= 0_int64, &
+            "four threads must DECLINE counting: the ceiling is 2 because ifx's radix wins above it")
+        if (allocated(error)) return
+        call check(error, all(got2 == ref), "the counting path must give the serial permutation")
+        if (allocated(error)) return
+        call check(error, all(got4 == ref), "declining counting must not change the answer")
+        if (allocated(error)) return
+        call check(error, all(gotold == ref), "the forced-radix arm must not change the answer either")
+    end subroutine test_counting_small_team
     !
     !> `perm(k)` must name the element belonging at position k, and gathering by it must sort.
     subroutine test_argsort_basic(error)

@@ -476,6 +476,28 @@ contains
         integer, intent(in) :: nt                 !! team size; 1 is the serial path.
         integer(int64) :: lo, hi !! the counting path's value range, carried from the candidate test.
         logical :: did_radix     !! .false. when the radix path declined for want of memory.
+        logical :: take_counting !! resolved counting-path decision, once the range is known.
+        integer(int64) :: max_count_nt !! resolved team ceiling, after any debug override.
+        !> Largest team that may still take the SERIAL counting sort.
+        !!
+        !! **The C++ engine -- the shipped one -- has never gated this on the team at all**
+        !! (`sort_build_permutation` in `src/parquet_wrapper.cpp`: "the counting path is already
+        !! O(n) and already produces this exact permutation, so it wins over any number of threads").
+        !! This engine gated it at 1, and machine A reported the consequence: a low-cardinality
+        !! integer key was 2.0x SLOWER at two threads than before the parallel campaign, because the
+        !! key fell counting -> radix -> Design B declines -> Design A, ending worse than it started.
+        !!
+        !! Reproduced on machine B under ifx (counting 2.903 against a 2-thread radix at 4.237,
+        !! 1.46x), which is the finding that settles it: **the two-thread loss is not the gfortran
+        !! radix-constant defect of section 11.3 and is not protected by the decision to weight ifx,
+        !! because ifx loses there too.** The grid that set the original rule stepped 1, 4, 16, 64
+        !! threads and never measured two.
+        !!
+        !! Held at 2 rather than higher because that is where the compilers stop agreeing: from four
+        !! threads ifx's radix wins at this range (2.067 against 2.903) while gfortran's does not
+        !! until past eight. Raising it would be tuning for gfortran against ifx, which is the
+        !! trade-off the maintainer's weighting rule resolves the other way.
+        integer(int64), parameter :: SORT_COUNTING_MAX_THREADS = 2_int64
         !
         ! Recorded here rather than in either entry point, so the counter is current whichever one
         ! was called and a test can never read a figure left behind by an earlier sort. Nothing else
@@ -490,15 +512,17 @@ contains
         ! run the candidate's O(n) range scan even with the counting path switched off -- and would
         ! define `lo`/`hi` as a side effect while doing it. CLAUDE.md records both halves of this.
         ! **The team test comes FIRST, before the candidate's O(n) range scan.** The scan walks every
-        ! row to find `lo`/`hi`, and a threaded sort is going to decline whatever it finds -- so
-        ! testing `nt` afterwards spends a whole extra pass over the column to reach a decision that
-        ! was already made. Measured: it cost 0.6 ns/element of a 4.4 ns sort (ifx, n = 5e6,
+        ! row to find `lo`/`hi`, and a team above the ceiling is going to decline whatever it finds --
+        ! so testing `nt` afterwards spends a whole extra pass over the column to reach a decision
+        ! that was already made. Measured: it cost 0.6 ns/element of a 4.4 ns sort (ifx, n = 5e6,
         ! range/n = 2e-4, 4 threads) before the tests were nested this way.
         !
         ! Nested rather than `.and.`-ed, for the reason CLAUDE.md records: Fortran does not
         ! short-circuit, so the one-line form would run the scan anyway and define `lo`/`hi` as a side
         ! effect while doing it.
-        if (nt <= 1) then
+        max_count_nt = SORT_COUNTING_MAX_THREADS
+        if (dbg_sort_counting_max_threads >= 0_int64) max_count_nt = dbg_sort_counting_max_threads
+        if (int(nt, int64) <= max_count_nt) then
             if (parquet_get_sort_counting_path()) then
             if (sort_counting_candidate(keys, n, lo, hi)) then
                 ! **The counting sort is SERIAL, so whether it wins is a function of the TEAM, not
@@ -526,8 +550,8 @@ contains
                 ! would otherwise read this rule as simply wrong.
                 !
                 ! The rule below follows the physical fact that the counting sort IS a serial
-                ! algorithm: it is admitted only when nothing else can be, and only while its O(range)
-                ! term stays small against its O(n) one. The 0.3 threshold is measured at one thread,
+                ! algorithm: its admissible range narrows as the team grows, and past a small team it
+                ! is not admitted at all. The 0.3 threshold is measured at one thread,
                 ! where ifx and gfortran AGREE -- ifx counting/radix is 12.23/12.79 at range/n = 0.2
                 ! and 14.64/14.17 at 0.4, so the crossover sits between them, and gfortran's 1-thread
                 ! numbers put it no lower.
@@ -541,7 +565,30 @@ contains
                 ! (range/n around 1e-4) it gives up to 2.5x, because there its radix is slow enough
                 ! that a serial counting sort still wins. Closing 11.3 would remove that cost and let
                 ! this rule be optimal for both.
-                if (hi - lo < n / 10_int64 * 3_int64) then
+                !
+                ! **A TEAM does not merely disqualify the counting sort -- it moves the range at
+                ! which the counting sort stops winning.** The threaded radix gets faster with the
+                ! team while a serial counting sort does not, so counting's admissible range shrinks
+                ! as `nt` grows. Measured on machine B, ifx, n = 5e6, `--profile release`, counting
+                ! against the radix at two threads (ns/element):
+                !
+                !   range/n    counting   radix(nt=2)    winner
+                !   2e-6         2.903       4.237       counting, 1.46x
+                !   1e-4         3.073       6.985       counting, 2.27x
+                !   1e-2         6.472       6.255       radix, 1.03x
+                !   1e-1         8.734       7.436       radix, 1.17x
+                !   3e-1        11.755       8.866       radix, 1.33x
+                !
+                ! so `n/100` at two threads, against `0.3n` at one. Note the radix's cost steps with
+                ! the BYTE WIDTH of the range rather than growing smoothly (range 10 is one pass,
+                ! range 500 is two), which is why its column is not monotone and why a threshold
+                ! fitted to a single range would be worthless.
+                if (nt <= 1) then
+                    take_counting = (hi - lo < n / 10_int64 * 3_int64)
+                else
+                    take_counting = (hi - lo < n / 100_int64)
+                end if
+                if (take_counting) then
                     call sort_counting_permutation(keys(1), n, lo, hi, perm)
                     return
                 end if
@@ -3508,6 +3555,10 @@ contains
     module procedure parquet_debug_set_sort_task_floor
         dbg_sort_task_floor = n
     end procedure parquet_debug_set_sort_task_floor
+
+    module procedure parquet_debug_set_sort_counting_max_threads
+        dbg_sort_counting_max_threads = n
+    end procedure parquet_debug_set_sort_counting_max_threads
 
     module procedure parquet_debug_set_sort_engine_min_rows
         dbg_sort_engine_min_rows = n

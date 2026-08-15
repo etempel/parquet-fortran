@@ -101,6 +101,7 @@ module parquet_sorting
     public :: parquet_debug_set_sort_task_floor
     public :: parquet_debug_set_sort_tail_min_rows
     public :: parquet_debug_set_sort_engine_min_rows
+    public :: parquet_debug_set_sort_counting_max_threads
     public :: parquet_debug_set_sort_split_min_card
     public :: parquet_debug_set_sort_radix_fail_alloc
     public :: parquet_debug_reset_sort_radix_passes
@@ -190,6 +191,14 @@ module parquet_sorting
     !! measured function of the team -- so this hook is the only way to move it, and is what
     !! `force_parallel_threshold` in the tests drives.
     integer(int64), save :: dbg_sort_engine_min_rows = -1_int64
+    !> Overrides how large a team may be and still take the counting path; NEGATIVE restores 2.
+    !!
+    !! The counting sort is SERIAL, so whether it beats the radix is a question about the TEAM as
+    !! well as the value range -- and the grid that first set this rule stepped 1, 4, 16, 64 threads
+    !! and so never measured the one team size where the answer had changed. This hook exists so the
+    !! ceiling can be A/B'd inside one binary rather than across two builds, which for a crossover is
+    !! the only resolution that works (see `feature_sort_report.md` section 12.1).
+    integer(int64), save :: dbg_sort_counting_max_threads = -1_int64
     !> Overrides the distinct-value count the split digit must reach; NEGATIVE restores
     !! `SORT_SPLIT_MIN_CARD`.
     !!
@@ -5973,6 +5982,15 @@ module parquet_sorting
         module subroutine parquet_debug_set_sort_engine_min_rows(n)
             integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
         end subroutine parquet_debug_set_sort_engine_min_rows
+        !> Test-only override for the counting path's team ceiling; NEGATIVE restores it.
+        !!
+        !! Setting it to 1 restores the pre-fix behaviour (counting serial-only), which is
+        !! how the fix is A/B'd in one binary; setting it high forces counting onto teams
+        !! that should decline it. Has no effect on the C++ engine, which has never gated
+        !! the counting path on the team at all.
+        module subroutine parquet_debug_set_sort_counting_max_threads(n)
+            integer(int64), intent(in) :: n !! forced ceiling, or a negative value to restore.
+        end subroutine parquet_debug_set_sort_counting_max_threads
         !> Test-only override for the split's minimum distinct-value count; NEGATIVE restores
         !! the built-in `SORT_SPLIT_MIN_CARD`.
         !!

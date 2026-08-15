@@ -159,6 +159,7 @@ contains
         integer(int64) :: sort_min !! forced sort floor; 0 restores the built-in.
         integer :: sort_threads !! forced automatic thread count; governs EXTRACTION.
         integer(int64) :: eng_min !! forced engine floor; negative restores the built-in.
+        integer(int64) :: count_max !! forced counting-path team ceiling; negative restores.
         character(len=64) :: a
         integer :: i
         !
@@ -169,6 +170,7 @@ contains
         sort_min = 0_int64
         sort_threads = 0
         eng_min = -1_int64
+        count_max = -1_int64
         use_fortran = .true.
         family = "f64"
         serial_policy = .false.
@@ -199,6 +201,11 @@ contains
                 ! way to choose the extraction team -- see the note at the top of this program.
                 read (a(16:), *) sort_threads
                 call parquet_set_sort_threads(sort_threads)
+            else if (a(1:23) == "--counting-max-threads=") then
+                ! Setting this to 1 restores the pre-fix behaviour (counting serial-only), so the
+                ! fix is A/B'd inside ONE binary -- a crossover cannot be resolved across two builds.
+                read (a(24:), *) count_max
+                call parquet_debug_set_sort_counting_max_threads(count_max)
             else if (a(1:18) == "--engine-min-rows=") then
                 ! The Fortran engine's own floor. Forcing both this and --tail-min-rows to 8192
                 ! reproduces the single flat setting both used to share, which is the A/B arm.

@@ -25,6 +25,7 @@ working rules).
   - [Report before implementing on analysis/audit requests](#report-before-implementing-on-analysisaudit-requests)
   - [Only apply low-blast-radius renames/refactors](#only-apply-low-blast-radius-renamesrefactors)
   - [`feature_*.md` planning documents](#feature_md-planning-documents)
+  - [NEVER delete a `feature_*.md` document — the maintainer archives them](#never-delete-a-feature_md-document--the-maintainer-archives-them)
   - [The `feature_risks.md` standing-risks register](#the-feature_risksmd-standing-risks-register)
   - [Never splice a file with an unanchored `index()` — use Edit, or assert both ends](#never-splice-a-file-with-an-unanchored-index--use-edit-or-assert-both-ends)
   - [Don't run the GitLab CI pipeline yourself](#dont-run-the-gitlab-ci-pipeline-yourself)
@@ -158,6 +159,41 @@ someone who was present for the conversation that produced the file. Quote the u
 decisions/wording directly in the document rather than alluding to them. Cross-references to
 other files in the repo (source, other `feature_*.md` docs, `CLAUDE.md` sections) are fine, since
 a future session can read those too.
+
+### NEVER delete a `feature_*.md` document — the maintainer archives them
+
+**Do not delete, move, rename or `git rm` any `feature_*.md` file, and do not consolidate several
+into one by removing the originals.** This holds even when asked to "clean up", "archive", "remove
+the obsolete planning documents" or "merge these into one" — a request phrased that way is a request
+for the *content* work (write the consolidated document, extract what is still open), not for the
+deletion. **The maintainer archives these files by hand, to a secure location outside this
+repository.** Leave the originals in place and say they are ready to be archived.
+
+**Why this is a hard rule rather than a preference: there is no undo.** `.gitignore` carries
+`feature_*.md`, so these files are never in a commit — no `git checkout`, no `git reflog`, no
+history. A deleted one exists nowhere except a backup someone happened to take, and a backup in a
+session's own scratch directory disappears with the session. That makes deletion the single most
+irreversible action available in this repository, more so than anything in the source tree.
+
+**What to do instead**, when a consolidation or cleanup is genuinely wanted:
+
+1. Write the new document, and put in it only what is still open. That is the useful half of the
+   work and it is not restricted at all.
+2. **Leave every original where it is.** List them, say what was carried across from each, and hand
+   the list to the maintainer to archive.
+3. If a document's content has been fully superseded, say so *in that document* — a banner at the
+   top pointing at its replacement. A superseded document that is still readable costs nothing; a
+   deleted one that turns out to have held a measurement nobody re-derived costs a campaign.
+
+**Two facts that make this less costly than it sounds.** These files are already invisible to git,
+so leaving them in the tree pollutes no commit and no published package — being untracked, they never
+enter the disposable branch `tools/prep_fpm_publish.sh` builds the tarball from, which is also why
+that script's `REMOVE_PATHS` names only the *tracked* `feature_risks.md` and none of the others. And
+source comments in this repository routinely cite planning documents that
+are no longer present (`feature_ifx.md`, `feature_table_parallel.md`, `feature_string_parallel.md`
+and others are cited from `tools/` and `src/` while absent from the tree); such a citation is
+attribution for where a decision was measured, and it stays meaningful whether or not the file is
+still here. So there is no tidiness argument that outweighs the irreversibility.
 
 ### The `feature_risks.md` standing-risks register
 
@@ -1997,7 +2033,15 @@ on machines A and C:
   `nm` finds no `materialize_marked_parallel` in the object, against 2 occurrences in the gfortran
   one.
 
-**But `--profile release` does NOT link under flang, and that is an LLVM defect rather than
+**Building is not passing, and the suite does not finish under flang.** `fpm test` reaches
+**1608 passed, 4 failed**, then **exits 11 (signal 11) inside the `table_parallel` suite**, so four
+suites never run at all. The four failures are all legitimately OpenMP-dependent — Design B cannot be
+reached serially, and the shared-table mutation guard has no parallel region to fire in — but the
+crash is unexplained and undiagnosed. **Do not describe flang as supported on the strength of a
+successful build**; "compiles and links" and "runs the suite" are different claims, and only the
+first is currently true.
+
+**And `--profile release` does NOT link under flang, which is an LLVM defect rather than
 anything here.** The release profile carries `-flto`, and the link dies with `LLVM ERROR: Unsupported
 stack probing method` followed by `flang: error: unable to execute command: Abort trap: 6`. The
 default profile is unaffected. So a flang check of this repository must use the default profile, and

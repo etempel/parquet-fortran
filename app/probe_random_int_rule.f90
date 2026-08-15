@@ -94,7 +94,7 @@ module pf_probe_int_rule
     integer, parameter :: pf_int128_present = 1 / merge(1, 0, k128 > 0)
 #endif
 
-    integer, parameter :: NARM = 12
+    integer, parameter :: NARM = 18
 
     ! Ranges used by the timed arms.  10**6 fits in 32 bits (the common case); 4*10**12 does not.
     !
@@ -337,6 +337,71 @@ contains
         hi = ishft(p1, -16) + ishft(t, -32)
     end subroutine mul32_strict
 
+    !> Full 64x64 -> 128 on 16-bit limbs: nothing exceeds `2**36`, so it cannot overflow.
+    !!
+    !! This is the independent reference for `mulhilo64`, and it exists because `mulhilo64` is a
+    !! THIRD undefined-behaviour site that §20.3's inventory does not list. Its four partial
+    !! products are 32x32 in `integer(int64)` -- `a0*b0` reaches `(2**32-1)**2`, which exceeds
+    !! `huge(int64)` -- so it depends on two's-complement wrapping exactly as SplitMix64's
+    !! multiplies do (Gap B), and route (e) does NOT widen it: route (e) widens the Philox round's
+    !! multiply inside `blk10`, and `mulhilo64` sits outside it, in the range reduction, on both
+    !! sides of the fork. Nothing in the probe compared it against an overflow-free form before
+    !! this: `reject_ref` calls `mulhilo64` itself, and gate 2's `ref_value` re-runs `int3_gen`,
+    !! so a wrong high half would be compared only against itself.
+    pure subroutine mulhilo64_strict(a, b, hi, lo)
+        integer(int64), intent(in)  :: a   !! left operand, unsigned pattern
+        integer(int64), intent(in)  :: b   !! right operand, unsigned pattern
+        integer(int64), intent(out) :: hi  !! high 64 bits of the product
+        integer(int64), intent(out) :: lo  !! low 64 bits of the product
+        integer(int64) :: al(0:3), bl(0:3), col(0:7), carry, t, w(0:7)
+        integer :: i, j
+        do i = 0, 3
+            al(i) = iand(ishft(a, -16 * i), 65535_int64)
+            bl(i) = iand(ishft(b, -16 * i), 65535_int64)
+        end do
+        col = 0_int64
+        do i = 0, 3
+            do j = 0, 3
+                col(i + j) = col(i + j) + al(i) * bl(j)     ! each term < 2**32, each column < 2**34
+            end do
+        end do
+        carry = 0_int64
+        do i = 0, 7
+            t = col(i) + carry
+            w(i) = iand(t, 65535_int64)
+            carry = ishft(t, -16)
+        end do
+        lo = 0_int64
+        hi = 0_int64
+        do i = 0, 3
+            lo = ior(lo, ishft(w(i), 16 * i))
+            hi = ior(hi, ishft(w(i + 4), 16 * i))
+        end do
+    end subroutine mulhilo64_strict
+
+    !> `(a + b) mod 2**64` on 32-bit limbs; no intermediate exceeds `2**33`.
+    pure function uadd64_strict(a, b) result(r)
+        integer(int64), intent(in) :: a  !! left operand, an unsigned pattern
+        integer(int64), intent(in) :: b  !! right operand, an unsigned pattern
+        integer(int64) :: r              !! the 64-bit pattern of the unsigned sum
+        integer(int64) :: t0, t1
+        t0 = iand(a, M32) + iand(b, M32)
+        t1 = iand(ishft(a, -32), M32) + iand(ishft(b, -32), M32) + ishft(t0, -32)
+        r  = ior(ishft(iand(t1, M32), 32), iand(t0, M32))
+    end function uadd64_strict
+
+    !> `(b - a) mod 2**64` on 32-bit limbs; no intermediate leaves `[0, 2**33)`.
+    pure function usub64_strict(b, a) result(r)
+        integer(int64), intent(in) :: b  !! minuend, an unsigned pattern
+        integer(int64), intent(in) :: a  !! subtrahend, an unsigned pattern
+        integer(int64) :: r              !! the 64-bit pattern of the unsigned difference
+        integer(int64) :: t0, t1, brw
+        t0  = iand(b, M32) - iand(a, M32) + 4294967296_int64
+        brw = 1_int64 - ishft(t0, -32)
+        t1  = iand(ishft(b, -32), M32) - iand(ishft(a, -32), M32) - brw + 4294967296_int64
+        r   = ior(ishft(iand(t1, M32), 32), iand(t0, M32))
+    end function usub64_strict
+
 ! =============================================================================================
 ! Tier-0 draws -- the arms
 ! =============================================================================================
@@ -544,6 +609,148 @@ contains
 #endif
     end function int3_gen_of
 
+    !> Option 3 with the width and offset formed on 32-bit LIMBS -- an `int128`-FREE Q2 reference.
+    !!
+    !! `int3_gen_of` above answers Q2 option (iii) by widening into `int(k128)`, so on a compiler
+    !! with no 128-bit kind it compiles to the shipped wrapping form and the self-test that compares
+    !! the two becomes a function compared with ITSELF. That is silently vacuous exactly on the one
+    !! compiler [§27.1](#271-machine-b)'s task **B11** is about -- ifx -- so the probe as it stood
+    !! could not answer B11 at all: a quiet run there meant nothing.
+    !!
+    !! This function closes that. It computes `s = (hi - lo) + 1` and `k = lo + high64(x*s)` with
+    !! `usub64_strict`/`uadd64_strict`, whose intermediates never leave `[0, 2**33)`, so it is
+    !! correct by construction on ANY compiler with no 128-bit kind required. Everything else --
+    !! including `mulhilo64` -- is `int3_gen`'s code verbatim, so a disagreement isolates the range
+    !! arithmetic and nothing else.
+    !!
+    !! Where `k128` exists it is cross-checked against `int3_gen_of`, which machine C and machine A
+    !! already validated against an arbitrary-precision oracle (`8560708566805553027` for
+    !! `lo = 0, hi = huge(int64), seed 12345, i = 1`). That chain is what makes its verdict on a
+    !! compiler without `int128` trustworthy.
+    elemental function int3_gen_sof(seed, i, lo, hi) result(k)
+        integer(int64), intent(in) :: seed  !! the seed
+        integer(int64), intent(in) :: i     !! the stream label
+        integer(int64), intent(in) :: lo    !! inclusive lower bound
+        integer(int64), intent(in) :: hi    !! inclusive upper bound
+        integer(int64) :: k                 !! uniform integer in [lo,hi]
+        integer(int64) :: k0, k1, c0, c1, c2, c3, o0, o1, o2, o3
+        integer(int64) :: x, s, h, l, t, a, b, n
+        a = lo; b = hi
+        if (a > b) then
+            t = a; a = b; b = t
+        end if
+        s = uadd64_strict(usub64_strict(b, a), 1_int64)
+        call key_of(seed, k0, k1)
+        call ctr_of(i, 0_int64, c0, c1, c2, c3)
+        call blk10(k0, k1, c0, c1, c2, c3, o0, o1, o2, o3)
+        x = u64_of(o0, o1)
+        if (s == 0_int64) then
+            k = x
+            return
+        end if
+        call mulhilo64(x, s, h, l)
+        if (ult(l, s)) then
+            t = umod_2p64(s)
+            n = 0_int64
+            do while (ult(l, t))
+                n = n + 1_int64
+                call blk10(iand(k0 + n * RT0, M32), iand(k1 + n * RT1, M32), &
+                           c0, c1, c2, c3, o0, o1, o2, o3)
+                x = u64_of(o0, o1)
+                call mulhilo64(x, s, h, l)
+            end do
+        end if
+        k = uadd64_strict(a, h)
+    end function int3_gen_sof
+
+    !> Option 3 with the 128-bit product on 16-bit LIMBS -- prices the THIRD undefined-behaviour
+    !! site on its own.
+    !!
+    !! `mulhilo64`'s four 32x32 partial products are formed in `integer(int64)` and `a0*b0` alone
+    !! reaches `(2**32-1)**2 > huge(int64)`, so the shipped integer path depends on two's-complement
+    !! wrapping there -- on BOTH sides of route (e)'s fork, since route (e) widens the Philox round
+    !! inside `blk10` and `mulhilo64` sits outside it. This arm is `int3_gen` with that one call
+    !! replaced, so the difference is the price of removing that site and nothing else. The values
+    !! are identical by construction: a full 64x64 product is exact either way.
+    elemental function int3_gen_sm(seed, i, lo, hi) result(k)
+        integer(int64), intent(in) :: seed  !! the seed
+        integer(int64), intent(in) :: i     !! the stream label
+        integer(int64), intent(in) :: lo    !! inclusive lower bound
+        integer(int64), intent(in) :: hi    !! inclusive upper bound
+        integer(int64) :: k                 !! uniform integer in [lo,hi]
+        integer(int64) :: k0, k1, c0, c1, c2, c3, o0, o1, o2, o3
+        integer(int64) :: x, s, h, l, t, a, b, n
+        a = lo; b = hi
+        if (a > b) then
+            t = a; a = b; b = t
+        end if
+        s = b - a + 1_int64
+        call key_of(seed, k0, k1)
+        call ctr_of(i, 0_int64, c0, c1, c2, c3)
+        call blk10(k0, k1, c0, c1, c2, c3, o0, o1, o2, o3)
+        x = u64_of(o0, o1)
+        if (s == 0_int64) then
+            k = x
+            return
+        end if
+        call mulhilo64_strict(x, s, h, l)
+        if (ult(l, s)) then
+            t = umod_2p64(s)
+            n = 0_int64
+            do while (ult(l, t))
+                n = n + 1_int64
+                call blk10(iand(k0 + n * RT0, M32), iand(k1 + n * RT1, M32), &
+                           c0, c1, c2, c3, o0, o1, o2, o3)
+                x = u64_of(o0, o1)
+                call mulhilo64_strict(x, s, h, l)
+            end do
+        end if
+        k = a + h
+    end function int3_gen_sm
+
+    !> Option 3 with EVERY undefined-behaviour site in the integer path removed, and no `int128`.
+    !!
+    !! `mulhilo64_strict` plus `usub64_strict`/`uadd64_strict`: the product, the width and the offset
+    !! are all on limbs, nothing exceeds `2**36`, and no 128-bit kind is required. This is the arm
+    !! that prices "one strict integer path everywhere, no `cpp` fork, no UB inventory" against the
+    !! shipped rule -- the option that would close Q2, Q3's sibling question and the `mulhilo64` site
+    !! together. It must agree with `int3_gen_sof` value for value on every width.
+    elemental function int3_gen_full(seed, i, lo, hi) result(k)
+        integer(int64), intent(in) :: seed  !! the seed
+        integer(int64), intent(in) :: i     !! the stream label
+        integer(int64), intent(in) :: lo    !! inclusive lower bound
+        integer(int64), intent(in) :: hi    !! inclusive upper bound
+        integer(int64) :: k                 !! uniform integer in [lo,hi]
+        integer(int64) :: k0, k1, c0, c1, c2, c3, o0, o1, o2, o3
+        integer(int64) :: x, s, h, l, t, a, b, n
+        a = lo; b = hi
+        if (a > b) then
+            t = a; a = b; b = t
+        end if
+        s = uadd64_strict(usub64_strict(b, a), 1_int64)
+        call key_of(seed, k0, k1)
+        call ctr_of(i, 0_int64, c0, c1, c2, c3)
+        call blk10(k0, k1, c0, c1, c2, c3, o0, o1, o2, o3)
+        x = u64_of(o0, o1)
+        if (s == 0_int64) then
+            k = x
+            return
+        end if
+        call mulhilo64_strict(x, s, h, l)
+        if (ult(l, s)) then
+            t = umod_2p64(s)
+            n = 0_int64
+            do while (ult(l, t))
+                n = n + 1_int64
+                call blk10(iand(k0 + n * RT0, M32), iand(k1 + n * RT1, M32), &
+                           c0, c1, c2, c3, o0, o1, o2, o3)
+                x = u64_of(o0, o1)
+                call mulhilo64_strict(x, s, h, l)
+            end do
+        end if
+        k = uadd64_strict(a, h)
+    end function int3_gen_full
+
     !> OPTION 3, 32-bit-range fast path: the full product in two 32x32 products instead of four.
     elemental function int3_fast(seed, i, lo, hi) result(k)
         integer(int64), intent(in) :: seed  !! the seed
@@ -703,6 +910,12 @@ contains
         case (10); nm = "L3Fnr opt3 fast, NO reject (control)"
         case (11); nm = "L3Go  opt3 gen, Q2(iii), range 1e6"
         case (12); nm = "L3GWo opt3 gen, Q2(iii), range 4e12"
+        case (13); nm = "L3Gs  opt3 gen, strict limbs, 1e6"
+        case (14); nm = "L3GWs opt3 gen, strict limbs, 4e12"
+        case (15); nm = "L3Gm  opt3 gen, strict mulhi, 1e6"
+        case (16); nm = "L3GWm opt3 gen, strict mulhi, 4e12"
+        case (17); nm = "L3Gf  opt3 gen, ALL strict,   1e6"
+        case (18); nm = "L3GWf opt3 gen, ALL strict,   4e12"
         case default; nm = "?"
         end select
     end function arm_name
@@ -772,6 +985,30 @@ contains
             do j = 1, n
                 dk(j) = int3_gen_of(seed, base + int(j, int64), LO_W, HI_W)
             end do
+        case (13)
+            do j = 1, n
+                dk(j) = int3_gen_sof(seed, base + int(j, int64), LO_N, HI_N)
+            end do
+        case (14)
+            do j = 1, n
+                dk(j) = int3_gen_sof(seed, base + int(j, int64), LO_W, HI_W)
+            end do
+        case (15)
+            do j = 1, n
+                dk(j) = int3_gen_sm(seed, base + int(j, int64), LO_N, HI_N)
+            end do
+        case (16)
+            do j = 1, n
+                dk(j) = int3_gen_sm(seed, base + int(j, int64), LO_W, HI_W)
+            end do
+        case (17)
+            do j = 1, n
+                dk(j) = int3_gen_full(seed, base + int(j, int64), LO_N, HI_N)
+            end do
+        case (18)
+            do j = 1, n
+                dk(j) = int3_gen_full(seed, base + int(j, int64), LO_W, HI_W)
+            end do
         end select
     end subroutine fill_arm
 
@@ -784,8 +1021,8 @@ contains
         integer, intent(out) :: nfail  !! number of failed checks
         integer(int64) :: o(4), e(4), c(4), k(2)
         integer(int64) :: a0, a1, a2, a3, b0, b1, b2, b3, kk0, kk1, cc0, cc1, cc2, cc3
-        integer(int64) :: s, t, tref, x, h, l, kv, seedv, cnt(0:6), lov, hiv
-        integer :: i, j, d, nret, nmax, nhit
+        integer(int64) :: s, t, tref, x, h, l, kv, seedv, cnt(0:6), lov, hiv, hs, ls, kw
+        integer :: i, j, d, nret, nmax, nhit, nwide
         logical :: ok
         real(real64) :: chi, expct
 
@@ -978,6 +1215,221 @@ contains
             call report("Q2(iii) == shipped rule for widths >= 2**63", .true., nfail)
         else
             write (*, "(a)") "  [ !! ] REPORTED, NOT COUNTED AS A GATE FAILURE -- see the note above."
+        end if
+
+        ! (6b) `mulhilo64` against a strictly overflow-free 16-bit-limb full product.
+        !
+        !      §20.3 lists the module's remaining undefined-behaviour sites as SplitMix64's two
+        !      multiplies and `pf_random_int_at`'s range arithmetic.  `mulhilo64` is a third, on
+        !      the same tier-0 hot path and on BOTH sides of route (e)'s fork: its four 32x32
+        !      partial products are formed in `integer(int64)` and `a0*b0` alone reaches
+        !      `(2**32-1)**2 > huge(int64)`.  That is the exact shape [§26](#26-open-questions) Q3
+        !      rules insufficient for the mixer ("a 32x32 product still exceeds int64").
+        !
+        !      Nothing here compared it against an overflow-free form before: `reject_ref` calls
+        !      `mulhilo64` itself, and gate 2's `ref_value` re-runs `int3_gen`, so a wrong high
+        !      half was only ever compared with itself.  A gate failure, because unlike the range
+        !      arithmetic this is exercised by every timed integer arm at every width.
+        ok = .true.
+        do i = 1, 60
+            s = test_width(i)
+            do j = 1, 40
+                select case (j)
+                case (1); x = 0_int64
+                case (2); x = 1_int64
+                case (3); x = -1_int64                      ! 2**64 - 1, the largest unsigned
+                case (4); x = M32
+                case (5); x = M32 + 1_int64
+                case (6); x = -huge(1_int64) - 1_int64      ! 2**63
+                case (7); x = huge(1_int64)
+                case default
+                    x = at_bits(seed_of(1 + mod(j, 5)), int(j, int64) + int(i, int64) * 101_int64)
+                end select
+                call mulhilo64(x, s, h, l)
+                call mulhilo64_strict(x, s, hs, ls)
+                if (h /= hs .or. l /= ls) ok = .false.
+            end do
+        end do
+        call report("mulhilo64 == mulhilo64_strict over 60x40 operand pairs", ok, nfail)
+
+        ! (6c) B11, the half `int3_gen_of` cannot answer.  On a compiler with no 128-bit kind
+        !      `int3_gen_of` IS `int3_gen`, so (6a) compares a function with itself and reports
+        !      `[ ok ]` whatever the compiler does.  `int3_gen_sof` needs no 128-bit kind, so this
+        !      pair is a real comparison everywhere.  Below 2**63 the shipped form cannot overflow
+        !      and the two must agree: a gate failure.
+        !      Two placements per width, and the second one is load-bearing: with `lo = 0` the low
+        !      32-bit limb of `hi - lo` can never borrow, so a dropped borrow in `usub64_strict`
+        !      survives the whole sweep.  Mutation testing found exactly that.  Placing `lo` at
+        !      `2**32 - 1` makes `low32(hi) < low32(lo)` for every width whose low limb is small,
+        !      which is what exercises the borrow.
+        ok = .true.
+        do i = 1, 60
+            s = test_width(i)
+            if (s <= 0_int64) cycle
+            do d = 1, 2
+                if (d == 1) then
+                    lov = 0_int64
+                else
+                    if (s > huge(1_int64) - M32) cycle    ! keep the shipped form overflow-free
+                    lov = M32
+                end if
+                hiv = lov + s - 1_int64
+                do j = 1, 60
+                    if (int3_gen_sof(seed_of(1 + mod(j, 5)), int(j, int64), lov, hiv) /= &
+                        int3_gen(seed_of(1 + mod(j, 5)), int(j, int64), lov, hiv)) ok = .false.
+                end do
+            end do
+        end do
+        call report("strict-limb Q2 ref == shipped rule for widths below 2**63", ok, nfail)
+
+        ! (6d) The same pair at or above 2**63, where the shipped form's `hi - lo + 1` and
+        !      `lo + high64` are §20.3's signed overflows.  Graded as (6a) is: a disagreement is a
+        !      FINDING about the build, printed and not counted, because the timed arms use widths
+        !      of 1e6 and 4e12.  This is the line B11 asks for, and unlike (6a)'s it is meaningful
+        !      on a compiler without `int128`.
+        ok = .true.
+        do i = 1, 9
+            select case (i)
+            case (1); lov = -huge(1_int64);          hiv = huge(1_int64)        ! width 2**64 - 1
+            case (2); lov = -huge(1_int64);          hiv = huge(1_int64) - 1    ! width 2**64 - 2
+            case (3); lov = 0_int64;                 hiv = huge(1_int64)        ! width 2**63
+            case (4); lov = -1_int64;                hiv = huge(1_int64)        ! width 2**63 + 1
+            case (5); lov = -huge(1_int64) - 1;      hiv = huge(1_int64) - 1    ! width 2**64 - 1
+            case (6); lov = -huge(1_int64) - 1;      hiv = 0_int64              ! width 2**63 + 1
+            case (7); lov = -huge(1_int64) - 1;      hiv = huge(1_int64)        ! width 0 (full)
+            ! The two placements whose low 32-bit limbs BORROW; without them a dropped borrow in
+            ! `usub64_strict` passes every case above (found by mutation testing).
+            case (8); lov = -huge(1_int64) - 1 + M32; hiv = huge(1_int64) - M32
+            case (9); lov = M32;                      hiv = huge(1_int64)
+            end select
+            do j = 1, 300
+                kv = int3_gen_sof(12345_int64, int(j, int64), lov, hiv)
+                kw = int3_gen(12345_int64, int(j, int64), lov, hiv)
+                if (kv < lov .or. kv > hiv) call report("strict-limb Q2 ref stays in range", &
+                                                        .false., nfail)
+                if (kv /= kw) then
+                    if (ok) then
+                        write (*, "(a)") "  [ !! ] STRICT-LIMB check: the shipped WRAPPING range &
+                                         &arithmetic disagrees at a width >= 2**63"
+                        write (*, "(a,i0,a,i0,a,i0)") "         lo=", lov, " hi=", hiv, " i=", j
+                        write (*, "(a,i0)") "         strict limbs (correct by construction): ", kv
+                        write (*, "(a,i0)") "         shipped wrapping form                 : ", kw
+                        write (*, "(a)") "         Q2 option (i) -- 'document the wrapping' -- is &
+                                         &UNSAFE on this build."
+                    end if
+                    ok = .false.
+                end if
+            end do
+        end do
+        if (ok) then
+            call report("strict-limb Q2 ref == shipped rule for widths >= 2**63", .true., nfail)
+        else
+            write (*, "(a)") "  [ !! ] REPORTED, NOT COUNTED AS A GATE FAILURE -- see the note above."
+        end if
+
+        ! (6e) The published oracle value, printed so the strict-limb reference can be checked by
+        !      eye against arbitrary-precision truth rather than only against another arm here.
+        !      Machines A and C both derived 8560708566805553027 for this exact triple.
+        write (*, "(a,i0)") "         strict-limb ref, lo=0 hi=huge(int64) i=1 (oracle &
+                            &8560708566805553027): ", &
+            int3_gen_sof(12345_int64, 1_int64, 0_int64, huge(1_int64))
+#ifdef PF_INT128
+        ! (6f) Where a 128-bit kind exists the two independent Q2 references must agree, which is
+        !      what carries `int3_gen_of`'s oracle validation over to the limb form.
+        ok = .true.
+        do i = 1, 9
+            select case (i)
+            case (1); lov = -huge(1_int64);          hiv = huge(1_int64)
+            case (2); lov = -huge(1_int64);          hiv = huge(1_int64) - 1
+            case (3); lov = 0_int64;                 hiv = huge(1_int64)
+            case (4); lov = -1_int64;                hiv = huge(1_int64)
+            case (5); lov = -huge(1_int64) - 1;      hiv = huge(1_int64) - 1
+            case (6); lov = -huge(1_int64) - 1;      hiv = 0_int64
+            case (7); lov = -huge(1_int64) - 1;      hiv = huge(1_int64)
+            case (8); lov = -huge(1_int64) - 1 + M32; hiv = huge(1_int64) - M32
+            case (9); lov = M32;                      hiv = huge(1_int64)
+            end select
+            do j = 1, 300
+                if (int3_gen_sof(12345_int64, int(j, int64), lov, hiv) /= &
+                    int3_gen_of(12345_int64, int(j, int64), lov, hiv)) ok = .false.
+            end do
+        end do
+        call report("strict-limb Q2 ref == int128 Q2 ref (two independent references)", ok, nfail)
+#endif
+
+        ! (6g) The strict-`mulhilo64` arms must reproduce the arms they replace, value for value.
+        !      A full 64x64 product is exact either way, so any difference is a defect in the limb
+        !      form (below 2**63) or the compiler exploiting the range arithmetic (at or above it,
+        !      where `int3_gen_sm` keeps the shipped wrapping form and so tracks `int3_gen`).
+        !      `int3_gen_full` removes every UB site in the integer path and must therefore equal
+        !      `int3_gen_sof` at EVERY width -- which is the check that prices are being compared
+        !      between arms computing the same numbers.
+        ok = .true.
+        do i = 1, 60
+            s = test_width(i)
+            if (s <= 0_int64) cycle
+            do d = 1, 2
+                if (d == 1) then
+                    lov = 0_int64
+                else
+                    if (s > huge(1_int64) - M32) cycle
+                    lov = M32
+                end if
+                hiv = lov + s - 1_int64
+                do j = 1, 40
+                    seedv = seed_of(1 + mod(j, 5))
+                    if (int3_gen_sm(seedv, int(j, int64), lov, hiv) /= &
+                        int3_gen(seedv, int(j, int64), lov, hiv)) ok = .false.
+                    if (int3_gen_full(seedv, int(j, int64), lov, hiv) /= &
+                        int3_gen_sof(seedv, int(j, int64), lov, hiv)) ok = .false.
+                end do
+            end do
+        end do
+        call report("strict-mulhilo arms == the arms they replace below 2**63", ok, nfail)
+
+        ! (6h) The same pair at or above 2**63, GRADED SEPARATELY and not as a gate failure.
+        !
+        !      `int3_gen_sof` and `int3_gen_full` differ only in `mulhilo64` against
+        !      `mulhilo64_strict`, and a full 64x64 product is exact either way -- so they cannot
+        !      legitimately differ. But at these widths the shipped `mulhilo64`'s partial products
+        !      DO overflow (`s`'s low 32 bits are large), so a disagreement is the compiler
+        !      exploiting §30.13's third undefined-behaviour site: a finding about the build, on the
+        !      same footing as (6d)'s, and reported the same way rather than blocking the timing.
+        !
+        !      Machine B sees this fire under gfortran 14.2.1 on the `int64` fork with fpm's full
+        !      release flag list, and NOT at plain `-O3`, `-O2`, `-O0`, with `-fwrapv`, without
+        !      `-fPIC`, or on the `int128` fork. It is destroyed by observation -- adding a `write`,
+        !      a recorded value or a checksum inside this loop makes it disappear -- so the loop is
+        !      deliberately kept to one counter and nothing else.
+        ok = .true.
+        nwide = 0
+        do i = 1, 9
+            select case (i)
+            case (1); lov = -huge(1_int64);           hiv = huge(1_int64)
+            case (2); lov = -huge(1_int64);           hiv = huge(1_int64) - 1
+            case (3); lov = 0_int64;                  hiv = huge(1_int64)
+            case (4); lov = -1_int64;                 hiv = huge(1_int64)
+            case (5); lov = -huge(1_int64) - 1;       hiv = huge(1_int64) - 1
+            case (6); lov = -huge(1_int64) - 1;       hiv = 0_int64
+            case (7); lov = -huge(1_int64) - 1;       hiv = huge(1_int64)
+            case (8); lov = -huge(1_int64) - 1 + M32; hiv = huge(1_int64) - M32
+            case (9); lov = M32;                      hiv = huge(1_int64)
+            end select
+            do j = 1, 300
+                if (int3_gen_full(12345_int64, int(j, int64), lov, hiv) /= &
+                    int3_gen_sof(12345_int64, int(j, int64), lov, hiv)) nwide = nwide + 1
+            end do
+        end do
+        if (nwide == 0) then
+            call report("strict-mulhilo arms == the arms they replace at widths >= 2**63", &
+                        .true., nfail)
+        else
+            write (*, "(a,i0,a)") "  [ !! ] the shipped mulhilo64 disagrees with the overflow-free &
+                                  &form on ", nwide, " of 2700 draws at widths >= 2**63"
+            write (*, "(a)") "         Both arms use the SAME strict range arithmetic, so this is &
+                             &§30.13's third UB site being exploited."
+            write (*, "(a)") "         REPORTED, NOT COUNTED AS A GATE FAILURE -- the timed arms &
+                             &use widths of 1e6 and 4e12."
         end if
 
         ! (7) The retry path must actually fire.  A range just above 2**63 rejects about a quarter
@@ -1224,6 +1676,12 @@ contains
         case (10); k = int3_gen_nr(seed, i, LO_N, HI_N)
         case (11); k = int3_gen(seed, i, LO_N, HI_N)
         case (12); k = int3_gen(seed, i, LO_W, HI_W)
+        case (13); k = int3_gen(seed, i, LO_N, HI_N)
+        case (14); k = int3_gen(seed, i, LO_W, HI_W)
+        case (15); k = int3_gen(seed, i, LO_N, HI_N)
+        case (16); k = int3_gen(seed, i, LO_W, HI_W)
+        case (17); k = int3_gen(seed, i, LO_N, HI_N)
+        case (18); k = int3_gen(seed, i, LO_W, HI_W)
         case default; k = 0_int64
         end select
     end function ref_value
@@ -1303,7 +1761,7 @@ program probe_random_int_rule
         end if
     end do
     if (allok) then
-        write (*, "(a)") "  [ ok ] all 10 timed paths reproduce the strict-kernel reference"
+        write (*, "(a)") "  [ ok ] every timed path reproduces the strict-kernel reference"
     else
         write (*, "(a)") " REFUSING TO TIME: a timed path computes wrong values."
         stop 1
@@ -1366,6 +1824,16 @@ program probe_random_int_rule
     write (*, "(a)") "--- Q2 option (iii): overflow-free width/offset against the shipped wrapping form ---"
     write (*, "(a,f7.3,a,f7.3)") "  range 1e6 :   shipped ", ns(6, 1), "   Q2(iii) ", ns(11, 1)
     write (*, "(a,f7.3,a,f7.3)") "  range 4e12:   shipped ", ns(8, 1), "   Q2(iii) ", ns(12, 1)
+    write (*, "(a)") ""
+    write (*, "(a)") "--- Q2 by 32-bit LIMBS: the int128-free form, priced on every compiler ---"
+    write (*, "(a,f7.3,a,f7.3)") "  range 1e6 :   shipped ", ns(6, 1), "   limbs   ", ns(13, 1)
+    write (*, "(a,f7.3,a,f7.3)") "  range 4e12:   shipped ", ns(8, 1), "   limbs   ", ns(14, 1)
+    write (*, "(a)") ""
+    write (*, "(a)") "--- the THIRD UB site: strict mulhilo64, and a fully UB-free integer path ---"
+    write (*, "(a,f7.3,a,f7.3,a,f7.3)") "  range 1e6 :   shipped ", ns(6, 1), &
+        "   strict mulhi ", ns(15, 1), "   ALL strict ", ns(17, 1)
+    write (*, "(a,f7.3,a,f7.3,a,f7.3)") "  range 4e12:   shipped ", ns(8, 1), &
+        "   strict mulhi ", ns(16, 1), "   ALL strict ", ns(18, 1)
     write (*, "(a)") ""
     write (*, "(a)") "--- attribution: what the rejection branch itself costs ---"
     write (*, "(a,f7.3)") "  opt3 fast - opt3 fast(no reject) : ", ns(7, 1) - ns(10, 1)

@@ -126,14 +126,14 @@ contains
             new_unittest("%clear makes a key list reusable", test_keys_clear), &
             new_unittest("empty and single-element arrays are handled", test_degenerate_sizes), &
             new_unittest("pf_argsort matches a read-time sort_by=", test_oracle_matches_read_time_sort), &
-            new_unittest("the counting path matches the comparator", test_counting_path_agrees), &
+            new_unittest("the counting path matches the comparator", cpp_test_counting_path_agrees), &
             new_unittest("the counting path matches the comparator on a NULL-BEARING key", &
-                test_counting_path_nulls_agree), &
+                cpp_test_counting_path_nulls_agree), &
             new_unittest("partial_sort equals a truncated full sort", test_partial_matches_full), &
             new_unittest("n is clamped, not refused", test_partial_clamps), &
             new_unittest("partial_argsort agrees with argsort", test_partial_argsort), &
             new_unittest("partial descending gives the last N", test_partial_descending), &
-            new_unittest("partial_sort really is partial", test_partial_is_partial), &
+            new_unittest("partial_sort really is partial", cpp_test_partial_is_partial), &
             new_unittest("sorted_valid tracks the sorted order", test_sorted_valid), &
             new_unittest("nth_element agrees with a full sort", test_nth_matches_full), &
             new_unittest("nth_element is stable on duplicates", test_nth_stable_index), &
@@ -160,14 +160,14 @@ contains
                 test_search_every_specific), &
             new_unittest("unique reports distinct values in order", test_unique_basic), &
             new_unittest("unique excludes and counts nulls", test_unique_nulls), &
-            new_unittest("unique agrees on both sort paths", test_unique_both_paths), &
+            new_unittest("unique agrees on both sort paths", cpp_test_unique_both_paths), &
             new_unittest("float distinctness is exact", test_unique_float_exact), &
             new_unittest("a string column's distinct values", test_unique_string_column), &
             new_unittest("the three rank methods differ on ties", test_rank_methods), &
             new_unittest("a null ranks 0", test_rank_nulls_zero), &
             new_unittest("ordinal ranks invert argsort", test_rank_inverts_argsort), &
             new_unittest("descending ranks from the top", test_rank_descending), &
-            new_unittest("rank agrees on both sort paths", test_rank_both_paths), &
+            new_unittest("rank agrees on both sort paths", cpp_test_rank_both_paths), &
             new_unittest("pf_unique/pf_unique_count: every type x both count kinds", &
                 test_unique_every_specific), &
             new_unittest("pf_rank: every type x both rank kinds", test_rank_every_specific), &
@@ -184,13 +184,13 @@ contains
             new_unittest("pf_argminmax: every type x both index kinds", test_argminmax_every_specific), &
             new_unittest("pf_merge: every type", test_merge_every_specific), &
             new_unittest("a threaded sort equals the serial one", test_threads_identical), &
-            new_unittest("threads are really created", test_threads_really_used), &
-            new_unittest("auto is serial inside a parallel region", test_threads_auto_in_parallel), &
+            new_unittest("threads are really created", cpp_test_threads_really_used), &
+            new_unittest("auto is serial inside a parallel region", cpp_test_threads_auto_in_parallel), &
             new_unittest("threads=1 forces serial", test_threads_one_is_serial), &
             new_unittest("unique and rank take threads too", test_threads_on_derived), &
             new_unittest("every size from 2 to 400 threads identically", test_merge_size_sweep), &
             new_unittest("a threaded sort is still a permutation at every size", test_merge_sweep_is_permutation), &
-            new_unittest("the final merge round is really co-ranked", test_merge_round_threads_used), &
+            new_unittest("the final merge round is really co-ranked", cpp_test_merge_round_threads_used), &
             new_unittest("co-ranking survives its extreme inputs", test_merge_corank_extremes), &
             new_unittest("strings and multi-key merge identically", test_merge_key_families), &
             new_unittest("nulls and NaNs merge identically", test_merge_tiers), &
@@ -319,7 +319,7 @@ contains
         !
         call parquet_debug_set_sort_task_floor(-1_int64)
         call force_parallel_threshold(0_int64)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, shipped_design == 2_int64, &
             "the fixture must reach Design B, or this test says nothing about its floor")
@@ -377,7 +377,7 @@ contains
         ! Restored BEFORE the assertions: each `check` can `return`, and this suite shares a process
         ! with the settings suite, where a leaked floor reads as an unrelated failure.
         call parquet_debug_set_sort_engine_min_rows(-1_int64)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, used_small == 1_int64, &
             "20000 rows is under max(32768, 2048*4) and must run serial, not open a team")
@@ -432,7 +432,7 @@ contains
         ! Restored before the assertions: each `check` can `return`, and this suite shares a process
         ! with the settings suite.
         call parquet_debug_set_sort_counting_max_threads(-1_int64)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, d2 == 0_int64, &
             "two threads on a narrow range must take the counting path, not fall through to a design")
@@ -5939,7 +5939,7 @@ contains
         call pf_argsort(keys, pc)
         call parquet_debug_use_fortran_sort_engine(.true.)
         call pf_argsort(keys, pf)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, size(pf, kind=int64) == n, label // ": the Fortran permutation is the wrong length")
         if (allocated(error)) return
@@ -5984,6 +5984,23 @@ contains
         end if
     end subroutine engine_only_introsort
     !
+    !> Puts the engine selector back to the value the library ships with.
+    !!
+    !! **Every test here that forces an engine must end by calling this, not by calling
+    !! `parquet_debug_use_fortran_sort_engine(.false.)`.** Before Stage 6 the two were the same
+    !! thing, so "restore" was written as "clear" throughout this file; the flip made those opposite
+    !! operations, and a leaked selector is the worst kind of leak — it does not fail the test that
+    !! leaked it, it silently changes which engine some LATER test measures. That has already
+    !! happened once in this suite for a different global (see `test_engine_refine_floor`, which
+    !! broke two settings tests that never mention sorting).
+    !!
+    !! The shipped default is `dbg_fortran_engine` in **`tools/generate_parquet_sorting.py`** —
+    !! `src/parquet_sorting.f90` is generated, so that is the only place it can be changed, and
+    !! this helper is the only place the tests encode it.
+    subroutine restore_engine_default()
+        call parquet_debug_use_fortran_sort_engine(.true.)
+    end subroutine restore_engine_default
+    !
     !> The switch really switches: the C++ engine counts comparisons, the Fortran one cannot.
     !!
     !! **Without this every other Stage 2 test is potentially vacuous.** They assert that two
@@ -6008,6 +6025,8 @@ contains
         end do
         call keys%add(v)
         !
+        ! NOT restore_engine_default(): this arm asserts what the selector reports after being
+        ! CLEARED, so it must clear it. The restore is at the end of the test.
         call parquet_debug_use_fortran_sort_engine(.false.)
         call check(error, .not. parquet_debug_using_fortran_sort_engine(), &
             "the engine selector must report the C++ engine after being cleared")
@@ -6020,13 +6039,13 @@ contains
         call check(error, parquet_debug_using_fortran_sort_engine(), &
             "the engine selector must report the Fortran engine after being set")
         if (allocated(error)) then
-            call parquet_debug_use_fortran_sort_engine(.false.)
+            call restore_engine_default()
             return
         end if
         call engine_arm_comparisons()
         call pf_argsort(keys, perm)
         cmp_fortran = engine_comparisons()
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, cmp_cpp > 0_int64, &
             "the C++ arm counted no comparisons, so the counter is not measuring what it should")
@@ -6412,7 +6431,7 @@ contains
         !
         call force_parallel_threshold(0_int64)
         call parquet_debug_set_sort_radix_min_rows(-1_int64)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
     end subroutine test_fortran_engine_threading
     !
     !> Whether `x` is a NEGATIVE zero, decided by its sign bit rather than by `sign()`.
@@ -6498,7 +6517,7 @@ contains
             call pf_partial_sort(v, cp, counts(k))
             call parquet_debug_use_fortran_sort_engine(.true.)
             call pf_partial_sort(v, fp, counts(k))
-            call parquet_debug_use_fortran_sort_engine(.false.)
+            call restore_engine_default()
             call check(error, size(cp) == size(fp), &
                 "partial count=" // trim(kstr) // ": the two engines returned different lengths")
             if (allocated(error)) return
@@ -6515,7 +6534,7 @@ contains
             call pf_nth_element(v, k, cv, ci)
             call parquet_debug_use_fortran_sort_engine(.true.)
             call pf_nth_element(v, k, fv, fi)
-            call parquet_debug_use_fortran_sort_engine(.false.)
+            call restore_engine_default()
             call check(error, cv == fv, &
                 "nth rank=" // trim(kstr) // ": the two engines returned different values")
             if (allocated(error)) return
@@ -6533,7 +6552,7 @@ contains
         call pf_is_sorted(v, cok)
         call parquet_debug_use_fortran_sort_engine(.true.)
         call pf_is_sorted(v, fok)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         call check(error, (.not. cok) .and. (cok .eqv. fok), &
             "is_sorted on unordered input: both engines must answer .false.")
         if (allocated(error)) return
@@ -6541,7 +6560,7 @@ contains
         call pf_is_sorted(sa, cok)
         call parquet_debug_use_fortran_sort_engine(.true.)
         call pf_is_sorted(sa, fok)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         call check(error, cok .and. (cok .eqv. fok), &
             "is_sorted on ordered input WITH A TIE: both engines must answer .true.")
         if (allocated(error)) return
@@ -6555,7 +6574,7 @@ contains
         call pf_unique_count(v, fc)
         call pf_unique(v, fp)
         call pf_rank(v, fr)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         call check(error, cc == fc, "unique_count: the two engines disagreed")
         if (allocated(error)) return
         call check(error, size(cp) == size(fp), "unique: the two engines returned different lengths")
@@ -6576,7 +6595,7 @@ contains
         call pf_argsort(gk, cperm, group_offsets=coff, group_nkeys=1)
         call parquet_debug_use_fortran_sort_engine(.true.)
         call pf_argsort(gk, fperm, group_offsets=foff, group_nkeys=1)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         call check(error, all(cperm == fperm), &
             "grouped argsort: the two engines returned different permutations")
         if (allocated(error)) return
@@ -6602,7 +6621,7 @@ contains
             call parquet_debug_use_fortran_sort_engine(.true.)
             call pf_lower_bound(sa, targets(k), fl, assume_sorted=.true.)
             call pf_upper_bound(sa, targets(k), fh, assume_sorted=.true.)
-            call parquet_debug_use_fortran_sort_engine(.false.)
+            call restore_engine_default()
             call check(error, cl == fl, &
                 "lower_bound target=" // trim(kstr) // ": the two engines disagreed")
             if (allocated(error)) return
@@ -6617,7 +6636,7 @@ contains
         call pf_merge(sa, sb, cp)
         call parquet_debug_use_fortran_sort_engine(.true.)
         call pf_merge(sa, sb, fp)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         call check(error, size(cp) == size(fp), "merge: the two engines returned different lengths")
         if (allocated(error)) return
         call check(error, all(cp == fp), "merge: the Fortran engine disagreed with the C++ one")
@@ -6646,7 +6665,7 @@ contains
         call pf_merge(za, zb, cz)
         call parquet_debug_use_fortran_sort_engine(.true.)
         call pf_merge(za, zb, fz)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         call check(error, all(cz == fz), "merge of reals: the two engines disagreed on the values")
         if (allocated(error)) return
         call check(error, negative_zero(fz(1)), &
@@ -6761,7 +6780,7 @@ contains
         !
         call parquet_debug_set_sort_radix_min_rows(-1_int64)
         call parquet_debug_set_sort_track_shift(.false.)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         ! The negative control, and the half that fails if the floor ever stops being consulted.
         call check(error, shift_below > 0_int64, &
@@ -6832,7 +6851,7 @@ contains
         !
         call parquet_debug_reset_sort_radix_passes()
         passes_reset = parquet_debug_sort_radix_passes()
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, passes_wide == 8_int64, &
             "a full-width real64 key should have run all eight radix passes")
@@ -7217,7 +7236,7 @@ contains
         call pf_argsort(keys, perm)
         shift_long = parquet_debug_sort_max_insertion_shift()
         call parquet_debug_set_sort_track_shift(.false.)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, shift_num == 0_int64, &
             "two numeric keys above the floor should have taken the multi-key radix, but the insertion pass ran")
@@ -7386,7 +7405,7 @@ contains
         call parquet_debug_reset_sort_radix_passes()
         call pf_argsort(farband, perm)
         passes_farband = parquet_debug_sort_radix_passes()
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, passes_narrow == 4_int64, &
             "a key spanning under 2^32 should have been biased down to four radix passes")
@@ -7430,7 +7449,7 @@ contains
         call pf_argsort(smallband, perm)
         passes_off = parquet_debug_sort_radix_passes()
         call parquet_set_sort_counting_path(.true.)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, passes_counting == 0_int64, &
             "a span-1000 key should have gone to the counting path, so no radix pass should have run")
@@ -7552,7 +7571,7 @@ contains
         shift_failed = parquet_debug_sort_max_insertion_shift()
         call parquet_debug_set_sort_radix_fail_alloc(0)
         call parquet_debug_set_sort_track_shift(.false.)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, shift_ok == 0_int64, &
             "the control run should have taken the radix path, but the insertion pass ran")
@@ -7722,7 +7741,7 @@ contains
         call parquet_debug_set_sort_track_shift(.false.)
         call parquet_debug_set_sort_depth_limit(-1)
         call engine_only_introsort(.false.)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         ! Nonzero on the way up as well as bounded on the way down: a tracker that never fired would
         ! satisfy the bound trivially, and this fixture is scrambled enough that the insertion pass
@@ -7794,7 +7813,7 @@ contains
         call parquet_set_sort_counting_path(.true.)
         call parquet_debug_set_sort_track_shift(.false.)
         call parquet_debug_set_sort_radix_min_rows(-1_int64)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, all(p_on == pc), label // ": the counting path disagrees with the C++ engine")
         if (allocated(error)) return
@@ -8034,7 +8053,7 @@ contains
         heap_forced = parquet_debug_sort_heapsort_calls()
         call parquet_debug_set_sort_depth_limit(-1)
         call engine_only_introsort(.false.)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, heap_normal == 0_int64, &
             "the ordinary path entered the heapsort fallback, so the depth limit is far too small")
@@ -8043,4 +8062,94 @@ contains
             "forcing the depth limit to zero did not reach the heapsort fallback")
     end subroutine test_fortran_engine_depth_limit_bites
     !
+    ! ---- C++-engine pins ------------------------------------------------------------------
+    !
+    ! Every test wrapped below observes a C++-SIDE counter (`engine_comparisons`,
+    ! `parquet_debug_sort_threads_used`, `parquet_debug_sort_merge_threads_used`), which the
+    ! Fortran engine does not populate. Stage 6 made the Fortran engine the default, so each of
+    ! these went from testing something to testing nothing -- and every one of them FAILED loudly
+    ! rather than passing vacuously, because each carries the "this arm must really reach the
+    ! path" control this project requires. That is the controls working exactly as intended.
+    !
+    ! Pinning is the right fix rather than re-pointing them at Fortran observables, because the
+    ! C++ engine still ships and is still user-reachable: `parquet_open_reader(..., sort_by=)`
+    ! and `parquet_reader_set_sort` call `sort_build_permutation_threaded` directly, with no
+    ! engine selector anywhere in that path. These are that engine's only tests.
+    !
+    ! The wrapper shape (rather than a pin at the top of each body) is deliberate: these tests
+    ! have up to five early `return`s, and a selector leaked on one of them would not fail the
+    ! test that leaked it -- it would silently change which engine a LATER test measures.
+
+    !> Pins the C++ engine for `test_counting_path_agrees` -- see the note above.
+    subroutine cpp_test_counting_path_agrees(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_counting_path_agrees(error)
+        call restore_engine_default()
+    end subroutine cpp_test_counting_path_agrees
+
+    !> Pins the C++ engine for `test_counting_path_nulls_agree` -- see the note above.
+    subroutine cpp_test_counting_path_nulls_agree(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_counting_path_nulls_agree(error)
+        call restore_engine_default()
+    end subroutine cpp_test_counting_path_nulls_agree
+
+    !> Pins the C++ engine for `test_partial_is_partial` -- see the note above.
+    subroutine cpp_test_partial_is_partial(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_partial_is_partial(error)
+        call restore_engine_default()
+    end subroutine cpp_test_partial_is_partial
+
+    !> Pins the C++ engine for `test_unique_both_paths` -- see the note above.
+    subroutine cpp_test_unique_both_paths(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_unique_both_paths(error)
+        call restore_engine_default()
+    end subroutine cpp_test_unique_both_paths
+
+    !> Pins the C++ engine for `test_rank_both_paths` -- see the note above.
+    subroutine cpp_test_rank_both_paths(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_rank_both_paths(error)
+        call restore_engine_default()
+    end subroutine cpp_test_rank_both_paths
+
+    !> Pins the C++ engine for `test_threads_really_used` -- see the note above.
+    subroutine cpp_test_threads_really_used(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_threads_really_used(error)
+        call restore_engine_default()
+    end subroutine cpp_test_threads_really_used
+
+    !> Pins the C++ engine for `test_threads_auto_in_parallel` -- see the note above.
+    subroutine cpp_test_threads_auto_in_parallel(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_threads_auto_in_parallel(error)
+        call restore_engine_default()
+    end subroutine cpp_test_threads_auto_in_parallel
+
+    !> Pins the C++ engine for `test_merge_round_threads_used` -- see the note above.
+    subroutine cpp_test_merge_round_threads_used(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_merge_round_threads_used(error)
+        call restore_engine_default()
+    end subroutine cpp_test_merge_round_threads_used
+
 end module test_sorting

@@ -113,18 +113,28 @@ module parquet_sorting
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_sorting: "
     !
-    ! ---- Stage 2 engine selection: TEST-ONLY SCAFFOLDING, deleted at the Stage 6 cutover --------
+    ! ---- Engine selection: the Fortran engine is the DEFAULT; the selector is TEST-ONLY ---------
     !
-    ! feature_sort.md's Stage 2 requires BOTH engines to stay reachable, so that the conformance
-    ! tests and the A/B benchmark can run them over the same data through the same public entry
-    ! point. It is deliberately NOT a `parquet_settings` knob: that module admits a setting only
-    ! when it changes how fast, how large or how loud the library runs and never what it ANSWERS,
-    ! and an engine selector is exactly a second way to get a different answer should the two ever
-    ! disagree. It is also why these are `parquet_debug_*` and absent from README.md's API overview.
+    ! Stage 6 flipped this to `.true.`, so `pf_sort`/`pf_argsort` and every operation reached
+    ! through `drive_engine` run the Fortran engine. The selector itself STAYS: the conformance
+    ! tests A/B the two engines over the same data through the same public entry point, and the
+    ! C++ engine is the oracle for that comparison. It is deliberately NOT a `parquet_settings`
+    ! knob: that module admits a setting only when it changes how fast, how large or how loud the
+    ! library runs and never what it ANSWERS, and an engine selector is exactly a second way to get
+    ! a different answer should the two ever disagree. It is also why these are `parquet_debug_*`
+    ! and absent from README.md's API overview.
+    !
+    ! **The C++ engine is NOT dead after this flip, and the published `sort_parallel_min_rows`
+    ! setting must NOT be retired.** `parquet_reader_set_sort` and `parquet_open_reader(...,
+    ! sort_by=)` reach `sort_build_permutation_threaded` (src/parquet_wrapper.cpp) directly, with
+    ! no selector anywhere in that path, and it reads `g_sort_parallel_min_rows` -- mirrored from
+    ! that setting -- to decide whether a read-time sort threads. feature_sort_report.md section
+    ! 14.6's "retire it at the cutover" note assumed the flip removed the C++ engine from the
+    ! library; it removes it only from `pf_sort`/`pf_argsort`.
     !
     ! Both are process-global saved state, which is why the `sorting` and `sort` suites must stay
     ! excluded from test-drive's per-test parallelism (test/run_tester.f90) -- they already are.
-    logical, save :: dbg_fortran_engine = .false. !! .true. routes `drive_engine` to the Fortran sort.
+    logical, save :: dbg_fortran_engine = .true. !! .true. routes `drive_engine` to the Fortran sort.
     !> .true. once the affinity-clamp warning has been emitted, so it is said once per process
     !! rather than once per sort. Written without synchronisation -- see `warn_thread_clamp`, which
     !! explains why a duplicated diagnostic is preferable to a lock on every sort's resolution path.

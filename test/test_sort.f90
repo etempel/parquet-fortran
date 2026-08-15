@@ -54,7 +54,7 @@ contains
             new_unittest("a struct-leaf path is a valid key", test_struct_leaf_key), &
             new_unittest("sorting by a column that is never read", test_key_column_not_read), &
             new_unittest("the counting fast path matches the comparator", test_counting_path_matches), &
-            new_unittest("table top_n selects rather than fully sorting", test_top_n_selects), &
+            new_unittest("table top_n selects rather than fully sorting", cpp_test_top_n_selects), &
             new_unittest("sort composes with a filter", test_sort_with_filter), &
             new_unittest("sort composes with a sample", test_sort_with_sample), &
             new_unittest("parquet_get_nrows is unchanged by sorting", test_nrows_unchanged), &
@@ -818,4 +818,31 @@ contains
         end block
     end subroutine test_time32_and_uint64_keys
     !
+    ! ---- C++-engine pins ------------------------------------------------------------------
+    !
+    ! Every test wrapped below observes a C++-SIDE counter (`engine_comparisons`,
+    ! `parquet_debug_sort_threads_used`, `parquet_debug_sort_merge_threads_used`), which the
+    ! Fortran engine does not populate. Stage 6 made the Fortran engine the default, so each of
+    ! these went from testing something to testing nothing -- and every one of them FAILED loudly
+    ! rather than passing vacuously, because each carries the "this arm must really reach the
+    ! path" control this project requires. That is the controls working exactly as intended.
+    !
+    ! Pinning is the right fix rather than re-pointing them at Fortran observables, because the
+    ! C++ engine still ships and is still user-reachable: `parquet_open_reader(..., sort_by=)`
+    ! and `parquet_reader_set_sort` call `sort_build_permutation_threaded` directly, with no
+    ! engine selector anywhere in that path. These are that engine's only tests.
+    !
+    ! The wrapper shape (rather than a pin at the top of each body) is deliberate: these tests
+    ! have up to five early `return`s, and a selector leaked on one of them would not fail the
+    ! test that leaked it -- it would silently change which engine a LATER test measures.
+
+    !> Pins the C++ engine for `test_top_n_selects` -- see the note above.
+    subroutine cpp_test_top_n_selects(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_top_n_selects(error)
+        call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default; see the note above
+    end subroutine cpp_test_top_n_selects
+
 end module test_sort

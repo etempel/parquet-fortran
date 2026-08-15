@@ -98,13 +98,13 @@ contains
             new_unittest("an explicit argument always beats the setting", test_argument_beats_setting), &
             new_unittest("an invalid codec default aborts nothing else", test_bad_codec_leaves_state_intact), &
             new_unittest("sort_parallel_min_rows decides whether a sort threads at all", &
-                test_sort_parallel_min_rows_effect), &
+                cpp_test_sort_parallel_min_rows_effect), &
             new_unittest("sort_counting_path switches the sort between its two engines", &
-                test_sort_counting_path_effect), &
+                cpp_test_sort_counting_path_effect), &
             new_unittest("sort_radix_path switches a single-key sort between radix and comparison", &
                 test_sort_radix_path_effect), &
             new_unittest("sort_counting_bucket_limit declines a key whose range exceeds it", &
-                test_sort_counting_bucket_limit_effect), &
+                cpp_test_sort_counting_bucket_limit_effect), &
             new_unittest("target_row_group_bytes sizes the row groups of a whole-table write", &
                 test_target_row_group_bytes_effect), &
             new_unittest("target_row_group_bytes also sizes the streaming path's estimate", &
@@ -1329,7 +1329,12 @@ contains
         shift_off = parquet_debug_sort_max_insertion_shift()
         !
         call parquet_debug_set_sort_track_shift(.false.)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        ! RESTORE, not clear: the Fortran engine is the shipped default (`dbg_fortran_engine` in
+        ! tools/generate_parquet_sorting.py). `parquet_reset_settings` does not touch the selector,
+        ! it being a debug hook rather than a setting, so leaving `.false.` here would hand every
+        ! later test in this process the C++ engine. test/test_sorting.f90's
+        ! `restore_engine_default` is the same rule; this suite has only this one site.
+        call parquet_debug_use_fortran_sort_engine(.true.)
         call parquet_reset_settings()
         !
         call check(error, shift_on == 0_int64, &
@@ -1795,5 +1800,50 @@ contains
         call check(error, inside == 1, "a cap does not lift the serial-inside-a-region rule")
         call parquet_set_string_threads(0)
     end subroutine test_string_threads_in_region
+
+    ! ---- C++-engine pins ------------------------------------------------------------------
+    !
+    ! Every test wrapped below observes a C++-SIDE counter (`engine_comparisons`,
+    ! `parquet_debug_sort_threads_used`, `parquet_debug_sort_merge_threads_used`), which the
+    ! Fortran engine does not populate. Stage 6 made the Fortran engine the default, so each of
+    ! these went from testing something to testing nothing -- and every one of them FAILED loudly
+    ! rather than passing vacuously, because each carries the "this arm must really reach the
+    ! path" control this project requires. That is the controls working exactly as intended.
+    !
+    ! Pinning is the right fix rather than re-pointing them at Fortran observables, because the
+    ! C++ engine still ships and is still user-reachable: `parquet_open_reader(..., sort_by=)`
+    ! and `parquet_reader_set_sort` call `sort_build_permutation_threaded` directly, with no
+    ! engine selector anywhere in that path. These are that engine's only tests.
+    !
+    ! The wrapper shape (rather than a pin at the top of each body) is deliberate: these tests
+    ! have up to five early `return`s, and a selector leaked on one of them would not fail the
+    ! test that leaked it -- it would silently change which engine a LATER test measures.
+
+    !> Pins the C++ engine for `test_sort_parallel_min_rows_effect` -- see the note above.
+    subroutine cpp_test_sort_parallel_min_rows_effect(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_sort_parallel_min_rows_effect(error)
+        call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default; see the note above
+    end subroutine cpp_test_sort_parallel_min_rows_effect
+
+    !> Pins the C++ engine for `test_sort_counting_path_effect` -- see the note above.
+    subroutine cpp_test_sort_counting_path_effect(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_sort_counting_path_effect(error)
+        call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default; see the note above
+    end subroutine cpp_test_sort_counting_path_effect
+
+    !> Pins the C++ engine for `test_sort_counting_bucket_limit_effect` -- see the note above.
+    subroutine cpp_test_sort_counting_bucket_limit_effect(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_sort_counting_bucket_limit_effect(error)
+        call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default; see the note above
+    end subroutine cpp_test_sort_counting_bucket_limit_effect
 
 end module test_settings

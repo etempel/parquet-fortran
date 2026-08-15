@@ -154,6 +154,9 @@ something a reader is expected to have.
 | [Risk-87](#risk-87--the-counting-sorts-range-check-cannot-be-written-the-way-c-writes-it) | The counting sort's range check cannot be written the way C++ writes it | 4 — covered |
 | [Risk-88](#risk-88--the-sort-comparator-silently-loses-a-third-of-its-speed-if-it-outgrows-an-inlining-budget) | The sort comparator silently loses a third of its speed if it outgrows an inlining budget | 3 — not testable |
 | [Risk-89](#risk-89--the-radix-path-is-a-third-expression-of-the-ordering-and-a-wrong-answer-there-is-silent) | The radix path is a third expression of the ordering, and a wrong answer there is silent | 4 — covered |
+| [Risk-90](#risk-90--the-narrow-integer-bias-is-safe-in-exactly-one-direction-and-its-guard-cannot-be-tested) | The narrow-integer bias is safe in exactly ONE direction, and its guard cannot be tested | 3 — not testable |
+| [Risk-91](#risk-91--sort_radix_refine_strings-reads-one-array-while-permuting-another-and-nothing-diagnoses-passing-the-same-one) | `sort_radix_refine_strings` reads one array while permuting another, and nothing diagnoses passing the same one | 3 — not testable |
+| [Risk-92](#risk-92--the-last-radix-pass-leaves-the-row-array-stale-and-only-the-string-exclusion-makes-that-safe) | The last radix pass leaves the row array STALE, and only the string exclusion makes that safe | 4 — covered |
 
 ---
 

@@ -915,6 +915,103 @@ contains
         call sort_radix_images_range(key, rows, 1_int64, m, out, bias)
     end subroutine sort_radix_images_threaded
 
+    !> Builds all eight per-digit histograms of `sk(1:m)` in ONE read, threaded when it can be.
+    !!
+    !! **Extracted so the single-key and multi-key paths share one implementation.** Both need the
+    !! identical thing and the multi-key chain was doing it serially, which is a whole-column pass per
+    !! key that no team ever touched -- part of why its 1 -> 64 scaling stopped at 1.33x.
+    !!
+    !! **A per-thread histogram plus one reduction, never an atomic update.** The reduction touches
+    !! 2048 counters per thread and runs once; an atomic would run eight times per ROW, on the hottest
+    !! loop in the phase. The per-thread array is allocated BEFORE the region, for the reason
+    !! `sort_radix_images_threaded` spells out -- nothing may be constructed inside a parallel region
+    !! here.
+    !!
+    !! **A failed allocation DECLINES to the serial loop** rather than aborting, exactly as the
+    !! scratch allocations do: the serial path is a complete answer, so a failure costs speed and
+    !! nothing else. That also means `nt > 1` never *guarantees* the threaded path ran, which is why
+    !! the pass counter and the threads-used counter measure different things and both exist.
+    subroutine sort_radix_hist_threaded(sk, m, hist, nt)
+        integer(int64), intent(in) :: sk(:)             !! the images to count; `1..m` are read.
+        integer(int64), intent(in) :: m                 !! how many images.
+        integer(int64), intent(out) :: hist(0:255, 0:7) !! receives one histogram per byte position.
+        integer, intent(in) :: nt                       !! team size; 1 runs the serial path.
+        integer(int64) :: j, b, u
+        integer :: p
+#ifdef _OPENMP
+        integer(int64), allocatable :: thist(:,:,:) !! per-thread histograms, reduced below.
+        integer :: tid, tt, ios
+        integer(int64) :: c_lo, c_hi
+#endif
+        !
+        hist = 0_int64
+#ifdef _OPENMP
+        if (nt > 1) then
+            allocate(thist(0:255, 0:7, 0:nt - 1), stat=ios)
+            if (ios == 0) then
+                thist = 0_int64
+                !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, j, p, b, u)
+                tid = omp_get_thread_num()
+                call sort_chunk_bounds(m, nt, tid, c_lo, c_hi)
+                do j = c_lo, c_hi
+                    u = sk(j)
+                    do p = 0, 7
+                        b = iand(u, 255_int64)
+                        thist(b, p, tid) = thist(b, p, tid) + 1_int64
+                        u = ishft(u, -8)
+                    end do
+                end do
+                !$omp end parallel
+                do tt = 0, nt - 1
+                    do p = 0, 7
+                        do b = 0_int64, 255_int64
+                            hist(b, p) = hist(b, p) + thist(b, p, tt)
+                        end do
+                    end do
+                end do
+                deallocate(thist)
+                return
+            end if
+        end if
+#endif
+        do j = 1_int64, m
+            u = sk(j)
+            do p = 0, 7
+                b = iand(u, 255_int64)
+                hist(b, p) = hist(b, p) + 1_int64
+                u = ishft(u, -8)
+            end do
+        end do
+    end subroutine sort_radix_hist_threaded
+
+    !> Copies `src(1:m)` into `dst(1:m)`, threaded when a team is available.
+    !!
+    !! The multi-key chain copies the permutation home once per key, and again inside its tier pass
+    !! and its string pass -- whole-column passes that were serial and are charged to every multi-key
+    !! sort. Trivial in itself; it is here rather than inline so the `#ifdef _OPENMP` fork and the
+    !! serial fallback are written once instead of at each of the three sites.
+    subroutine sort_copy_threaded(src, dst, m, nt)
+        integer(int64), intent(in) :: src(:)    !! source; `1..m` are read.
+        integer(int64), intent(inout) :: dst(:) !! destination; `1..m` are written.
+        integer(int64), intent(in) :: m         !! elements to copy.
+        integer, intent(in) :: nt               !! team size; 1 runs the serial loop.
+        integer(int64) :: j
+        !
+#ifdef _OPENMP
+        if (nt > 1) then
+            !$omp parallel do num_threads(nt) default(shared) private(j) schedule(static)
+            do j = 1_int64, m
+                dst(j) = src(j)
+            end do
+            !$omp end parallel do
+            return
+        end if
+#endif
+        do j = 1_int64, m
+            dst(j) = src(j)
+        end do
+    end subroutine sort_copy_threaded
+
     !> Splits `1..m` into `nt` contiguous, near-equal chunks and returns chunk `tid`'s bounds.
     !!
     !! **Contiguous, never strided.** Every phase this splits is memory-bound and walks its input
@@ -1855,59 +1952,10 @@ contains
         !
         last_p = -1
         if (nv > 1_int64) then
-            ! All eight histograms in one read of `ka`, rather than one read per pass.
-            hist = 0_int64
-            hist_done = .false.
-#ifdef _OPENMP
-            ! **A per-thread histogram plus one reduction, never an atomic update.** The reduction
-            ! touches 2048 counters per thread and runs once; an atomic would run eight times per
-            ! ROW, on the hottest loop in the phase. The per-thread array is allocated BEFORE the
-            ! region for the reason spelled out in `sort_radix_images_threaded` -- nothing may be
-            ! constructed inside a parallel region here.
-            !
-            ! A failed allocation DECLINES to the serial loop below rather than aborting, exactly as
-            ! the scratch allocations do: the serial path is a complete answer, so a failure here
-            ! costs speed and nothing else. This also means `nt > 1` never *guarantees* the threaded
-            ! path ran, which is why the pass counter and the threads-used counter measure different
-            ! things and both exist.
-            if (nt > 1) then
-                allocate(thist(0:255, 0:7, 0:nt - 1), stat=ios)
-                if (ios == 0) then
-                    thist = 0_int64
-                    !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, j, p, b, u)
-                    tid = omp_get_thread_num()
-                    call sort_chunk_bounds(nv, nt, tid, c_lo, c_hi)
-                    do j = c_lo, c_hi
-                        u = ka(j)
-                        do p = 0, 7
-                            b = iand(u, 255_int64)
-                            thist(b, p, tid) = thist(b, p, tid) + 1_int64
-                            u = ishft(u, -8)
-                        end do
-                    end do
-                    !$omp end parallel
-                    do tt = 0, nt - 1
-                        do p = 0, 7
-                            do b = 0_int64, 255_int64
-                                hist(b, p) = hist(b, p) + thist(b, p, tt)
-                            end do
-                        end do
-                    end do
-                    deallocate(thist)
-                    hist_done = .true.
-                end if
-            end if
-#endif
-            if (.not. hist_done) then
-                do j = 1_int64, nv
-                    u = ka(j)
-                    do p = 0, 7
-                        b = iand(u, 255_int64)
-                        hist(b, p) = hist(b, p) + 1_int64
-                        u = ishft(u, -8)
-                    end do
-                end do
-            end if
+            ! All eight histograms in one read of `ka`, rather than one read per pass. Shared with
+            ! the multi-key chain -- see `sort_radix_hist_threaded`, which owns the threading, the
+            ! per-thread reduction and the decline-to-serial fallback that used to sit here inline.
+            call sort_radix_hist_threaded(ka, nv, hist, nt)
             allocate(kb(nv), rb(nv), stat=ios)
             ! Nothing has been written to `perm` yet, so returning here really is a clean decline
             ! rather than a half-finished sort. Keep any future allocation ahead of the first
@@ -2095,13 +2143,27 @@ contains
             if (ios /= 0 .and. allocated(cnt)) deallocate(cnt)
         end if
 #endif
-        do i = 1_int64, n
-            perm(i) = i
-        end do
+        ! Threaded on the same rule the single-key path's `fill_identity` uses: this is a whole
+        ! column pass, and leaving it serial charges every multi-key sort for it.
+#ifdef _OPENMP
+        if (nt > 1) then
+            !$omp parallel do num_threads(nt) default(shared) private(i) schedule(static)
+            do i = 1_int64, n
+                perm(i) = i
+            end do
+            !$omp end parallel do
+        else
+#endif
+            do i = 1_int64, n
+                perm(i) = i
+            end do
+#ifdef _OPENMP
+        end if
+#endif
         !
         do k = size(keys), 1, -1
             if (keys(k)%family == SK_STR) then
-                call sort_radix_string_key_pass(keys, k, n, perm, code, cb, pb)
+                call sort_radix_string_key_pass(keys, k, n, perm, code, cb, pb, nt)
                 cycle
             end if
             ! The value image, and 0 for a row this key calls null or NaN -- those are ordered by
@@ -2120,22 +2182,14 @@ contains
             ! being discovered by scanning every row twice to find out.
             has_tiers = key_has_tiers(keys(k))
             vrank = sort_radix_value_rank(keys(k))
-            call sort_radix_images(keys(k), perm, n, code)
+            call sort_radix_images_threaded(keys(k), perm, n, code, nt)
             if (has_tiers) then
                 do j = 1_int64, n
                     if (sort_radix_tier_rank(keys(k), perm(j)) /= vrank) code(j) = 0_int64
                 end do
             end if
             !
-            hist = 0_int64
-            do j = 1_int64, n
-                u = code(j)
-                do p = 0, 7
-                    b = iand(u, 255_int64)
-                    hist(b, p) = hist(b, p) + 1_int64
-                    u = ishft(u, -8)
-                end do
-            end do
+            call sort_radix_hist_threaded(code, n, hist, nt)
             ! The permutation ALTERNATES between `perm` and `pb` rather than being copied back after
             ! every pass. That copy was a full read and write of `n` int64 per pass per key, against
             ! the 32 bytes per element the scatter itself moves -- a third of the pass's whole
@@ -2215,9 +2269,7 @@ contains
             ! At most one copy-back per key instead of one per pass, and it must happen HERE: the
             ! tier pass below reads `perm`, and so does the next key's image build.
             if (in_pb) then
-                do j = 1_int64, n
-                    perm(j) = pb(j)
-                end do
+                call sort_copy_threaded(pb, perm, n, nt)
                 in_pb = .false.
             end if
             !
@@ -2243,9 +2295,7 @@ contains
                 pb(tier(r)) = perm(j)
                 tier(r) = tier(r) + 1_int64
             end do
-            do j = 1_int64, n
-                perm(j) = pb(j)
-            end do
+            call sort_copy_threaded(pb, perm, n, nt)
         end do
         ok = .true.
     end subroutine sort_radix_multi_permutation
@@ -2288,7 +2338,7 @@ contains
     !! survives the change of shape: the refine walks runs within a CONTIGUOUS value block, and the
     !! tier split is what makes it contiguous. A string key has no NaN tier, but
     !! `sort_radix_tier_rank` answers for it anyway and costs nothing to reuse.
-    subroutine sort_radix_string_key_pass(keys, kx, n, perm, code, cb, pb)
+    subroutine sort_radix_string_key_pass(keys, kx, n, perm, code, cb, pb, nt)
         type(sort_key_buf), intent(in) :: keys(:)  !! the keys, in precedence order.
         integer, intent(in) :: kx                  !! which key to order by; family SK_STR.
         integer(int64), intent(in) :: n            !! rows.
@@ -2296,6 +2346,7 @@ contains
         integer(int64), intent(inout) :: code(:)   !! the caller's image buffer, `n` long.
         integer(int64), intent(inout) :: cb(:)     !! the caller's second image buffer, `n` long.
         integer(int64), intent(inout) :: pb(:)     !! the caller's scatter buffer, `n` long.
+        integer, intent(in) :: nt                  !! team size; 1 runs every whole-column pass serially.
         !
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
         integer(int64) :: off(0:255)     !! running output cursor per bucket.
@@ -2336,9 +2387,7 @@ contains
                     pb(tier(r)) = perm(j)
                     tier(r) = tier(r) + 1_int64
                 end do
-                do j = 1_int64, n
-                    perm(j) = pb(j)
-                end do
+                call sort_copy_threaded(pb, perm, n, nt)
             end if
         end if
         !
@@ -2352,17 +2401,9 @@ contains
         do j = 1_int64, nv
             pb(j) = perm(base + j)
         end do
-        call sort_radix_images(keys(kx), pb, nv, code)
+        call sort_radix_images_threaded(keys(kx), pb, nv, code, nt)
         !
-        hist = 0_int64
-        do j = 1_int64, nv
-            u = code(j)
-            do p = 0, 7
-                b = iand(u, 255_int64)
-                hist(b, p) = hist(b, p) + 1_int64
-                u = ishft(u, -8)
-            end do
-        end do
+        call sort_radix_hist_threaded(code, nv, hist, nt)
         in_alt = .false.
         do p = 0, 7
             ! A byte position every row agrees on cannot reorder anything -- the same skip the

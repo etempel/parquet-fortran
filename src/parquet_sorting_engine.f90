@@ -406,8 +406,12 @@ contains
     end procedure sort_build_permutation
 
     module procedure sort_build_permutation_threaded
-        use parquet_settings, only : parquet_get_sort_parallel_min_rows
         integer :: nt !! the team this build will actually open.
+        !> Absolute row floor below which a team never pays, whatever the team size.
+        integer(int64), parameter :: SORT_ENGINE_MIN_ROWS = 32768_int64
+        !> Extra rows demanded per thread on top of that floor.
+        integer(int64), parameter :: SORT_ENGINE_ELEMS_PER_THREAD = 2048_int64
+        integer(int64) :: floor_rows !! resolved floor, after any debug override.
         !
         ! Two clauses, and both need the DATA to decide, which is why they live here rather than in
         ! `resolve_thread_count` with the rest of the thread policy.
@@ -417,11 +421,25 @@ contains
         ! (`feature_sort_parallel.md` §2.7), so a team of one is a regression at every row count --
         ! and at every row count a test can afford, by the wider of those two margins.
         !
-        ! **The row floor** is where a team stops paying for itself at all. It is a published
-        ! setting rather than a constant precisely because its right value is a property of the
-        ! machine: this was tuned on eight arm64 cores and has no claim on 192 x86 ones.
+        ! **The row floor** is where a team stops paying for itself at all. It used to read the
+        ! published `sort_parallel_min_rows` setting, on the reasoning that its right value is a
+        ! property of the machine and so belongs to the user. It is now derived instead, because the
+        ! part that is a property of the machine is the TEAM SIZE, which the library already knows --
+        ! and asking a user to track it by hand is asking them to re-tune on every machine.
+        !
+        ! `max(32768, 2048 * nt)`, measured on machine B with `benchmark_sort_tail` (threaded against
+        ! serial, over n x team, `--profile release`). The flat 8192 it replaces is wrong by **4.83x
+        ! under ifx and 20.11x under gfortran** at their worst points, with geometric means of 1.230
+        ! and 1.429; this rule's worst cases are 1.10x and 1.17x, geometric means 1.007 and 1.006.
+        ! Both compilers picked the same rule out of nine candidates, so no weighting was needed.
+        !
+        ! **`parquet_set_sort_parallel_min_rows` is untouched and still governs the C++ engine** --
+        ! it is not consulted here any more. When the Fortran engine becomes the default that setting
+        ! should be retired and this rule left as the only one; see `feature_sort_report.md` §14.
         nt = 1
-        if (nthreads > 1_int64 .and. n >= parquet_get_sort_parallel_min_rows()) then
+        floor_rows = max(SORT_ENGINE_MIN_ROWS, SORT_ENGINE_ELEMS_PER_THREAD * nthreads)
+        if (dbg_sort_engine_min_rows >= 0_int64) floor_rows = dbg_sort_engine_min_rows
+        if (nthreads > 1_int64 .and. n >= floor_rows) then
             ! Clamped into default INTEGER, which is what every OpenMP clause below takes. A caller
             ! may pass any `threads=` it likes, including a silly one, so the clamp belongs here --
             ! at the point the region is opened -- rather than in the policy layer.
@@ -3490,6 +3508,14 @@ contains
     module procedure parquet_debug_set_sort_task_floor
         dbg_sort_task_floor = n
     end procedure parquet_debug_set_sort_task_floor
+
+    module procedure parquet_debug_set_sort_engine_min_rows
+        dbg_sort_engine_min_rows = n
+    end procedure parquet_debug_set_sort_engine_min_rows
+
+    module procedure parquet_debug_set_sort_tail_min_rows
+        dbg_sort_tail_min_rows = n
+    end procedure parquet_debug_set_sort_tail_min_rows
 
     module procedure parquet_debug_set_sort_split_min_card
         dbg_sort_split_min_card = n

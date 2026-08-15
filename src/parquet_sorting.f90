@@ -99,6 +99,8 @@ module parquet_sorting
     public :: parquet_debug_sort_max_insertion_shift
     public :: parquet_debug_set_sort_radix_min_rows
     public :: parquet_debug_set_sort_task_floor
+    public :: parquet_debug_set_sort_tail_min_rows
+    public :: parquet_debug_set_sort_engine_min_rows
     public :: parquet_debug_set_sort_split_min_card
     public :: parquet_debug_set_sort_radix_fail_alloc
     public :: parquet_debug_reset_sort_radix_passes
@@ -174,6 +176,20 @@ module parquet_sorting
     !! sits inside this project's 11-16% cross-build noise floor, so the sweep has to happen in one
     !! binary, which is what this hook is for.
     integer(int64), save :: dbg_sort_task_floor = -1_int64
+    !> Overrides the TAIL passes' row floor; NEGATIVE restores `SORT_TAIL_ELEMS_PER_THREAD * nt`.
+    !!
+    !! The tail (key extraction, the identity fill, the int32 narrowing) is memcpy-shaped, so its
+    !! threading crossover has no reason to equal the SORT's -- and until this existed the two shared
+    !! one number, `sort_parallel_min_rows`, which therefore could not be right for both. This hook
+    !! is what lets the tail's own crossover be measured without disturbing the sort's.
+    integer(int64), save :: dbg_sort_tail_min_rows = -1_int64
+    !> Overrides the Fortran ENGINE's own threading floor; NEGATIVE restores the built-in rule.
+    !!
+    !! Distinct from `parquet_set_sort_parallel_min_rows`, which remains the published knob and
+    !! still governs the C++ engine. The Fortran engine's floor is internal and automatic -- a
+    !! measured function of the team -- so this hook is the only way to move it, and is what
+    !! `force_parallel_threshold` in the tests drives.
+    integer(int64), save :: dbg_sort_engine_min_rows = -1_int64
     !> Overrides the distinct-value count the split digit must reach; NEGATIVE restores
     !! `SORT_SPLIT_MIN_CARD`.
     !!
@@ -5940,6 +5956,23 @@ module parquet_sorting
         module subroutine parquet_debug_set_sort_task_floor(n)
             integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
         end subroutine parquet_debug_set_sort_task_floor
+        !> Test-only override for the TAIL passes' row floor; NEGATIVE restores the built-in.
+        !!
+        !! Separate from the sort's own floor because the tail is memcpy-shaped and crosses
+        !! over an order of magnitude lower; the two shared one setting until this existed,
+        !! which meant one number governing two different questions. Has no effect on the
+        !! C++ engine.
+        module subroutine parquet_debug_set_sort_tail_min_rows(n)
+            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
+        end subroutine parquet_debug_set_sort_tail_min_rows
+        !> Test-only override for the Fortran ENGINE's threading floor; NEGATIVE restores it.
+        !!
+        !! The engine's floor is internal and automatic, so unlike the tail's it has no
+        !! published setting to move it. `parquet_set_sort_parallel_min_rows` still governs
+        !! the C++ engine and is unaffected by this.
+        module subroutine parquet_debug_set_sort_engine_min_rows(n)
+            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
+        end subroutine parquet_debug_set_sort_engine_min_rows
         !> Test-only override for the split's minimum distinct-value count; NEGATIVE restores
         !! the built-in `SORT_SPLIT_MIN_CARD`.
         !!

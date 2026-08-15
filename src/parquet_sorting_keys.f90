@@ -1874,14 +1874,37 @@ contains
     end subroutine warn_thread_clamp
     !
     module procedure tail_team
-        use parquet_settings, only : parquet_get_sort_parallel_min_rows
+        !> Elements each thread must get from a tail pass for the team to be worth opening.
+        !!
+        !! **The tail's floor is its OWN, and this is the change that separated it.** It used to
+        !! read `parquet_get_sort_parallel_min_rows()` -- the setting that also decides whether the
+        !! RADIX threads -- on the reasoning that the two should "decline together". They should
+        !! not: a tail pass is memcpy-shaped (extraction, the identity fill, the int32 narrowing)
+        !! while the sort is compute-bound over many passes, so one number could not be right for
+        !! both and was measured being right for neither.
+        !!
+        !! **The floor is `max(SORT_TAIL_MIN_ROWS, SORT_TAIL_ELEMS_PER_THREAD * nt)`, and unlike the
+        !! refinement floor it is dominated by its ABSOLUTE term.** Measured on machine B with
+        !! `benchmark_sort_tail --extract-only`, threaded against serial over n x team: the flat 8192
+        !! this replaces is wrong by **16.22x** under gfortran (n = 8192 at 64 threads) and 2.75x
+        !! under ifx.
+        !!
+        !! **The two compilers genuinely disagree here, and ifx is weighted per the maintainer's
+        !! rule.** Under ifx extraction threads profitably from n = 32768 at every team size (1.25x
+        !! to 1.36x) and the gains reach 74x at 4 M rows; under gfortran it does not pay until
+        !! 65536, and not until 262144 at 64 threads. The rule below costs gfortran at most 2.28x
+        !! (n = 32768, 32 threads) while taking ifx's worst case to 1.25x -- against 16.22x and 2.75x
+        !! for the constant it replaces, so both compilers gain substantially even though only one
+        !! of them got its preferred value.
+        integer(int64), parameter :: SORT_TAIL_MIN_ROWS = 32768_int64
+        integer(int64), parameter :: SORT_TAIL_ELEMS_PER_THREAD = 1024_int64
+        integer(int64) :: floor_rows !! resolved floor, after any debug override.
         !
         team = 1
-        ! The floor. A whole-column loop of a few thousand elements is dominated by the cost of
-        ! opening the team, and the same setting already governs whether the RADIX threads at all,
-        ! so the two decline together rather than on separate rules.
         if (nthreads <= 1_int64) return
-        if (n < parquet_get_sort_parallel_min_rows()) return
+        floor_rows = max(SORT_TAIL_MIN_ROWS, SORT_TAIL_ELEMS_PER_THREAD * nthreads)
+        if (dbg_sort_tail_min_rows >= 0_int64) floor_rows = dbg_sort_tail_min_rows
+        if (n < floor_rows) return
         team = int(min(nthreads, int(huge(0), int64)))
         if (team < 1) team = 1
     end procedure tail_team

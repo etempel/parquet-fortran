@@ -253,7 +253,9 @@ contains
             new_unittest("engine: the counting range check survives int64 extremes", &
                 test_counting_path_int64_extremes), &
             new_unittest("engine: the refinement floor scales with the team and declines small tasks", &
-                test_engine_refine_floor) &
+                test_engine_refine_floor), &
+            new_unittest("engine: the threading floor scales with the team and declines small columns", &
+                test_engine_thread_floor) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -330,6 +332,60 @@ contains
         call check(error, shipped_buckets == 3_int64, &
             "at the shipped floor the three top-byte buckets must survive unrefined")
     end subroutine test_engine_refine_floor
+    !
+    !> The engine's threading floor must scale with the team, and decline a column too small for it.
+    !!
+    !! **What this protects.** The floor is `max(32768, 2048 * nt)`, replacing a flat 8192 that was
+    !! measured wrong by **4.83x under ifx and 20.11x under gfortran** at their worst points -- the
+    !! damage concentrated exactly where a flat number must fail, at small `n` with a large team,
+    !! where 8192 rows over 64 threads is 128 rows each and a full barrier to pay for them.
+    !!
+    !! **The fixture straddles the ABSOLUTE term, not the per-thread one.** At four threads the rule
+    !! is `max(32768, 8192)` = 32768, so 20000 rows must run serial and 40000 must thread. A fixture
+    !! chosen to straddle `2048 * nt` instead would sit at 8192 rows, where the absolute term decides
+    !! and the per-thread term is invisible -- the test would then pass against a rule that had lost
+    !! its team scaling entirely.
+    !!
+    !! **The forced arm is the vacuity control**: with the floor forced to 1 the same 20000-row
+    !! column must thread, or the serial assertion above is passing against an engine that never
+    !! threads at this size for some other reason.
+    subroutine test_engine_thread_floor(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), allocatable :: small(:), big(:), perm(:)
+        integer(int64) :: used_small, used_big, used_forced, st, i
+        !
+        allocate(small(20000), big(40000))
+        st = 88172645463325252_int64
+        do i = 1_int64, 40000_int64
+            st = ieor(st, ishft(st, 13)); st = ieor(st, ishft(st, -7)); st = ieor(st, ishft(st, 17))
+            if (i <= 20000_int64) small(i) = st
+            big(i) = st
+        end do
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_argsort(small, perm, threads=4)
+        used_small = fortran_threads_used()
+        call pf_argsort(big, perm, threads=4)
+        used_big = fortran_threads_used()
+        !
+        call parquet_debug_set_sort_engine_min_rows(1_int64)
+        call pf_argsort(small, perm, threads=4)
+        used_forced = fortran_threads_used()
+        !
+        ! Restored BEFORE the assertions: each `check` can `return`, and this suite shares a process
+        ! with the settings suite, where a leaked floor reads as an unrelated failure.
+        call parquet_debug_set_sort_engine_min_rows(-1_int64)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, used_small == 1_int64, &
+            "20000 rows is under max(32768, 2048*4) and must run serial, not open a team")
+        if (allocated(error)) return
+        call check(error, used_big >= 2_int64, &
+            "40000 rows is over the floor and must open a team")
+        if (allocated(error)) return
+        call check(error, used_forced >= 2_int64, &
+            "forcing the floor to 1 must make the small column thread, or the serial check is vacuous")
+    end subroutine test_engine_thread_floor
     !
     !> `perm(k)` must name the element belonging at position k, and gathering by it must sort.
     subroutine test_argsort_basic(error)
@@ -4137,7 +4193,19 @@ contains
     subroutine force_parallel_threshold(rows)
         integer(int64), intent(in) :: rows !! new threshold; 0 restores the built-in one.
 
+        ! **Three floors, because one setting used to be three.** `sort_parallel_min_rows` governed
+        ! the C++ engine, the Fortran engine and the tail passes alike; the last two are now internal
+        ! rules derived from the team size, each with its own hook. Driving all three from here keeps
+        ! every existing caller's meaning exactly what it was -- "make the threaded paths engage at
+        ! this row count" -- which is the only reason this helper still reads as one knob.
         call parquet_set_sort_parallel_min_rows(rows)
+        if (rows <= 0_int64) then
+            call parquet_debug_set_sort_engine_min_rows(-1_int64)
+            call parquet_debug_set_sort_tail_min_rows(-1_int64)
+        else
+            call parquet_debug_set_sort_engine_min_rows(rows)
+            call parquet_debug_set_sort_tail_min_rows(rows)
+        end if
     end subroutine force_parallel_threshold
     !
     !> How many threads the last sort actually put to work, the calling thread included.

@@ -349,6 +349,8 @@ module parquet_sorting
     public :: parquet_debug_sort_max_insertion_shift
     public :: parquet_debug_set_sort_radix_min_rows
     public :: parquet_debug_set_sort_task_floor
+    public :: parquet_debug_set_sort_tail_min_rows
+    public :: parquet_debug_set_sort_engine_min_rows
     public :: parquet_debug_set_sort_split_min_card
     public :: parquet_debug_set_sort_radix_fail_alloc
     public :: parquet_debug_reset_sort_radix_passes
@@ -424,6 +426,20 @@ module parquet_sorting
     !! sits inside this project's 11-16% cross-build noise floor, so the sweep has to happen in one
     !! binary, which is what this hook is for.
     integer(int64), save :: dbg_sort_task_floor = -1_int64
+    !> Overrides the TAIL passes' row floor; NEGATIVE restores `SORT_TAIL_ELEMS_PER_THREAD * nt`.
+    !!
+    !! The tail (key extraction, the identity fill, the int32 narrowing) is memcpy-shaped, so its
+    !! threading crossover has no reason to equal the SORT's -- and until this existed the two shared
+    !! one number, `sort_parallel_min_rows`, which therefore could not be right for both. This hook
+    !! is what lets the tail's own crossover be measured without disturbing the sort's.
+    integer(int64), save :: dbg_sort_tail_min_rows = -1_int64
+    !> Overrides the Fortran ENGINE's own threading floor; NEGATIVE restores the built-in rule.
+    !!
+    !! Distinct from `parquet_set_sort_parallel_min_rows`, which remains the published knob and
+    !! still governs the C++ engine. The Fortran engine's floor is internal and automatic -- a
+    !! measured function of the team -- so this hook is the only way to move it, and is what
+    !! `force_parallel_threshold` in the tests drives.
+    integer(int64), save :: dbg_sort_engine_min_rows = -1_int64
     !> Overrides the distinct-value count the split digit must reach; NEGATIVE restores
     !! `SORT_SPLIT_MIN_CARD`.
     !!
@@ -1846,6 +1862,23 @@ def emit_engine_interfaces(w):
     w("        module subroutine parquet_debug_set_sort_task_floor(n)")
     w("            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.")
     w("        end subroutine parquet_debug_set_sort_task_floor")
+    w("        !> Test-only override for the TAIL passes' row floor; NEGATIVE restores the built-in.")
+    w("        !!")
+    w("        !! Separate from the sort's own floor because the tail is memcpy-shaped and crosses")
+    w("        !! over an order of magnitude lower; the two shared one setting until this existed,")
+    w("        !! which meant one number governing two different questions. Has no effect on the")
+    w("        !! C++ engine.")
+    w("        module subroutine parquet_debug_set_sort_tail_min_rows(n)")
+    w("            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.")
+    w("        end subroutine parquet_debug_set_sort_tail_min_rows")
+    w("        !> Test-only override for the Fortran ENGINE's threading floor; NEGATIVE restores it.")
+    w("        !!")
+    w("        !! The engine's floor is internal and automatic, so unlike the tail's it has no")
+    w("        !! published setting to move it. `parquet_set_sort_parallel_min_rows` still governs")
+    w("        !! the C++ engine and is unaffected by this.")
+    w("        module subroutine parquet_debug_set_sort_engine_min_rows(n)")
+    w("            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.")
+    w("        end subroutine parquet_debug_set_sort_engine_min_rows")
     w("        !> Test-only override for the split's minimum distinct-value count; NEGATIVE restores")
     w("        !! the built-in `SORT_SPLIT_MIN_CARD`.")
     w("        !!")
@@ -3164,14 +3197,37 @@ contains
     end subroutine warn_thread_clamp
     !
     module procedure tail_team
-        use parquet_settings, only : parquet_get_sort_parallel_min_rows
+        !> Elements each thread must get from a tail pass for the team to be worth opening.
+        !!
+        !! **The tail's floor is its OWN, and this is the change that separated it.** It used to
+        !! read `parquet_get_sort_parallel_min_rows()` -- the setting that also decides whether the
+        !! RADIX threads -- on the reasoning that the two should "decline together". They should
+        !! not: a tail pass is memcpy-shaped (extraction, the identity fill, the int32 narrowing)
+        !! while the sort is compute-bound over many passes, so one number could not be right for
+        !! both and was measured being right for neither.
+        !!
+        !! **The floor is `max(SORT_TAIL_MIN_ROWS, SORT_TAIL_ELEMS_PER_THREAD * nt)`, and unlike the
+        !! refinement floor it is dominated by its ABSOLUTE term.** Measured on machine B with
+        !! `benchmark_sort_tail --extract-only`, threaded against serial over n x team: the flat 8192
+        !! this replaces is wrong by **16.22x** under gfortran (n = 8192 at 64 threads) and 2.75x
+        !! under ifx.
+        !!
+        !! **The two compilers genuinely disagree here, and ifx is weighted per the maintainer's
+        !! rule.** Under ifx extraction threads profitably from n = 32768 at every team size (1.25x
+        !! to 1.36x) and the gains reach 74x at 4 M rows; under gfortran it does not pay until
+        !! 65536, and not until 262144 at 64 threads. The rule below costs gfortran at most 2.28x
+        !! (n = 32768, 32 threads) while taking ifx's worst case to 1.25x -- against 16.22x and 2.75x
+        !! for the constant it replaces, so both compilers gain substantially even though only one
+        !! of them got its preferred value.
+        integer(int64), parameter :: SORT_TAIL_MIN_ROWS = 32768_int64
+        integer(int64), parameter :: SORT_TAIL_ELEMS_PER_THREAD = 1024_int64
+        integer(int64) :: floor_rows !! resolved floor, after any debug override.
         !
         team = 1
-        ! The floor. A whole-column loop of a few thousand elements is dominated by the cost of
-        ! opening the team, and the same setting already governs whether the RADIX threads at all,
-        ! so the two decline together rather than on separate rules.
         if (nthreads <= 1_int64) return
-        if (n < parquet_get_sort_parallel_min_rows()) return
+        floor_rows = max(SORT_TAIL_MIN_ROWS, SORT_TAIL_ELEMS_PER_THREAD * nthreads)
+        if (dbg_sort_tail_min_rows >= 0_int64) floor_rows = dbg_sort_tail_min_rows
+        if (n < floor_rows) return
         team = int(min(nthreads, int(huge(0), int64)))
         if (team < 1) team = 1
     end procedure tail_team

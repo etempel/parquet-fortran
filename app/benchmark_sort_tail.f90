@@ -25,6 +25,10 @@ program benchmark_sort_tail
     integer(int64) :: vrange    !! integer key values are folded onto 0..vrange-1; 0 = full range.
     logical :: counting         !! .false. forces the radix path so the two can be compared.
     logical :: serial_policy    !! .true. caps the AUTOMATIC thread count to 1.
+    logical :: extract_only = .false.
+    !! .true. times ONLY `keys%add`, skipping the engine, the narrowing and the end-to-end arm --
+    !! see the note at the timing loop for why the engine's presence makes the extract column
+    !! unreadable.
     integer(int64), allocatable :: perm64(:)
     integer(int32), allocatable :: perm32(:)
     type(pf_sort_keys) :: keys
@@ -92,6 +96,16 @@ program benchmark_sort_tail
             end if
             t1 = omp_get_wtime()
             t_ex = t1 - t0
+            ! **Extract-only exists because the ENGINE contaminates the extract column.** Each
+            ! extraction below is measured immediately after an engine run of 10-20 ms that has just
+            ! rewritten the whole working set with a different number of threads, so the extract
+            ! figure moves with the engine's team rather than with its own -- measured varying 12x
+            ! down a single ladder for an operation that is IDENTICAL in every row. Skipping the
+            ! other three phases is the only way to time extraction against nothing but itself.
+            if (extract_only) then
+                if (rep > 0) b_ex = min(b_ex, t_ex)
+                cycle
+            end if
             ! --- engine alone, keys already built ---------------------------------------------
             t0 = omp_get_wtime()
             call pf_argsort(keys, perm64, threads=nt)
@@ -141,12 +155,20 @@ contains
         logical, intent(out) :: serial_policy     !! .true. caps the automatic thread count to 1.
         integer(int64), intent(out) :: vrange     !! fold integer keys onto 0..vrange-1; 0 = off.
         logical, intent(out) :: counting          !! .false. forces the radix path.
+        integer(int64) :: tail_min !! forced tail floor; negative restores the built-in.
+        integer(int64) :: sort_min !! forced sort floor; 0 restores the built-in.
+        integer :: sort_threads !! forced automatic thread count; governs EXTRACTION.
+        integer(int64) :: eng_min !! forced engine floor; negative restores the built-in.
         character(len=64) :: a
         integer :: i
         !
         n = 5000000_int64
         reps = 3
         maxthreads = 64
+        tail_min = -1_int64
+        sort_min = 0_int64
+        sort_threads = 0
+        eng_min = -1_int64
         use_fortran = .true.
         family = "f64"
         serial_policy = .false.
@@ -168,8 +190,30 @@ contains
                 serial_policy = .true.
             else if (a(1:8) == "--range=") then
                 read (a(9:), *) vrange
+            else if (a(1:14) == "--extract-only") then
+                extract_only = .true.
             else if (a(1:14) == "--no-counting") then
                 counting = .false.
+            else if (a(1:15) == "--sort-threads=") then
+                ! `pf_sort_keys%add` takes no thread argument, so the AUTOMATIC count is the only
+                ! way to choose the extraction team -- see the note at the top of this program.
+                read (a(16:), *) sort_threads
+                call parquet_set_sort_threads(sort_threads)
+            else if (a(1:18) == "--engine-min-rows=") then
+                ! The Fortran engine's own floor. Forcing both this and --tail-min-rows to 8192
+                ! reproduces the single flat setting both used to share, which is the A/B arm.
+                read (a(19:), *) eng_min
+                call parquet_debug_set_sort_engine_min_rows(eng_min)
+            else if (a(1:16) == "--tail-min-rows=") then
+                ! The tail's own threading floor, separated from the sort's. Swept by RE-RUNNING one
+                ! binary: a crossover sits inside this project's 11-16% cross-build noise floor.
+                read (a(17:), *) tail_min
+                call parquet_debug_set_sort_tail_min_rows(tail_min)
+            else if (a(1:11) == "--min-rows=") then
+                ! The SORT's floor, which is still the published setting -- and is the instrument
+                ! for its own measurement, which is why it must be measured before it is removed.
+                read (a(12:), *) sort_min
+                call parquet_set_sort_parallel_min_rows(sort_min)
             end if
         end do
     end subroutine read_args

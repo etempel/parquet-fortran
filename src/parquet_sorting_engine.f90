@@ -1644,9 +1644,34 @@ contains
         integer(int64) :: floor_task !! resolved `SORT_TASK_FLOOR`, after any debug override.
         integer :: team, ios, i, ntask, head, d, maxtask
         logical :: insrc !! which buffer pair this refinement's output landed in.
-        !> Never subdivide below this. A task smaller than this costs more in split overhead and
-        !! per-task histogram rebuilds than the balance it buys.
-        integer(int64), parameter :: SORT_TASK_FLOOR = 4096_int64
+        !> Elements each thread must get from a refinement pass for that pass to be worth opening.
+        !! The task floor is this times the team: never subdivide below `SORT_REFINE_ELEMS_PER_THREAD
+        !! * nt`.
+        !!
+        !! **A refinement pass is THREADED, so its cost scales with the team while its work does
+        !! not** -- `sort_radix_count_range_par` and `sort_radix_scatter_range_par` dispatch the whole
+        !! team over one task's range, so refining a 16 K range with 64 threads gives each thread
+        !! 256 elements and pays a full barrier for them. That is why the floor has to be a function
+        !! of `nt`: the flat 4096 it replaces described a task size, when the quantity that actually
+        !! decides is elements PER THREAD.
+        !!
+        !! **Measured on machine B, ifx and gfortran, `--profile release`.** Refining versus never
+        !! refining, over n x team, with the crossover read off in units of `target = nv/team`:
+        !! refinement starts paying at target 32768 at 16 threads, 65536 at 32 and 131072 at 64 --
+        !! i.e. at 2048 elements per thread, the same constant at every team size, on both
+        !! compilers. Below it the cost is severe and grows with the team: one refinement pass on a
+        !! 32768-row column cost **2.0x at 16 threads, 6.1x at 32 and 10.6x at 64**, which
+        !! `parquet_debug_sort_radix_passes` shows directly as the pass count going 20 -> 40.
+        !!
+        !! **The bracket is [512, 2048] and 2048 is chosen deliberately**, because the error is
+        !! asymmetric: refining too eagerly costs up to 10.6x, declining a refinement that would
+        !! have paid costs at most 1.9x. When in doubt, do not refine.
+        !!
+        !! Consequence worth knowing: the floor binds while `nv < SORT_REFINE_ELEMS_PER_THREAD *
+        !! nt**2`, so a 64-thread team does no refinement at all below ~8.4 M rows, and a 192-thread
+        !! team below ~75 M. Above that `nv/team` dominates and this constant is inert -- it has no
+        !! effect on the large-column case at all.
+        integer(int64), parameter :: SORT_REFINE_ELEMS_PER_THREAD = 2048_int64
         !> Divisor in the distinct-value floor `max(2, nt / SORT_SPLIT_CARD_PER_THREAD)`: the split
         !! digit's column must reach that many distinct values before refinement is worth attempting.
         !!
@@ -1782,7 +1807,7 @@ contains
         ! a 4-core team asks for tasks of `nv / 4` and refines almost nothing, a 64-core team asks
         ! for `nv / 64` and refines whatever is above it.
         target = nv / int(team, int64)
-        floor_task = SORT_TASK_FLOOR
+        floor_task = SORT_REFINE_ELEMS_PER_THREAD * int(nt, int64)
         if (dbg_sort_task_floor >= 0_int64) floor_task = dbg_sort_task_floor
         if (target < floor_task) target = floor_task
         budget = 4_int64 * nv

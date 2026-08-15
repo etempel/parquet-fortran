@@ -251,9 +251,85 @@ contains
             new_unittest("engine: the counting path's bucket limit declines a wide range", &
                 test_counting_path_bucket_limit), &
             new_unittest("engine: the counting range check survives int64 extremes", &
-                test_counting_path_int64_extremes) &
+                test_counting_path_int64_extremes), &
+            new_unittest("engine: the refinement floor scales with the team and declines small tasks", &
+                test_engine_refine_floor) &
             ]
     end subroutine collect_tests_parquet_sorting
+    !
+    !> The refinement floor must scale with the team, and must decline a task too small to thread.
+    !!
+    !! **What this protects.** A refinement pass is THREADED, so `sort_radix_count_range_par` and
+    !! `sort_radix_scatter_range_par` dispatch the whole team over one task's range. Refining a range
+    !! that gives each thread only a few hundred elements pays a full barrier for almost no work, and
+    !! machine B measured that costing **2.0x at 16 threads, 6.1x at 32 and 10.6x at 64** on a 32768-row
+    !! column -- the damage growing with the team, which is exactly why the floor is
+    !! `SORT_REFINE_ELEMS_PER_THREAD * nt` and not the flat 4096 it replaced.
+    !!
+    !! **The fixture has to collide in the top byte and differ lower down.** Refinement subdivides; it
+    !! cannot manufacture distinctions the key does not have, so a key whose distinct values each own
+    !! their own top byte leaves every post-split bucket internally constant and NOTHING to refine --
+    !! the loop would drop `tdmax` through the constant digits and never scatter, and both arms below
+    !! would report the same bucket count for the wrong reason. Three top-byte groups each holding
+    !! thirteen values that differ in digit 6 is what gives refinement something to do.
+    !!
+    !! **Both arms are asserted, and the forced one is the vacuity control**: with the floor forced to
+    !! 1 the same key must refine, or the shipped-floor assertion is passing against a build that
+    !! never refines anything.
+    subroutine test_engine_refine_floor(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: n = 16384_int64
+        integer(int64) :: v(n)
+        integer(int64), allocatable :: ref(:), got_shipped(:), got_forced(:)
+        integer(int64) :: shipped_buckets, forced_buckets, shipped_design
+        integer(int64) :: i, g
+        !
+        ! Group 0 takes 6000 rows, groups 1 and 2 the rest. With four threads the shipped floor is
+        ! 2048*4 = 8192 and `nv/team` is 4096, so the target is 8192 and the largest bucket (6000)
+        ! sits UNDER it -- no refinement. Forcing the floor to 1 drops the target to 4096, which
+        ! every one of the three buckets exceeds.
+        do i = 1_int64, n
+            if (i <= 6000_int64) then
+                g = 0_int64
+            else
+                g = 1_int64 + mod(i, 2_int64)
+            end if
+            v(i) = ishft(g, 56) + ishft(mod(i, 13_int64), 48)
+        end do
+        !
+        ! **Every piece of global state is captured and RESTORED before the first assertion.** Each
+        ! `check` below can `return`, and this suite shares one process with the settings suite -- a
+        ! leaked engine selection was measured breaking two settings tests that never mention sorting
+        ! designs at all, which is the kind of failure that gets debugged in the wrong file.
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call force_parallel_threshold(1_int64)
+        call pf_argsort(v, ref, threads=1)
+        !
+        call pf_argsort(v, got_shipped, threads=4)
+        shipped_buckets = parquet_debug_sort_split_buckets()
+        shipped_design = parquet_debug_sort_design()
+        !
+        call parquet_debug_set_sort_task_floor(1_int64)
+        call pf_argsort(v, got_forced, threads=4)
+        forced_buckets = parquet_debug_sort_split_buckets()
+        !
+        call parquet_debug_set_sort_task_floor(-1_int64)
+        call force_parallel_threshold(0_int64)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, shipped_design == 2_int64, &
+            "the fixture must reach Design B, or this test says nothing about its floor")
+        if (allocated(error)) return
+        call check(error, all(got_shipped == ref), "the shipped floor must not change the answer")
+        if (allocated(error)) return
+        call check(error, all(got_forced == ref), "refining must not change the answer either")
+        if (allocated(error)) return
+        call check(error, forced_buckets > shipped_buckets, &
+            "forcing the floor to 1 must actually refine, or the shipped-floor assertion is vacuous")
+        if (allocated(error)) return
+        call check(error, shipped_buckets == 3_int64, &
+            "at the shipped floor the three top-byte buckets must survive unrefined")
+    end subroutine test_engine_refine_floor
     !
     !> `perm(k)` must name the element belonging at position k, and gathering by it must sort.
     subroutine test_argsort_basic(error)

@@ -2299,6 +2299,25 @@ applied to the harness instead of the source.
   compiles that file with **zero** diagnostics on gfortran 15.2, so `-Wcompare-reals` evidently does
   not fire on a SELF-comparison there, whatever it does for two distinct operands. If some other
   compiler does warn, suppress or accept it rather than restoring `ieee_is_nan`.
+- **`sign(1.0, x)` is NOT a portable test for a NEGATIVE ZERO — use the sign bit.** F2018 16.9.180
+  makes `SIGN(A, B)` with a zero `B` **processor-dependent**: a processor that does not distinguish
+  negative zero returns `|A|`, so `sign(1.0_real64, -0.0_real64)` is entitled to be `+1.0`. Confirmed
+  three ways on this project: gfortran 15.2 and flang 22.1.8 both distinguish it, **ifx does not**,
+  and the idiom therefore reported a *correct* merge as broken on one compiler out of three
+  (`test_fortran_engine_ab_operations`, whose tie fixture separates its two inputs solely by the sign
+  bit of a zero). The portable form asks the question directly:
+
+  ```fortran
+  neg = (x == 0.0_real64) .and. transfer(x, 0_int64) < 0_int64
+  ```
+
+  `ieee_is_negative` from `ieee_arithmetic` is equally correct if the module is already imported.
+  **Two adjacent traps worth knowing while you are here.** The sign of a negative zero in a
+  *constant expression* is a second, independent risk — gfortran and flang preserve it through a
+  `parameter`, but building the value at runtime costs nothing and rules the question out, which is
+  what that test now does. And a fixture whose whole discriminating power is one bit **must assert
+  its own precondition first**: without it, a compiler that loses the sign produces a failure message
+  blaming the code under test, which is exactly how this one presented.
 - **A function returning an unallocated `allocatable` cannot yield an unallocated LHS via
   `x = func()`.** Verified on gfortran 15.2: intrinsic assignment from an unallocated allocatable
   function result leaves the LHS *allocated* (an empty string/array), even for a fresh target.

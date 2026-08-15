@@ -6086,6 +6086,22 @@ contains
         call parquet_debug_use_fortran_sort_engine(.false.)
     end subroutine test_fortran_engine_threading
     !
+    !> Whether `x` is a NEGATIVE zero, decided by its sign bit rather than by `sign()`.
+    !>
+    !> **`sign(1.0_real64, x) < 0.0` is NOT a portable test for this**, which is what it took an ifx
+    !> failure to notice. F2018 16.9.180 makes `SIGN(A, B)` with a zero `B` processor-dependent: a
+    !> processor that does not distinguish negative zero returns `|A|`, so the idiom is entitled to
+    !> answer `+1.0` for a genuine `-0.0`. gfortran and flang both distinguish it; ifx does not, so
+    !> the old form reported a correct merge as broken on one compiler out of three.
+    !>
+    !> Reading the sign bit has no such licence — it is the definition of the thing being asked.
+    !> Note this deliberately does not use `ieee_is_negative`, which would be equally correct but
+    !> would add an import for one call and answers a slightly wider question.
+    logical function negative_zero(x) result(neg)
+        real(real64), intent(in) :: x !! the value to probe.
+        neg = (x == 0.0_real64) .and. transfer(x, 0_int64) < 0_int64
+    end function negative_zero
+    !
     !> How many threads the **Fortran** engine's last permutation build resolved; 1 means serial.
     !>
     !> The twin of `threads_used` above, which answers for the C++ engine. The two counters cannot
@@ -6118,8 +6134,15 @@ contains
         !! indistinguishable however the tie was broken — which let "take from the second range"
         !! survive a first version of this test. Negative zero compares equal to positive zero and
         !! is still a different value, so it reveals which input the element came from.
-        real(real64), parameter :: za(2) = [-0.0_real64, 3.0_real64]
-        real(real64), parameter :: zb(2) = [0.0_real64, 4.0_real64]
+        !!
+        !! **Built at runtime, not as a `parameter`, and probed by BIT PATTERN rather than by
+        !! `sign()`** — both changed after ifx failed this assertion where gfortran and flang passed.
+        !! `SIGN(A, B)` with a zero `B` is explicitly processor-dependent (F2018 16.9.180): a
+        !! processor that does not distinguish negative zero returns `|A|`, so `sign(1.0, -0.0)` is
+        !! allowed to be `+1.0`. That made the old probe report a correct merge as broken. The sign
+        !! of a negative zero in a *constant expression* is a second, independent risk, removed here
+        !! by constructing the array at runtime; it costs nothing and rules the question out.
+        real(real64) :: za(2), zb(2)
         integer(int32), allocatable :: cp(:), fp(:) !! per-engine value results.
         real(real64), allocatable :: cz(:), fz(:)   !! per-engine merged reals.
         integer, allocatable :: cr(:), fr(:)        !! per-engine ranks.
@@ -6276,6 +6299,20 @@ contains
         ! rule observable at all through an API that returns values rather than indices. Taking the
         ! first range's element on a tie is `std::merge`'s stability guarantee and the reason
         ! `pf_merge` agrees with `pf_sort` of the concatenation element for element.
+        za(1) = -0.0_real64
+        za(2) = 3.0_real64
+        zb(1) = 0.0_real64
+        zb(2) = 4.0_real64
+        ! **The fixture's own precondition, and it has to come first.** Everything below distinguishes
+        ! the two inputs solely by the sign bit of a zero, so if this compiler has not actually given
+        ! `za(1)` a negative zero then the assertions below are measuring the fixture and not the
+        ! merge — and they fail with a message blaming the engine, which is exactly what happened on
+        ! ifx before this check existed. Assert the instrument before trusting the reading.
+        call check(error, negative_zero(za(1)) .and. .not. negative_zero(zb(1)), &
+            "fixture is broken, not the merge: za(1) must be -0.0 and zb(1) must be +0.0")
+        if (allocated(error)) return
+        call check(error, za(1) == zb(1), "the fixture's two zeros must still COMPARE equal")
+        if (allocated(error)) return
         call parquet_debug_use_fortran_sort_engine(.false.)
         call pf_merge(za, zb, cz)
         call parquet_debug_use_fortran_sort_engine(.true.)
@@ -6283,10 +6320,10 @@ contains
         call parquet_debug_use_fortran_sort_engine(.false.)
         call check(error, all(cz == fz), "merge of reals: the two engines disagreed on the values")
         if (allocated(error)) return
-        call check(error, sign(1.0_real64, fz(1)) < 0.0_real64, &
+        call check(error, negative_zero(fz(1)), &
             "merge must take the FIRST range's element on a tie: -0.0 from a, not +0.0 from b")
         if (allocated(error)) return
-        call check(error, sign(1.0_real64, cz(1)) < 0.0_real64, &
+        call check(error, negative_zero(cz(1)), &
             "the C++ engine must break the merge tie the same way, or the two have diverged")
     end subroutine test_fortran_engine_ab_operations
     !

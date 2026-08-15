@@ -5945,6 +5945,8 @@ contains
         !! correct behaviour and is why this arm needs a different key rather than a looser threshold.
         integer(int64) :: wide(4000)
         integer(int64) :: spread_vals(200)            !! the distinct values `wide` cycles through.
+        character(len=10) :: sv(4000)                 !! a string key with a SHARED STEM.
+        integer(int64), allocatable :: sref(:), sgot(:) !! the string key's serial and threaded answers.
         integer(int64) :: xs                          !! xorshift state, so the spread is reproducible.
         integer(int64), allocatable :: wref(:)        !! the wide key's serial answer.
         integer(int64), allocatable :: lref(:)        !! the low-cardinality key's serial answer.
@@ -6079,6 +6081,29 @@ contains
             "declining Design B must fall back to Design A, not to the serial loop")
         if (allocated(error)) return
         call check(error, all(got == lref), "declining the split must not change the answer")
+        if (allocated(error)) return
+        !
+        !
+        ! **Strings, which reach Design A and must NOT reach Design B.** The string path radixes a
+        ! packed 8-byte prefix and then refines runs that share one, reading the sorted `ka`/`ra` the
+        ! radix leaves behind — so a design that writes into `perm` and abandons the images cannot be
+        ! used here. Design A can, because it ping-pongs with `move_alloc` and finishes with the
+        ! answer in place. A shared stem is deliberate: it is the shape real string columns have, and
+        ! the one machine B measured Design B losing 2.10× on.
+        do k = 1, size(v)
+            write (sv(k), '(a,i5.5)') "stem/", mod(k * 37, 700)
+        end do
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_argsort(sv, sref, threads=1)
+        call pf_argsort(sv, sgot, threads=4)
+        call check(error, size(sgot) == size(sref) .and. all(sgot == sref), &
+            "a threaded string sort must give the serial permutation exactly")
+        if (allocated(error)) return
+        call check(error, parquet_debug_sort_design() == 1_int64, &
+            "a string key must take Design A: B abandons the images its refine has to read")
+        if (allocated(error)) return
+        call check(error, parquet_debug_sort_split_buckets() == 0_int64, &
+            "a string key must never reach Design B's split")
         if (allocated(error)) return
         !
         call force_parallel_threshold(0_int64)

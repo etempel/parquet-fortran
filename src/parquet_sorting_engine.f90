@@ -1209,10 +1209,12 @@ contains
     !! a swap is O(n) per pass and the serial path avoids it with `move_alloc`, which is unavailable
     !! here because these are plain array dummies.
     subroutine sort_radix_design_a(ka, ra, kb, rb, nv, last_p, hist, nt, perm, value_base, done)
-        integer(int64), intent(inout) :: ka(:), ra(:) !! the images and rows to order.
-        integer(int64), intent(inout) :: kb(:), rb(:) !! the partner buffers.
+        integer(int64), allocatable, intent(inout) :: ka(:), ra(:) !! the images and rows to order.
+        integer(int64), allocatable, intent(inout) :: kb(:), rb(:) !! the partner buffers.
         integer(int64), intent(in) :: nv              !! value-tier rows, occupying `1..nv`.
-        integer, intent(in) :: last_p                 !! the last pass that will execute.
+        integer, intent(in) :: last_p
+        !! the last pass that will execute, or **-1 meaning "emit nothing"** — which is how a STRING
+        !! key asks for the images and rows to be left sorted in `ka`/`ra` for its refine to read.
         integer(int64), intent(in) :: hist(0:255, 0:7) !! whole-column histograms; valid every pass.
         integer, intent(in) :: nt                     !! team size.
         integer(int64), intent(inout) :: perm(:)      !! receives the ordered row indices.
@@ -1220,50 +1222,50 @@ contains
         logical, intent(out) :: done                  !! .false. when this declined and did nothing.
         !
         integer(int64), allocatable :: cnt(:,:) !! per-thread cursors, `(bucket, thread)`.
+        integer(int64), allocatable :: tmp(:)   !! `move_alloc` intermediary for the buffer swap.
         integer(int64) :: b
         integer :: p, ios
-        logical :: src_is_a !! .true. while `ka`/`ra` hold the current state.
         !
+        ! **Ping-pongs with `move_alloc`, exactly as the serial loop does**, which is why the buffers
+        ! are ALLOCATABLE dummies here and plain arrays in Design B. It costs O(1) per pass, it keeps
+        ! `ka`/`ra` holding the current state at every point so there is no parity to track, and --
+        ! the reason it matters beyond tidiness -- it lets this procedure finish with the answer left
+        ! in `ka`/`ra` rather than written to `perm`. That is precisely what a string key needs.
+        ! Design B cannot do this: its buckets are sorted concurrently out of shared buffers, so
+        ! exchanging them is not available.
         done = .false.
-        if (last_p < 0) return
         allocate(cnt(0:255, 0:nt - 1), stat=ios)
         if (ios /= 0) return
-        src_is_a = .true.
         do p = 0, 7
-            ! The constant-digit skip, and `hist` is still the right thing to ask even though rows
-            ! have moved: a permutation does not change how many rows carry a given digit value.
-            if (src_is_a) then
-                b = iand(ishft(ka(1), -8 * p), 255_int64)
-            else
-                b = iand(ishft(kb(1), -8 * p), 255_int64)
-            end if
+            ! The constant-digit skip. `hist` is still the right thing to ask even though rows have
+            ! moved: a permutation cannot change how many rows carry a given digit value.
+            b = iand(ishft(ka(1), -8 * p), 255_int64)
             if (hist(b, p) == nv) cycle
             dbg_sort_radix_passes = dbg_sort_radix_passes + 1_int64
-            if (src_is_a) then
-                call sort_radix_count_par(ka, nv, p, cnt, nt)
-            else
-                call sort_radix_count_par(kb, nv, p, cnt, nt)
-            end if
+            ! Rebuilt every pass, never reused: a row's CHUNK changes when rows move, which is
+            ! `feature_sort_parallel.md` §6.1's silently-wrong-permutation trap.
+            call sort_radix_count_par(ka, nv, p, cnt, nt)
             call sort_radix_cursors(cnt, nt)
             if (p == last_p) then
-                if (src_is_a) then
-                    call sort_radix_emit_par(ka, ra, nv, p, cnt, nt, perm, value_base)
-                else
-                    call sort_radix_emit_par(kb, rb, nv, p, cnt, nt, perm, value_base)
-                end if
+                ! The last reordering pass writes rows straight into `perm` and drops the images.
+                ! Unreachable when `last_p` is -1, which is how the string path keeps `ra` live.
+                call sort_radix_emit_par(ka, ra, nv, p, cnt, nt, perm, value_base)
                 deallocate(cnt)
                 dbg_sort_design = 1_int64
                 done = .true.
                 return
             end if
-            if (src_is_a) then
-                call sort_radix_scatter_par(ka, ra, kb, rb, nv, p, cnt, nt)
-            else
-                call sort_radix_scatter_par(kb, rb, ka, ra, nv, p, cnt, nt)
-            end if
-            src_is_a = .not. src_is_a
+            call sort_radix_scatter_par(ka, ra, kb, rb, nv, p, cnt, nt)
+            call move_alloc(ka, tmp)
+            call move_alloc(kb, ka)
+            call move_alloc(tmp, kb)
+            call move_alloc(ra, tmp)
+            call move_alloc(rb, ra)
+            call move_alloc(tmp, rb)
         end do
         deallocate(cnt)
+        dbg_sort_design = 1_int64
+        done = .true.
     end subroutine sort_radix_design_a
 
     !> Design B — one synchronised MSD split, then every bucket sorted alone by one thread.
@@ -1397,7 +1399,7 @@ contains
         integer :: tt  !! walk index over threads when the per-thread histograms are reduced.
         integer(int64) :: c_lo, c_hi !! one thread's chunk of the image array, inclusive.
         logical :: hist_done !! .true. once the histogram is built, by whichever of the two paths.
-        logical :: did_b     !! .true. once Design B has ordered every bucket and written `perm`.
+        logical :: did_par   !! .true. once Design A or B has ordered the value tier.
         integer(int64), allocatable :: ra(:), rb(:) !! the row indices travelling with them.
         integer(int64), allocatable :: tmp(:)       !! `move_alloc` intermediary for the swap.
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
@@ -1600,10 +1602,18 @@ contains
             ! leave stale. `feature_sort_parallel.md` §11 step 5 is where strings get this properly,
             ! and its argument -- rows in different buckets differ in the split byte, so no
             ! shared-prefix run can straddle a boundary -- is why that is a real step and not a wish.
-            did_b = .false.
+            did_par = .false.
 #ifdef _OPENMP
+            ! **A string key is kept out of Design B THREE times over, and all three are deliberate.**
+            ! `.not. is_str` here; `last_p >= 1` here, which a string can never satisfy because
+            ! `last_p` is forced to -1 for one above; and `dsplit < 1` inside Design B itself. Removing
+            ! the first alone is a semantic NO-OP — confirmed by mutation, and by the string arm of
+            ! `test_fortran_engine_threading`, whose `split_buckets == 0` assertion still held with it
+            ! gone. Keep all three: the redundancy is what stops a future change to the `last_p`
+            ! computation from quietly routing strings into a design that abandons the images their
+            ! refine has to read.
             if (nt > 1 .and. .not. is_str .and. last_p >= 1) then
-                call sort_radix_design_b(ka, ra, kb, rb, nv, last_p, hist, nt, perm, value_base, did_b)
+                call sort_radix_design_b(ka, ra, kb, rb, nv, last_p, hist, nt, perm, value_base, did_par)
             end if
             ! **Design A is the fallback, and it is reached exactly when B declined.** That is what
             ! machine B's report makes required rather than optional: on a key whose top varying digit
@@ -1613,8 +1623,13 @@ contains
             !
             ! `last_p >= 0` rather than `>= 1`: A needs no digit below the split because it has no
             ! split, so a single-pass column is still worth threading.
-            if (.not. did_b .and. nt > 1 .and. .not. is_str .and. last_p >= 0) then
-                call sort_radix_design_a(ka, ra, kb, rb, nv, last_p, hist, nt, perm, value_base, did_b)
+            ! **Strings reach Design A and only Design A**, which is where machine B's report puts
+            ! them: a string column with a common stem is the low-cardinality-split shape, and there
+            ! A gets 2.70-4.74x at 64 threads where B gets 1.39-1.85x. It needs no `last_p` guard --
+            ! -1 is a valid argument meaning "leave the answer in `ka`/`ra`" -- and no `is_str` guard,
+            ! because Design A never touches the images the refine goes on to read.
+            if (.not. did_par .and. nt > 1) then
+                call sort_radix_design_a(ka, ra, kb, rb, nv, last_p, hist, nt, perm, value_base, did_par)
             end if
 #endif
             do p = 0, 7
@@ -1624,7 +1639,7 @@ contains
                 ! would leave every NaN and every null row unwritten -- with `ok = .true.` claiming
                 ! otherwise. `last_p >= 1` is a preconditon of Design B running, so the `last_p < 0`
                 ! copy below is already skipped, and `is_str` excludes the string refine.
-                if (did_b) exit
+                if (did_par) exit
                 ! A byte position every row agrees on cannot reorder anything. This is what makes a
                 ! key narrower than 64 bits cost proportionately less -- an int32 or a float32 key
                 ! leaves its top bytes constant and skips those passes outright, and the narrow-range

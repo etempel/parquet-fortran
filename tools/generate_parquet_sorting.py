@@ -1143,10 +1143,11 @@ module parquet_sorting
     w("            integer(int32), allocatable, intent(out) :: dst(:) !! the narrowed copy.")
     w("        end subroutine narrow_i64_array")
     w("        !> Narrows a 1-based int64 permutation to int32, aborting rather than truncating.")
-    w("        module subroutine narrow_perm(perm64, proc, perm32)")
+    w("        module subroutine narrow_perm(perm64, proc, perm32, threads)")
     w("            integer(int64), intent(in) :: perm64(:)                !! the permutation.")
     w("            character(len=*), intent(in) :: proc                   !! calling procedure, for messages.")
     w("            integer(int32), allocatable, intent(out) :: perm32(:)  !! the narrowed copy.")
+    w("            integer, intent(in), optional :: threads               !! caller's team request.")
     w("        end subroutine narrow_perm")
     w("        !> Narrows a group-offsets array to int32, aborting rather than truncating.")
     w("        !!")
@@ -2927,8 +2928,9 @@ contains
     end procedure fill_identity
     !
     module procedure narrow_perm
-        integer(int64) :: n
+        integer(int64) :: n, nthreads, k
         character(len=32) :: n_str
+        integer :: team
         !
         n = size(perm64, kind=int64)
         if (n > int(huge(1_int32), int64)) then
@@ -2941,6 +2943,18 @@ contains
             ! GCOVR_EXCL_STOP
         end if
         allocate(perm32(n))
+        ! Threaded for the same reason `fill_identity` is: at 64 threads this whole-column copy was
+        ! ~13% of an end-to-end argsort while every other phase had been parallelised around it.
+        call resolve_thread_count(threads, n, nthreads)
+        team = tail_team(nthreads, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                perm32(k) = int(perm64(k), int32)
+            end do
+            !$omp end parallel do
+            return
+        end if
         perm32 = int(perm64, int32)
     end procedure narrow_perm
     !
@@ -3329,7 +3343,7 @@ contains
                 w("        else")
                 w(f"            call drive_engine_grouped(buf, {rows_expr(t)}, \"pf_argsort\", perm64, threads=threads)")
                 w("        end if")
-                w("        call narrow_perm(perm64, \"pf_argsort\", perm)")
+                w("        call narrow_perm(perm64, \"pf_argsort\", perm, threads=threads)")
             else:
                 # An absent optional dummy passed on as an optional actual stays absent
                 # (F2018 15.5.2.13), so the i64 form needs no branch at all.
@@ -3358,7 +3372,7 @@ contains
             w("            call drive_engine_grouped(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", &")
             w("                perm64, threads=threads)")
             w("        end if")
-            w("        call narrow_perm(perm64, \"pf_argsort\", perm)")
+            w("        call narrow_perm(perm64, \"pf_argsort\", perm, threads=threads)")
         else:
             w("        call drive_engine_grouped(keys%keys(1:keys%nkeys), keys%nrows, \"pf_argsort\", perm, &")
             w("            threads=threads, group_offsets=group_offsets, group_ekeys=gek)")

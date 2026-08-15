@@ -38,7 +38,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_i32_i32
     !
     module procedure argsort_i32_i64
@@ -71,7 +71,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_i64_i32
     !
     module procedure argsort_i64_i64
@@ -104,7 +104,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_f32_i32
     !
     module procedure argsort_f32_i64
@@ -137,7 +137,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_f64_i32
     !
     module procedure argsort_f64_i64
@@ -170,7 +170,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_bool_i32
     !
     module procedure argsort_bool_i64
@@ -203,7 +203,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_chr_i32
     !
     module procedure argsort_chr_i64
@@ -236,7 +236,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_date_i32
     !
     module procedure argsort_date_i64
@@ -269,7 +269,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_time_i32
     !
     module procedure argsort_time_i64
@@ -302,7 +302,7 @@ contains
         else
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_ts_i32
     !
     module procedure argsort_ts_i64
@@ -335,7 +335,7 @@ contains
         else
             call drive_engine_grouped(buf, values%size(), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_strcol_i32
     !
     module procedure argsort_strcol_i64
@@ -368,7 +368,7 @@ contains
         else
             call drive_engine_grouped(buf, values%length(), "pf_argsort", perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_col_i32
     !
     module procedure argsort_col_i64
@@ -401,7 +401,7 @@ contains
             call drive_engine_grouped(keys%keys(1:keys%nkeys), keys%nrows, "pf_argsort", &
                 perm64, threads=threads)
         end if
-        call narrow_perm(perm64, "pf_argsort", perm)
+        call narrow_perm(perm64, "pf_argsort", perm, threads=threads)
     end procedure argsort_keys_i32
     !
     module procedure argsort_keys_i64

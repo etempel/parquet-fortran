@@ -1335,10 +1335,11 @@ module parquet_sorting
             integer(int32), allocatable, intent(out) :: dst(:) !! the narrowed copy.
         end subroutine narrow_i64_array
         !> Narrows a 1-based int64 permutation to int32, aborting rather than truncating.
-        module subroutine narrow_perm(perm64, proc, perm32)
+        module subroutine narrow_perm(perm64, proc, perm32, threads)
             integer(int64), intent(in) :: perm64(:)                !! the permutation.
             character(len=*), intent(in) :: proc                   !! calling procedure, for messages.
             integer(int32), allocatable, intent(out) :: perm32(:)  !! the narrowed copy.
+            integer, intent(in), optional :: threads               !! caller's team request.
         end subroutine narrow_perm
         !> Narrows a group-offsets array to int32, aborting rather than truncating.
         !!

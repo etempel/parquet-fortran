@@ -1239,8 +1239,9 @@ contains
     end procedure fill_identity
     !
     module procedure narrow_perm
-        integer(int64) :: n
+        integer(int64) :: n, nthreads, k
         character(len=32) :: n_str
+        integer :: team
         !
         n = size(perm64, kind=int64)
         if (n > int(huge(1_int32), int64)) then
@@ -1253,6 +1254,18 @@ contains
             ! GCOVR_EXCL_STOP
         end if
         allocate(perm32(n))
+        ! Threaded for the same reason `fill_identity` is: at 64 threads this whole-column copy was
+        ! ~13% of an end-to-end argsort while every other phase had been parallelised around it.
+        call resolve_thread_count(threads, n, nthreads)
+        team = tail_team(nthreads, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                perm32(k) = int(perm64(k), int32)
+            end do
+            !$omp end parallel do
+            return
+        end if
         perm32 = int(perm64, int32)
     end procedure narrow_perm
     !

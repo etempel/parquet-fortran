@@ -5949,6 +5949,8 @@ contains
         logical :: nmask(4000)                        !! a validity mask, so the null tier is exercised.
         integer(int64) :: narrowv(4000)               !! a NARROW-range integer key, for the pass count.
         integer(int64) :: npass_ser, npass_par        !! radix passes, serial and threaded.
+        integer(int64) :: mk1(4000), mk2(4000)        !! a two-key chain; the first repeats heavily.
+        type(pf_sort_keys) :: mkeys                   !! the multi-key set.
         integer(int64), allocatable :: sref(:), sgot(:) !! the string key's serial and threaded answers.
         integer(int64) :: xs                          !! xorshift state, so the spread is reproducible.
         integer(int64), allocatable :: wref(:)        !! the wide key's serial answer.
@@ -6150,6 +6152,29 @@ contains
         if (allocated(error)) return
         call check(error, npass_ser > 0_int64 .and. npass_par > 0_int64, &
             "the narrow-range fixture must actually reach the radix on both arms")
+        if (allocated(error)) return
+        !
+        ! **A MULTI-KEY chain, which runs a different routine entirely.** Single-key work goes through
+        ! `sort_radix_permutation` and Designs A/B; two or more keys go through
+        ! `sort_radix_multi_permutation`, one stable pass per key from the last key to the first. Its
+        ! scatter is threaded with the same count-prefix-scatter helpers, and nothing above touches it
+        ! — every assertion so far would hold with the multi-key path still fully serial.
+        !
+        ! The first key repeats heavily so the second one actually decides order for most rows: with
+        ! a near-unique first key the later passes are no-ops and a broken chain still looks right.
+        do k = 1, size(v)
+            mk1(k) = int(mod(k, 40), int64)
+            mk2(k) = int(mod(k * 37, 977), int64)
+        end do
+        call mkeys%add(mk1)
+        call mkeys%add(mk2)
+        call pf_argsort(mkeys, ref, threads=1)
+        call pf_argsort(mkeys, got, threads=4)
+        call check(error, size(got) == size(ref) .and. all(got == ref), &
+            "a threaded multi-key sort must give the serial permutation exactly")
+        if (allocated(error)) return
+        call check(error, parquet_debug_sort_design() == 1_int64, &
+            "the multi-key chain must actually thread its scatter, not fall back to the serial arms")
         if (allocated(error)) return
         !
         call force_parallel_threshold(0_int64)

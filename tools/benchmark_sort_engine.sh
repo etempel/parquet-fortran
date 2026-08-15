@@ -87,6 +87,7 @@ SIZES="${SIZES:-1000,10000,100000,1000000,5000000}"
 FAMILIES="${FAMILIES:-i32,i64,i64lo,f32,f64,str,multi2,multi3}"
 DIST_FAMILIES="${DIST_FAMILIES:-f64,i64lo,str}"
 THREAD_FAMILIES="${THREAD_FAMILIES:-f64,i64lo,str}"
+THREAD_DIST="${THREAD_DIST:-rand}"
 DISTS="${DISTS:-rand,sorted,reverse,organ,equal,null001,null10,nan}"
 ROUNDS="${ROUNDS:-3}"
 PERM="${PERM:-32}"
@@ -107,6 +108,7 @@ for arg in "$@"; do
         --families=*)        FAMILIES="${arg#*=}" ;;
         --dist-families=*)   DIST_FAMILIES="${arg#*=}" ;;
         --thread-families=*) THREAD_FAMILIES="${arg#*=}" ;;
+        --thread-dist=*)     THREAD_DIST="${arg#*=}" ;;
         --dists=*)           DISTS="${arg#*=}" ;;
         --rounds=*)          ROUNDS="${arg#*=}" ;;
         --perm=*)            PERM="${arg#*=}" ;;
@@ -271,6 +273,7 @@ THREADS_ARG=()
 for m in "${MODES[@]}"; do
     fpm run benchmark_sort_engine --profile release -- \
         --mode="$m" --sizes="$SIZES" --families="$(families_for "$m")" --dists="$DISTS" \
+        --thread-dist="$THREAD_DIST" \
         --rounds="$ROUNDS" --perm="$PERM" --strwidth="$STRWIDTH" --seed="$SEED" \
         --engine="$ENGINE" \
         --radix-min-rows="$RADIX_MIN_ROWS" \

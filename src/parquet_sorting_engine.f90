@@ -487,7 +487,7 @@ contains
             if (size(keys) == 1) then
                 call sort_radix_permutation(keys, n, perm, did_radix, nt)
             else
-                call sort_radix_multi_permutation(keys, n, perm, did_radix)
+                call sort_radix_multi_permutation(keys, n, perm, did_radix, nt)
             end if
             if (did_radix) return
         end if
@@ -1855,14 +1855,17 @@ contains
     !! once for all keys; each pass asks its own key afresh.
     !!
     !! String keys are excluded by `sort_radix_candidate` — see the note there.
-    subroutine sort_radix_multi_permutation(keys, n, perm, ok)
+    subroutine sort_radix_multi_permutation(keys, n, perm, ok, nt)
         type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order; at least two.
         integer(int64), intent(in) :: n           !! rows to order.
         integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
         logical, intent(out) :: ok                !! .false. when the scratch could not be allocated.
+        integer, intent(in) :: nt                 !! team size; 1 runs every pass serially.
         !
         integer(int64), allocatable :: code(:), pb(:), cb(:) !! key images, and the ping-pong buffers.
         integer(int64), allocatable :: tmp(:)                !! `move_alloc` intermediary.
+        integer(int64), allocatable :: cnt(:,:) !! per-thread scatter cursors; unallocated = serial.
+        logical :: threaded_pass !! .true. when this pass's scatter was done by the team.
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
         integer(int64) :: off(0:255)       !! running output cursor per bucket.
         integer(int64) :: tier(0:2)        !! rows per tier, then the tier pass's output cursor.
@@ -1876,6 +1879,16 @@ contains
         ok = .false.
         allocate(code(n), pb(n), cb(n), stat=ios)
         if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 1) return
+#ifdef _OPENMP
+        ! Allocated ONCE for the whole chain rather than per key or per pass: it is 2 KB per thread
+        ! and its contents are rewritten by every count. A failure leaves it unallocated, which is
+        ! the signal each pass tests to fall back to its serial arms -- so running out of memory here
+        ! costs speed and never an answer.
+        if (nt > 1) then
+            allocate(cnt(0:255, 0:nt - 1), stat=ios)
+            if (ios /= 0 .and. allocated(cnt)) deallocate(cnt)
+        end if
+#endif
         do i = 1_int64, n
             perm(i) = i
         end do
@@ -1937,10 +1950,40 @@ contains
                     off(b) = i
                     i = i + hist(b, p)
                 end do
+                ! **Threaded with the same count-prefix-scatter the two single-key designs share.**
+                ! The mapping is exact: `code` is the image array and the rows travelling with it are
+                ! `pb` or `perm` by parity, which is precisely `sort_radix_scatter_par`'s (source
+                ! images, source rows, destination images, destination rows). The multi-key chain
+                ! needed no new mechanism at all.
+                !
+                ! The serial 256-entry prefix above runs either way: it costs nothing beside a pass
+                ! over `n`, and computing it unconditionally leaves the serial arms below exactly as
+                ! they were instead of re-indenting them under another guard.
+                threaded_pass = .false.
+#ifdef _OPENMP
+                if (nt > 1 .and. allocated(cnt)) then
+                    call sort_radix_count_par(code, n, p, cnt, nt)
+                    call sort_radix_cursors(cnt, nt)
+                    if (in_pb) then
+                        call sort_radix_scatter_par(code, pb, cb, perm, n, p, cnt, nt)
+                    else
+                        call sort_radix_scatter_par(code, perm, cb, pb, n, p, cnt, nt)
+                    end if
+                    threaded_pass = .true.
+                    ! Reported as Design A because that is structurally what this is: one
+                    ! synchronised count-prefix-scatter per digit, no bucket decomposition. Without
+                    ! it nothing can observe that the multi-key chain threaded at all -- the serial
+                    ! arms produce the same permutation, so a fallback that always fired would pass
+                    ! every test.
+                    dbg_sort_design = 1_int64
+                end if
+#endif
                 ! Two arms rather than one loop over a pair of pointers: `perm` is a plain dummy
                 ! array, not an allocatable, so it cannot join the `move_alloc` swap that carries the
                 ! images. Duplicating eight lines is what lets it alternate anyway.
-                if (in_pb) then
+                if (threaded_pass) then
+                    continue
+                else if (in_pb) then
                     do j = 1_int64, n
                         b = iand(ishft(code(j), -8 * p), 255_int64)
                         cb(off(b)) = code(j)

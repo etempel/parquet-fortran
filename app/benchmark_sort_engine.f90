@@ -68,6 +68,11 @@ program benchmark_sort_engine
     character(len=:), allocatable :: mode      !! which group of arms to run.
     character(len=:), allocatable :: families  !! comma-separated family list, or "all".
     character(len=:), allocatable :: dists     !! comma-separated distribution list, or "all".
+    character(len=:), allocatable :: thread_dist
+    !! the ONE distribution `--mode=threads` sweeps. Defaults to "rand", which is what every earlier
+    !! report was taken with, so the default output is unchanged. It exists because the thread ladder
+    !! is the only mode that can answer "does this phase parallelise", and phases that only run for a
+    !! column WITH nulls or NaNs (the non-value-tier tail) are invisible under "rand".
     character(len=:), allocatable :: sizes_arg !! comma-separated row counts.
     integer :: rounds = 5                      !! rounds per figure; the best is kept.
     integer :: permkind = 32                   !! 32 or 64: which permutation kind to ask for.
@@ -196,12 +201,12 @@ contains
         !
         n = sizes(size(sizes))
         tl = thread_ladder()
-        call section("threads -- scaling at n = " // i2s(n) // " (dist=rand)")
+        call section("threads -- scaling at n = " // i2s(n) // " (dist=" // thread_dist // ")")
         call table_head()
         do fi = 1, list_len(families)
             fam = list_item(families, fi)
             do ti = 1, size(tl)
-                call one_argsort(fam, "rand", n, tl(ti))
+                call one_argsort(fam, thread_dist, n, tl(ti))
             end do
         end do
     end subroutine run_threads
@@ -1044,6 +1049,7 @@ contains
         mode = "all"
         families = "i32,i64,i64lo,f32,f64,str,multi2,multi3"
         dists = "rand,sorted,reverse,organ,equal,null001,null10,nan"
+        thread_dist = "rand"
         sizes_arg = "1000,10000,100000,1000000,5000000,20000000"
         engine = "cpp"
         radix_min = -1_int64
@@ -1063,6 +1069,7 @@ contains
             case ("--mode");     mode = val
             case ("--families"); families = val
             case ("--dists");    dists = val
+            case ("--thread-dist"); thread_dist = val
             case ("--sizes");    sizes_arg = val
             case ("--rounds");   read(val, *, iostat=ios) rounds
             case ("--perm");     read(val, *, iostat=ios) permkind
@@ -1122,6 +1129,7 @@ contains
         write(output_unit,'(a)') "  --mode=argsort|dist|ops|threads|all   (default all)"
         write(output_unit,'(a)') "  --families=i32,i64,i64lo,f32,f64,str,multi2,multi3"
         write(output_unit,'(a)') "  --dists=rand,sorted,reverse,organ,equal,null001,null10,nan"
+        write(output_unit,'(a)') "  --thread-dist=rand   (the one distribution --mode=threads sweeps)"
         write(output_unit,'(a)') "  --sizes=1000,10000,...                row counts to sweep"
         write(output_unit,'(a)') "  --rounds=5                            max rounds per figure"
         write(output_unit,'(a)') "  --perm=32|64                          permutation kind to ask for"

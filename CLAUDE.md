@@ -913,10 +913,12 @@ Working rules for this class of file:
   perfectly until the next regeneration silently deletes it; and the header carries a digest of the
   source input, so `--check` can say "you edited generated text" rather than "this file is stale"
   — without it both look identical and the message has to guess. See `feature_risks.md` Risk-32.
-- **A generator that is maintainer-only belongs in `tools/prep_fpm_publish.sh`'s `REMOVE_PATHS`**
-  (downstream projects consume the committed output). One that is consumer-facing — like
-  `tools/generate_parquet_maml.sh`, which downstream projects run on their own schemas — does not. See
-  "Keeping `tools/prep_fpm_publish.sh` in sync".
+- **A generator that is maintainer-only needs NO entry in `tools/prep_fpm_publish.sh`** (downstream
+  projects consume the committed output, and `tools/` is an allow-list, so anything not named in
+  `TOOLS_KEEP` is stripped automatically). One that is consumer-facing — like
+  `tools/generate_parquet_maml.sh`, which downstream projects run on their own schemas — **must be
+  added to `TOOLS_KEEP`**, or the published tarball will not contain it. See "Keeping
+  `tools/prep_fpm_publish.sh` in sync".
 
 ### Nested submodule tree
 
@@ -3051,15 +3053,26 @@ broken implementation.
 
 `tools/prep_fpm_publish.sh` builds the tarball content for `fpm publish` (see CONTRIBUTING.md's
 "Publishing to the fpm registry") by committing a disposable local branch that strips
-maintainer/CI-only files (`REMOVE_PATHS`) and edits `fpm.toml` (comments out `test-drive`, flips
-`module-naming` to `"parquet"`). This list/logic silently goes stale unless updated alongside the
-change that invalidates it — watch for these triggers:
+maintainer/CI-only files and edits `fpm.toml` (comments out `test-drive`, flips
+`module-naming` to `"parquet"`). **`app/` and `tools/` are ALLOW-lists (`APP_KEEP`, `TOOLS_KEEP`);
+only the repository root is a strip-list (`REMOVE_PATHS`).** That asymmetry is the whole design: in
+the two directories where files are added often, a new file is excluded by default, so forgetting
+costs nothing. This list/logic silently goes stale unless updated alongside the change that
+invalidates it — watch for these triggers:
 
-- **A new file lands under `tools/`.** Decide whether it's consumer-facing (like
-  `tools/generate_parquet_maml.sh`, documented in `doc/pages/utilities/embedding-maml-schemas.md`) or
-  maintainer/CI-only. If the latter, add it to `REMOVE_PATHS`. (A missing/renamed entry fails
-  loudly — the script pre-validates every path exists — so this is at least self-enforcing for
-  *existing* entries; it won't catch a *new* file that should have been added but wasn't.)
+- **A new file lands under `tools/` or `app/`.** If it is maintainer/CI-only — which nearly all of
+  them are — **do nothing**: the allow-lists sweep it into `REMOVE_PATHS` automatically, `tools/` from
+  `git ls-files` and `app/` from a disk glob. Only a **consumer-facing** addition needs an edit, and
+  it must be added to `TOOLS_KEEP`/`APP_KEEP` or it will be stripped from the published tarball. The
+  four consumer-facing tools today are `generate_parquet_maml.sh` (see
+  `doc/pages/utilities/embedding-maml-schemas.md`), `generate_user_table_code.py`,
+  `convert_fits_to_parquet.py` and `parquet_metadata_to_md.py`; `prep_fpm_publish.sh` is in
+  `TOOLS_KEEP` too, for the mechanical reason that a running script should not delete itself.
+- **An allow-list entry is renamed or moved.** This is the one failure mode the inversion creates,
+  and it is the dangerous direction: a stale `TOOLS_KEEP`/`APP_KEEP` entry stops matching, so a
+  *consumer-facing* file is silently stripped. The script validates both lists exist before it
+  creates the disposable branch, so it fails immediately with zero side effects — but, as with
+  `REMOVE_PATHS`, only once someone actually runs it.
 - **A new maintainer/CI-only file lands at the repo root** (another CI config, another
   AI-instructions-style file, etc.) — same call: add to `REMOVE_PATHS` if it's not
   consumer-relevant.
@@ -3076,10 +3089,11 @@ change that invalidates it — watch for these triggers:
   data rather than from a person: `tools/generate_user_table_code.py` takes it from its MAML's
   `dataset:` key, so a schema naming a module `example` produces a package that cannot be
   published.
-- **Any `REMOVE_PATHS` entry is renamed or moved.** Update the path string. The script's
+- **A root `REMOVE_PATHS` entry is renamed or moved.** Update the path string. The script's
   pre-flight existence check turns a stale entry into an immediate, zero-side-effect failure
   rather than a silently-wrong tarball — but only once you actually run it; nothing catches this
-  at edit time.
+  at edit time. (Only the root entries are hand-written now; the `app/`- and `tools/`-derived
+  entries cannot go stale, since they are enumerated from what is actually there.)
 - **A new dev-dependency is added to `fpm.toml`** — check whether its own modules comply with fpm's
   [module-naming rules](https://fpm.fortran-lang.org/registry/naming.html) before adding it. If
   not, it needs the same "comment out in the disposable branch" treatment as `test-drive`, or it

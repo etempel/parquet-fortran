@@ -18,19 +18,16 @@
 #      by testing) and switches `module-naming` from `false` to this project's
 #      registry-registered custom prefix, `"parquet"`.
 #   3. Removing maintainer/CI-only files that a downstream library consumer has no use for --
-#      see REMOVE_PATHS below. `tools/generate_parquet_maml.sh`, `tools/generate_user_table_code.py`,
-#      `tools/convert_fits_to_parquet.py`,
-#      and `tools/parquet_metadata_to_md.py` are deliberately kept: they're consumer-facing (see
-#      doc/pages/utilities/embedding-maml-schemas.md and each script's own docstring, respectively). This
-#      list must stay in sync by hand -- see CLAUDE.md's "Keeping tools/prep_fpm_publish.sh in
-#      sync" for the rule.
-#   4. `app/` is an *allow-list*, not a strip-list: only `app/program.f90` (the `run_parquet_fortran`
-#      executable) ships in the published tarball. Every other `app/*.f90` file is a maintainer-only
-#      dev/benchmark/scratch tool (see CONTRIBUTING.md's "Other tools/ helpers"), and a *new* file
-#      dropped into `app/` is excluded by default without needing a REMOVE_PATHS edit -- unlike the
-#      strip-list model this replaced, where a forgotten entry silently shipped in the tarball
-#      (this is exactly what happened to app/playground.f90 and app/demo_print_schema_info.f90
-#      before this script tracked them).
+#      see REMOVE_PATHS below for the repository-root ones, which remain a hand-maintained
+#      strip-list.
+#   4. `app/` and `tools/` are *allow-lists*, not strip-lists: only APP_KEEP and TOOLS_KEEP survive,
+#      and every other file found in those directories is appended to REMOVE_PATHS. So a *new* file
+#      dropped into either one is excluded by default, without needing a REMOVE_PATHS edit. Both
+#      replaced strip-lists, where a forgotten entry silently shipped in the tarball -- exactly what
+#      happened to app/playground.f90 and app/demo_print_schema_info.f90 before this script tracked
+#      them, and the same hazard tools/ carried for its 36 maintainer-only scripts until the
+#      inversion. The residual risk moves to the allow-lists themselves, where a *renamed* entry
+#      would silently stop matching and be stripped, so both are validated to exist up front.
 #   5. `test/fixtures/` is removed entirely -- a downstream consumer of the library has no use for
 #      this project's own test fixtures, and it sidesteps a Git-LFS pointer-file hazard: if the
 #      fixtures were ever pulled as ~128-byte LFS pointer files instead of the real binary content
@@ -77,10 +74,9 @@ if [ -n "$(git status --porcelain)" ]; then
     exit 1
 fi
 
-# Maintainer/CI-only paths, not relevant to a downstream consumer of the published library.
-# tools/prep_fpm_publish.sh (this file) is deliberately NOT in this list: deleting a running
-# shell script out from under its own interpreter is a fragile pattern, so it's left in place --
-# one small maintainer-only script left in the tarball is an accepted trade-off.
+# Maintainer/CI-only paths at the repository root, not relevant to a downstream consumer of the
+# published library. Everything under app/ and tools/ is handled by the two allow-lists below
+# instead, so nothing from either directory belongs in this list.
 REMOVE_PATHS=(
     CLAUDE.md
     CONTRIBUTING.md
@@ -89,42 +85,6 @@ REMOVE_PATHS=(
     .github
     docs.md
     test/fixtures
-    tools/benchmark_colindex.sh
-    tools/bench_resolve_ladder.py
-    tools/benchmark_stage7.sh
-    tools/benchmark_template.md
-    tools/benchmark_sort_comparator.sh
-    tools/benchmark_sort_ab.sh
-    tools/probe_isnan.sh
-    tools/benchmark_sort_engine.sh
-    tools/benchmark_strings.sh
-    tools/benchmark_table.sh
-    tools/benchmark_threads.sh
-    tools/build_ci_test_image.sh
-    tools/check_arrow_release.sh
-    tools/machine_report.sh
-    tools/check_s7_9.sh
-    tools/check_bindc_boundary.py
-    tools/check_doc_anchors.py
-    tools/check_source_conventions.py
-    tools/count_lines.py
-    tools/count_tests.sh
-    tools/coverage.sh
-    tools/coverage_cpp.sh
-    tools/fix_ford_page_links.sh
-    tools/fpm_lto.sh
-    tools/generate_fixtures.cpp
-    tools/generate_parquet_columns.py
-    tools/generate_parquet_tables.py
-    tools/generate_parquet_sorting.py
-    tools/generate_logo_svg.py
-    tools/mirror_to_github.sh
-    tools/prep_github_mirroring.sh
-    tools/run_ci_test_image.sh
-    tools/run_error_scenarios.sh
-    tools/run_generate_fixtures.sh
-    tools/run_lint_check.sh
-    tools/test_large_scale.sh
 )
 
 # app/ is an allow-list: only APP_KEEP survives; every other app/*.f90 file found on disk is
@@ -144,8 +104,48 @@ for app_file in app/*.f90; do
     fi
 done
 
+# tools/ is an allow-list on the same model: only TOOLS_KEEP survives, and every other tracked file
+# under tools/ is appended to REMOVE_PATHS. This replaced a 36-entry strip-list whose failure mode
+# was silent -- a new maintainer-only script shipped in the tarball until someone remembered to add
+# it, and the tarball self-check could not notice, because it only ever asserted that listed paths
+# were absent.
+#
+# Enumerated from `git ls-files` rather than a disk glob, unlike app/ above, because `fpm publish`
+# packages from git HEAD: an untracked or ignored path (tools/__pycache__/, a scratch script) can
+# never reach the tarball, so sweeping it in would only add noise to REMOVE_PATHS and to the
+# self-check. It is also recursive, so a future tools/<subdir>/ is covered without further work.
+#
+# tools/prep_fpm_publish.sh (this file) is kept for a mechanical reason rather than a consumer-facing
+# one: deleting a running shell script out from under its own interpreter is a fragile pattern, so it
+# is left in place -- one small maintainer-only script in the tarball is an accepted trade-off. The
+# other four are genuinely consumer-facing; see doc/pages/utilities/embedding-maml-schemas.md and
+# each script's own docstring.
+TOOLS_KEEP=(
+    tools/prep_fpm_publish.sh
+    tools/generate_parquet_maml.sh
+    tools/generate_user_table_code.py
+    tools/convert_fits_to_parquet.py
+    tools/parquet_metadata_to_md.py
+)
+while IFS= read -r tools_file; do
+    keep=0
+    for allowed in "${TOOLS_KEEP[@]}"; do
+        if [ "$tools_file" = "$allowed" ]; then
+            keep=1
+            break
+        fi
+    done
+    if [ "$keep" -eq 0 ]; then
+        REMOVE_PATHS+=("$tools_file")
+    fi
+done < <(git ls-files tools/)
+
 # Files that must survive into the tarball -- a sanity check in the opposite direction from
-# REMOVE_PATHS, catching an over-broad future edit that strips something it shouldn't.
+# REMOVE_PATHS, catching an over-broad future edit that strips something it shouldn't. The app/ and
+# tools/ entries are spliced in from the allow-lists themselves rather than written out again: two
+# hand-maintained copies of one list drift, and the direction they drift in here is silent (a tool
+# dropped from TOOLS_KEEP but still named in a duplicated KEEP_PATHS would fail the self-check with
+# a confusing message, while the reverse would strip a consumer-facing script and assert nothing).
 KEEP_PATHS=(
     fpm.toml
     LICENSE
@@ -153,17 +153,27 @@ KEEP_PATHS=(
     VERSION.txt
     src/parquet.f90
     src/parquet_core.f90
-    app/program.f90
-    tools/generate_parquet_maml.sh
-    tools/generate_user_table_code.py
-    tools/convert_fits_to_parquet.py
-    tools/parquet_metadata_to_md.py
+    "${APP_KEEP[@]}"
+    "${TOOLS_KEEP[@]}"
 )
 
 for path in "${REMOVE_PATHS[@]}"; do
     if [ ! -e "$path" ]; then
         echo "tools/prep_fpm_publish.sh: expected path '$path' does not exist -- REMOVE_PATHS is" >&2
         echo "out of sync with the repository (renamed/moved file?); fix the list before continuing." >&2
+        exit 1
+    fi
+done
+
+# An allow-list fails in the opposite, and more dangerous, direction from a strip-list: a renamed or
+# moved entry simply stops matching, so the file it names is swept into REMOVE_PATHS and stripped
+# from the published tarball with nothing to report it. Validating both lists up front is what keeps
+# the inversion from trading a known failure mode for a quieter one.
+for path in "${APP_KEEP[@]}" "${TOOLS_KEEP[@]}"; do
+    if [ ! -e "$path" ]; then
+        echo "tools/prep_fpm_publish.sh: allow-list entry '$path' does not exist -- APP_KEEP or" >&2
+        echo "TOOLS_KEEP is out of sync with the repository (renamed/moved file?). Left unfixed, that" >&2
+        echo "file would be STRIPPED from the tarball; fix the list before continuing." >&2
         exit 1
     fi
 done

@@ -33,7 +33,7 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-83` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-93` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 

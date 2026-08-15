@@ -157,15 +157,70 @@ something a reader is expected to have.
 | [Risk-90](#risk-90--the-narrow-integer-bias-is-safe-in-exactly-one-direction-and-its-guard-cannot-be-tested) | The narrow-integer bias is safe in exactly ONE direction, and its guard cannot be tested | 3 — not testable |
 | [Risk-91](#risk-91--sort_radix_refine_strings-reads-one-array-while-permuting-another-and-nothing-diagnoses-passing-the-same-one) | `sort_radix_refine_strings` reads one array while permuting another, and nothing diagnoses passing the same one | 3 — not testable |
 | [Risk-92](#risk-92--the-last-radix-pass-leaves-the-row-array-stale-and-only-the-string-exclusion-makes-that-safe) | The last radix pass leaves the row array STALE, and only the string exclusion makes that safe | 4 — covered |
+| [Risk-93](#risk-93--an-intermittent-hang-inside-the-fortran-sort-engines-threaded-histogram-mechanism-unknown) | An intermittent hang inside the Fortran sort engine's threaded histogram, mechanism UNKNOWN | 1 — new |
 
 ---
 
 ## 1. New risks
 
-*Nothing here.* A risk lands in this section when it is first identified — before anyone has
+A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-93**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-94**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
+
+### Risk-93 — An intermittent hang inside the Fortran sort engine's threaded histogram, mechanism UNKNOWN
+
+**What was actually observed, once.** During the Stage 6 engine flip's own test run on machine A, a
+sort of a 2000-element array sat for over 456 seconds. `sample` on the live process gave
+
+```
+test_merge_size_sweep -> pf_argsort -> drive_engine -> sort_build_permutation_impl
+  -> sort_radix_permutation -> sort_radix_hist_threaded -> libgomp -> _pthread_mutex_firstfit_lock_slow
+```
+
+`sort_radix_hist_threaded` (`src/parquet_sorting_engine.f90`) contains one plain
+`!$omp parallel num_threads(nt)` with no lock, no `critical` and no explicit barrier, so the stack
+points at libgomp's team management rather than at anything this library holds.
+
+**The obvious explanation is REFUTED, and it is recorded here so nobody spends the afternoon on it
+again.** The first write-up of this entry blamed nesting — an explicit `threads=` honoured inside a
+caller's parallel region, where the previous C++ engine used `std::thread` and cost nothing. Two
+independent facts kill it:
+
+- The `sorting` suite is excluded from test-drive's per-test parallelism
+  (`suite_is_safe_to_parallelize`, `test/run_tester.f90`), so test-drive's
+  `!$omp parallel do ... if (parallel_)` is **inactive** there and `omp_in_parallel()` is `.false.`
+  inside it. The hang had no enclosing active region at all.
+- Nested parallelism is off by default, so a nested region is serialized to a team of one and no
+  team is created. Measured with the probe below: the nested arm runs in **0.010 s** by default and
+  **1.13 s** under `OMP_MAX_ACTIVE_LEVELS=4`, which is what creating the teams actually costs.
+
+**It did not reproduce.** `app/probe_sort_team_churn.f90` mimics `test_merge_size_sweep` exactly —
+every size 2..400 at every thread count 2..8, the engine floor forced down so the teams really open.
+**83,790 sorts at top level with the team size cycling, and 25 further rounds with nesting forced on,
+all completed.** So this is one observation, not a reproducible defect, and the mechanism is
+**unestablished**. Candidates still open: a libgomp team-pool pathology reachable only from some
+particular process state (the full suite has run Arrow, several OpenMP suites and ~700 error-scenario
+subprocesses before reaching this point), or severe machine oversubscription at that moment.
+
+**One quantitative result worth keeping, because it is solid and useful.** Team creation costs
+**~183 us** per `!$omp parallel` on this machine — 0.512 s for 2793 sorts of at most 400 elements,
+where the sorting itself is microseconds. That independently validates section 14's engine floor of
+`max(32768, 2048*nt)`: below it a team costs far more than the sort it parallelises.
+
+**Why it stays in the register despite not reproducing.** A hang is not a wrong answer, but it fails
+the register's real test: a green run is not evidence of absence. It also presents at whichever test
+the scheduler was running rather than the one that provoked it — the log's last "Starting" line named
+a *different* test from the stack, because test-drive prints before dispatching. Anyone diagnosing
+this from the log rather than from a live stack will investigate the wrong test, which is exactly
+what happened the first time.
+
+**Test.** Not yet triaged, and it should not be given a test until the mechanism is known — a test
+for an unreproducible hang would be a test that passes for unknown reasons. Note the shape when it
+comes: a hang is not a failed assertion, so it needs a watchdog or an out-of-process scenario with a
+timeout; test-drive has none of its own. `app/probe_sort_team_churn.f90` is the starting point, and
+its negative result is part of the evidence rather than a gap in it.
+
 
 ## 2. Risks with a proposed testing scenario
 

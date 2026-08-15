@@ -2,11 +2,12 @@
 title: Sorting arrays and columns
 ---
 
-`parquet_sorting` sorts plain Fortran arrays and this library's own column types. It is the same
-C++ engine that orders a read-time `parquet_open_reader(..., sort_by=)` and a
-`parquet_table%sort_by` — sharing it is the point, because a read-time sort, a table sort and a
-raw-array sort can then never disagree about where nulls go, where NaNs go, or how ties are
-broken.
+`parquet_sorting` sorts plain Fortran arrays and this library's own column types. It orders rows
+exactly as a read-time `parquet_open_reader(..., sort_by=)` does, and `parquet_table%sort_by` goes
+through it — so a read-time sort, a table sort and a raw-array sort can never disagree about where
+nulls go, where NaNs go, or how ties are broken. That agreement is the point, and it is asserted
+directly: the three are checked against each other over the same data rather than merely intended
+to match.
 
 Everything here is reachable from `use parquet`.
 
@@ -595,28 +596,27 @@ rounds:
 
 | rows | serial | 8 threads | speedup |
 |---|---|---|---|
-| 2 000 | 0.18 ms | 0.20 ms | 0.86x — threading *loses* |
-| 32 000 | 3.7 ms | 1.6 ms | 2.3x |
-| 1 000 000 | 172 ms | 40 ms | 4.3x |
-| 20 000 000 | 5.98 s | 1.36 s | 4.4x |
+| 2 000 | 0.025 ms | 0.023 ms | threading declines — see below |
+| 32 000 | 0.40 ms | 0.40 ms | threading declines — see below |
+| 1 000 000 | 17.8 ms | 6.6 ms | 2.7x |
+| 20 000 000 | 0.42 s | 0.13 s | 3.2x |
 
-**The speedup still falls short of the thread count, but it is no longer capped by a serial pass.**
-The array is sorted in chunks and the chunks are then merged; the merge is *co-ranked*, meaning each
-round is partitioned by binary search so every thread merges its own disjoint slice of the output.
-Before that, the merge was pairwise — halving the thread count each round and ending in a
-single-threaded pass over the whole array, which cost the same 0.6 s at 2, 4 and 8 threads and held
-the whole operation to roughly 2–3x. Co-ranking makes that last round **3.5x** faster at 8 threads
-and the merge phase as a whole **2.4x** faster, which is where the table's improvement comes from.
+**The two smallest rows do not show threading losing; they show it declining.** Below the
+minimum-work threshold `threads=` is ignored, so both columns run the same serial sort and differ
+only by measurement noise. That is the threshold behaving correctly rather than a cost being paid —
+opening a team is worth roughly 180 microseconds on this machine, which is several times what
+sorting 32 000 elements costs in the first place.
 
-What remains is ordinary: the per-chunk sorts do not scale perfectly, and the merge is dominated by
-one cache miss per element — it chases a scattered key for every comparison — so it is bound by
-memory latency rather than by how many threads are available. Thread counts that are powers of two
-still merge more evenly than others.
+**The speedup falls short of the thread count, and that is expected.** A radix sort makes one pass
+over the data per byte of key, so its cost is dominated by memory traffic rather than by
+comparisons; adding threads adds bandwidth demand rather than relieving it. The gap widens with
+size for the same reason — at twenty million rows the working set no longer fits in cache, and the
+sort becomes bound by memory bandwidth rather than by how many threads are available.
 
-The 2 000-row row is why the minimum-work threshold exists: below it, `threads=` is ignored. The
-32 000-row row is close behind it for a related reason — there is also a **minimum segment size**,
-so a merge too small to be worth splitting is simply run in one piece, and at that size co-ranking
-correctly declines to do anything.
+**Threading is not the only thing that decides how long a sort takes, and often not the largest.**
+A single integer key with a small value range takes the counting path described above, which is
+O(n), serial, and faster than any threaded sort of the same data — so a key that qualifies will
+beat every row of this table regardless of `threads=`.
 
 ### Cost
 

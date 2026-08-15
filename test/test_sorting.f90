@@ -186,7 +186,7 @@ contains
             new_unittest("a threaded sort equals the serial one", test_threads_identical), &
             new_unittest("threads are really created", cpp_test_threads_really_used), &
             new_unittest("auto is serial inside a parallel region", cpp_test_threads_auto_in_parallel), &
-            new_unittest("threads=1 forces serial", test_threads_one_is_serial), &
+            new_unittest("threads=1 forces serial", cpp_test_threads_one_is_serial), &
             new_unittest("unique and rank take threads too", test_threads_on_derived), &
             new_unittest("every size from 2 to 400 threads identically", test_merge_size_sweep), &
             new_unittest("a threaded sort is still a permutation at every size", test_merge_sweep_is_permutation), &
@@ -8151,5 +8151,20 @@ contains
         call test_merge_round_threads_used(error)
         call restore_engine_default()
     end subroutine cpp_test_merge_round_threads_used
+
+    !> Pins the C++ engine for `test_threads_one_is_serial` -- see the note above.
+    !!
+    !! This one did NOT fail when the flip landed, and that is the point: `threads_used()` is a
+    !! stale C++ counter, so on the Fortran engine it kept whatever a previous test left behind,
+    !! and "threads=1 must sort serially" passed by reading a 1 nobody had written for it. Running
+    !! the suite ALONE is what exposed it. A vacuous pass is the failure mode these pins exist to
+    !! prevent, and it is strictly worse than the eleven that failed loudly.
+    subroutine cpp_test_threads_one_is_serial(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_threads_one_is_serial(error)
+        call restore_engine_default()
+    end subroutine cpp_test_threads_one_is_serial
 
 end module test_sorting

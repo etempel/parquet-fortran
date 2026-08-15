@@ -43,7 +43,7 @@ contains
             new_unittest("the '-' shorthand equals an explicit desc", test_minus_shorthand), &
             new_unittest("direction words are case-insensitive", test_direction_case_insensitive), &
             new_unittest("a second key breaks the first key's ties", test_multi_key_tiebreak), &
-            new_unittest("rows tied on every key keep file order", test_stability_full_tie), &
+            new_unittest("rows tied on every key keep file order", cpp_test_stability_full_tie), &
             new_unittest("nulls sort last by default", test_nulls_last_default), &
             new_unittest("nulls_first= puts them first instead", test_nulls_first_option), &
             new_unittest("descending does not move nulls", test_descending_keeps_nulls_last), &
@@ -53,7 +53,7 @@ contains
             new_unittest("date, time and timestamp keys", test_temporal_keys), &
             new_unittest("a struct-leaf path is a valid key", test_struct_leaf_key), &
             new_unittest("sorting by a column that is never read", test_key_column_not_read), &
-            new_unittest("the counting fast path matches the comparator", test_counting_path_matches), &
+            new_unittest("the counting fast path matches the comparator", cpp_test_counting_path_matches), &
             new_unittest("table top_n selects rather than fully sorting", cpp_test_top_n_selects), &
             new_unittest("sort composes with a filter", test_sort_with_filter), &
             new_unittest("sort composes with a sample", test_sort_with_sample), &
@@ -844,5 +844,22 @@ contains
         call test_top_n_selects(error)
         call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default; see the note above
     end subroutine cpp_test_top_n_selects
+
+    !> Pins the C++ engine for `test_stability_full_tie` -- see the note above.
+    subroutine cpp_test_stability_full_tie(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_stability_full_tie(error)
+        call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default
+    end subroutine cpp_test_stability_full_tie
+    !> Pins the C++ engine for `test_counting_path_matches` -- see the note above.
+    subroutine cpp_test_counting_path_matches(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_counting_path_matches(error)
+        call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default
+    end subroutine cpp_test_counting_path_matches
 
 end module test_sort

@@ -104,7 +104,7 @@ contains
             new_unittest("the padded string read's two phase timers record", &
                 test_string_read_phase_timers), &
             new_unittest("the threaded sort's phase timers record, and reject a bad phase", &
-                test_sort_phase_timers) &
+                cpp_test_sort_phase_timers) &
             ]
     end subroutine collect_tests_diagnostics
     !
@@ -273,4 +273,24 @@ contains
         call parquet_close_writer(w)
     end subroutine write_numeric_fixture
     !
+
+    ! ---- C++-engine pins ------------------------------------------------------------------
+    !
+    ! Each test wrapped below observes a C++-SIDE counter, which the Fortran engine (the default
+    ! since Stage 6) does not populate. Pinning keeps them testing the engine they were written
+    ! for -- one that still ships, since `parquet_open_reader(..., sort_by=)` and
+    ! `parquet_reader_set_sort` reach it directly with no selector in the path.
+    !
+    ! The wrapper shape rather than a pin inside each body is deliberate: these tests have early
+    ! `return`s, and a selector leaked on one would not fail the test that leaked it -- it would
+    ! silently change which engine a LATER test measures.
+    !> Pins the C++ engine for `test_sort_phase_timers` -- see the note above.
+    subroutine cpp_test_sort_phase_timers(error)
+        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
+        !
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call test_sort_phase_timers(error)
+        call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default
+    end subroutine cpp_test_sort_phase_timers
+
 end module test_diagnostics

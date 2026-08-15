@@ -105,6 +105,10 @@ contains
                 test_sort_radix_path_effect), &
             new_unittest("sort_counting_bucket_limit declines a key whose range exceeds it", &
                 cpp_test_sort_counting_bucket_limit_effect), &
+            new_unittest("sort_counting_path switches the FORTRAN engine's two paths", &
+                test_sort_counting_path_effect_fortran), &
+            new_unittest("sort_counting_bucket_limit declines a key on the FORTRAN engine too", &
+                test_sort_counting_bucket_limit_effect_fortran), &
             new_unittest("target_row_group_bytes sizes the row groups of a whole-table write", &
                 test_target_row_group_bytes_effect), &
             new_unittest("target_row_group_bytes also sizes the streaming path's estimate", &
@@ -1343,6 +1347,94 @@ contains
         call check(error, shift_off > 0_int64, &
             "turning sort_radix_path off must force the comparison sort (a nonzero insertion shift)")
     end subroutine test_sort_radix_path_effect
+
+    !> The FORTRAN half of `sort_counting_path`, which the C++-pinned test above cannot reach.
+    !>
+    !> Both engines read this knob, but the two observables are disjoint: the C++ engine answers
+    !> through its comparison counter, and the Fortran engine performs no comparisons on either of
+    !> its fast paths, so that counter cannot tell counting from radix. The radix PASS count can:
+    !> the counting path runs none, and above the radix row floor the declined key runs some.
+    !>
+    !> Fixture constraints, both load-bearing and neither obvious:
+    !>
+    !> * **512 rows**, because the radix path declines below its own row floor. Beneath it the
+    !>   "off" arm would take the comparison sort, which also reports zero passes, and both arms
+    !>   would agree for the wrong reason.
+    !> * **Range 63**, because the counting path is admitted only while the key's value range is
+    !>   under a fraction of the row count. A wider key is declined whichever way this knob is set,
+    !>   and switching it would then prove nothing -- the same trap `test_radix_path_narrow_integer`
+    !>   records for its own `smallband` fixture.
+    !>
+    !> `threads=1` is explicit rather than incidental: the counting path is admitted only at a
+    !> small team, so an automatic count would make the fixture depend on the machine.
+    subroutine test_sort_counting_path_effect_fortran(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64) :: v(512)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: passes_on, passes_off
+        integer :: k
+        !
+        call parquet_reset_settings()
+        do k = 1, size(v)
+            v(k) = mod(int(k, int64) * 7_int64, 64_int64)
+        end do
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(v, perm, threads=1)
+        passes_on = parquet_debug_sort_radix_passes()
+        !
+        call parquet_set_sort_counting_path(.false.)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(v, perm, threads=1)
+        passes_off = parquet_debug_sort_radix_passes()
+        call parquet_reset_settings()
+        !
+        call check(error, passes_on == 0_int64, &
+            "with sort_counting_path on, a narrow integer key must take the counting path (no radix passes)")
+        if (allocated(error)) return
+        ! The negative control. Without it the assertion above would pass against a build whose
+        ! radix path never ran at all -- which is exactly what a fixture below the row floor gives.
+        call check(error, passes_off > 0_int64, &
+            "turning sort_counting_path off must force the radix path (a nonzero pass count)")
+    end subroutine test_sort_counting_path_effect_fortran
+
+    !> The FORTRAN half of `sort_counting_bucket_limit`, observed the same way.
+    !>
+    !> The knob bounds the key's value RANGE rather than its cardinality, so both arms use the same
+    !> data and only the limit moves -- which is what shows the setting is read rather than merely
+    !> stored (feature_risks.md Risk-41). The first arm doubles as the control: at the built-in
+    !> limit this key is accepted, so a limit that declined everything could not pass both halves.
+    subroutine test_sort_counting_bucket_limit_effect_fortran(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64) :: v(512)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: passes_wide, passes_tight
+        integer :: k
+        !
+        call parquet_reset_settings()
+        do k = 1, size(v)
+            v(k) = mod(int(k, int64) * 7_int64, 64_int64)
+        end do
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(v, perm, threads=1)
+        passes_wide = parquet_debug_sort_radix_passes()
+        !
+        ! Range 63 against a limit of 8: the same key, now declined onto the radix path.
+        call parquet_set_sort_counting_bucket_limit(8_int64)
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(v, perm, threads=1)
+        passes_tight = parquet_debug_sort_radix_passes()
+        call parquet_reset_settings()
+        !
+        call check(error, passes_wide == 0_int64, &
+            "at the built-in bucket limit a range-63 key must take the counting path (no radix passes)")
+        if (allocated(error)) return
+        call check(error, passes_tight > 0_int64, &
+            "a bucket limit below the key's value range must push the Fortran engine onto the radix path")
+    end subroutine test_sort_counting_bucket_limit_effect_fortran
 
     !> The bound is on the key's value RANGE, not its cardinality (feature_risks.md Risk-39), so
     !> both halves here use the SAME 500 values and the same cardinality -- only the spread differs,

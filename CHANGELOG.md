@@ -208,9 +208,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`k%add(...)` once per key, keys of any mix of types, each with its own direction), since a
   Fortran generic cannot offer "an optional second array of any type"; the same object also works
   with `pf_is_sorted` and `pf_partial_argsort`, and `%nkeys_added()` counts the keys you added, one
-  per `%add`, whatever their types. These run on the **same C++
-  engine** as a read-time `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`, so the
-  three can never disagree about null placement, NaN placement or tie order; every sort is stable,
+  per `%add`, whatever their types. These agree **exactly** with a read-time
+  `parquet_open_reader(..., sort_by=)` and with `parquet_table%sort_by` — the three can never
+  disagree about null placement, NaN placement or tie order; every sort is stable,
   `descending=` reverses the values without moving the null/NaN tiers, and the six types with no
   null state of their own take an optional `is_valid=` mask. `pf_permute` validates that its
   permutation really is one before writing anything, since an invalid one silently duplicates some
@@ -251,12 +251,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OMP_PROC_BIND` setting combined with `OMP_PLACES=cores` otherwise disables threading silently
   (see [Performance](doc/pages/operating/performance.md#thread-placement-omp_places-and-omp_proc_bind)). The
   answer is bit-identical at every thread count, because the comparator is a total order under
-  which no two rows compare equal, so `threads=` is purely a performance control. The chunks each
-  thread sorts are combined by a **co-ranked merge** — every round is partitioned by binary search
-  so each thread merges a disjoint slice of the output, rather than merging pairwise and ending in
-  a single-threaded pass over the whole array — which is worth roughly 4.3x over serial at a
-  million rows and 4.4x at twenty million on an 8-core laptop; the remaining gap to the thread
-  count is memory latency, since every comparison chases a scattered key. Note that a threaded
+  which no two rows compare equal, so `threads=` is purely a performance control. Threading is
+  worth a substantial speedup over a serial sort, and the margin grows with the array size; the
+  remaining gap to the thread count is memory latency, since a sort chases a scattered key
+  whatever else it does. Note that a threaded
   sort's peak memory is about twice a serial one's. See
   [Sorting arrays and columns](doc/pages/utilities/sorting.md).
 - **Generated table types.** `tools/generate_user_table_code.py` turns a MAML schema into a named
@@ -380,7 +378,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   place. Changing the **row set** detaches the table from its file: the rows in memory no longer
   line up with the rows on disk, so any column not read by then can never be read, `%is_detached`
   reports it, and every later read from the file is a clear error rather than misaligned data.
-  `%sort_by` runs the same C++ sort engine as the read-time `sort_by=`, so sorting a table in
+  `%sort_by` orders rows exactly as the read-time `sort_by=` does, so sorting a table in
   memory and reading the same file sorted give the identical row order, and it reads a key column
   that has not been read yet rather than refusing. Ordering can also be asked for **without** being
   applied, which is the only way to read a table's rows in an order and keep the file behind them:

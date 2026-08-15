@@ -35,12 +35,17 @@
 # WHAT THIS RUN CAN AND CANNOT SETTLE, as of Stage 3
 # ---------------------------------------------------------------------------------------------
 #
-# The Fortran engine is SERIAL and only the full argsort is wired to it. So:
+# Only the full argsort is wired to the Fortran engine. So:
 #
-#   * its `thr` rows are the same figure twice -- it ignores `threads=` entirely (Stage 4 is what
-#     threads it), which makes those rows a free negative control: if the two differ by more than
-#     the machine's noise, the harness is measuring something other than the engine;
-#   * the C++ threaded rows are not a defeat, they are the target Stage 4 has to reach;
+#   * its `thr` rows USED to be the same figure twice, because the engine ignored `threads=`
+#     entirely, which made them a free negative control. **Stage 4 step 1 ended that** -- the engine
+#     now honours the resolved thread count and threads its histogram and image build, so those rows
+#     are expected to differ and are a measurement rather than a control. What replaced the control
+#     is `parquet_debug_sort_threads_used`, which reports the count the engine actually resolved;
+#     read it rather than inferring threading from the shape of the timings, since a first-touch
+#     page-mapping artifact once read as a 2.3x threading win on an engine that did no threading at
+#     all (see the untimed warm-up in app/benchmark_sort_engine.f90);
+#   * the C++ threaded rows are not a defeat, they are the target the rest of Stage 4 has to reach;
 #   * partial_argsort / nth_element / is_sorted / search / merge / group_offsets still cross into
 #     C++ on BOTH arms (Stage 5), so `--mode=ops` would compare the C++ engine with itself. This
 #     script therefore runs `--mode=argsort` only, deliberately.

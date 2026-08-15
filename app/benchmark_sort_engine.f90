@@ -243,8 +243,13 @@ contains
         ! pages and later calls get the same block back already mapped. At reps >= 3 that amortises
         ! away, but `reps()` drops to 1 at the largest sizes, where the whole cost landed on
         ! whichever arm ran first -- **measured at 7.19 ns/elem against 3.05 for identical work** on
-        ! the n = 5e7 i64lo arm. It read as a 2.3x threading win on an engine that ignores `threads=`
+        ! the n = 5e7 i64lo arm. It read as a 2.3x threading win on an engine that ignored `threads=`
         ! entirely, which is what exposed it.
+        !
+        ! **That self-diagnosis is no longer available**: since Stage 4 step 1 the Fortran engine does
+        ! honour `threads=`, so a threading-shaped curve is no longer prima facie impossible and this
+        ! artifact would now look plausible instead of absurd. Trust
+        ! `parquet_debug_sort_threads_used` for whether a team was opened, never the timings.
         !
         ! It bites hardest exactly where it is least visible: a FAST arm at a LARGE n, i.e. the
         ! counting fast path, which is the one arm feature_sort.md's Stage 6 bar requires not to

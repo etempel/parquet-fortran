@@ -30,7 +30,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_i32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_i32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -49,7 +49,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_i32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_i32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_i32_i64
@@ -63,7 +63,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_i64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_i64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -82,7 +82,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_i64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_i64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_i64_i64
@@ -96,7 +96,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_f32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_f32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -115,7 +115,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_f32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_f32(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_f32_i64
@@ -129,7 +129,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_f64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_f64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -148,7 +148,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_f64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_f64(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_f64_i64
@@ -162,7 +162,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_bool(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_bool(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -181,7 +181,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_bool(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_bool(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_bool_i64
@@ -195,7 +195,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_chr(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_chr(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -214,7 +214,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_chr(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid)
+        call extract_chr(values, buf, desc, nlo, "pf_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_chr_i64
@@ -228,7 +228,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_date(values, buf, desc, nlo, "pf_argsort")
+        call extract_date(values, buf, desc, nlo, "pf_argsort", threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -247,7 +247,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_date(values, buf, desc, nlo, "pf_argsort")
+        call extract_date(values, buf, desc, nlo, "pf_argsort", threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_date_i64
@@ -261,7 +261,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_time(values, buf, desc, nlo, "pf_argsort")
+        call extract_time(values, buf, desc, nlo, "pf_argsort", threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -280,7 +280,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_time(values, buf, desc, nlo, "pf_argsort")
+        call extract_time(values, buf, desc, nlo, "pf_argsort", threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_time_i64
@@ -294,7 +294,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_ts(values, buf, desc, nlo, "pf_argsort")
+        call extract_ts(values, buf, desc, nlo, "pf_argsort", threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -313,7 +313,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_ts(values, buf, desc, nlo, "pf_argsort")
+        call extract_ts(values, buf, desc, nlo, "pf_argsort", threads=threads)
         call drive_engine_grouped(buf, size(values, kind=int64), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_ts_i64
@@ -327,7 +327,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_strcol(values, buf, desc, nlo, "pf_argsort")
+        call extract_strcol(values, buf, desc, nlo, "pf_argsort", threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, values%size(), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -346,7 +346,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_strcol(values, buf, desc, nlo, "pf_argsort")
+        call extract_strcol(values, buf, desc, nlo, "pf_argsort", threads=threads)
         call drive_engine_grouped(buf, values%size(), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_strcol_i64
@@ -360,7 +360,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_col(values, buf, desc, nlo, "pf_argsort")
+        call extract_col(values, buf, desc, nlo, "pf_argsort", threads=threads)
         if (present(group_offsets)) then
             call drive_engine_grouped(buf, values%length(), "pf_argsort", perm64, &
                 threads=threads, group_offsets=go64)
@@ -379,7 +379,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call extract_col(values, buf, desc, nlo, "pf_argsort")
+        call extract_col(values, buf, desc, nlo, "pf_argsort", threads=threads)
         call drive_engine_grouped(buf, values%length(), "pf_argsort", perm, threads=threads, &
             group_offsets=group_offsets)
     end procedure argsort_col_i64
@@ -427,7 +427,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_i32(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call extract_i32(values, buf, desc, nlo, "pf_sort", is_valid=is_valid, threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
@@ -460,7 +460,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_i64(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call extract_i64(values, buf, desc, nlo, "pf_sort", is_valid=is_valid, threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
@@ -493,7 +493,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_f32(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call extract_f32(values, buf, desc, nlo, "pf_sort", is_valid=is_valid, threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
@@ -526,7 +526,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_f64(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call extract_f64(values, buf, desc, nlo, "pf_sort", is_valid=is_valid, threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
@@ -559,7 +559,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_bool(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call extract_bool(values, buf, desc, nlo, "pf_sort", is_valid=is_valid, threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
@@ -592,7 +592,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_chr(values, buf, desc, nlo, "pf_sort", is_valid=is_valid)
+        call extract_chr(values, buf, desc, nlo, "pf_sort", is_valid=is_valid, threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(character(len=len(values)) :: sorted(n))
         do k = 1_int64, n
@@ -625,7 +625,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_date(values, buf, desc, nlo, "pf_sort")
+        call extract_date(values, buf, desc, nlo, "pf_sort", threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
@@ -644,7 +644,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_time(values, buf, desc, nlo, "pf_sort")
+        call extract_time(values, buf, desc, nlo, "pf_sort", threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n
@@ -663,7 +663,7 @@ contains
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
         n = size(values, kind=int64)
-        call extract_ts(values, buf, desc, nlo, "pf_sort")
+        call extract_ts(values, buf, desc, nlo, "pf_sort", threads=threads)
         call drive_engine(buf, n, "pf_sort", perm, threads=threads)
         allocate(sorted(n))
         do k = 1_int64, n

@@ -635,7 +635,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_i32(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_i32(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -674,7 +674,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_i32(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_i32(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -722,7 +722,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_i64(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_i64(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -761,7 +761,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_i64(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_i64(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -809,7 +809,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_f32(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_f32(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -848,7 +848,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_f32(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_f32(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -896,7 +896,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_f64(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_f64(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -935,7 +935,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_f64(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_f64(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -983,7 +983,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_bool(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_bool(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -1022,7 +1022,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_bool(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_bool(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -1070,7 +1070,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_chr(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_chr(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -1109,7 +1109,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_chr(values, buf, descending, .false., proc, is_valid=is_valid)
+        call extract_chr(values, buf, descending, .false., proc, is_valid=is_valid, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -1156,7 +1156,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_date(values, buf, descending, .false., proc)
+        call extract_date(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -1194,7 +1194,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_date(values, buf, descending, .false., proc)
+        call extract_date(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -1241,7 +1241,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_time(values, buf, descending, .false., proc)
+        call extract_time(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -1279,7 +1279,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_time(values, buf, descending, .false., proc)
+        call extract_time(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -1326,7 +1326,7 @@ contains
         integer(int64) :: k, n
         !
         n = size(values, kind=int64)
-        call extract_ts(values, buf, descending, .false., proc)
+        call extract_ts(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -1364,7 +1364,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = size(values, kind=int64)
-        call extract_ts(values, buf, descending, .false., proc)
+        call extract_ts(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -1411,7 +1411,7 @@ contains
         integer(int64) :: k, n
         !
         n = values%size()
-        call extract_strcol(values, buf, descending, .false., proc)
+        call extract_strcol(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -1449,7 +1449,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = values%size()
-        call extract_strcol(values, buf, descending, .false., proc)
+        call extract_strcol(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))
@@ -1496,7 +1496,7 @@ contains
         integer(int64) :: k, n
         !
         n = values%length()
-        call extract_col(values, buf, descending, .false., proc)
+        call extract_col(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(first_idx(max(n, 1_int64)))
@@ -1534,7 +1534,7 @@ contains
         !
         call resolve_rank_method(method, proc, mode)
         n = values%length()
-        call extract_col(values, buf, descending, .false., proc)
+        call extract_col(values, buf, descending, .false., proc, threads=threads)
         call engine_build_runs(buf, n, proc, perm, tie, threads=threads)
         call key_null_mask(buf, n, isnull)
         allocate(ranks(n))

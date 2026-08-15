@@ -24,7 +24,8 @@ submodule (parquet_sorting) parquet_sorting_keys
 contains
     !
     module procedure extract_i32
-        integer(int64) :: k, n
+        integer(int64) :: k, n, nth
+        integer :: team
         !
         n = size(values, kind=int64)
         allocate(buf(1))
@@ -32,15 +33,53 @@ contains
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%ints(max(n, 1_int64)))
-        buf(1)%ints = 0_int64
-        do k = 1_int64, n
+        ! **The pre-fill and the extraction share ONE static schedule, and that pairing is
+        ! the point.** Whichever pass writes a page first decides which NUMA node it lives
+        ! on for the rest of the sort, so a serial blanket fill puts the whole key buffer
+        ! on the master thread's node and every other thread then reads it across the
+        ! interconnect. Filling under the same `schedule(static)` the extraction uses means
+        ! each thread faults exactly the range it is about to write.
+        !
+        ! **Do NOT drop the fill as a redundant pass**, however obviously the loop below
+        ! covers every one of `1..n`. Removing it measured **23% SLOWER** at 64 threads
+        ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
+        ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
+        ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
+        ! not always less time. See feature_sort_report.md.
+        !
+        ! **`threads=` is honoured here, and the absent case falls back to the automatic
+        ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
+        ! explicit `threads=1` really does make the whole operation serial -- which the
+        ! CHANGELOG promises for `pf_argsort`/`pf_sort`/`pf_unique*`/`pf_rank`, and which a
+        ! bare `pf_sort_threads()` here would have quietly broken. Entry points that take
+        ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
+        ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
+        ! thing they could ever have got.
+        call resolve_thread_count(threads, n, nth)
+        team = tail_team(nth, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                buf(1)%ints(k) = 0_int64
+            end do
+            !$omp end parallel do
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
             buf(1)%ints(k) = int(values(k), int64)
-        end do
+            end do
+            !$omp end parallel do
+        else
+            buf(1)%ints = 0_int64
+            do k = 1_int64, n
+            buf(1)%ints(k) = int(values(k), int64)
+            end do
+        end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_i32
     !
     module procedure extract_i64
-        integer(int64) :: k, n
+        integer(int64) :: k, n, nth
+        integer :: team
         !
         n = size(values, kind=int64)
         allocate(buf(1))
@@ -48,15 +87,53 @@ contains
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%ints(max(n, 1_int64)))
-        buf(1)%ints = 0_int64
-        do k = 1_int64, n
+        ! **The pre-fill and the extraction share ONE static schedule, and that pairing is
+        ! the point.** Whichever pass writes a page first decides which NUMA node it lives
+        ! on for the rest of the sort, so a serial blanket fill puts the whole key buffer
+        ! on the master thread's node and every other thread then reads it across the
+        ! interconnect. Filling under the same `schedule(static)` the extraction uses means
+        ! each thread faults exactly the range it is about to write.
+        !
+        ! **Do NOT drop the fill as a redundant pass**, however obviously the loop below
+        ! covers every one of `1..n`. Removing it measured **23% SLOWER** at 64 threads
+        ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
+        ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
+        ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
+        ! not always less time. See feature_sort_report.md.
+        !
+        ! **`threads=` is honoured here, and the absent case falls back to the automatic
+        ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
+        ! explicit `threads=1` really does make the whole operation serial -- which the
+        ! CHANGELOG promises for `pf_argsort`/`pf_sort`/`pf_unique*`/`pf_rank`, and which a
+        ! bare `pf_sort_threads()` here would have quietly broken. Entry points that take
+        ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
+        ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
+        ! thing they could ever have got.
+        call resolve_thread_count(threads, n, nth)
+        team = tail_team(nth, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                buf(1)%ints(k) = 0_int64
+            end do
+            !$omp end parallel do
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
             buf(1)%ints(k) = values(k)
-        end do
+            end do
+            !$omp end parallel do
+        else
+            buf(1)%ints = 0_int64
+            do k = 1_int64, n
+            buf(1)%ints(k) = values(k)
+            end do
+        end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_i64
     !
     module procedure extract_f32
-        integer(int64) :: k, n
+        integer(int64) :: k, n, nth
+        integer :: team
         !
         n = size(values, kind=int64)
         allocate(buf(1))
@@ -64,15 +141,53 @@ contains
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%reals(max(n, 1_int64)))
-        buf(1)%reals = 0.0_real64
-        do k = 1_int64, n
+        ! **The pre-fill and the extraction share ONE static schedule, and that pairing is
+        ! the point.** Whichever pass writes a page first decides which NUMA node it lives
+        ! on for the rest of the sort, so a serial blanket fill puts the whole key buffer
+        ! on the master thread's node and every other thread then reads it across the
+        ! interconnect. Filling under the same `schedule(static)` the extraction uses means
+        ! each thread faults exactly the range it is about to write.
+        !
+        ! **Do NOT drop the fill as a redundant pass**, however obviously the loop below
+        ! covers every one of `1..n`. Removing it measured **23% SLOWER** at 64 threads
+        ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
+        ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
+        ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
+        ! not always less time. See feature_sort_report.md.
+        !
+        ! **`threads=` is honoured here, and the absent case falls back to the automatic
+        ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
+        ! explicit `threads=1` really does make the whole operation serial -- which the
+        ! CHANGELOG promises for `pf_argsort`/`pf_sort`/`pf_unique*`/`pf_rank`, and which a
+        ! bare `pf_sort_threads()` here would have quietly broken. Entry points that take
+        ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
+        ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
+        ! thing they could ever have got.
+        call resolve_thread_count(threads, n, nth)
+        team = tail_team(nth, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                buf(1)%reals(k) = 0.0_real64
+            end do
+            !$omp end parallel do
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
             buf(1)%reals(k) = real(values(k), real64)
-        end do
+            end do
+            !$omp end parallel do
+        else
+            buf(1)%reals = 0.0_real64
+            do k = 1_int64, n
+            buf(1)%reals(k) = real(values(k), real64)
+            end do
+        end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_f32
     !
     module procedure extract_f64
-        integer(int64) :: k, n
+        integer(int64) :: k, n, nth
+        integer :: team
         !
         n = size(values, kind=int64)
         allocate(buf(1))
@@ -80,15 +195,53 @@ contains
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%reals(max(n, 1_int64)))
-        buf(1)%reals = 0.0_real64
-        do k = 1_int64, n
+        ! **The pre-fill and the extraction share ONE static schedule, and that pairing is
+        ! the point.** Whichever pass writes a page first decides which NUMA node it lives
+        ! on for the rest of the sort, so a serial blanket fill puts the whole key buffer
+        ! on the master thread's node and every other thread then reads it across the
+        ! interconnect. Filling under the same `schedule(static)` the extraction uses means
+        ! each thread faults exactly the range it is about to write.
+        !
+        ! **Do NOT drop the fill as a redundant pass**, however obviously the loop below
+        ! covers every one of `1..n`. Removing it measured **23% SLOWER** at 64 threads
+        ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
+        ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
+        ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
+        ! not always less time. See feature_sort_report.md.
+        !
+        ! **`threads=` is honoured here, and the absent case falls back to the automatic
+        ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
+        ! explicit `threads=1` really does make the whole operation serial -- which the
+        ! CHANGELOG promises for `pf_argsort`/`pf_sort`/`pf_unique*`/`pf_rank`, and which a
+        ! bare `pf_sort_threads()` here would have quietly broken. Entry points that take
+        ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
+        ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
+        ! thing they could ever have got.
+        call resolve_thread_count(threads, n, nth)
+        team = tail_team(nth, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                buf(1)%reals(k) = 0.0_real64
+            end do
+            !$omp end parallel do
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
             buf(1)%reals(k) = values(k)
-        end do
+            end do
+            !$omp end parallel do
+        else
+            buf(1)%reals = 0.0_real64
+            do k = 1_int64, n
+            buf(1)%reals(k) = values(k)
+            end do
+        end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_f64
     !
     module procedure extract_bool
-        integer(int64) :: k, n
+        integer(int64) :: k, n, nth
+        integer :: team
         !
         n = size(values, kind=int64)
         allocate(buf(1))
@@ -96,10 +249,47 @@ contains
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%ints(max(n, 1_int64)))
-        buf(1)%ints = 0_int64
-        do k = 1_int64, n
+        ! **The pre-fill and the extraction share ONE static schedule, and that pairing is
+        ! the point.** Whichever pass writes a page first decides which NUMA node it lives
+        ! on for the rest of the sort, so a serial blanket fill puts the whole key buffer
+        ! on the master thread's node and every other thread then reads it across the
+        ! interconnect. Filling under the same `schedule(static)` the extraction uses means
+        ! each thread faults exactly the range it is about to write.
+        !
+        ! **Do NOT drop the fill as a redundant pass**, however obviously the loop below
+        ! covers every one of `1..n`. Removing it measured **23% SLOWER** at 64 threads
+        ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
+        ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
+        ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
+        ! not always less time. See feature_sort_report.md.
+        !
+        ! **`threads=` is honoured here, and the absent case falls back to the automatic
+        ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
+        ! explicit `threads=1` really does make the whole operation serial -- which the
+        ! CHANGELOG promises for `pf_argsort`/`pf_sort`/`pf_unique*`/`pf_rank`, and which a
+        ! bare `pf_sort_threads()` here would have quietly broken. Entry points that take
+        ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
+        ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
+        ! thing they could ever have got.
+        call resolve_thread_count(threads, n, nth)
+        team = tail_team(nth, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                buf(1)%ints(k) = 0_int64
+            end do
+            !$omp end parallel do
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
             buf(1)%ints(k) = merge(1_int64, 0_int64, values(k))
-        end do
+            end do
+            !$omp end parallel do
+        else
+            buf(1)%ints = 0_int64
+            do k = 1_int64, n
+            buf(1)%ints(k) = merge(1_int64, 0_int64, values(k))
+            end do
+        end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_bool
     !
@@ -134,7 +324,8 @@ contains
     end procedure extract_chr
     !
     module procedure extract_date
-        integer(int64) :: k, n
+        integer(int64) :: k, n, nth
+        integer :: team
         logical, allocatable :: mask(:)
         !
         n = size(values, kind=int64)
@@ -143,11 +334,49 @@ contains
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%ints(max(n, 1_int64)))
-        buf(1)%ints = 0_int64
-        do k = 1_int64, n
+        ! **The pre-fill and the extraction share ONE static schedule, and that pairing is
+        ! the point.** Whichever pass writes a page first decides which NUMA node it lives
+        ! on for the rest of the sort, so a serial blanket fill puts the whole key buffer
+        ! on the master thread's node and every other thread then reads it across the
+        ! interconnect. Filling under the same `schedule(static)` the extraction uses means
+        ! each thread faults exactly the range it is about to write.
+        !
+        ! **Do NOT drop the fill as a redundant pass**, however obviously the loop below
+        ! covers every one of `1..n`. Removing it measured **23% SLOWER** at 64 threads
+        ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
+        ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
+        ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
+        ! not always less time. See feature_sort_report.md.
+        !
+        ! **`threads=` is honoured here, and the absent case falls back to the automatic
+        ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
+        ! explicit `threads=1` really does make the whole operation serial -- which the
+        ! CHANGELOG promises for `pf_argsort`/`pf_sort`/`pf_unique*`/`pf_rank`, and which a
+        ! bare `pf_sort_threads()` here would have quietly broken. Entry points that take
+        ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
+        ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
+        ! thing they could ever have got.
+        call resolve_thread_count(threads, n, nth)
+        team = tail_team(nth, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                buf(1)%ints(k) = 0_int64
+            end do
+            !$omp end parallel do
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
             buf(1)%ints(k) = int(values(k)%raw(), int64)
-        end do
+            end do
+            !$omp end parallel do
+        else
+            buf(1)%ints = 0_int64
+            do k = 1_int64, n
+            buf(1)%ints(k) = int(values(k)%raw(), int64)
+            end do
+        end if
         allocate(mask(max(n, 1_int64)))
+        ! Kept blanket for the same measured reason as the value buffer above.
         mask = .true.
         do k = 1_int64, n
             mask(k) = .not. values(k)%is_null()
@@ -156,7 +385,8 @@ contains
     end procedure extract_date
     !
     module procedure extract_time
-        integer(int64) :: k, n
+        integer(int64) :: k, n, nth
+        integer :: team
         logical, allocatable :: mask(:)
         !
         n = size(values, kind=int64)
@@ -165,11 +395,49 @@ contains
         buf(1)%descending = descending
         buf(1)%nulls_first = nulls_first
         allocate(buf(1)%ints(max(n, 1_int64)))
-        buf(1)%ints = 0_int64
-        do k = 1_int64, n
+        ! **The pre-fill and the extraction share ONE static schedule, and that pairing is
+        ! the point.** Whichever pass writes a page first decides which NUMA node it lives
+        ! on for the rest of the sort, so a serial blanket fill puts the whole key buffer
+        ! on the master thread's node and every other thread then reads it across the
+        ! interconnect. Filling under the same `schedule(static)` the extraction uses means
+        ! each thread faults exactly the range it is about to write.
+        !
+        ! **Do NOT drop the fill as a redundant pass**, however obviously the loop below
+        ! covers every one of `1..n`. Removing it measured **23% SLOWER** at 64 threads
+        ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
+        ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
+        ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
+        ! not always less time. See feature_sort_report.md.
+        !
+        ! **`threads=` is honoured here, and the absent case falls back to the automatic
+        ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
+        ! explicit `threads=1` really does make the whole operation serial -- which the
+        ! CHANGELOG promises for `pf_argsort`/`pf_sort`/`pf_unique*`/`pf_rank`, and which a
+        ! bare `pf_sort_threads()` here would have quietly broken. Entry points that take
+        ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
+        ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
+        ! thing they could ever have got.
+        call resolve_thread_count(threads, n, nth)
+        team = tail_team(nth, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
+                buf(1)%ints(k) = 0_int64
+            end do
+            !$omp end parallel do
+            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+            do k = 1_int64, n
             buf(1)%ints(k) = values(k)%raw()
-        end do
+            end do
+            !$omp end parallel do
+        else
+            buf(1)%ints = 0_int64
+            do k = 1_int64, n
+            buf(1)%ints(k) = values(k)%raw()
+            end do
+        end if
         allocate(mask(max(n, 1_int64)))
+        ! Kept blanket for the same measured reason as the value buffer above.
         mask = .true.
         do k = 1_int64, n
             mask(k) = .not. values(k)%is_null()

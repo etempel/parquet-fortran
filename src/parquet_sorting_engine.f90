@@ -1022,7 +1022,7 @@ contains
         ! All the histograms this bucket needs in ONE read of its images, mirroring the whole-column
         ! build above. `dmax` is at most 6 here (the split digit is at least 1 and is excluded), so
         ! this is never the full 2048 counters.
-        bh = 0_int64
+        bh(:, 0:dmax) = 0_int64
         do j = lo, hi
             u = ka(j)
             do p = 0, dmax
@@ -1234,15 +1234,19 @@ contains
     !!
     !! Optionally reports each bucket's resulting range, which is what a bucket decomposition needs
     !! and an LSD pass does not.
-    subroutine sort_radix_cursors(cnt, nt, blo, bhi)
+    subroutine sort_radix_cursors(cnt, nt, blo, bhi, first)
         integer, intent(in) :: nt                   !! team size.
         integer(int64), intent(inout) :: cnt(0:255, 0:nt - 1) !! counts in, cursors out.
         integer(int64), intent(out), optional :: blo(0:255) !! each bucket's first slot.
         integer(int64), intent(out), optional :: bhi(0:255) !! each bucket's last slot.
+        integer(int64), intent(in), optional :: first
+        !! first output slot; defaults to 1. A SUB-RANGE refinement passes its own `lo`, so the
+        !! cursors address the parent bucket's slice of the shared buffers rather than the column.
         integer :: tt
         integer(int64) :: b, t, held
         !
         t = 1_int64
+        if (present(first)) t = first
         do b = 0_int64, 255_int64
             if (present(blo)) blo(b) = t
             do tt = 0, nt - 1
@@ -1305,6 +1309,67 @@ contains
         end do
         !$omp end parallel
     end subroutine sort_radix_emit_par
+
+    !> The threaded count of `sort_radix_count_par`, restricted to one CONTIGUOUS SUB-RANGE.
+    !!
+    !! Exists for Design B's refinement, which re-splits one oversized bucket with the whole team
+    !! rather than leaving it to the single thread that drew it. Chunking is over the sub-range, so
+    !! every thread contributes to a bucket that is only a fraction of the column — which is the
+    !! entire point, and is why the whole-column helper cannot simply be reused with a mask.
+    !!
+    !! Carries `sort_radix_count_par`'s `cnt = 0` for the same reason it does: `intent(out)` on an
+    !! integer array does not initialise it, the allocator usually hands back zeroed pages, and so
+    !! removing the line survives the whole suite while leaving a corrupted permutation one unlucky
+    !! allocation away.
+    subroutine sort_radix_count_range_par(sk, lo, hi, p, cnt, nt)
+        integer(int64), intent(in) :: sk(:)         !! the images to count.
+        integer(int64), intent(in) :: lo, hi        !! the sub-range, inclusive.
+        integer, intent(in) :: p                    !! byte position, 0 = least significant.
+        integer, intent(in) :: nt                   !! team size.
+        integer(int64), intent(out) :: cnt(0:255, 0:nt - 1) !! receives each thread's counts.
+        integer :: tid
+        integer(int64) :: j, b, c_lo, c_hi, m
+        !
+        m = hi - lo + 1_int64
+        cnt = 0_int64
+        !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, j, b)
+        tid = omp_get_thread_num()
+        call sort_chunk_bounds(m, nt, tid, c_lo, c_hi)
+        do j = lo + c_lo - 1_int64, lo + c_hi - 1_int64
+            b = iand(ishft(sk(j), -8 * p), 255_int64)
+            cnt(b, tid) = cnt(b, tid) + 1_int64
+        end do
+        !$omp end parallel
+    end subroutine sort_radix_count_range_par
+
+    !> The threaded stable scatter of `sort_radix_scatter_par`, restricted to one sub-range.
+    !!
+    !! The destination slots come from cursors the caller built with `sort_radix_cursors(..., first
+    !! = lo)`, so rows never leave the parent bucket's slice — which is what keeps every other
+    !! bucket's range untouched and lets refinement run while unrefined buckets sit in the partner
+    !! buffer.
+    subroutine sort_radix_scatter_range_par(sk, sr, dk, dr, lo, hi, p, cnt, nt)
+        integer(int64), intent(in) :: sk(:), sr(:)    !! source images and rows.
+        integer(int64), intent(inout) :: dk(:), dr(:) !! destination images and rows.
+        integer(int64), intent(in) :: lo, hi          !! the sub-range, inclusive.
+        integer, intent(in) :: p                      !! byte position.
+        integer, intent(in) :: nt                     !! team size.
+        integer(int64), intent(inout) :: cnt(0:255, 0:nt - 1) !! per-thread cursors, advanced here.
+        integer :: tid
+        integer(int64) :: j, b, c_lo, c_hi, m
+        !
+        m = hi - lo + 1_int64
+        !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, j, b)
+        tid = omp_get_thread_num()
+        call sort_chunk_bounds(m, nt, tid, c_lo, c_hi)
+        do j = lo + c_lo - 1_int64, lo + c_hi - 1_int64
+            b = iand(ishft(sk(j), -8 * p), 255_int64)
+            dk(cnt(b, tid)) = sk(j)
+            dr(cnt(b, tid)) = sr(j)
+            cnt(b, tid) = cnt(b, tid) + 1_int64
+        end do
+        !$omp end parallel
+    end subroutine sort_radix_scatter_range_par
 
     !> Design A — the LSD structure kept, with every digit's pass threaded and synchronised.
     !!
@@ -1414,43 +1479,74 @@ contains
         logical, intent(out) :: done                  !! .false. when this declined and did nothing.
         !
         integer(int64), allocatable :: scnt(:,:) !! per-thread split cursors, `(bucket, thread)`.
+        integer(int64), allocatable :: tlo(:), thi(:) !! each task's range in the split's output.
+        integer, allocatable :: tdmax(:)   !! highest digit each task still has to order by.
+        logical, allocatable :: tsrcb(:)
+        !! .true. when a task's rows are in `kb`/`rb` -- the split's output, which is where every
+        !! unrefined bucket sits. A refinement flips the flag, because it scatters the task back into
+        !! the partner pair. Tasks are disjoint RANGES, so one holding data in `ka` while its
+        !! neighbour uses `ka` as scratch is safe: neither touches the other's slots.
         integer(int64) :: blo(0:255), bhi(0:255) !! each bucket's range in the split's output.
         integer(int64) :: nbuckets   !! how many buckets at `dsplit` are non-empty.
-        integer(int64) :: biggest    !! rows in the largest of them.
-        integer(int64) :: b
-        integer :: team, ios
-        !> Decline when the largest bucket exceeds `nv / (team * this)`. Named rather than a literal
-        !! because the value is REASONED, not measured (`feature_sort_parallel.md` §15.1 item 3), and
-        !! because machine B's report makes what it selects matter: 2.10–2.57× at 64 threads.
-        integer(int64), parameter :: SORT_SPLIT_BALANCE = 2_int64
+        integer(int64) :: maxcard    !! most non-empty buckets any digit at or below `dsplit` has.
+        integer(int64) :: b, nb, m, target, spent, budget, sub_biggest
+        integer :: team, ios, i, ntask, head, d, maxtask
+        logical :: insrc !! which buffer pair this refinement's output landed in.
+        !> Never subdivide below this. A task smaller than this costs more in split overhead and
+        !! per-task histogram rebuilds than the balance it buys.
+        integer(int64), parameter :: SORT_TASK_FLOOR = 4096_int64
+        !> Distinct values the split digit's column must reach before refinement is worth
+        !! attempting. **Refinement subdivides; it cannot manufacture distinctions the key does not
+        !! have**, so a key with a handful of distinct values ends up with one thread holding most
+        !! of the rows however many digits are burned looking for a split. That is the shape machine
+        !! B measured Design B losing 2.10-2.57x on, and it is what this sends to Design A instead.
+        integer(int64), parameter :: SORT_SPLIT_MIN_CARD = 16_int64
         !
         done = .false.
         if (dsplit < 1) return
         !
         nbuckets = 0_int64
-        biggest = 0_int64
         do b = 0_int64, 255_int64
             if (hist(b, dsplit) > 0_int64) nbuckets = nbuckets + 1_int64
-            if (hist(b, dsplit) > biggest) biggest = hist(b, dsplit)
         end do
         ! One bucket means the split digit does not vary after all, which `dsplit`'s derivation should
         ! already have excluded -- kept because reaching the bucket loop with a single bucket would
         ! serialise the whole sort behind one thread while looking like it had parallelised.
         if (nbuckets < 2_int64) return
         !
-        ! **The bucket-count cap.** Threads beyond the number of non-empty buckets have nothing to
-        ! take. It makes no sort faster; it stops the engine opening a team it cannot feed, which is
-        ! the cost that grows with the machine. The SPLIT pass is row-parallel and is deliberately
-        ! left at the full `nt` -- only the bucket loop has this ceiling.
+        ! **The cardinality test, which REPLACED a balance test that tightened with the team.** The
+        ! old form declined when `biggest * team * 2 > nv`, i.e. it required the largest bucket to be
+        ! within 2x of a perfect 256-way split at 4 threads and within 32x of it at 64 -- so on
+        ! machine B it declined on every real key and Design B never ran at all. Balance is now
+        ! achieved rather than demanded (the refinement below subdivides whatever is oversized), so
+        ! the only question left upfront is whether the key HAS enough distinct values for
+        ! subdivision to reach a balanced state. The most populated digit answers that for free from
+        ! histograms already built: `maxcard` is a lower bound on the key's distinct-value count.
+        maxcard = 0_int64
+        do d = 0, dsplit
+            nb = 0_int64
+            do b = 0_int64, 255_int64
+                if (hist(b, d) > 0_int64) nb = nb + 1_int64
+            end do
+            if (nb > maxcard) maxcard = nb
+        end do
+        if (maxcard < SORT_SPLIT_MIN_CARD) return
         team = nt
-        if (int(team, int64) > nbuckets) team = int(nbuckets)
-        !
-        ! **The balance test.** Reasoned, not measured (`feature_sort_parallel.md` §15.1 item 3), and
-        ! now the thing that routes a hostile key away from a design that handles it badly.
-        if (biggest * int(team, int64) * SORT_SPLIT_BALANCE > nv) return
+        ! **Task-list capacity, sized from the TEAM rather than fixed.** At most `team` tasks can
+        ! exceed a fair share at any moment, and one refinement turns a task into at most 256, so
+        ! `256 * (team + 2)` is a real bound on the walk rather than a ceiling it might trip over --
+        ! which matters because a ceiling that binds stops refinement in the middle of the list, and
+        ! then the tasks that keep their full size are whichever the walk had not reached.
+        maxtask = 256 * (nt + 2)
         !
         allocate(scnt(0:255, 0:nt - 1), stat=ios)
         if (ios /= 0) return
+        allocate(tlo(0:maxtask - 1), thi(0:maxtask - 1), &
+                 tdmax(0:maxtask - 1), tsrcb(0:maxtask - 1), stat=ios)
+        if (ios /= 0) then
+            deallocate(scnt)
+            return
+        end if
         !
         ! **The split is one count-prefix-scatter over the whole column** — the same three steps every
         ! Design A pass performs, which is why they are shared helpers rather than written twice here.
@@ -1462,22 +1558,132 @@ contains
         call sort_radix_count_par(ka, nv, dsplit, scnt, nt)
         call sort_radix_cursors(scnt, nt, blo, bhi)
         call sort_radix_scatter_par(ka, ra, kb, rb, nv, dsplit, scnt, nt)
-        deallocate(scnt)
         dbg_sort_radix_passes = dbg_sort_radix_passes + 1_int64
-        dbg_sort_split_buckets = nbuckets
-        dbg_sort_design = 2_int64
         !
-        ! Phase 2. `schedule(dynamic)` because bucket sizes vary by orders of magnitude on real data
-        ! and a static split would leave every thread waiting on whichever drew the largest. The
-        ! buffer roles swap: the split's OUTPUT (`kb`/`rb`) is each bucket's input, and `ka`/`ra`
-        ! become its scratch. Ranges are disjoint, so no per-thread allocation is needed at all.
-        !$omp parallel do num_threads(team) default(shared) private(b) schedule(dynamic)
+        ! The initial task list: one per non-empty bucket, all sitting in the split's output and all
+        ! still owing digits `0..dsplit-1`.
+        ntask = 0
         do b = 0_int64, 255_int64
             if (hist(b, dsplit) > 0_int64) then
-                call sort_radix_bucket(kb, rb, ka, ra, blo(b), bhi(b), dsplit - 1, perm, value_base)
+                tlo(ntask) = blo(b)
+                thi(ntask) = bhi(b)
+                tdmax(ntask) = dsplit - 1
+                tsrcb(ntask) = .true.
+                ntask = ntask + 1
+            end if
+        end do
+        !
+        ! **Refinement -- the balanced split, and the reason this design no longer declines on a
+        ! skewed key.** An oversized bucket is re-split on its next digit BY THE WHOLE TEAM, and its
+        ! sub-buckets rejoin the task list owing one digit fewer.
+        !
+        ! **The work is not extra.** That bucket had to make a pass over digit `tdmax` regardless;
+        ! refinement performs that same pass with `nt` threads instead of the one thread that would
+        ! have drawn the bucket, and every sub-bucket then owes one digit fewer. What changes is
+        ! *who* does it, not how much there is -- which is why this is worth doing even when the
+        ! imbalance is mild, and why the budget below is a safety rail rather than a real constraint.
+        !
+        ! **A single forward walk of the task list, never a repeated search for the largest.** An
+        ! earlier version picked the biggest oversized task each round, which is a better SCHEDULE
+        ! and a much worse algorithm: the scan is O(ntask) per refinement, so at the task counts this
+        ! design wants it became the serial bottleneck -- 64 threads measured SLOWER than 32 with it
+        ! in place (8.22 against 4.94 ns/element at target 1024), because the scan does not shrink
+        ! when the team grows. The walk below touches each entry once.
+        !
+        ! **The target is ONE FAIR SHARE of the column, and that is measured rather than reasoned.**
+        ! Two instincts are both wrong here and both were tested. Aiming for several tasks per thread
+        ! so `schedule(dynamic)` has slack costs more in refinement passes than it recovers in
+        ! balance: at 64 threads, `nv / (team * 1)` measured **1.77 ns/element** against 2.63 at
+        ! `* 2` and 4.03 at `* 4`. And an absolute, cache-sized target -- the shape a bucket's own
+        ! working set would suggest -- is worse still, monotonically: 32768 gave 3.80, 8192 gave
+        ! 3.80, 2048 gave 7.41, 1024 gave 8.22, because each halving of the target roughly doubles
+        ! the number of threaded refinement passes and every one of them is a full read and write of
+        ! its range. **Refinement passes are the cost; task count is not.** (f64, n = 5e6, ifx,
+        ! machine B, `benchmark_sort_tail`.)
+        !
+        ! It is also the only team-dependent term left, and it moves the right way with the machine:
+        ! a 4-core team asks for tasks of `nv / 4` and refines almost nothing, a 64-core team asks
+        ! for `nv / 64` and refines whatever is above it.
+        target = nv / int(team, int64)
+        if (target < SORT_TASK_FLOOR) target = SORT_TASK_FLOOR
+        budget = 4_int64 * nv
+        spent = 0_int64
+        head = 0
+        do while (head < ntask)
+            m = thi(head) - tlo(head) + 1_int64
+            if (tdmax(head) < 1 .or. m <= target) then
+                head = head + 1
+                cycle
+            end if
+            if (ntask + 256 > maxtask) exit
+            if (spent + m > budget) exit
+            spent = spent + m
+            d = tdmax(head)
+            !
+            ! **Count first, scatter only if the digit actually splits.** A constant digit is common
+            ! -- it is exactly why a bucket ended up oversized -- and scattering on one moves every
+            ! row for nothing. Counting is half the cost and answers the question, after which the
+            ! task simply drops a digit and is re-examined without advancing the queue. Lowering
+            ! `tdmax` past a constant digit is sound because ordering by `0..d-1` and by `0..d` agree
+            ! when every row in the range shares digit `d`.
+            if (tsrcb(head)) then
+                call sort_radix_count_range_par(kb, tlo(head), thi(head), d, scnt, nt)
+            else
+                call sort_radix_count_range_par(ka, tlo(head), thi(head), d, scnt, nt)
+            end if
+            call sort_radix_cursors(scnt, nt, blo, bhi, first=tlo(head))
+            sub_biggest = 0_int64
+            do b = 0_int64, 255_int64
+                nb = bhi(b) - blo(b) + 1_int64
+                if (nb > sub_biggest) sub_biggest = nb
+            end do
+            if (sub_biggest >= m) then
+                tdmax(head) = d - 1
+                cycle
+            end if
+            if (tsrcb(head)) then
+                call sort_radix_scatter_range_par(kb, rb, ka, ra, tlo(head), thi(head), d, scnt, nt)
+            else
+                call sort_radix_scatter_range_par(ka, ra, kb, rb, tlo(head), thi(head), d, scnt, nt)
+            end if
+            dbg_sort_radix_passes = dbg_sort_radix_passes + 1_int64
+            !
+            ! The sub-buckets are appended at the TAIL and the parent is emptied, so the walk never
+            ! revisits an index and a sub-bucket that is itself oversized is refined in turn when the
+            ! head reaches it. An emptied entry costs `sort_radix_bucket` an immediate return.
+            insrc = .not. tsrcb(head)
+            do b = 0_int64, 255_int64
+                if (bhi(b) >= blo(b)) then
+                    tlo(ntask) = blo(b)
+                    thi(ntask) = bhi(b)
+                    tdmax(ntask) = d - 1
+                    tsrcb(ntask) = insrc
+                    ntask = ntask + 1
+                end if
+            end do
+            thi(head) = tlo(head) - 1_int64
+            head = head + 1
+        end do
+        deallocate(scnt)
+        dbg_sort_split_buckets = int(ntask, int64)
+        dbg_sort_design = 2_int64
+        !
+        ! Phase 2. `schedule(dynamic)` because task sizes vary by orders of magnitude on real data
+        ! and a static split would leave every thread waiting on whichever drew the largest. Each
+        ! task names which buffer pair holds its rows; the other pair is its scratch, over its own
+        ! range only. Ranges are disjoint, so no per-thread allocation is needed at all.
+        team = nt
+        if (team > ntask) team = ntask
+        !$omp parallel do num_threads(team) default(shared) private(i) schedule(dynamic)
+        do i = 0, ntask - 1
+            if (tsrcb(i)) then
+                call sort_radix_bucket(kb, rb, ka, ra, tlo(i), thi(i), tdmax(i), perm, value_base)
+            else
+                call sort_radix_bucket(ka, ra, kb, rb, tlo(i), thi(i), tdmax(i), perm, value_base)
             end if
         end do
         !$omp end parallel do
+        deallocate(tlo, thi, tdmax, tsrcb)
         done = .true.
     end subroutine sort_radix_design_b
 #endif

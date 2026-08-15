@@ -882,98 +882,109 @@ module parquet_sorting
     ! ---- Key extraction and pf_sort_keys%add (parquet_sorting_keys) ----
     interface
         !> Extracts a 32-bit integer key into the canonical form the engine takes.
-        module subroutine extract_i32(values, buf, descending, nulls_first, proc, is_valid)
+        module subroutine extract_i32(values, buf, descending, nulls_first, proc, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_i32
         !> Extracts a 64-bit integer key into the canonical form the engine takes.
-        module subroutine extract_i64(values, buf, descending, nulls_first, proc, is_valid)
+        module subroutine extract_i64(values, buf, descending, nulls_first, proc, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_i64
         !> Extracts a 32-bit real key into the canonical form the engine takes.
-        module subroutine extract_f32(values, buf, descending, nulls_first, proc, is_valid)
+        module subroutine extract_f32(values, buf, descending, nulls_first, proc, is_valid, threads)
         real(real32), intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_f32
         !> Extracts a 64-bit real key into the canonical form the engine takes.
-        module subroutine extract_f64(values, buf, descending, nulls_first, proc, is_valid)
+        module subroutine extract_f64(values, buf, descending, nulls_first, proc, is_valid, threads)
         real(real64), intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_f64
         !> Extracts a logical key into the canonical form the engine takes.
-        module subroutine extract_bool(values, buf, descending, nulls_first, proc, is_valid)
+        module subroutine extract_bool(values, buf, descending, nulls_first, proc, is_valid, threads)
         logical, intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_bool
         !> Extracts a string key into the canonical form the engine takes.
-        module subroutine extract_chr(values, buf, descending, nulls_first, proc, is_valid)
+        module subroutine extract_chr(values, buf, descending, nulls_first, proc, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_chr
         !> Extracts a date key into the canonical form the engine takes.
-        module subroutine extract_date(values, buf, descending, nulls_first, proc)
+        module subroutine extract_date(values, buf, descending, nulls_first, proc, threads)
         type(parquet_date), intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_date
         !> Extracts a time key into the canonical form the engine takes.
-        module subroutine extract_time(values, buf, descending, nulls_first, proc)
+        module subroutine extract_time(values, buf, descending, nulls_first, proc, threads)
         type(parquet_time), intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_time
         !> Extracts a timestamp key into the canonical form the engine takes.
-        module subroutine extract_ts(values, buf, descending, nulls_first, proc)
+        module subroutine extract_ts(values, buf, descending, nulls_first, proc, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_ts
         !> Extracts a packed string column key into the canonical form the engine takes.
-        module subroutine extract_strcol(values, buf, descending, nulls_first, proc)
+        module subroutine extract_strcol(values, buf, descending, nulls_first, proc, threads)
         type(parquet_string_column), intent(in) :: values
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_strcol
         !> Extracts a type-erased column key into the canonical form the engine takes.
-        module subroutine extract_col(values, buf, descending, nulls_first, proc)
+        module subroutine extract_col(values, buf, descending, nulls_first, proc, threads)
         type(parquet_column), intent(in) :: values
             type(sort_key_buf), allocatable, intent(out) :: buf(:) !! one entry, or two for a timestamp.
             logical, intent(in) :: descending !! .true. sorts high to low.
             logical, intent(in) :: nulls_first !! .true. places nulls before values.
             character(len=*), intent(in) :: proc !! calling procedure, for messages.
+            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         end subroutine extract_col
         !> Appends a 32-bit integer sort key.
         module subroutine add_i32(self, values, descending, nulls_first, is_valid)

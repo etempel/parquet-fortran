@@ -5946,6 +5946,9 @@ contains
         integer(int64) :: wide(4000)
         integer(int64) :: spread_vals(200)            !! the distinct values `wide` cycles through.
         character(len=10) :: sv(4000)                 !! a string key with a SHARED STEM.
+        logical :: nmask(4000)                        !! a validity mask, so the null tier is exercised.
+        integer(int64) :: narrowv(4000)               !! a NARROW-range integer key, for the pass count.
+        integer(int64) :: npass_ser, npass_par        !! radix passes, serial and threaded.
         integer(int64), allocatable :: sref(:), sgot(:) !! the string key's serial and threaded answers.
         integer(int64) :: xs                          !! xorshift state, so the spread is reproducible.
         integer(int64), allocatable :: wref(:)        !! the wide key's serial answer.
@@ -6104,6 +6107,49 @@ contains
         if (allocated(error)) return
         call check(error, parquet_debug_sort_split_buckets() == 0_int64, &
             "a string key must never reach Design B's split")
+        if (allocated(error)) return
+        !
+        ! **A NULL-carrying key, which the threaded tier split is otherwise never asked about.** Both
+        ! of this test's earlier keys are null-free, so pass 2 of `sort_tier_split_par` never takes
+        ! its skip branch — and inverting that branch, so nulls are kept and values dropped, survived
+        ! every assertion above. A compaction that mis-classifies rows is about as bad as this engine
+        ! gets, and nothing here could see it.
+        do k = 1, size(v)
+            nmask(k) = mod(k, 5) /= 0
+        end do
+        call pf_argsort(v, ref, is_valid=nmask, threads=1)
+        call pf_argsort(v, got, is_valid=nmask, threads=4)
+        call check(error, size(got) == size(ref) .and. all(got == ref), &
+            "a threaded sort of a key WITH NULLS must give the serial permutation exactly")
+        if (allocated(error)) return
+        !
+        ! **A narrow-range integer key far from zero**, which is the shape the value-range bias exists
+        ! for: imaged as `v - vmin` its top bytes go constant and the radix skips those passes.
+        !
+        ! **What this does NOT assert, and why — read before "strengthening" it.** The obvious check
+        ! is that the threaded run does the same number of radix passes as the serial one, and it
+        ! cannot be written: `parquet_debug_sort_radix_passes` is DESIGN-dependent. Design B counts a
+        ! single pass for its whole split and counts nothing for the per-bucket sorts, where the
+        ! serial loop counts every digit — so serial and threaded pass counts differ legitimately and
+        ! comparing them fails against correct code. A mutation that drops the per-thread range
+        ! reduction in `sort_tier_split_par` therefore SURVIVES this test; it is recorded as an open
+        ! gap in `feature_sort.md` §6 Stage 4, 4e rather than papered over here. Closing it needs an
+        ! observable the designs share — the resolved `vmin`/`vmax` themselves.
+        call parquet_set_sort_counting_path(.false.)
+        do k = 1, size(narrowv)
+            narrowv(k) = 1000000000000_int64 + int(mod(k * 37, 5000), int64)
+        end do
+        call parquet_debug_reset_sort_radix_passes()
+        call pf_argsort(narrowv, ref, threads=1)
+        npass_ser = parquet_debug_sort_radix_passes()
+        call pf_argsort(narrowv, got, threads=4)
+        npass_par = parquet_debug_sort_radix_passes()
+        call parquet_set_sort_counting_path(.true.)
+        call check(error, all(got == ref), &
+            "a narrow-range integer key far from zero must sort the same threaded as serial")
+        if (allocated(error)) return
+        call check(error, npass_ser > 0_int64 .and. npass_par > 0_int64, &
+            "the narrow-range fixture must actually reach the radix on both arms")
         if (allocated(error)) return
         !
         call force_parallel_threshold(0_int64)

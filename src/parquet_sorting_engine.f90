@@ -1078,6 +1078,119 @@ contains
     end subroutine sort_radix_bucket
 
 #ifdef _OPENMP
+    !> The tier split, threaded — `feature_sort_parallel.md` §11 step 1's last whole-column phase.
+    !!
+    !! Classifies every row as value / NaN / null, compacts the value rows into `ra(1:nv)` **in row
+    !! order**, and reduces an integer key's value range along the way. The serial original does all
+    !! of that in one pass; this needs **two**, because a stable compaction cannot know where a
+    !! thread's output begins until every earlier thread has been counted.
+    !!
+    !! **Reading the column twice is the price of stability and it is worth paying.** The alternative
+    !! — recording each row's class in a byte array during pass 1 — trades a recomputed test for an
+    !! extra `n` bytes written and read, and the test is a null-bit load or a NaN compare, i.e.
+    !! cheaper than the memory traffic it would save. For the common null-free integer column neither
+    !! branch is taken at all and pass 2 is a bare `ra(k) = i`.
+    !!
+    !! **The value-range scan stays folded into pass 1**, for the reason the serial code documents:
+    !! `key%ints(i)` is read SEQUENTIALLY here, where a separate gathered scan over `ra` would not be.
+    !!
+    !! Nulls never reach the range scan — the same `cycle` ordering as the serial loop — so a null
+    !! row's undefined key slot cannot widen the range and cost the narrow-integer optimisation.
+    subroutine sort_tier_split_par(key, n, has_nulls, is_real, is_int, nt, ra, nv, nnan, nnull, vmin, vmax)
+        type(sort_key_buf), intent(in) :: key   !! the bound key.
+        integer(int64), intent(in) :: n         !! rows in the column.
+        logical, intent(in) :: has_nulls        !! whether the key carries a validity mask.
+        logical, intent(in) :: is_real          !! whether a NaN tier is possible.
+        logical, intent(in) :: is_int           !! whether the value range is wanted.
+        integer, intent(in) :: nt               !! team size.
+        integer(int64), intent(inout) :: ra(:)  !! receives the value-tier row indices, in row order.
+        integer(int64), intent(out) :: nv       !! value-tier rows.
+        integer(int64), intent(out) :: nnan     !! NaN-tier rows.
+        integer(int64), intent(out) :: nnull    !! null-tier rows.
+        integer(int64), intent(out) :: vmin, vmax !! the integer key's range over its VALID rows.
+        !
+        integer(int64), allocatable :: cv(:), cn(:), cu(:) !! per-thread value / NaN / null counts.
+        integer(int64), allocatable :: lo_t(:), hi_t(:)    !! per-thread value range.
+        integer(int64) :: i, k, t, held, c_lo, c_hi
+        integer :: tid, tt, ios
+        real(real64) :: x
+        !
+        nv = 0_int64
+        nnan = 0_int64
+        nnull = 0_int64
+        vmin = huge(0_int64)
+        vmax = -huge(0_int64) - 1_int64
+        allocate(cv(0:nt - 1), cn(0:nt - 1), cu(0:nt - 1), lo_t(0:nt - 1), hi_t(0:nt - 1), stat=ios)
+        if (ios /= 0) then
+            nv = -1_int64   ! the caller's signal to take the serial path
+            return
+        end if
+        !
+        !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, i, x, t)
+        tid = omp_get_thread_num()
+        call sort_chunk_bounds(n, nt, tid, c_lo, c_hi)
+        cv(tid) = 0_int64
+        cn(tid) = 0_int64
+        cu(tid) = 0_int64
+        lo_t(tid) = huge(0_int64)
+        hi_t(tid) = -huge(0_int64) - 1_int64
+        do i = c_lo, c_hi
+            if (has_nulls) then
+                if (key%valid(i) == 0_c_int8_t) then
+                    cu(tid) = cu(tid) + 1_int64
+                    cycle
+                end if
+            end if
+            if (is_real) then
+                ! `x /= x` rather than `ieee_is_nan` -- see this submodule's header.
+                x = key%reals(i)
+                if (x /= x) then
+                    cn(tid) = cn(tid) + 1_int64
+                    cycle
+                end if
+            end if
+            cv(tid) = cv(tid) + 1_int64
+            if (is_int) then
+                t = key%ints(i)
+                if (t < lo_t(tid)) lo_t(tid) = t
+                if (t > hi_t(tid)) hi_t(tid) = t
+            end if
+        end do
+        !$omp end parallel
+        !
+        ! Prefix over threads, and the totals. `cv` becomes each thread's first output slot, which is
+        ! what makes the compaction stable: thread order is chunk order is row order.
+        t = 1_int64
+        do tt = 0, nt - 1
+            held = cv(tt)
+            cv(tt) = t
+            t = t + held
+            nnan = nnan + cn(tt)
+            nnull = nnull + cu(tt)
+            if (lo_t(tt) < vmin) vmin = lo_t(tt)
+            if (hi_t(tt) > vmax) vmax = hi_t(tt)
+        end do
+        nv = t - 1_int64
+        !
+        !$omp parallel num_threads(nt) default(shared) private(tid, c_lo, c_hi, i, k, x)
+        tid = omp_get_thread_num()
+        call sort_chunk_bounds(n, nt, tid, c_lo, c_hi)
+        k = cv(tid)
+        do i = c_lo, c_hi
+            if (has_nulls) then
+                if (key%valid(i) == 0_c_int8_t) cycle
+            end if
+            if (is_real) then
+                x = key%reals(i)
+                if (x /= x) cycle
+            end if
+            ra(k) = i
+            k = k + 1_int64
+        end do
+        !$omp end parallel
+        deallocate(cv, cn, cu, lo_t, hi_t)
+    end subroutine sort_tier_split_par
+
     !> Per-thread counts of digit `p` over `1..nv`, one column per thread.
     !!
     !! **Must be rebuilt after ANY reordering, and that is the trap this whole area carries.** Reusing
@@ -1400,6 +1513,7 @@ contains
         integer(int64) :: c_lo, c_hi !! one thread's chunk of the image array, inclusive.
         logical :: hist_done !! .true. once the histogram is built, by whichever of the two paths.
         logical :: did_par   !! .true. once Design A or B has ordered the value tier.
+        logical :: tier_done !! .true. once the tier split has been done by the threaded path.
         integer(int64), allocatable :: ra(:), rb(:) !! the row indices travelling with them.
         integer(int64), allocatable :: tmp(:)       !! `move_alloc` intermediary for the swap.
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
@@ -1431,10 +1545,29 @@ contains
         !
         ! Pass 1 -- tier split and key transform, walked in ROW ORDER so that every tie and both
         ! non-value tiers keep file order with no later stable pass needed.
-        nv = 0_int64
-        nnan = 0_int64
-        nnull = 0_int64
+        !
+        ! Threaded when there is a team, by the two-pass count-prefix-fill in `sort_tier_split_par`;
+        ! it reports `nv < 0` if it could not allocate its per-thread counters, whereupon the serial
+        ! loop below does the whole job. This is the last of §11 step 1's whole-column phases: it
+        ! reads every row of the column and, left serial, it is a pure Amdahl term under every
+        ! parallel design.
+        tier_done = .false.
+#ifdef _OPENMP
+        if (nt > 1) then
+            call sort_tier_split_par(keys(1), n, has_nulls, is_real, is_int, nt, ra, nv, nnan, nnull, &
+                vmin, vmax)
+            tier_done = (nv >= 0_int64)
+        end if
+#endif
+        if (.not. tier_done) then
+            nv = 0_int64
+            nnan = 0_int64
+            nnull = 0_int64
+        end if
         do i = 1_int64, n
+            ! An `exit` rather than wrapping the loop, so the serial body below stays exactly as it
+            ! was and this reads as one added line rather than a re-indentation of thirty.
+            if (tier_done) exit
             if (has_nulls) then
                 if (keys(1)%valid(i) == 0_c_int8_t) then
                     nnull = nnull + 1_int64

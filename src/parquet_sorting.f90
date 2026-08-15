@@ -120,6 +120,10 @@ module parquet_sorting
     ! Both are process-global saved state, which is why the `sorting` and `sort` suites must stay
     ! excluded from test-drive's per-test parallelism (test/run_tester.f90) -- they already are.
     logical, save :: dbg_fortran_engine = .false. !! .true. routes `drive_engine` to the Fortran sort.
+    !> .true. once the affinity-clamp warning has been emitted, so it is said once per process
+    !! rather than once per sort. Written without synchronisation -- see `warn_thread_clamp`, which
+    !! explains why a duplicated diagnostic is preferable to a lock on every sort's resolution path.
+    logical, save :: warned_thread_clamp = .false.
     !> Overrides the introsort's depth limit; NEGATIVE restores the computed `2*floor(log2(n))`.
     !!
     !! Zero forces the heapsort fallback on the first partition, which is otherwise unreachable from

@@ -1761,7 +1761,7 @@ contains
     module procedure pf_sort_threads
         use parquet_settings, only : parquet_get_sort_threads
 #ifdef _OPENMP
-        use omp_lib, only : omp_get_max_threads, omp_in_parallel
+        use omp_lib, only : omp_get_max_threads, omp_in_parallel, omp_get_num_procs
 #endif
         integer :: cap
         !
@@ -1785,9 +1785,19 @@ contains
         ! reader is how the two would come to disagree.
         cap = parquet_get_sort_threads()
         if (cap > 0 .and. cap < n) n = cap
+#ifdef _OPENMP
+        ! **Never report more threads than can actually run.** `omp_get_max_threads` answers an ICV,
+        ! which is what the environment ASKED for; `omp_get_num_procs` answers what this thread's
+        ! affinity mask allows. They differ whenever the initial thread was bound before `main` --
+        ! see `resolve_thread_count`, which clamps for the same reason and documents the trap.
+        if (n > omp_get_num_procs()) n = max(1, omp_get_num_procs())
+#endif
     end procedure pf_sort_threads
     !
     module procedure resolve_thread_count
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_num_procs
+#endif
         !
         if (present(threads)) then
             ! An explicit request is honoured wherever it is made, including inside a parallel
@@ -1799,7 +1809,69 @@ contains
         end if
         ! Never more threads than rows; the C++ side clamps again by its own minimum chunk size.
         if (count > nrows) count = max(nrows, 1_int64)
+#ifdef _OPENMP
+        ! **Clamped to the processors actually available, and this is the ONE place that protects
+        ! the tail.** The engine has always clamped separately (`sort_build_permutation_threaded`),
+        ! so a bound process merely sorted serially -- but key extraction, the identity fill and the
+        ! narrowing size their teams from this count and had no clamp at all, so they opened a full
+        ! team on however few processors the mask allowed. Measured on machine B with
+        ! `OMP_PLACES=cores`, where `omp_get_num_procs()` reports 2 while `omp_get_max_threads()`
+        ! reports 64: extraction went **0.35 -> 2.58 ns/element**, a 7.3x loss from 32x
+        ! oversubscription of two cores, while the engine only went serial.
+        !
+        ! **An explicit `threads=` is clamped too**, deliberately, unlike the parallel-region rule
+        ! above which honours it. Those are different questions: a caller inside a parallel region
+        ! has said something the library should obey, whereas a caller asking for 64 threads on a
+        ! 2-processor mask has asked for something that cannot happen -- the threads would time-share
+        ! and run slower than the serial path.
+        !
+        ! **The clamp cannot be avoided by asking the place list instead.** `omp_get_num_places()`
+        ! and `omp_get_place_num_procs()` were measured on a process whose initial thread was
+        ! pre-bound to 2 CPUs: they report 2 places totalling 2 processors, not the machine's 384,
+        ! and a team of 64 then lands on 2 distinct CPUs. The true machine size is not recoverable
+        ! from inside the process. See feature_sort_report.md sections 5 and 11.
+        if (count > int(omp_get_num_procs(), int64)) then
+            count = max(1_int64, int(omp_get_num_procs(), int64))
+            call warn_thread_clamp(count)
+        end if
+#endif
     end procedure resolve_thread_count
+
+    !> Warns, ONCE per process, that the resolved thread count was cut to the affinity mask.
+    !!
+    !! **Silent by construction otherwise, which is why this exists.** The clamp turns a 64-thread
+    !! sort into a 2-thread one with no error and no output; on machine B under `OMP_PLACES=cores`
+    !! that is the difference between 1.69 and 36.7 ns/element, and nothing in the result reveals it.
+    !!
+    !! **It fires only when the clamp actually bit**, which is what keeps it quiet in the cases that
+    !! are not defects: a job confined to a 4-processor cpuset with `OMP_NUM_THREADS` unset resolves
+    !! to 4 and never reaches here, and one rank pinned per core with `OMP_NUM_THREADS=1` likewise.
+    !! What it does catch is a caller who asked for more -- by environment or by an explicit
+    !! `threads=` -- than the binding permits.
+    !!
+    !! The `saved` flag is written without synchronisation. A concurrent first sort could print the
+    !! line twice; it can never print a wrong one, and guarding it would put a lock on the resolution
+    !! path of every sort to save a duplicated diagnostic.
+    subroutine warn_thread_clamp(count)
+        use parquet_settings, only : parquet_emit_warning, parquet_output_is_suppressed
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_max_threads
+#endif
+        integer(int64), intent(in) :: count !! the clamped count, for the message.
+        character(len=32) :: got, asked
+        !
+        if (warned_thread_clamp) return
+        if (parquet_output_is_suppressed()) return
+        warned_thread_clamp = .true.
+#ifdef _OPENMP
+        write (got, '(i0)') count
+        write (asked, '(i0)') omp_get_max_threads()
+        call parquet_emit_warning("sorting is limited to " // trim(got) // &
+            " thread(s) because this process's CPU affinity allows no more, although " // &
+            trim(asked) // " were requested. This usually means OMP_PROC_BIND is set with " // &
+            "OMP_PLACES=cores; OMP_PLACES=sockets avoids it.")
+#endif
+    end subroutine warn_thread_clamp
     !
     module procedure tail_team
         use parquet_settings, only : parquet_get_sort_parallel_min_rows

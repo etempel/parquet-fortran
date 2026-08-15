@@ -43,3 +43,55 @@ total = sum(p)
 On the shipped code a per-cell loop measured **4.17x** (gfortran) and **3.93x** (ifx) the name form's throughput, and a realistic four-column loop with arithmetic **4.43x** and **4.08x**; the pointer form is a plain array read with no call at all — on the same machine it was **21 ns/row against 167** for four columns. See [A column handle](../tables/table.html#a-column-handle) for what a handle can do and the two traps to avoid — chiefly that making one is not free, so it belongs outside the loop, and that making one *reads* the column, so a metadata sweep should use the by-position queries instead.
 
 **Making a handle is not free, so do not make one per cell** — re-fetching one every iteration measured *worse than the name form it replaced*, by 39.1 ns per cell under gfortran and 51.4 under ifx. For a row handle the construction dominates its use: `r = t%row(i)` followed by one `r%get` cost **1.37x–2.50x** (three toolchains) what the same `r%get` costs on a handle that already exists. A loop over *rows* cannot hoist a row handle — the handle names the row — so for a column-at-a-time sweep reach for a column handle or a `%col` pointer instead, and keep the row handle for what it is good at: passing one row to a procedure, and reading several columns of the same row.
+
+## Thread placement: `OMP_PLACES` and `OMP_PROC_BIND`
+
+Threaded sorting, table prefetching and the string bulk paths all size their teams from what
+OpenMP reports as available. That report depends on the **CPU affinity of the process**, and one
+common environment setting reduces it to almost nothing.
+
+**Set `OMP_PLACES=sockets` if you set `OMP_PROC_BIND` at all:**
+
+```bash
+export OMP_PROC_BIND=spread
+export OMP_PLACES=sockets
+```
+
+**What goes wrong with `OMP_PLACES=cores`.** With binding active, the initial thread is pinned to a
+single place before your program's first statement runs, and `omp_get_num_procs()` then reports the
+size of that one place rather than the machine. The library clamps every sort to that number,
+because threads cannot escape the mask -- a team asked for 64 on a two-processor mask really does
+land on two processors and time-share them, which is slower than not threading at all.
+
+Measured on a 192-core dual-socket machine: with `OMP_PLACES=cores` the sort ran at **36.7
+nanoseconds per row at every thread count from 1 to 64**, against **1.7** with `OMP_PLACES=sockets`
+-- a 21x loss, with no error and no failure. `OMP_PROC_BIND=close` with `OMP_PLACES=cores` behaves
+the same way.
+
+**The library warns when this happens**, once per process:
+
+```
+WARNING: sorting is limited to 2 thread(s) because this process's CPU affinity allows no more,
+although 64 were requested. This usually means OMP_PROC_BIND is set with OMP_PLACES=cores;
+OMP_PLACES=sockets avoids it.
+```
+
+The warning fires only when the clamp actually reduced the thread count, so a job deliberately
+confined to a small cpuset -- or one rank pinned per core with `OMP_NUM_THREADS=1` -- stays quiet.
+It follows [the verbosity setting](settings.html#terminal-output), so `parquet_set_verbosity`
+suppresses it along with every other warning.
+
+**Checking what a sort will actually use**, without waiting for a warning:
+
+```fortran
+n = pf_sort_threads()   ! the resolved count for the current context
+```
+
+This already accounts for the affinity clamp, for `parquet_set_sort_threads`, and for the rule that
+a sort inside your own OpenMP parallel region stays serial. If it reports a small number on a large
+machine, the placement above is the first thing to check.
+
+**Why the library cannot simply fix this itself.** The true machine size is not recoverable from
+inside a bound process: the OpenMP place list is intersected with the affinity mask too, so
+`omp_get_num_places()` and `omp_get_place_num_procs()` report the mask rather than the hardware.
+The environment is the only place this can be corrected.

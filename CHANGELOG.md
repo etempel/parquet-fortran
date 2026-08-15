@@ -246,6 +246,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   automatically — and stay serial inside an OpenMP parallel region, since a nested region is the
   caller's business. An optional `threads=` turns that down (`threads=1` forces serial) and is
   honoured wherever it is given; `pf_sort_threads()` reports what an automatic sort would do. The
+  resolved count is also clamped to the CPU affinity the process actually has, since threads cannot
+  escape their mask, and a one-per-process warning says so when the clamp bites -- an
+  `OMP_PROC_BIND` setting combined with `OMP_PLACES=cores` otherwise disables threading silently
+  (see [Performance](doc/pages/operating/performance.md#thread-placement-omp_places-and-omp_proc_bind)). The
   answer is bit-identical at every thread count, because the comparator is a total order under
   which no two rows compare equal, so `threads=` is purely a performance control. The chunks each
   thread sorts are combined by a **co-ranked merge** — every round is partitioned by binary search

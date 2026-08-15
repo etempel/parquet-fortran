@@ -1889,13 +1889,103 @@ EXTRACT_LOOP = {
 }
 
 
+def emit_extract_par(w, t):
+    """The THREADED arm of one `extract_<tag>`, emitted as its own contained procedure.
+
+    Deliberately not written inline in `extract_<tag>`: an `!$omp parallel do` sitting in that
+    procedure perturbs gfortran's codegen for the SERIAL branch badly enough to cost 2.4x on a
+    statement-for-statement unchanged body. The measurement is in the comment this generator
+    emits into each caller, and in feature_sort.md 4k/4l.
+
+    The extraction loop body is DERIVED from `EXTRACT_LOOP` rather than written a second time,
+    so the threaded and serial arms cannot drift apart.
+    """
+    tag, decl, what, family, _, _, _ = t
+    if family not in ("int", "int64", "real", "real64"):
+        return
+    store = "ints" if family in ("int", "int64") else "reals"
+    sdecl = "integer(int64)" if store == "ints" else "real(real64)"
+    zero = "0_int64" if store == "ints" else "0.0_real64"
+    body = EXTRACT_LOOP[tag].replace(f"buf(1)%{store}", "dst")
+    if "dst(k)" not in body:                      # the rename must have landed; see the docstring
+        raise SystemExit(f"emit_extract_par: could not retarget EXTRACT_LOOP[{tag!r}] onto `dst`")
+    w(f"    !> Threaded pre-fill and extraction for `extract_{tag}` -- the {what} arm.")
+    w("    !!")
+    w("    !! **The pre-fill and the extraction share ONE static schedule, and that pairing is the")
+    w("    !! point.** Whichever pass writes a page first decides which NUMA node it lives on for the")
+    w("    !! rest of the sort, so a serial blanket fill puts the whole key buffer on the master")
+    w("    !! thread's node and every other thread then reads it across the interconnect.")
+    w("    !!")
+    w("    !! **Do NOT drop the fill as a redundant pass**, however obviously the second loop covers")
+    w("    !! every one of `1..n`. Removing it measured 23% SLOWER at 64 threads (6.46 against 5.26")
+    w("    !! ns/element, f64, n = 5e6, ifx): the fill is a pure sequential sweep and faults pages far")
+    w("    !! faster than the extraction loop, which interleaves a read of `values`.")
+    w(f"    subroutine extract_{tag}_par(dst, values, n, team)")
+    w(f"        {sdecl}, intent(out), contiguous :: dst(:) !! the key buffer to fill.")
+    w(f"        {decl}, intent(in) :: values(:) !! the caller's values.")
+    w("        integer(int64), intent(in) :: n !! elements to extract.")
+    w("        integer, intent(in) :: team !! threads to use; the caller has already checked it is > 1.")
+    w("        integer(int64) :: k")
+    w("        !")
+    w("        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)")
+    w("        do k = 1_int64, n")
+    w(f"            dst(k) = {zero}")
+    w("        end do")
+    w("        !$omp end parallel do")
+    w("        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)")
+    w("        do k = 1_int64, n")
+    w(body)
+    w("        end do")
+    w("        !$omp end parallel do")
+    w(f"    end subroutine extract_{tag}_par")
+    w("    !")
+
+
+def emit_extract_ser(w, t):
+    """The SERIAL arm of one `extract_<tag>`, emitted as its own contained procedure.
+
+    Companion to `emit_extract_par`, and separate for a related but distinct reason: with the
+    loop written inline in `extract_<tag>`, it sits after a `resolve_thread_count` call that the
+    compiler cannot prove leaves the key buffer alone, so the copy is generated conservatively.
+    In its own procedure it has no call in front of it at all. Body derived from `EXTRACT_LOOP`.
+    """
+    tag, decl, what, family, _, _, _ = t
+    if family not in ("int", "int64", "real", "real64"):
+        return
+    store = "ints" if family in ("int", "int64") else "reals"
+    sdecl = "integer(int64)" if store == "ints" else "real(real64)"
+    zero = "0_int64" if store == "ints" else "0.0_real64"
+    body = EXTRACT_LOOP[tag].replace(f"buf(1)%{store}", "dst")
+    if "dst(k)" not in body:
+        raise SystemExit(f"emit_extract_ser: could not retarget EXTRACT_LOOP[{tag!r}] onto `dst`")
+    w(f"    !> Serial pre-fill and extraction for `extract_{tag}` -- the {what} arm.")
+    w("    !!")
+    w("    !! The blanket fill is kept for the reason given on the threaded twin: it is a sequential")
+    w("    !! sweep that faults pages faster than the extraction loop, which interleaves a read of")
+    w("    !! `values`. Dropping it measured 23% SLOWER at 64 threads.")
+    w(f"    subroutine extract_{tag}_ser(dst, values, n)")
+    w(f"        {sdecl}, intent(out), contiguous :: dst(:) !! the key buffer to fill.")
+    w(f"        {decl}, intent(in) :: values(:) !! the caller's values.")
+    w("        integer(int64), intent(in) :: n !! elements to extract.")
+    w("        integer(int64) :: k")
+    w("        !")
+    w(f"        dst = {zero}")
+    w("        do k = 1_int64, n")
+    w(body)
+    w("        end do")
+    w(f"    end subroutine extract_{tag}_ser")
+    w("    !")
+
+
 def emit_extract(w, t):
     """The body of one `extract_<tag>` module procedure."""
     tag, decl, what, family, nulls, _, _ = t
     w(f"    module procedure extract_{tag}")
     # -- declarations
     if family in ("int", "int64", "real", "real64"):
-        w("        integer(int64) :: k, n, nth")
+        # `k` only survives here for the elem-null families, whose mask loop still runs inline --
+        # both extraction arms now live in extract_<tag>_par/_ser and carry their own counter.
+        w("        integer(int64) :: k, n, nth" if nulls == "elem" else "        integer(int64) :: n, nth")
         w("        integer :: team")
     elif family == "chr":
         w("        integer(int64) :: k, n, total, pos, j, ln")
@@ -1953,24 +2043,21 @@ def emit_extract(w, t):
         w("        ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,")
         w("        ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only")
         w("        ! thing they could ever have got.")
+        w("        !")
+        w("        ! **The threaded arm lives in `extract_" + tag + "_par`, and keeping it OUT of this")
+        w("        ! procedure is load-bearing rather than tidiness.** With the two `!$omp parallel do`")
+        w("        ! regions written inline here, gfortran's codegen for the SERIAL branch below -- whose")
+        w("        ! statements are unchanged either way -- measured **2.4x slower**: 0.251 -> 0.609")
+        w("        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,")
+        w("        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller")
+        w("        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing")
+        w("        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.")
         w("        call resolve_thread_count(threads, n, nth)")
         w("        team = tail_team(nth, n)")
         w("        if (team > 1) then")
-        w(f"            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)")
-        w("            do k = 1_int64, n")
-        w(f"                buf(1)%{store}(k) = {zero}")
-        w("            end do")
-        w("            !$omp end parallel do")
-        w(f"            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)")
-        w("            do k = 1_int64, n")
-        w(EXTRACT_LOOP[tag])
-        w("            end do")
-        w("            !$omp end parallel do")
+        w(f"            call extract_{tag}_par(buf(1)%{store}, values, n, team)")
         w("        else")
-        w(f"            buf(1)%{store} = {zero}")
-        w("            do k = 1_int64, n")
-        w(EXTRACT_LOOP[tag])
-        w("            end do")
+        w(f"            call extract_{tag}_ser(buf(1)%{store}, values, n)")
         w("        end if")
         if nulls == "elem":
             w("        allocate(mask(max(n, 1_int64)))")
@@ -2087,6 +2174,12 @@ contains
     !''')
     for t in TYPES:
         emit_extract(w, t)
+    # The threaded arms, one per numeric tag. Separate procedures on purpose -- see
+    # emit_extract_par's docstring; an inline !$omp region costs the serial branch 2.4x.
+    for t in TYPES:
+        emit_extract_par(w, t)
+    for t in TYPES:
+        emit_extract_ser(w, t)
 
     # ---- parquet_column sub-extractors (plain contained procedures) ----
     w('''    !> Reads every integer-valued scalar kind of a column as int64 -- including logical and the

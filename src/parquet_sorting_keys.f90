@@ -24,7 +24,7 @@ submodule (parquet_sorting) parquet_sorting_keys
 contains
     !
     module procedure extract_i32
-        integer(int64) :: k, n, nth
+        integer(int64) :: n, nth
         integer :: team
         !
         n = size(values, kind=int64)
@@ -55,30 +55,27 @@ contains
         ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
         ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
         ! thing they could ever have got.
+        !
+        ! **The threaded arm lives in `extract_i32_par`, and keeping it OUT of this
+        ! procedure is load-bearing rather than tidiness.** With the two `!$omp parallel do`
+        ! regions written inline here, gfortran's codegen for the SERIAL branch below -- whose
+        ! statements are unchanged either way -- measured **2.4x slower**: 0.251 -> 0.609
+        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
+        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
+        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-                buf(1)%ints(k) = 0_int64
-            end do
-            !$omp end parallel do
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-            buf(1)%ints(k) = int(values(k), int64)
-            end do
-            !$omp end parallel do
+            call extract_i32_par(buf(1)%ints, values, n, team)
         else
-            buf(1)%ints = 0_int64
-            do k = 1_int64, n
-            buf(1)%ints(k) = int(values(k), int64)
-            end do
+            call extract_i32_ser(buf(1)%ints, values, n)
         end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_i32
     !
     module procedure extract_i64
-        integer(int64) :: k, n, nth
+        integer(int64) :: n, nth
         integer :: team
         !
         n = size(values, kind=int64)
@@ -109,30 +106,27 @@ contains
         ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
         ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
         ! thing they could ever have got.
+        !
+        ! **The threaded arm lives in `extract_i64_par`, and keeping it OUT of this
+        ! procedure is load-bearing rather than tidiness.** With the two `!$omp parallel do`
+        ! regions written inline here, gfortran's codegen for the SERIAL branch below -- whose
+        ! statements are unchanged either way -- measured **2.4x slower**: 0.251 -> 0.609
+        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
+        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
+        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-                buf(1)%ints(k) = 0_int64
-            end do
-            !$omp end parallel do
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-            buf(1)%ints(k) = values(k)
-            end do
-            !$omp end parallel do
+            call extract_i64_par(buf(1)%ints, values, n, team)
         else
-            buf(1)%ints = 0_int64
-            do k = 1_int64, n
-            buf(1)%ints(k) = values(k)
-            end do
+            call extract_i64_ser(buf(1)%ints, values, n)
         end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_i64
     !
     module procedure extract_f32
-        integer(int64) :: k, n, nth
+        integer(int64) :: n, nth
         integer :: team
         !
         n = size(values, kind=int64)
@@ -163,30 +157,27 @@ contains
         ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
         ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
         ! thing they could ever have got.
+        !
+        ! **The threaded arm lives in `extract_f32_par`, and keeping it OUT of this
+        ! procedure is load-bearing rather than tidiness.** With the two `!$omp parallel do`
+        ! regions written inline here, gfortran's codegen for the SERIAL branch below -- whose
+        ! statements are unchanged either way -- measured **2.4x slower**: 0.251 -> 0.609
+        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
+        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
+        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-                buf(1)%reals(k) = 0.0_real64
-            end do
-            !$omp end parallel do
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-            buf(1)%reals(k) = real(values(k), real64)
-            end do
-            !$omp end parallel do
+            call extract_f32_par(buf(1)%reals, values, n, team)
         else
-            buf(1)%reals = 0.0_real64
-            do k = 1_int64, n
-            buf(1)%reals(k) = real(values(k), real64)
-            end do
+            call extract_f32_ser(buf(1)%reals, values, n)
         end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_f32
     !
     module procedure extract_f64
-        integer(int64) :: k, n, nth
+        integer(int64) :: n, nth
         integer :: team
         !
         n = size(values, kind=int64)
@@ -217,30 +208,27 @@ contains
         ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
         ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
         ! thing they could ever have got.
+        !
+        ! **The threaded arm lives in `extract_f64_par`, and keeping it OUT of this
+        ! procedure is load-bearing rather than tidiness.** With the two `!$omp parallel do`
+        ! regions written inline here, gfortran's codegen for the SERIAL branch below -- whose
+        ! statements are unchanged either way -- measured **2.4x slower**: 0.251 -> 0.609
+        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
+        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
+        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-                buf(1)%reals(k) = 0.0_real64
-            end do
-            !$omp end parallel do
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-            buf(1)%reals(k) = values(k)
-            end do
-            !$omp end parallel do
+            call extract_f64_par(buf(1)%reals, values, n, team)
         else
-            buf(1)%reals = 0.0_real64
-            do k = 1_int64, n
-            buf(1)%reals(k) = values(k)
-            end do
+            call extract_f64_ser(buf(1)%reals, values, n)
         end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_f64
     !
     module procedure extract_bool
-        integer(int64) :: k, n, nth
+        integer(int64) :: n, nth
         integer :: team
         !
         n = size(values, kind=int64)
@@ -271,24 +259,21 @@ contains
         ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
         ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
         ! thing they could ever have got.
+        !
+        ! **The threaded arm lives in `extract_bool_par`, and keeping it OUT of this
+        ! procedure is load-bearing rather than tidiness.** With the two `!$omp parallel do`
+        ! regions written inline here, gfortran's codegen for the SERIAL branch below -- whose
+        ! statements are unchanged either way -- measured **2.4x slower**: 0.251 -> 0.609
+        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
+        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
+        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-                buf(1)%ints(k) = 0_int64
-            end do
-            !$omp end parallel do
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-            buf(1)%ints(k) = merge(1_int64, 0_int64, values(k))
-            end do
-            !$omp end parallel do
+            call extract_bool_par(buf(1)%ints, values, n, team)
         else
-            buf(1)%ints = 0_int64
-            do k = 1_int64, n
-            buf(1)%ints(k) = merge(1_int64, 0_int64, values(k))
-            end do
+            call extract_bool_ser(buf(1)%ints, values, n)
         end if
         if (present(is_valid)) call valid_from_mask(is_valid, n, proc, buf(1)%valid)
     end procedure extract_bool
@@ -356,24 +341,21 @@ contains
         ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
         ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
         ! thing they could ever have got.
+        !
+        ! **The threaded arm lives in `extract_date_par`, and keeping it OUT of this
+        ! procedure is load-bearing rather than tidiness.** With the two `!$omp parallel do`
+        ! regions written inline here, gfortran's codegen for the SERIAL branch below -- whose
+        ! statements are unchanged either way -- measured **2.4x slower**: 0.251 -> 0.609
+        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
+        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
+        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-                buf(1)%ints(k) = 0_int64
-            end do
-            !$omp end parallel do
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-            buf(1)%ints(k) = int(values(k)%raw(), int64)
-            end do
-            !$omp end parallel do
+            call extract_date_par(buf(1)%ints, values, n, team)
         else
-            buf(1)%ints = 0_int64
-            do k = 1_int64, n
-            buf(1)%ints(k) = int(values(k)%raw(), int64)
-            end do
+            call extract_date_ser(buf(1)%ints, values, n)
         end if
         allocate(mask(max(n, 1_int64)))
         ! Kept blanket for the same measured reason as the value buffer above.
@@ -417,24 +399,21 @@ contains
         ! no thread argument at all (`pf_sort_keys%add`, `pf_merge`, `pf_is_sorted`,
         ! `pf_partial_*`) pass nothing and get the automatic answer, which is the only
         ! thing they could ever have got.
+        !
+        ! **The threaded arm lives in `extract_time_par`, and keeping it OUT of this
+        ! procedure is load-bearing rather than tidiness.** With the two `!$omp parallel do`
+        ! regions written inline here, gfortran's codegen for the SERIAL branch below -- whose
+        ! statements are unchanged either way -- measured **2.4x slower**: 0.251 -> 0.609
+        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
+        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
+        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-                buf(1)%ints(k) = 0_int64
-            end do
-            !$omp end parallel do
-            !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
-            do k = 1_int64, n
-            buf(1)%ints(k) = values(k)%raw()
-            end do
-            !$omp end parallel do
+            call extract_time_par(buf(1)%ints, values, n, team)
         else
-            buf(1)%ints = 0_int64
-            do k = 1_int64, n
-            buf(1)%ints(k) = values(k)%raw()
-            end do
+            call extract_time_ser(buf(1)%ints, values, n)
         end if
         allocate(mask(max(n, 1_int64)))
         ! Kept blanket for the same measured reason as the value buffer above.
@@ -513,6 +492,335 @@ contains
         end select
         call col_valid_flags(values, n, buf)
     end procedure extract_col
+    !
+    !> Threaded pre-fill and extraction for `extract_i32` -- the 32-bit integer arm.
+    !!
+    !! **The pre-fill and the extraction share ONE static schedule, and that pairing is the
+    !! point.** Whichever pass writes a page first decides which NUMA node it lives on for the
+    !! rest of the sort, so a serial blanket fill puts the whole key buffer on the master
+    !! thread's node and every other thread then reads it across the interconnect.
+    !!
+    !! **Do NOT drop the fill as a redundant pass**, however obviously the second loop covers
+    !! every one of `1..n`. Removing it measured 23% SLOWER at 64 threads (6.46 against 5.26
+    !! ns/element, f64, n = 5e6, ifx): the fill is a pure sequential sweep and faults pages far
+    !! faster than the extraction loop, which interleaves a read of `values`.
+    subroutine extract_i32_par(dst, values, n, team)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        integer(int32), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer, intent(in) :: team !! threads to use; the caller has already checked it is > 1.
+        integer(int64) :: k
+        !
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = 0_int64
+        end do
+        !$omp end parallel do
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = int(values(k), int64)
+        end do
+        !$omp end parallel do
+    end subroutine extract_i32_par
+    !
+    !> Threaded pre-fill and extraction for `extract_i64` -- the 64-bit integer arm.
+    !!
+    !! **The pre-fill and the extraction share ONE static schedule, and that pairing is the
+    !! point.** Whichever pass writes a page first decides which NUMA node it lives on for the
+    !! rest of the sort, so a serial blanket fill puts the whole key buffer on the master
+    !! thread's node and every other thread then reads it across the interconnect.
+    !!
+    !! **Do NOT drop the fill as a redundant pass**, however obviously the second loop covers
+    !! every one of `1..n`. Removing it measured 23% SLOWER at 64 threads (6.46 against 5.26
+    !! ns/element, f64, n = 5e6, ifx): the fill is a pure sequential sweep and faults pages far
+    !! faster than the extraction loop, which interleaves a read of `values`.
+    subroutine extract_i64_par(dst, values, n, team)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        integer(int64), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer, intent(in) :: team !! threads to use; the caller has already checked it is > 1.
+        integer(int64) :: k
+        !
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = 0_int64
+        end do
+        !$omp end parallel do
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = values(k)
+        end do
+        !$omp end parallel do
+    end subroutine extract_i64_par
+    !
+    !> Threaded pre-fill and extraction for `extract_f32` -- the 32-bit real arm.
+    !!
+    !! **The pre-fill and the extraction share ONE static schedule, and that pairing is the
+    !! point.** Whichever pass writes a page first decides which NUMA node it lives on for the
+    !! rest of the sort, so a serial blanket fill puts the whole key buffer on the master
+    !! thread's node and every other thread then reads it across the interconnect.
+    !!
+    !! **Do NOT drop the fill as a redundant pass**, however obviously the second loop covers
+    !! every one of `1..n`. Removing it measured 23% SLOWER at 64 threads (6.46 against 5.26
+    !! ns/element, f64, n = 5e6, ifx): the fill is a pure sequential sweep and faults pages far
+    !! faster than the extraction loop, which interleaves a read of `values`.
+    subroutine extract_f32_par(dst, values, n, team)
+        real(real64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        real(real32), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer, intent(in) :: team !! threads to use; the caller has already checked it is > 1.
+        integer(int64) :: k
+        !
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = 0.0_real64
+        end do
+        !$omp end parallel do
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = real(values(k), real64)
+        end do
+        !$omp end parallel do
+    end subroutine extract_f32_par
+    !
+    !> Threaded pre-fill and extraction for `extract_f64` -- the 64-bit real arm.
+    !!
+    !! **The pre-fill and the extraction share ONE static schedule, and that pairing is the
+    !! point.** Whichever pass writes a page first decides which NUMA node it lives on for the
+    !! rest of the sort, so a serial blanket fill puts the whole key buffer on the master
+    !! thread's node and every other thread then reads it across the interconnect.
+    !!
+    !! **Do NOT drop the fill as a redundant pass**, however obviously the second loop covers
+    !! every one of `1..n`. Removing it measured 23% SLOWER at 64 threads (6.46 against 5.26
+    !! ns/element, f64, n = 5e6, ifx): the fill is a pure sequential sweep and faults pages far
+    !! faster than the extraction loop, which interleaves a read of `values`.
+    subroutine extract_f64_par(dst, values, n, team)
+        real(real64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        real(real64), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer, intent(in) :: team !! threads to use; the caller has already checked it is > 1.
+        integer(int64) :: k
+        !
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = 0.0_real64
+        end do
+        !$omp end parallel do
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = values(k)
+        end do
+        !$omp end parallel do
+    end subroutine extract_f64_par
+    !
+    !> Threaded pre-fill and extraction for `extract_bool` -- the logical arm.
+    !!
+    !! **The pre-fill and the extraction share ONE static schedule, and that pairing is the
+    !! point.** Whichever pass writes a page first decides which NUMA node it lives on for the
+    !! rest of the sort, so a serial blanket fill puts the whole key buffer on the master
+    !! thread's node and every other thread then reads it across the interconnect.
+    !!
+    !! **Do NOT drop the fill as a redundant pass**, however obviously the second loop covers
+    !! every one of `1..n`. Removing it measured 23% SLOWER at 64 threads (6.46 against 5.26
+    !! ns/element, f64, n = 5e6, ifx): the fill is a pure sequential sweep and faults pages far
+    !! faster than the extraction loop, which interleaves a read of `values`.
+    subroutine extract_bool_par(dst, values, n, team)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        logical, intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer, intent(in) :: team !! threads to use; the caller has already checked it is > 1.
+        integer(int64) :: k
+        !
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = 0_int64
+        end do
+        !$omp end parallel do
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = merge(1_int64, 0_int64, values(k))
+        end do
+        !$omp end parallel do
+    end subroutine extract_bool_par
+    !
+    !> Threaded pre-fill and extraction for `extract_date` -- the date arm.
+    !!
+    !! **The pre-fill and the extraction share ONE static schedule, and that pairing is the
+    !! point.** Whichever pass writes a page first decides which NUMA node it lives on for the
+    !! rest of the sort, so a serial blanket fill puts the whole key buffer on the master
+    !! thread's node and every other thread then reads it across the interconnect.
+    !!
+    !! **Do NOT drop the fill as a redundant pass**, however obviously the second loop covers
+    !! every one of `1..n`. Removing it measured 23% SLOWER at 64 threads (6.46 against 5.26
+    !! ns/element, f64, n = 5e6, ifx): the fill is a pure sequential sweep and faults pages far
+    !! faster than the extraction loop, which interleaves a read of `values`.
+    subroutine extract_date_par(dst, values, n, team)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        type(parquet_date), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer, intent(in) :: team !! threads to use; the caller has already checked it is > 1.
+        integer(int64) :: k
+        !
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = 0_int64
+        end do
+        !$omp end parallel do
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = int(values(k)%raw(), int64)
+        end do
+        !$omp end parallel do
+    end subroutine extract_date_par
+    !
+    !> Threaded pre-fill and extraction for `extract_time` -- the time arm.
+    !!
+    !! **The pre-fill and the extraction share ONE static schedule, and that pairing is the
+    !! point.** Whichever pass writes a page first decides which NUMA node it lives on for the
+    !! rest of the sort, so a serial blanket fill puts the whole key buffer on the master
+    !! thread's node and every other thread then reads it across the interconnect.
+    !!
+    !! **Do NOT drop the fill as a redundant pass**, however obviously the second loop covers
+    !! every one of `1..n`. Removing it measured 23% SLOWER at 64 threads (6.46 against 5.26
+    !! ns/element, f64, n = 5e6, ifx): the fill is a pure sequential sweep and faults pages far
+    !! faster than the extraction loop, which interleaves a read of `values`.
+    subroutine extract_time_par(dst, values, n, team)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        type(parquet_time), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer, intent(in) :: team !! threads to use; the caller has already checked it is > 1.
+        integer(int64) :: k
+        !
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = 0_int64
+        end do
+        !$omp end parallel do
+        !$omp parallel do num_threads(team) default(shared) private(k) schedule(static)
+        do k = 1_int64, n
+            dst(k) = values(k)%raw()
+        end do
+        !$omp end parallel do
+    end subroutine extract_time_par
+    !
+    !> Serial pre-fill and extraction for `extract_i32` -- the 32-bit integer arm.
+    !!
+    !! The blanket fill is kept for the reason given on the threaded twin: it is a sequential
+    !! sweep that faults pages faster than the extraction loop, which interleaves a read of
+    !! `values`. Dropping it measured 23% SLOWER at 64 threads.
+    subroutine extract_i32_ser(dst, values, n)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        integer(int32), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer(int64) :: k
+        !
+        dst = 0_int64
+        do k = 1_int64, n
+            dst(k) = int(values(k), int64)
+        end do
+    end subroutine extract_i32_ser
+    !
+    !> Serial pre-fill and extraction for `extract_i64` -- the 64-bit integer arm.
+    !!
+    !! The blanket fill is kept for the reason given on the threaded twin: it is a sequential
+    !! sweep that faults pages faster than the extraction loop, which interleaves a read of
+    !! `values`. Dropping it measured 23% SLOWER at 64 threads.
+    subroutine extract_i64_ser(dst, values, n)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        integer(int64), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer(int64) :: k
+        !
+        dst = 0_int64
+        do k = 1_int64, n
+            dst(k) = values(k)
+        end do
+    end subroutine extract_i64_ser
+    !
+    !> Serial pre-fill and extraction for `extract_f32` -- the 32-bit real arm.
+    !!
+    !! The blanket fill is kept for the reason given on the threaded twin: it is a sequential
+    !! sweep that faults pages faster than the extraction loop, which interleaves a read of
+    !! `values`. Dropping it measured 23% SLOWER at 64 threads.
+    subroutine extract_f32_ser(dst, values, n)
+        real(real64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        real(real32), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer(int64) :: k
+        !
+        dst = 0.0_real64
+        do k = 1_int64, n
+            dst(k) = real(values(k), real64)
+        end do
+    end subroutine extract_f32_ser
+    !
+    !> Serial pre-fill and extraction for `extract_f64` -- the 64-bit real arm.
+    !!
+    !! The blanket fill is kept for the reason given on the threaded twin: it is a sequential
+    !! sweep that faults pages faster than the extraction loop, which interleaves a read of
+    !! `values`. Dropping it measured 23% SLOWER at 64 threads.
+    subroutine extract_f64_ser(dst, values, n)
+        real(real64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        real(real64), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer(int64) :: k
+        !
+        dst = 0.0_real64
+        do k = 1_int64, n
+            dst(k) = values(k)
+        end do
+    end subroutine extract_f64_ser
+    !
+    !> Serial pre-fill and extraction for `extract_bool` -- the logical arm.
+    !!
+    !! The blanket fill is kept for the reason given on the threaded twin: it is a sequential
+    !! sweep that faults pages faster than the extraction loop, which interleaves a read of
+    !! `values`. Dropping it measured 23% SLOWER at 64 threads.
+    subroutine extract_bool_ser(dst, values, n)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        logical, intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer(int64) :: k
+        !
+        dst = 0_int64
+        do k = 1_int64, n
+            dst(k) = merge(1_int64, 0_int64, values(k))
+        end do
+    end subroutine extract_bool_ser
+    !
+    !> Serial pre-fill and extraction for `extract_date` -- the date arm.
+    !!
+    !! The blanket fill is kept for the reason given on the threaded twin: it is a sequential
+    !! sweep that faults pages faster than the extraction loop, which interleaves a read of
+    !! `values`. Dropping it measured 23% SLOWER at 64 threads.
+    subroutine extract_date_ser(dst, values, n)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        type(parquet_date), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer(int64) :: k
+        !
+        dst = 0_int64
+        do k = 1_int64, n
+            dst(k) = int(values(k)%raw(), int64)
+        end do
+    end subroutine extract_date_ser
+    !
+    !> Serial pre-fill and extraction for `extract_time` -- the time arm.
+    !!
+    !! The blanket fill is kept for the reason given on the threaded twin: it is a sequential
+    !! sweep that faults pages faster than the extraction loop, which interleaves a read of
+    !! `values`. Dropping it measured 23% SLOWER at 64 threads.
+    subroutine extract_time_ser(dst, values, n)
+        integer(int64), intent(out), contiguous :: dst(:) !! the key buffer to fill.
+        type(parquet_time), intent(in) :: values(:) !! the caller's values.
+        integer(int64), intent(in) :: n !! elements to extract.
+        integer(int64) :: k
+        !
+        dst = 0_int64
+        do k = 1_int64, n
+            dst(k) = values(k)%raw()
+        end do
+    end subroutine extract_time_ser
     !
     !> Reads every integer-valued scalar kind of a column as int64 -- including logical and the
     !! two date/time kinds, whose stored values order exactly as the values they represent.

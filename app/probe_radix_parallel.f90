@@ -203,13 +203,31 @@ contains
         integer(int64), allocatable :: gb(:,:), hb(:,:)     !! the scatter partner.
         integer(int64), allocatable :: gref(:,:), href(:,:) !! the serial answer.
         integer :: ol(6), o, outer, inner, i, c
+        !> The column count, re-read from the ALLOCATED array rather than trusted from the dummy, and
+        !! used in place of `nc` in every expression below.
+        !!
+        !! **`volatile` is load-bearing here and is not decoration.** gfortran 14.2.1 at -O2/-O3
+        !! derives a bogus value range for `nc` in this procedure and folds it to 1 inside every
+        !! expression -- while still printing it correctly, allocating the right shape and sorting the
+        !! right number of columns. The damage was entirely silent: every ns/element figure came out
+        !! divided by `n` instead of `n*nc`, and `min(ol(i), nc)` collapsed to 1 for every entry, so
+        !! the outer ladder below skipped five of its six configurations and the sweep reduced to a
+        !! single data point that still looked like a valid run. Reading the count back from the
+        !! array descriptor defeats it, and `volatile` stops the same range propagation folding the
+        !! read itself. ifx 2026.1.1 is unaffected, as is gfortran at -O0/-O1 or with -fno-tree-vrp.
+        !! See feature_sort_report.md section 7.
+        integer, volatile :: ncol
         real(real64) :: t0, t1, best, tbase
         integer :: rep
         logical :: ok
         !
         allocate(g0(n, nc), h0(n, nc), ga(n, nc), ha(n, nc), gb(n, nc), hb(n, nc))
         allocate(gref(n, nc), href(n, nc))
-        do c = 1, nc
+        ncol = int(size(g0, 2))
+        if (ncol /= nc) write (output_unit, '(a,i0,a,i0,a)') &
+            "  *** COMPILER DEFECT: column count reads ", nc, " as a dummy argument but ", ncol, &
+            " from the allocated array. Using the latter; rebuild with -fno-tree-vrp."
+        do c = 1, ncol
             call make_input(g0(:, c), h0(:, c), n, shape_in)
             ! Decorrelate the columns so no two are the same sort.
             g0(:, c) = ieor(g0(:, c), int(c, int64) * 6364136223846793005_int64)
@@ -218,12 +236,12 @@ contains
         write (output_unit, '(a)') "=============================================================="
         write (output_unit, '(a)') "probe_radix_parallel -- NESTED sweep (outer columns x inner B)"
         write (output_unit, '(a)') "=============================================================="
-        write (output_unit, '(a,i0,a,i0,a,i0)') "  columns = ", nc, "   rows/column = ", n, &
-            "   total elements = ", n * int(nc, int64)
+        write (output_unit, '(a,i0,a,i0,a,i0)') "  columns = ", ncol, "   rows/column = ", n, &
+            "   total elements = ", n * int(ncol, int64)
         write (output_unit, '(a,i0,a,i0)') "  thread budget = ", budget, &
             "   omp_get_num_procs() = ", omp_get_num_procs()
         write (output_unit, '(a,f7.1,a)') "  scratch if every column is live at once = ", &
-            real(n, real64) * real(nc, real64) * 32.0_real64 / 1073741824.0_real64, " GiB"
+            real(n, real64) * real(ncol, real64) * 32.0_real64 / 1073741824.0_real64, " GiB"
         write (output_unit, '(a)') ""
         !
         ! Nested regions are INACTIVE by default (max_active_levels = 1), so an inner num_threads()
@@ -231,38 +249,38 @@ contains
         call omp_set_max_active_levels(2)
         !
         ! Reference: one column at a time, design B serial inside.
-        call run_nested(g0, h0, ga, ha, gb, hb, n, nc, 1, 1, reps, tbase)
+        call run_nested(g0, h0, ga, ha, gb, hb, n, ncol, 1, 1, reps, tbase)
         gref = ga
         href = ha
         write (output_unit, '(a)') "  outer  inner  total     ms     ns/elem  speedup  check"
         write (output_unit, '(a,i5,i7,i7,f9.2,f10.3,f9.2,a)') "  ", 1, 1, 1, tbase * 1.0e3_real64, &
-            tbase * 1.0e9_real64 / real(n * int(nc, int64), real64), 1.0_real64, "   --"
+            tbase * 1.0e9_real64 / real(n * int(ncol, int64), real64), 1.0_real64, "   --"
         !
         ol = [1, 2, 4, 8, 16, 32]
         do i = 1, size(ol)
-            outer = min(ol(i), nc)
+            outer = min(ol(i), ncol)
             if (i > 1) then
-                if (min(ol(i - 1), nc) == outer) cycle
+                if (min(ol(i - 1), ncol) == outer) cycle
             end if
             inner = max(1, budget / outer)
             if (outer * inner > 2 * omp_get_num_procs()) cycle
-            call run_nested(g0, h0, ga, ha, gb, hb, n, nc, outer, inner, reps, best)
-            ok = all(ga(1:n, 1:nc) == gref(1:n, 1:nc)) .and. all(ha(1:n, 1:nc) == href(1:n, 1:nc))
+            call run_nested(g0, h0, ga, ha, gb, hb, n, ncol, outer, inner, reps, best)
+            ok = all(ga(1:n, 1:ncol) == gref(1:n, 1:ncol)) .and. all(ha(1:n, 1:ncol) == href(1:n, 1:ncol))
             write (output_unit, '(a,i5,i7,i7,f9.2,f10.3,f9.2,a)') "  ", outer, inner, outer * inner, &
-                best * 1.0e3_real64, best * 1.0e9_real64 / real(n * int(nc, int64), real64), &
+                best * 1.0e3_real64, best * 1.0e9_real64 / real(n * int(ncol, int64), real64), &
                 tbase / best, merge("   OK  ", "  WRONG", ok)
         end do
         !
         ! The same budget spent ENTIRELY at one level or the other, for the two extremes.
         write (output_unit, '(a)') ""
         write (output_unit, '(a)') "  -- the two pure strategies at the same budget --"
-        call run_nested(g0, h0, ga, ha, gb, hb, n, nc, 1, budget, reps, best)
+        call run_nested(g0, h0, ga, ha, gb, hb, n, ncol, 1, budget, reps, best)
         write (output_unit, '(a,i5,i7,i7,f9.2,f10.3,f9.2,a)') "  ", 1, budget, budget, &
-            best * 1.0e3_real64, best * 1.0e9_real64 / real(n * int(nc, int64), real64), &
+            best * 1.0e3_real64, best * 1.0e9_real64 / real(n * int(ncol, int64), real64), &
             tbase / best, "   inner only"
-        call run_nested(g0, h0, ga, ha, gb, hb, n, nc, nc, 1, reps, best)
-        write (output_unit, '(a,i5,i7,i7,f9.2,f10.3,f9.2,a)') "  ", nc, 1, nc, &
-            best * 1.0e3_real64, best * 1.0e9_real64 / real(n * int(nc, int64), real64), &
+        call run_nested(g0, h0, ga, ha, gb, hb, n, ncol, ncol, 1, reps, best)
+        write (output_unit, '(a,i5,i7,i7,f9.2,f10.3,f9.2,a)') "  ", ncol, 1, ncol, &
+            best * 1.0e3_real64, best * 1.0e9_real64 / real(n * int(ncol, int64), real64), &
             tbase / best, "   outer only"
     end subroutine nested_sweep
     !

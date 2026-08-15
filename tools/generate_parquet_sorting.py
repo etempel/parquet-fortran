@@ -950,6 +950,28 @@ module parquet_sorting
     w("            integer(int64), intent(in) :: nrows      !! rows to be sorted.")
     w("            integer(int64), intent(out) :: count     !! resolved count; 1 sorts serially.")
     w("        end subroutine resolve_thread_count")
+    w("        !> Team size for a trivially parallel whole-column loop, given an already-resolved")
+    w("        !! sort thread count.")
+    w("        !!")
+    w("        !! Separate from `resolve_thread_count` because the question is different: that one")
+    w("        !! answers \"how many threads may this sort use\", this one answers \"is this particular")
+    w("        !! O(n) loop big enough to be worth a team\". Both are needed -- a 64-thread sort still")
+    w("        !! should not open a team to copy 500 elements.")
+    w("        module function tail_team(nthreads, n) result(team)")
+    w("            integer(int64), intent(in) :: nthreads !! the sort's resolved thread count.")
+    w("            integer(int64), intent(in) :: n        !! elements the loop will walk.")
+    w("            integer :: team                        !! team size; 1 means run it serially.")
+    w("        end function tail_team")
+    w("        !> Fills `perm(1:n)` with `1..n`, threaded when `nthreads` and `n` justify it.")
+    w("        !!")
+    w("        !! Its own procedure rather than an inline loop because it is one of the three")
+    w("        !! whole-column serial loops that bound a threaded sort's end-to-end speedup, and")
+    w("        !! measuring it separately is how that was found. See `app/benchmark_sort_tail.f90`.")
+    w("        module subroutine fill_identity(perm, n, nthreads)")
+    w("            integer(int64), intent(out) :: perm(:)  !! receives `1..n`.")
+    w("            integer(int64), intent(in) :: n         !! elements to fill.")
+    w("            integer(int64), intent(in) :: nthreads  !! the sort's resolved thread count.")
+    w("        end subroutine fill_identity")
     w("        !> Runs the engine over `keys` but orders only the first `count` entries -- `perm`")
     w("        !! comes back with exactly `count` elements.")
     w("        module subroutine drive_engine_partial(keys, nrows, count, proc, perm)")
@@ -2442,11 +2464,12 @@ contains
         ! of an empty array. The engine is not called at all below two rows, so nothing downstream
         ! needs the one-element floor the extraction buffers use.
         allocate(perm(nrows))
-        do ik = 1_int64, nrows
-            perm(ik) = ik
-        end do
-        if (nrows < 2_int64) return
+        ! Resolved BEFORE the identity fill, not after, so the fill can be threaded too. It is one
+        ! of three whole-column serial loops that together were 48% of a 64-thread end-to-end sort
+        ! before they were threaded -- see `app/benchmark_sort_tail.f90`, which sizes each one.
         call resolve_thread_count(threads, nrows, nthreads)
+        call fill_identity(perm, nrows, nthreads)
+        if (nrows < 2_int64) return
         if (dbg_fortran_engine) then
             ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. **Stage 4 made this
             ! branch honour `threads`**, and the resolution above is deliberately SHARED with the
@@ -2871,6 +2894,37 @@ contains
         ! Never more threads than rows; the C++ side clamps again by its own minimum chunk size.
         if (count > nrows) count = max(nrows, 1_int64)
     end procedure resolve_thread_count
+    !
+    module procedure tail_team
+        use parquet_settings, only : parquet_get_sort_parallel_min_rows
+        !
+        team = 1
+        ! The floor. A whole-column loop of a few thousand elements is dominated by the cost of
+        ! opening the team, and the same setting already governs whether the RADIX threads at all,
+        ! so the two decline together rather than on separate rules.
+        if (nthreads <= 1_int64) return
+        if (n < parquet_get_sort_parallel_min_rows()) return
+        team = int(min(nthreads, int(huge(0), int64)))
+        if (team < 1) team = 1
+    end procedure tail_team
+    !
+    module procedure fill_identity
+        integer(int64) :: ik
+        integer :: team
+        !
+        team = tail_team(nthreads, n)
+        if (team > 1) then
+            !$omp parallel do num_threads(team) default(shared) private(ik) schedule(static)
+            do ik = 1_int64, n
+                perm(ik) = ik
+            end do
+            !$omp end parallel do
+            return
+        end if
+        do ik = 1_int64, n
+            perm(ik) = ik
+        end do
+    end procedure fill_identity
     !
     module procedure narrow_perm
         integer(int64) :: n

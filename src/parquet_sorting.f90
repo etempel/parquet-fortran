@@ -1142,6 +1142,28 @@ module parquet_sorting
             integer(int64), intent(in) :: nrows      !! rows to be sorted.
             integer(int64), intent(out) :: count     !! resolved count; 1 sorts serially.
         end subroutine resolve_thread_count
+        !> Team size for a trivially parallel whole-column loop, given an already-resolved
+        !! sort thread count.
+        !!
+        !! Separate from `resolve_thread_count` because the question is different: that one
+        !! answers "how many threads may this sort use", this one answers "is this particular
+        !! O(n) loop big enough to be worth a team". Both are needed -- a 64-thread sort still
+        !! should not open a team to copy 500 elements.
+        module function tail_team(nthreads, n) result(team)
+            integer(int64), intent(in) :: nthreads !! the sort's resolved thread count.
+            integer(int64), intent(in) :: n        !! elements the loop will walk.
+            integer :: team                        !! team size; 1 means run it serially.
+        end function tail_team
+        !> Fills `perm(1:n)` with `1..n`, threaded when `nthreads` and `n` justify it.
+        !!
+        !! Its own procedure rather than an inline loop because it is one of the three
+        !! whole-column serial loops that bound a threaded sort's end-to-end speedup, and
+        !! measuring it separately is how that was found. See `app/benchmark_sort_tail.f90`.
+        module subroutine fill_identity(perm, n, nthreads)
+            integer(int64), intent(out) :: perm(:)  !! receives `1..n`.
+            integer(int64), intent(in) :: n         !! elements to fill.
+            integer(int64), intent(in) :: nthreads  !! the sort's resolved thread count.
+        end subroutine fill_identity
         !> Runs the engine over `keys` but orders only the first `count` entries -- `perm`
         !! comes back with exactly `count` elements.
         module subroutine drive_engine_partial(keys, nrows, count, proc, perm)

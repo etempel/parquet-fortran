@@ -13,7 +13,9 @@
 !! fixed. Not picked up by `fpm test` -- it is an `auto-executables` target.
 program benchmark_sort_tail
     use parquet
+#ifdef _OPENMP
     use omp_lib
+#endif
     use iso_fortran_env, only : int32, int64, real64, output_unit
     implicit none
     !
@@ -138,6 +140,30 @@ program benchmark_sort_tail
     end do
     !
 contains
+
+    ! ---- OpenMP shims -----------------------------------------------------------------------
+    !
+    ! Built WITHOUT OpenMP, `use omp_lib` does not resolve and every `omp_*` reference is an
+    ! undeclared function. That is a compile failure, not a graceful degradation to serial -- which
+    ! is exactly the latent portability defect CLAUDE.md records for `materialize_marked_parallel`,
+    ! and it is what blocks a flang build on the two machines whose flang ships no `omp_lib.mod`.
+    ! The `!$omp` directives themselves need no guarding: the preprocessor removes them.
+#ifndef _OPENMP
+    !> One processor, which is what a build with no OpenMP can address.
+    function omp_get_num_procs() result(n)
+        integer :: n !! always 1.
+        n = 1
+    end function omp_get_num_procs
+    !
+    !> Wall-clock seconds. `system_clock` rather than a stub, since the timings are the point.
+    function omp_get_wtime() result(t)
+        real(real64) :: t                  !! seconds, from an arbitrary origin.
+        integer(int64) :: c, r             !! count and rate.
+        !
+        call system_clock(count=c, count_rate=r)
+        t = real(c, real64) / real(max(r, 1_int64), real64)
+    end function omp_get_wtime
+#endif
     !
     !> Seconds to nanoseconds per element.
     function ns(t) result(r)
@@ -156,7 +182,6 @@ contains
         integer(int64), intent(out) :: vrange     !! fold integer keys onto 0..vrange-1; 0 = off.
         logical, intent(out) :: counting          !! .false. forces the radix path.
         integer(int64) :: tail_min !! forced tail floor; negative restores the built-in.
-        integer(int64) :: sort_min !! forced sort floor; 0 restores the built-in.
         integer :: sort_threads !! forced automatic thread count; governs EXTRACTION.
         integer(int64) :: eng_min !! forced engine floor; negative restores the built-in.
         integer(int64) :: count_max !! forced counting-path team ceiling; negative restores.
@@ -167,7 +192,6 @@ contains
         reps = 3
         maxthreads = 64
         tail_min = -1_int64
-        sort_min = 0_int64
         sort_threads = 0
         eng_min = -1_int64
         count_max = -1_int64
@@ -216,11 +240,6 @@ contains
                 ! binary: a crossover sits inside this project's 11-16% cross-build noise floor.
                 read (a(17:), *) tail_min
                 call parquet_debug_set_sort_tail_min_rows(tail_min)
-            else if (a(1:11) == "--min-rows=") then
-                ! The SORT's floor, which is still the published setting -- and is the instrument
-                ! for its own measurement, which is why it must be measured before it is removed.
-                read (a(12:), *) sort_min
-                call parquet_set_sort_parallel_min_rows(sort_min)
             end if
         end do
     end subroutine read_args

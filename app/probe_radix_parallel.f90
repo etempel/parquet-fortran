@@ -31,7 +31,9 @@
 !! be re-askable whenever the engine or the machine changes.
 program probe_radix_parallel
     use iso_fortran_env, only : int32, int64, real64, output_unit
+#ifdef _OPENMP
     use omp_lib
+#endif
     implicit none
     !
     integer(int64) :: n            !! rows.
@@ -146,6 +148,60 @@ program probe_radix_parallel
     end do
     !
 contains
+
+    ! ---- OpenMP shims -----------------------------------------------------------------------
+    !
+    ! Built WITHOUT OpenMP, `use omp_lib` does not resolve and every `omp_*` reference is an
+    ! undeclared function. That is a compile failure, not a graceful degradation to serial -- which
+    ! is exactly the latent portability defect CLAUDE.md records for `materialize_marked_parallel`,
+    ! and it is what blocks a flang build on the two machines whose flang ships no `omp_lib.mod`.
+    ! The `!$omp` directives themselves need no guarding: the preprocessor removes them.
+#ifndef _OPENMP
+    !> One thread, which is what a build with no OpenMP can open.
+    function omp_get_max_threads() result(n)
+        integer :: n !! always 1.
+        n = 1
+    end function omp_get_max_threads
+    !
+    !> One processor, which is what a build with no OpenMP can address.
+    function omp_get_num_procs() result(n)
+        integer :: n !! always 1.
+        n = 1
+    end function omp_get_num_procs
+    !
+    !> One thread: outside a team, which is everywhere in a build with no OpenMP.
+    function omp_get_num_threads() result(n)
+        integer :: n !! always 1.
+        n = 1
+    end function omp_get_num_threads
+    !
+    !> Thread zero, the only thread there is.
+    function omp_get_thread_num() result(n)
+        integer :: n !! always 0.
+        n = 0
+    end function omp_get_thread_num
+    !
+    !> Wall-clock seconds. `system_clock` rather than a stub, since the timings are the point.
+    function omp_get_wtime() result(t)
+        real(real64) :: t                  !! seconds, from an arbitrary origin.
+        integer(int64) :: c, r             !! count and rate.
+        !
+        call system_clock(count=c, count_rate=r)
+        t = real(c, real64) / real(max(r, 1_int64), real64)
+    end function omp_get_wtime
+    !
+    !> Accepts and ignores: there is no team to size.
+    subroutine omp_set_dynamic(on)
+        logical, intent(in) :: on !! ignored.
+        associate (ignored => on); end associate
+    end subroutine omp_set_dynamic
+    !
+    !> Accepts and ignores: there are no nested levels.
+    subroutine omp_set_max_active_levels(n)
+        integer, intent(in) :: n !! ignored.
+        associate (ignored => n); end associate
+    end subroutine omp_set_max_active_levels
+#endif
     !
     subroutine read_args(n, reps, maxthreads, shape_in, firsttouch, ncols)
         integer(int64), intent(out) :: n

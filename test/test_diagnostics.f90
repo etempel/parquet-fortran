@@ -29,7 +29,7 @@
 module test_diagnostics
     use parquet
     use iso_fortran_env, only : int32, int64, real64
-    use iso_c_binding, only : c_int, c_long_long
+    use iso_c_binding, only : c_int, c_long_long, c_int64_t
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
     implicit none
@@ -94,6 +94,24 @@ module test_diagnostics
     end interface
     !
 contains
+
+    !> Lowers the C++ engine's threading floor so a small fixture reaches its parallel path.
+    !!
+    !! The published `sort_parallel_min_rows` setting used to do this. It was retired once the
+    !! Fortran engine stopped reading it, leaving the C++ floor an internal constant -- so a test
+    !! needing the threaded path at a few thousand rows now goes through this bind(C) override,
+    !! declared locally per this project's debug-hook convention rather than in parquet_bindings.
+    subroutine set_cpp_sort_min(n)
+        integer(c_int64_t), intent(in) :: n !! rows; <= 0 restores the built-in floor.
+        interface
+            subroutine set_min(k) bind(C, name="parquet_debug_set_sort_parallel_min_rows")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: k !! rows; <= 0 restores the built-in floor.
+            end subroutine set_min
+        end interface
+        !
+        call set_min(n)
+    end subroutine set_cpp_sort_min
     !
     subroutine collect_tests_diagnostics(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the suite's tests.
@@ -204,7 +222,7 @@ contains
         real(real64) :: v(N)
         integer(int64), allocatable :: perm(:)
         type(pf_sort_keys) :: keys
-        integer(int64) :: p0, p1, p2, min_rows
+        integer(int64) :: p0, p1, p2
         logical :: counting
         integer :: i
         !
@@ -218,9 +236,8 @@ contains
         if (allocated(error)) return
         !
         counting = parquet_get_sort_counting_path()
-        min_rows = parquet_get_sort_parallel_min_rows()
         call parquet_set_sort_counting_path(.false.)
-        call parquet_set_sort_parallel_min_rows(1000_int64)
+        call set_cpp_sort_min(1000_c_int64_t)
         !
         ! Values chosen so no two are equal and the order is nowhere near sorted, so the chunk
         ! sorts and the merge rounds both have real work to do.
@@ -231,7 +248,7 @@ contains
         call pf_argsort(keys, perm, threads=4)
         !
         call parquet_set_sort_counting_path(counting)
-        call parquet_set_sort_parallel_min_rows(min_rows)
+        call set_cpp_sort_min(-1_c_int64_t)   ! restores the built-in floor
         !
         call check(error, size(perm) == N, "the sort must have produced a full permutation")
         if (allocated(error)) return

@@ -441,14 +441,15 @@ module parquet_sorting
     !!
     !! The tail (key extraction, the identity fill, the int32 narrowing) is memcpy-shaped, so its
     !! threading crossover has no reason to equal the SORT's -- and until this existed the two shared
-    !! one number, `sort_parallel_min_rows`, which therefore could not be right for both. This hook
+    !! one number, the since-retired `sort_parallel_min_rows`, which could not be right for both.
+    !! This hook
     !! is what lets the tail's own crossover be measured without disturbing the sort's.
     integer(int64), save :: dbg_sort_tail_min_rows = -1_int64
     !> Overrides the Fortran ENGINE's own threading floor; NEGATIVE restores the built-in rule.
     !!
-    !! Distinct from `parquet_set_sort_parallel_min_rows`, which remains the published knob and
-    !! still governs the C++ engine. The Fortran engine's floor is internal and automatic -- a
-    !! measured function of the team -- so this hook is the only way to move it, and is what
+    !! The Fortran engine's floor is internal and automatic -- a measured function of the team --
+    !! so this hook is the only way to move it; the C++ engine has its own separate bind(C)
+    !! override, since neither is a setting any more. This hook is what
     !! `force_parallel_threshold` in the tests drives.
     integer(int64), save :: dbg_sort_engine_min_rows = -1_int64
     !> Overrides how large a team may be and still take the counting path; NEGATIVE restores 2.
@@ -1675,7 +1676,7 @@ def emit_engine_interfaces(w):
     w("        !! `nthreads` is a resolved count, never a sentinel -- `resolve_thread_count` has already")
     w("        !! applied the caller's `threads=`, the automatic policy and the in-parallel rule. This")
     w("        !! procedure applies only the two clauses that need the DATA to decide: the row floor")
-    w("        !! (`parquet_get_sort_parallel_min_rows`), below which a team costs more than it saves,")
+    w("        !! (an internal team-scaled rule), below which a team costs more than it saves,")
     w("        !! and one thread meaning the plain serial path. Both are observable through")
     w("        !! `parquet_debug_sort_threads_used`, which is the only way a test can see either.")
     w("        module subroutine sort_build_permutation_threaded(keys, n, nthreads, perm)")
@@ -1892,9 +1893,8 @@ def emit_engine_interfaces(w):
     w("        end subroutine parquet_debug_set_sort_tail_min_rows")
     w("        !> Test-only override for the Fortran ENGINE's threading floor; NEGATIVE restores it.")
     w("        !!")
-    w("        !! The engine's floor is internal and automatic, so unlike the tail's it has no")
-    w("        !! published setting to move it. `parquet_set_sort_parallel_min_rows` still governs")
-    w("        !! the C++ engine and is unaffected by this.")
+    w("        !! The engine's floor is internal and automatic, and there is no published setting")
+    w("        !! for it -- `sort_parallel_min_rows` was retired once this rule replaced it.")
     w("        module subroutine parquet_debug_set_sort_engine_min_rows(n)")
     w("            integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.")
     w("        end subroutine parquet_debug_set_sort_engine_min_rows")
@@ -3228,7 +3228,7 @@ contains
         !> Elements each thread must get from a tail pass for the team to be worth opening.
         !!
         !! **The tail's floor is its OWN, and this is the change that separated it.** It used to
-        !! read `parquet_get_sort_parallel_min_rows()` -- the setting that also decides whether the
+        !! read the since-retired `sort_parallel_min_rows` setting -- which also decided whether the
         !! RADIX threads -- on the reasoning that the two should "decline together". They should
         !! not: a tail pass is memcpy-shaped (extraction, the identity fill, the int32 narrowing)
         !! while the sort is compute-bound over many passes, so one number could not be right for

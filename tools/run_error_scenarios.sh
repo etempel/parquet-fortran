@@ -481,7 +481,6 @@ scenarios=(
     "set_arrow_threads_zero:1"
     "settings_bad_codec:1"
     "settings_negative_sort_threads:1"
-    "settings_negative_parallel_min_rows:1"
     "settings_negative_bucket_limit:1"
     "settings_negative_row_group_bytes:1"
     "settings_env_bad_token:1"

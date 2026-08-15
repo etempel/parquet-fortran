@@ -332,8 +332,6 @@ program error_scenarios
         call scenario_settings_bad_codec()
     case ("settings_negative_sort_threads")
         call scenario_settings_negative_sort_threads()
-    case ("settings_negative_parallel_min_rows")
-        call scenario_settings_negative_parallel_min_rows()
     case ("settings_negative_bucket_limit")
         call scenario_settings_negative_bucket_limit()
     case ("settings_negative_row_group_bytes")
@@ -4172,15 +4170,6 @@ contains
         print '(a)', "unexpectedly accepted a negative sort thread cap"
     end subroutine scenario_settings_negative_sort_threads
 
-    !> A negative parallel-sort threshold. 0 is legal and restores the built-in 8192; below that is
-    !> meaningless. The valid value is exercised first, so the scenario cannot pass against a guard
-    !> that rejects everything -- the negative control every abort scenario here needs.
-    subroutine scenario_settings_negative_parallel_min_rows()
-
-        call parquet_set_sort_parallel_min_rows(0)    ! legal: restores the built-in default
-        call parquet_set_sort_parallel_min_rows(-1)   ! -> aborts (must be >= 0)
-        print '(a)', "unexpectedly accepted a negative sort_parallel_min_rows"
-    end subroutine scenario_settings_negative_parallel_min_rows
 
     !> The counting path's bucket ceiling, same guard and same negative control.
     subroutine scenario_settings_negative_bucket_limit()

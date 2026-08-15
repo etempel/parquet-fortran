@@ -897,9 +897,15 @@ extern "C"
 	// default back through the C++-observable effect rather than through the Fortran getter alone.
 	//
 	// These replaced three test-only parquet_debug_* override hooks (sort_parallel_min_rows,
-	// disable_sort_counting_path, disable_statistics_prescreen). Do not reintroduce a debug
-	// override for any of them: a real setting already does the job, and two mechanisms for one
-	// behaviour is precisely the drift parquet_settings exists to remove.
+	// disable_sort_counting_path, disable_statistics_prescreen). **Do not reintroduce a debug
+	// override for a value that is STILL a setting**: two writers for one behaviour is precisely
+	// the drift parquet_settings exists to remove.
+	//
+	// `sort_parallel_min_rows` is the exception, and it is an exception because it is no longer a
+	// setting at all -- it was retired once the Fortran engine stopped reading it, leaving the C++
+	// floor an internal constant that no fixture a test can build could ever reach. Its override
+	// (parquet_debug_set_sort_parallel_min_rows, far below) is therefore the ONLY writer, not a
+	// second one. The rule is about competing writers, not about debug hooks.
 
 	//! Rows below which threading is refused outright: spawning threads to sort a small array costs
 	//! more than the sort saves.
@@ -921,16 +927,21 @@ extern "C"
 	// and for the three bounds that are NOT settings and stay declared beside it.
 	static constexpr int64_t kTargetRowGroupBytes = 256LL * 1024 * 1024; // ~256 MiB
 
-	static int64_t g_sort_parallel_min_rows = kSortParallelMinRows;
+	// Test-only override for kSortParallelMinRows, which is otherwise unreachable now that the
+	// published `sort_parallel_min_rows` setting has been retired. Every fixture a test can
+	// build is orders of magnitude below 8192 rows, so without a way down every C++-engine
+	// threading test would assert "serial matches serial" -- feature_risks.md Risk-35's vacuous
+	// shape, and Risk-49's unreachable-threshold shape at the same time. Negative = use the
+	// real constant.
+	static int64_t g_debug_sort_parallel_min_rows = -1;
 	static bool g_sort_counting_path = true;
 	static int64_t g_sort_counting_bucket_limit = kSortCountingBucketLimit;
 	static int64_t g_target_row_group_bytes = kTargetRowGroupBytes;
 	static bool g_statistics_prescreen = true;
 
-	void parquet_push_performance_settings(int64_t sort_parallel_min_rows, int sort_counting_path,
+	void parquet_push_performance_settings(int sort_counting_path,
 		int64_t sort_counting_bucket_limit, int64_t target_row_group_bytes, int statistics_prescreen)
 	{
-		g_sort_parallel_min_rows = sort_parallel_min_rows;
 		g_sort_counting_path = (sort_counting_path != 0);
 		g_sort_counting_bucket_limit = sort_counting_bucket_limit;
 		g_target_row_group_bytes = target_row_group_bytes;
@@ -4230,12 +4241,19 @@ extern "C"
 	// Fortran side, which is the only side compiled with OpenMP and so the only one that can ask
 	// omp_get_max_threads()/omp_in_parallel(). This function only declines a count it cannot use.
 
-	// The row threshold below which threading is refused is a SETTING
-	// (parquet_set_sort_parallel_min_rows) and lives with the other mirrored values near the top of
-	// this file, as g_sort_parallel_min_rows -- read directly below, with no accessor. Lowering it
-	// is how a test small enough to run quickly still reaches the parallel path; without that, a
-	// test asserting "parallel matches serial" would be asserting "serial matches serial", the
-	// vacuous shape feature_risks.md Risk-35 exists to warn about.
+	// The row threshold below which threading is refused is kSortParallelMinRows, an internal
+	// constant declared with the other engine defaults near the top of this file. It used to be the
+	// published `sort_parallel_min_rows` setting; that knob was retired once the Fortran engine
+	// stopped reading it, since it then governed only this engine and a setting whose scope is "one
+	// of two engines, depending on which entry point you called" is worse than no setting at all.
+	// This engine still ships: parquet_reader_set_sort and parquet_open_reader(..., sort_by=) reach
+	// it with no selector in the path.
+	//
+	// **A test that needs the parallel path at a small row count therefore cannot lower a setting
+	// any more** -- it has to use parquet_debug_set_sort_engine_min_rows, which is what
+	// force_parallel_threshold now drives. Without a way in, a test asserting "parallel matches
+	// serial" would be asserting "serial matches serial", the vacuous shape feature_risks.md
+	// Risk-35 exists to warn about.
 
 	// Test-only: how many threads the last threaded build actually put to work, counting the
 	// calling thread. 1 means the sort ran serially, whatever was asked for.
@@ -4377,7 +4395,7 @@ extern "C"
 
 	// Smallest output range worth giving a thread of its own. A merge step is far cheaper per element
 	// than a sort comparison, so this floor has to be well above phase 1's own min_chunk
-	// (g_sort_parallel_min_rows / 4, i.e. 2048 by default -- a 16 KB segment, less work than creating
+	// (kSortParallelMinRows / 4, i.e. 2048 -- a 16 KB segment, less work than creating
 	// the thread to run it).
 	//
 	// **Measured basis**, so this is a number someone can argue with rather than a magic one: one
@@ -4386,8 +4404,8 @@ extern "C"
 	// bandwidth on the permutation stream (which is ~1% of it). So 16384 elements is ~0.5 ms of work
 	// against a std::thread construction of perhaps 20-50 us: comfortably worth spawning, with room
 	// to lower the floor if a workload ever wants finer segments. Deliberately NOT a setting -- it
-	// has no meaning a caller can reason about, and sort_parallel_min_rows already owns the
-	// user-facing "does this sort thread at all" question.
+	// has no meaning a caller can reason about. Nothing is user-facing here any more: the
+	// "does this sort thread at all" floor is kSortParallelMinRows, also not a setting.
 	static constexpr int64_t kSortMergeMinSegment = 1 << 14;
 
 	// Test-only override of the floor above. <= 0 restores the real one.
@@ -4476,7 +4494,8 @@ extern "C"
 		{
 			return sort_counting_permutation(keys[0], n, lo, hi);
 		}
-		int64_t min_rows = g_sort_parallel_min_rows;
+		int64_t min_rows = (g_debug_sort_parallel_min_rows > 0) ? g_debug_sort_parallel_min_rows
+		                                                       : kSortParallelMinRows;
 		int64_t min_chunk = min_rows / 4;
 		if (min_chunk < 1) min_chunk = 1;
 		int64_t nchunks = threads;
@@ -11732,6 +11751,14 @@ extern "C"
 	void parquet_debug_set_sort_merge_min_segment(int64_t n)
 	{
 		g_debug_sort_merge_min_segment = (n > 0) ? n : -1;
+	}
+
+	// Test-only: lowers the C++ engine's threading floor so a small fixture can reach the parallel
+	// path. Replaces what parquet_set_sort_parallel_min_rows did for tests before that setting was
+	// retired; <= 0 restores the built-in kSortParallelMinRows.
+	void parquet_debug_set_sort_parallel_min_rows(int64_t n)
+	{
+		g_debug_sort_parallel_min_rows = (n > 0) ? n : -1;
 	}
 
 	// Test-only: how many threads worked the last threaded sort's FINAL merge round, the calling

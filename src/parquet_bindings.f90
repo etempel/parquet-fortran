@@ -174,11 +174,10 @@ module parquet_bindings
         !> One push rather than five setters so that parquet_reset_settings cannot restore some
         !> knobs and forget others: restoring the Fortran variables and calling this once is the
         !> whole job (feature_risks.md Risk-42).
-        subroutine parquet_push_performance_settings(sort_parallel_min_rows, sort_counting_path, &
+        subroutine parquet_push_performance_settings(sort_counting_path, &
                 sort_counting_bucket_limit, target_row_group_bytes, statistics_prescreen) &
                 bind(C, name="parquet_push_performance_settings")
             import
-            integer(c_int64_t), value :: sort_parallel_min_rows
             integer(c_int), value :: sort_counting_path
             integer(c_int64_t), value :: sort_counting_bucket_limit
             integer(c_int64_t), value :: target_row_group_bytes

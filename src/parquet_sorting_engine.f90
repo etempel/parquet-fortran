@@ -433,9 +433,9 @@ contains
         ! and 1.429; this rule's worst cases are 1.10x and 1.17x, geometric means 1.007 and 1.006.
         ! Both compilers picked the same rule out of nine candidates, so no weighting was needed.
         !
-        ! **`parquet_set_sort_parallel_min_rows` is untouched and still governs the C++ engine** --
-        ! it is not consulted here any more. When the Fortran engine becomes the default that setting
-        ! should be retired and this rule left as the only one; see `feature_sort_report.md` §14.
+        ! **The published `sort_parallel_min_rows` setting has been RETIRED** -- this rule replaced
+        ! it here, and the C++ engine now uses its own internal constant `kSortParallelMinRows`
+        ! (`src/parquet_wrapper.cpp`), overridable for tests only. See `feature_sort_report.md` §14.
         nt = 1
         floor_rows = max(SORT_ENGINE_MIN_ROWS, SORT_ENGINE_ELEMS_PER_THREAD * nthreads)
         if (dbg_sort_engine_min_rows >= 0_int64) floor_rows = dbg_sort_engine_min_rows

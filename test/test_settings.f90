@@ -30,8 +30,6 @@
 !> The five C++-side knobs are each observed through something the library already had to expose to
 !> test the behaviour itself, which is why S4 added no new debug hook at all:
 !>
-!> * `sort_parallel_min_rows` through `parquet_debug_get_sort_threads_used` -- the sort's RESULT is
-!>   identical threaded or not, by design, so only the thread count can see this knob;
 !> * `sort_counting_path` and `sort_counting_bucket_limit` through
 !>   `parquet_debug_get_sort_comparisons`, which is exactly 0 on the counting path and nonzero on
 !>   the comparator path -- again, the two produce the same permutation;
@@ -97,8 +95,6 @@ contains
             new_unittest("default_use_threads reaches the reader and the writer", test_default_use_threads_effect), &
             new_unittest("an explicit argument always beats the setting", test_argument_beats_setting), &
             new_unittest("an invalid codec default aborts nothing else", test_bad_codec_leaves_state_intact), &
-            new_unittest("sort_parallel_min_rows decides whether a sort threads at all", &
-                cpp_test_sort_parallel_min_rows_effect), &
             new_unittest("sort_counting_path switches the sort between its two engines", &
                 cpp_test_sort_counting_path_effect), &
             new_unittest("sort_radix_path switches a single-key sort between radix and comparison", &
@@ -275,9 +271,6 @@ contains
         if (allocated(error)) return
         call check(error, parquet_get_default_use_threads(), "default_use_threads defaults to .true.")
         if (allocated(error)) return
-        call check(error, parquet_get_sort_parallel_min_rows() == 8192_int64, &
-            "sort_parallel_min_rows defaults to the built-in 8192")
-        if (allocated(error)) return
         call check(error, parquet_get_sort_counting_path(), "sort_counting_path defaults to .true.")
         if (allocated(error)) return
         call check(error, parquet_get_sort_radix_path(), "sort_radix_path defaults to .true.")
@@ -331,7 +324,6 @@ contains
         call parquet_set_default_compression("gzip")
         call parquet_set_default_compression_level(9)
         call parquet_set_default_use_threads(.false.)
-        call parquet_set_sort_parallel_min_rows(64_int64)
         call parquet_set_sort_counting_path(.false.)
         call parquet_set_sort_radix_path(.false.)
         call parquet_set_sort_counting_bucket_limit(128_int64)
@@ -351,9 +343,6 @@ contains
         call check(error, parquet_get_default_compression_level() == 3, "reset restores default_compression_level")
         if (allocated(error)) return
         call check(error, parquet_get_default_use_threads(), "reset restores default_use_threads")
-        if (allocated(error)) return
-        call check(error, parquet_get_sort_parallel_min_rows() == 8192_int64, &
-            "reset restores sort_parallel_min_rows")
         if (allocated(error)) return
         call check(error, parquet_get_sort_counting_path(), "reset restores sort_counting_path")
         if (allocated(error)) return
@@ -954,7 +943,6 @@ contains
         call unset_env("PARQUET_FORTRAN_PREFETCH_THREADS")
         call unset_env("PARQUET_FORTRAN_TABLE_THREADS")
         call unset_env("PARQUET_FORTRAN_STRING_THREADS")
-        call unset_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_PATH")
         call unset_env("PARQUET_FORTRAN_SORT_RADIX_PATH")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT")
@@ -987,7 +975,6 @@ contains
         call set_env("PARQUET_FORTRAN_PREFETCH_THREADS", "2")
         call set_env("PARQUET_FORTRAN_TABLE_THREADS", "7")
         call set_env("PARQUET_FORTRAN_STRING_THREADS", "5")
-        call set_env("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", "64")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_PATH", "false")
         call set_env("PARQUET_FORTRAN_SORT_RADIX_PATH", "false")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", "128")
@@ -1011,8 +998,6 @@ contains
             "PARQUET_FORTRAN_TABLE_THREADS reaches table_threads")
         if (.not. allocated(error)) call check(error, parquet_get_string_threads() == 5, &
             "PARQUET_FORTRAN_STRING_THREADS reaches string_threads")
-        if (.not. allocated(error)) call check(error, parquet_get_sort_parallel_min_rows() == 64_int64, &
-            "PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS reaches sort_parallel_min_rows")
         if (.not. allocated(error)) call check(error, .not. parquet_get_sort_counting_path(), &
             "PARQUET_FORTRAN_SORT_COUNTING_PATH reaches sort_counting_path")
         if (.not. allocated(error)) call check(error, .not. parquet_get_sort_radix_path(), &
@@ -1231,41 +1216,6 @@ contains
         end do
     end subroutine ties_real
 
-    !> The threshold decides whether a sort threads AT ALL, so the observation is the thread count
-    !> the sort actually reached -- not its result, which is identical either way by design.
-    !>
-    !> Both directions are asserted on the SAME array with the SAME `threads=4`: only the setting
-    !> differs between them. A threshold that was stored and never pushed to C++ would leave the
-    !> built-in 8192 in force, and this 2000-element array would stay serial in both halves.
-    subroutine test_sort_parallel_min_rows_effect(error)
-        type(error_type), allocatable, intent(out) :: error
-        real(real64) :: v(2000)
-        integer(int32), allocatable :: perm(:)
-        !
-        call parquet_reset_settings()
-        call ties_real(v)
-        ! Negative control FIRST: at the built-in 8192 this array is far too small to thread.
-        call pf_argsort(v, perm, threads=4)
-        call check(error, sort_threads_used() == 1_int64, &
-            "at the built-in threshold a 2000-element array must sort serially whatever threads= asks")
-        if (allocated(error)) return
-        !
-        call parquet_set_sort_parallel_min_rows(4_int64)
-        call pf_argsort(v, perm, threads=4)
-        call check(error, sort_threads_used() == 4_int64, &
-            "lowering sort_parallel_min_rows must let the same array reach the parallel path")
-        if (allocated(error)) then
-            call parquet_reset_settings()
-            return
-        end if
-        !
-        ! And back up again, which also proves the knob is re-readable rather than latched once.
-        call parquet_set_sort_parallel_min_rows(1000000000_int64)
-        call pf_argsort(v, perm, threads=4)
-        call check(error, sort_threads_used() == 1_int64, &
-            "raising sort_parallel_min_rows above the array size must return the sort to serial")
-        call parquet_reset_settings()
-    end subroutine test_sort_parallel_min_rows_effect
 
     !> The counting path performs ZERO comparisons by construction, so the comparison counter is
     !> what distinguishes the two engines -- their permutations are identical, which is the whole
@@ -1626,8 +1576,8 @@ contains
         integer(int64) :: big = 5000000000_int64
         !
         call parquet_reset_settings()
-        call parquet_set_sort_parallel_min_rows(small)
-        call check(error, parquet_get_sort_parallel_min_rows() == 4096_int64, &
+        call parquet_set_target_row_group_bytes(small)
+        call check(error, parquet_get_target_row_group_bytes() == 4096_int64, &
             "the int32 setter must reach the same storage the int64 getter reads")
         if (allocated(error)) then
             call parquet_reset_settings()
@@ -1911,14 +1861,6 @@ contains
     ! have up to five early `return`s, and a selector leaked on one of them would not fail the
     ! test that leaked it -- it would silently change which engine a LATER test measures.
 
-    !> Pins the C++ engine for `test_sort_parallel_min_rows_effect` -- see the note above.
-    subroutine cpp_test_sort_parallel_min_rows_effect(error)
-        type(error_type), allocatable, intent(out) :: error !! forwarded from the wrapped test.
-        !
-        call parquet_debug_use_fortran_sort_engine(.false.)
-        call test_sort_parallel_min_rows_effect(error)
-        call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default; see the note above
-    end subroutine cpp_test_sort_parallel_min_rows_effect
 
     !> Pins the C++ engine for `test_sort_counting_path_effect` -- see the note above.
     subroutine cpp_test_sort_counting_path_effect(error)

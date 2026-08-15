@@ -191,14 +191,15 @@ module parquet_sorting
     !!
     !! The tail (key extraction, the identity fill, the int32 narrowing) is memcpy-shaped, so its
     !! threading crossover has no reason to equal the SORT's -- and until this existed the two shared
-    !! one number, `sort_parallel_min_rows`, which therefore could not be right for both. This hook
+    !! one number, the since-retired `sort_parallel_min_rows`, which could not be right for both.
+    !! This hook
     !! is what lets the tail's own crossover be measured without disturbing the sort's.
     integer(int64), save :: dbg_sort_tail_min_rows = -1_int64
     !> Overrides the Fortran ENGINE's own threading floor; NEGATIVE restores the built-in rule.
     !!
-    !! Distinct from `parquet_set_sort_parallel_min_rows`, which remains the published knob and
-    !! still governs the C++ engine. The Fortran engine's floor is internal and automatic -- a
-    !! measured function of the team -- so this hook is the only way to move it, and is what
+    !! The Fortran engine's floor is internal and automatic -- a measured function of the team --
+    !! so this hook is the only way to move it; the C++ engine has its own separate bind(C)
+    !! override, since neither is a setting any more. This hook is what
     !! `force_parallel_threshold` in the tests drives.
     integer(int64), save :: dbg_sort_engine_min_rows = -1_int64
     !> Overrides how large a team may be and still take the counting path; NEGATIVE restores 2.
@@ -5769,7 +5770,7 @@ module parquet_sorting
         !! `nthreads` is a resolved count, never a sentinel -- `resolve_thread_count` has already
         !! applied the caller's `threads=`, the automatic policy and the in-parallel rule. This
         !! procedure applies only the two clauses that need the DATA to decide: the row floor
-        !! (`parquet_get_sort_parallel_min_rows`), below which a team costs more than it saves,
+        !! (an internal team-scaled rule), below which a team costs more than it saves,
         !! and one thread meaning the plain serial path. Both are observable through
         !! `parquet_debug_sort_threads_used`, which is the only way a test can see either.
         module subroutine sort_build_permutation_threaded(keys, n, nthreads, perm)
@@ -5986,9 +5987,8 @@ module parquet_sorting
         end subroutine parquet_debug_set_sort_tail_min_rows
         !> Test-only override for the Fortran ENGINE's threading floor; NEGATIVE restores it.
         !!
-        !! The engine's floor is internal and automatic, so unlike the tail's it has no
-        !! published setting to move it. `parquet_set_sort_parallel_min_rows` still governs
-        !! the C++ engine and is unaffected by this.
+        !! The engine's floor is internal and automatic, and there is no published setting
+        !! for it -- `sort_parallel_min_rows` was retired once this rule replaced it.
         module subroutine parquet_debug_set_sort_engine_min_rows(n)
             integer(int64), intent(in) :: n !! forced floor, or a negative value to restore.
         end subroutine parquet_debug_set_sort_engine_min_rows

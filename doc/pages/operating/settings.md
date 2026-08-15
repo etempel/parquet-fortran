@@ -209,21 +209,20 @@ because you changed the codec.
 
 ## Tuning the sort
 
-Four knobs govern the sort engine. All four are read at each sort, so they take effect
-immediately, and all four are process-global — a sort anywhere in your program sees the same
+Three knobs govern the sort engine. All three are read at each sort, so they take effect
+immediately, and all three are process-global — a sort anywhere in your program sees the same
 values.
 
 ```fortran
-call parquet_set_sort_parallel_min_rows(20000)   ! don't thread below 20k rows
 call parquet_set_sort_counting_bucket_limit(0)   ! 0 restores the built-in value
 ```
 
-`parquet_set_sort_parallel_min_rows(n)` is the row count below which a sort refuses to use threads
-at all, however many `threads=` asks for — threading a small array costs more than the sort saves.
-The built-in 8192 is measured rather than guessed: an 8-thread argsort of random `real64` against
-the serial one came out at 0.86x for 2k rows (threading *loses*), 1.48x at 8k, 2.18x at 16k and
-3.23x at 1M, so break-even sits between 2k and 8k. Lower it only against a measurement of your own
-hardware and data.
+**There is no knob for the row count below which a sort refuses to thread.** That floor is
+internal and scales with the team size, because the right value depends on how many threads are
+being opened rather than on the data — a floor correct for four threads is far too low for
+sixty-four. Threading a small array costs more than the sort saves, so the engine declines rather
+than obeying a `threads=` it cannot use profitably; a sort that reports one thread on a small array
+is behaving correctly.
 
 `parquet_set_sort_counting_path(flag)` and `parquet_set_sort_counting_bucket_limit(n)` control the
 integer counting fast path — a second sort implementation that a single, null-free integer key with
@@ -396,7 +395,6 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_PREFETCH_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_TABLE_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_STRING_THREADS` | integer >= 0 (`0` = automatic) |
-| `PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS` | integer >= 0 (`0` = built-in) |
 | `PARQUET_FORTRAN_SORT_COUNTING_PATH` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_SORT_RADIX_PATH` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT` | integer >= 0 (`0` = built-in) |
@@ -459,7 +457,6 @@ parquet-fortran settings
   prefetch_threads                 0
   table_threads                    0
   string_threads                   0
-  sort_parallel_min_rows           8192
   sort_counting_path               true
   sort_radix_path                  true
   sort_counting_bucket_limit       4194304

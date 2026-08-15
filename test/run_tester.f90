@@ -151,7 +151,7 @@ contains
 
     !> "sorting" is excluded for the same reason as "filter_screen": its counting-fast-path and
     !> parallel-threshold tests drive parquet_set_sort_counting_path and
-    !> parquet_set_sort_parallel_min_rows, which are process-global. **Promoting those from debug
+    !> parquet_set_sort_counting_bucket_limit, which are process-global. **Promoting those from debug
     !> hooks to real settings did not weaken this** -- a parquet_settings knob is a saved module
     !> variable, exactly as process-global as the C++ static it replaced, so the exclusion is as
     !> necessary as it ever was. Run concurrently, a sibling test could turn the counting path off

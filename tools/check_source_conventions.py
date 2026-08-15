@@ -871,7 +871,7 @@ def check_single_cpp_translation_unit():
         different object than the guard reads, so the override stops working and the error scenario
         that depends on it starts testing nothing while reporting green;
       * the settings mirrored from parquet_settings (`g_verbosity`, `g_message_stream`,
-        `g_sort_parallel_min_rows`, `g_sort_counting_path`, `g_sort_counting_bucket_limit`,
+        `g_sort_counting_path`, `g_sort_counting_bucket_limit`,
         `g_target_row_group_bytes`, `g_statistics_prescreen`) -- a user's setting would apply to
         some of the library and not the rest, with the Fortran getters still reporting it correctly
         (feature_risks.md Risk-42).

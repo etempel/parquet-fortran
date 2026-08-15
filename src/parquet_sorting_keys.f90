@@ -1877,7 +1877,7 @@ contains
         !> Elements each thread must get from a tail pass for the team to be worth opening.
         !!
         !! **The tail's floor is its OWN, and this is the change that separated it.** It used to
-        !! read `parquet_get_sort_parallel_min_rows()` -- the setting that also decides whether the
+        !! read the since-retired `sort_parallel_min_rows` setting -- which also decided whether the
         !! RADIX threads -- on the reasoning that the two should "decline together". They should
         !! not: a tail pass is memcpy-shaped (extraction, the identity fill, the int32 narrowing)
         !! while the sort is compute-bound over many passes, so one number could not be right for

@@ -906,8 +906,17 @@ def gen_table_type():
     w("""        ! --- lifecycle ---
         !> Blocks intrinsic assignment: the store lives behind a pointer, so a default `b = a`
         !! would leave two tables sharing one store and double-freeing it.
-        generic :: assignment(=) => table_assign_guard
-        procedure, private :: table_assign_guard !! The blocking defined assignment.
+        !!
+        !! **The binding is named `assign_guard`, and the name's ALPHABETICAL POSITION is
+        !! load-bearing -- do not "tidy" it to `table_assign_guard` to match its implementation.**
+        !! flang builds a type's binding table sorted by name and stores a SPECIAL binding's index
+        !! (a defined assignment, here) in a single byte. `parquet_table` has ~285 bindings, so a
+        !! guard sorting under "t" lands past index 255 and flang dies with an internal compiler
+        !! error -- `CHECK(bindingIndex <= 255)` in runtime-type-info.cpp, which names neither this
+        !! type nor this line. Sorting under "a" keeps it far below the limit. gfortran and ifx are
+        !! indifferent, so nothing here will warn if this is undone.
+        generic :: assignment(=) => assign_guard
+        procedure, private :: assign_guard => table_assign_guard !! The blocking defined assignment.
         final :: table_finalize                  !! Frees the store; never fails, never validates.
     end type parquet_table""")
     return "\n".join(o)

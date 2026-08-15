@@ -4257,11 +4257,21 @@ contains
         integer(int64), intent(in) :: rows !! new threshold; 0 restores the built-in one.
 
         ! **Three floors, because one setting used to be three.** `sort_parallel_min_rows` governed
-        ! the C++ engine, the Fortran engine and the tail passes alike; the last two are now internal
-        ! rules derived from the team size, each with its own hook. Driving all three from here keeps
-        ! every existing caller's meaning exactly what it was -- "make the threaded paths engage at
-        ! this row count" -- which is the only reason this helper still reads as one knob.
-        call parquet_set_sort_parallel_min_rows(rows)
+        ! the C++ engine, the Fortran engine and the tail passes alike. All three are now internal:
+        ! the Fortran pair are team-derived rules with their own hooks, and the C++ one is the
+        ! constant `kSortParallelMinRows` with a bind(C) test override. Driving all three from here
+        ! keeps every existing caller's meaning exactly what it was -- "make the threaded paths
+        ! engage at this row count" -- which is the only reason this helper still reads as one knob.
+        block
+            use iso_c_binding, only : c_int64_t
+            interface
+                subroutine set_cpp_min(n) bind(C, name="parquet_debug_set_sort_parallel_min_rows")
+                    use iso_c_binding, only : c_int64_t
+                    integer(c_int64_t), value :: n !! rows; <= 0 restores the built-in floor.
+                end subroutine set_cpp_min
+            end interface
+            call set_cpp_min(int(rows, c_int64_t))
+        end block
         if (rows <= 0_int64) then
             call parquet_debug_set_sort_engine_min_rows(-1_int64)
             call parquet_debug_set_sort_tail_min_rows(-1_int64)
@@ -6204,9 +6214,8 @@ contains
         ! fixture big enough to clear the production values of both would be far too slow for a unit
         ! test — `feature_risks.md` Risk-49 in its usual form.
         call parquet_debug_set_sort_radix_min_rows(2_int64)
-        ! **1, not 0.** `parquet_set_sort_parallel_min_rows(0)` stores zero but
-        ! `parquet_get_sort_parallel_min_rows()` maps any value <= 0 back to the built-in 8192, so a
-        ! floor of 0 is the DEFAULT floor and would refuse this 4000-row fixture outright. The
+        ! **1, not 0.** Every floor hook treats a value <= 0 as "restore the built-in", so a floor
+        ! of 0 is the DEFAULT floor and would refuse this 4000-row fixture outright. The
         ! positive assertions below caught exactly that; the negative control could not have, because
         ! it would have been asserting a refusal that was already happening for the wrong reason.
         call force_parallel_threshold(1_int64)

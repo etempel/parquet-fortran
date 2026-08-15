@@ -65,7 +65,6 @@ module parquet_settings
     public :: parquet_set_default_use_threads, parquet_get_default_use_threads
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
-    public :: parquet_set_sort_parallel_min_rows, parquet_get_sort_parallel_min_rows
     public :: parquet_set_sort_counting_path, parquet_get_sort_counting_path
     public :: parquet_set_sort_radix_path, parquet_get_sort_radix_path
     public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
@@ -150,9 +149,8 @@ module parquet_settings
     !
     !> The built-in values of the three numeric C++-side knobs, i.e. what `0` resolves to and what a
     !! getter reports after a reset. Each MUST equal the corresponding global's initialiser in
-    !! src/parquet_wrapper.cpp (`kSortParallelMinRows`, `kSortCountingBucketLimit`,
-    !! `kTargetRowGroupBytes`), which is what applies before this module has pushed anything.
-    integer(int64), parameter :: sort_parallel_min_rows_builtin = 8192_int64
+    !! src/parquet_wrapper.cpp (`kSortCountingBucketLimit`, `kTargetRowGroupBytes`), which is what
+    !! applies before this module has pushed anything.
     integer(int64), parameter :: sort_counting_bucket_limit_builtin = 4194304_int64 !! 2**22 buckets.
     integer(int64), parameter :: target_row_group_bytes_builtin = 268435456_int64   !! 256 MiB.
     !
@@ -198,10 +196,8 @@ module parquet_settings
     !! "use the built-in default". The sentinel is resolved HERE, in push_performance_settings, so
     !! parquet_wrapper.cpp receives a usable number and never has to know a default -- but its own
     !! globals still need initialisers for the window before anything is pushed, which is why the
-    !! three `*_builtin` parameters below must equal the initialisers of `g_sort_parallel_min_rows`,
-    !! `g_sort_counting_bucket_limit` and `g_target_row_group_bytes` there (feature_risks.md
-    !! Risk-42).
-    integer(int64), save :: cfg_sort_parallel_min_rows = 0
+    !! `*_builtin` parameters below must equal the initialisers of `g_sort_counting_bucket_limit`
+    !! and `g_target_row_group_bytes` there (feature_risks.md Risk-42).
     !> Whether the sort's integer counting fast path may be taken at all.
     logical, save :: cfg_sort_counting_path = .true.
     !> Whether the sort's single-key radix fast path may be taken at all.
@@ -220,12 +216,6 @@ module parquet_settings
     !
     ! ---- Generic setters over both integer kinds ----
     !
-    !> Sets the row count below which a sort refuses to use threads at all. See
-    !> parquet_set_sort_parallel_min_rows_int64 for the full description; both kinds share it.
-    interface parquet_set_sort_parallel_min_rows
-        module procedure parquet_set_sort_parallel_min_rows_int32
-        module procedure parquet_set_sort_parallel_min_rows_int64
-    end interface parquet_set_sort_parallel_min_rows
     !> Sets the largest key value range the sort's counting fast path will accept. See
     !> parquet_set_sort_counting_bucket_limit_int64 for the full description.
     interface parquet_set_sort_counting_bucket_limit
@@ -615,37 +605,6 @@ contains
     !> Sets the row count below which a sort refuses to use threads at all, however many `threads=`
     !> asks for. Pass `0` to restore the built-in 8192.
     !>
-    !> Threading a small array costs more than the sort saves. The built-in value is measured rather
-    !> than guessed -- an 8-thread argsort of random real64 against the serial one, best of 15 rounds
-    !> each, on an 8-core arm64 laptop: 2k rows 0.86x (threading LOSES), 8k 1.48x, 16k 2.18x, 32k
-    !> 2.50x, 1M 3.23x -- so break-even sits between 2k and 8k. Lower it only against a measurement
-    !> of your own hardware and data; set too low, every trivial sort pays for threads it cannot use.
-    !>
-    !> Available in both integer kinds; a row count can exceed int32.
-    subroutine parquet_set_sort_parallel_min_rows_int64(n)
-        integer(int64), intent(in) :: n !! row threshold, or 0 for the built-in default; must be >= 0.
-
-        if (n < 0) error stop "parquet_set_sort_parallel_min_rows: n must be >= 0 " // &
-            "(0 restores the built-in default)"
-        cfg_sort_parallel_min_rows = n
-        call push_performance_settings()
-    end subroutine parquet_set_sort_parallel_min_rows_int64
-
-    !> int32 form of parquet_set_sort_parallel_min_rows_int64 -- see it for what the value means.
-    subroutine parquet_set_sort_parallel_min_rows_int32(n)
-        integer(int32), intent(in) :: n !! row threshold, or 0 for the built-in default; must be >= 0.
-
-        call parquet_set_sort_parallel_min_rows_int64(int(n, kind=int64))
-    end subroutine parquet_set_sort_parallel_min_rows_int32
-
-    !> Reports the row count below which a sort refuses to thread -- the EFFECTIVE value, so a
-    !> program that never set it (or reset it) is told 8192 rather than the `0` that is stored.
-    integer(int64) function parquet_get_sort_parallel_min_rows() result(n)
-
-        n = cfg_sort_parallel_min_rows
-        if (n <= 0) n = sort_parallel_min_rows_builtin
-    end function parquet_get_sort_parallel_min_rows
-
     !> Enables or disables the sort's integer counting fast path.
     !>
     !> The counting path is a second implementation that must produce exactly the same permutation as
@@ -882,7 +841,6 @@ contains
     subroutine push_performance_settings()
 
         call parquet_push_performance_settings( &
-            int(parquet_get_sort_parallel_min_rows(), kind=c_int64_t), &
             int(merge(1, 0, cfg_sort_counting_path), kind=c_int), &
             int(parquet_get_sort_counting_bucket_limit(), kind=c_int64_t), &
             int(parquet_get_target_row_group_bytes(), kind=c_int64_t), &
@@ -967,11 +925,6 @@ contains
         if (got) then
             call env_int32("PARQUET_FORTRAN_STRING_THREADS", text, n32)
             call parquet_set_string_threads(n32)
-        end if
-        call env_value("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", text, got)
-        if (got) then
-            call env_int64("PARQUET_FORTRAN_SORT_PARALLEL_MIN_ROWS", text, n64)
-            call parquet_set_sort_parallel_min_rows(n64)
         end if
         call env_value("PARQUET_FORTRAN_SORT_COUNTING_PATH", text, got)
         if (got) then
@@ -1232,7 +1185,6 @@ contains
         cfg_default_use_threads = .true.
         cfg_verbosity = verb_normal
         cfg_message_stream = stream_stdout
-        cfg_sort_parallel_min_rows = 0
         cfg_sort_counting_path = .true.
         cfg_sort_radix_path = .true.
         cfg_sort_counting_bucket_limit = 0
@@ -1264,7 +1216,6 @@ contains
         call print_one(u, "prefetch_threads", cfg_prefetch_threads)
         call print_one(u, "table_threads", cfg_table_threads)
         call print_one(u, "string_threads", cfg_string_threads)
-        call print_big(u, "sort_parallel_min_rows", parquet_get_sort_parallel_min_rows())
         call print_text(u, "sort_counting_path", merge("true ", "false", cfg_sort_counting_path))
         call print_text(u, "sort_radix_path", merge("true ", "false", cfg_sort_radix_path))
         call print_big(u, "sort_counting_bucket_limit", parquet_get_sort_counting_bucket_limit())

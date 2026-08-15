@@ -1992,9 +1992,36 @@ on machines A and C:
 - **with** `-fopenmp`, a flang build cannot get past the first `use omp_lib` inside an
   `#ifdef _OPENMP` — nothing to be done from this repository;
 - **without** it — which is what fpm actually does under flang, since the metapackage contributes no
-  `-fopenmp` there — every OpenMP block is preprocessed away and **the library builds cleanly**
-  (verified: `FPM_FC=flang-mp-22 fpm build --profile release` succeeds, and `nm` finds no
-  `materialize_marked_parallel` in the object, against 2 occurrences in the gfortran one).
+  `-fopenmp` there — every OpenMP block is preprocessed away and **the whole project builds**:
+  `FPM_FC=flang-mp-22 fpm build` compiles every `src/` file and links all 17 `app/` executables, and
+  `nm` finds no `materialize_marked_parallel` in the object, against 2 occurrences in the gfortran
+  one.
+
+**But `--profile release` does NOT link under flang, and that is an LLVM defect rather than
+anything here.** The release profile carries `-flto`, and the link dies with `LLVM ERROR: Unsupported
+stack probing method` followed by `flang: error: unable to execute command: Abort trap: 6`. The
+default profile is unaffected. So a flang check of this repository must use the default profile, and
+a release-profile failure there is not a portability signal — re-test it against a newer LLVM before
+treating it as one.
+
+**Two things had to be fixed in this repository before any of that worked, and both will recur.**
+
+- **A type may not carry more than 255 bindings ahead of a SPECIAL binding, because flang sorts the
+  binding table by NAME and stores a special binding's index in one byte.** `parquet_table` has ~285
+  bindings, and its `generic :: assignment(=)` guard used to be backed by `table_assign_guard` — which
+  sorts under "t", lands past 255, and killed flang with an internal compiler error
+  (`CHECK(bindingIndex <= 255)`, `runtime-type-info.cpp`) naming neither the type nor the line. The
+  binding is now `assign_guard` (implementation unchanged), and **its alphabetical position is
+  load-bearing**: `tools/generate_parquet_tables.py` says so at the declaration, because gfortran and
+  ifx are indifferent and nothing will warn if it is renamed back. Any *future* special binding on a
+  large type — another defined assignment, a defined operator — needs an early-sorting name too.
+- **An unguarded `use omp_lib` is a compile failure, not a graceful fallback to serial.**
+  `app/probe_radix_parallel.f90` and `app/benchmark_sort_tail.f90` both had one. Both now guard the
+  `use` with `#ifdef _OPENMP` and supply serial shims for the `omp_*` functions they call under
+  `#ifndef _OPENMP` (`omp_get_wtime` via `system_clock`, the rest returning 1/0). The `!$omp`
+  directives themselves need no guarding — the preprocessor removes them. This is the same defect
+  recorded below for `materialize_marked_parallel`, and it is worth grepping for whenever an `app/`
+  program gains a timer.
 
 So **"flang can build this" and "flang can build this with threads" are different claims here**, and
 any flang measurement taken on these machines is of the serial paths. Do not read a flang build
@@ -2910,7 +2937,7 @@ testing nothing at all while still reporting green.
 
 **The settings mirrored from `parquet_settings` are the second family, and they are worse**, because
 they affect production behaviour rather than only tests: `g_verbosity`, `g_message_stream`,
-`g_sort_parallel_min_rows`, `g_sort_counting_path`, `g_sort_counting_bucket_limit`,
+`g_sort_counting_path`, `g_sort_counting_bucket_limit`,
 `g_target_row_group_bytes` and `g_statistics_prescreen`. `parquet_push_output_settings` and
 `parquet_push_performance_settings` would write to their own TU's copy, and every read site in
 another TU would keep the built-in initialiser — so a user's `parquet_set_verbosity("silent")` or

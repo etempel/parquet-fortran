@@ -352,6 +352,7 @@ module parquet_sorting
     public :: parquet_debug_set_sort_tail_min_rows
     public :: parquet_debug_set_sort_engine_min_rows
     public :: parquet_debug_set_sort_counting_max_threads
+    public :: parquet_debug_sort_refine_runs
     public :: parquet_debug_set_sort_split_min_card
     public :: parquet_debug_set_sort_radix_fail_alloc
     public :: parquet_debug_reset_sort_radix_passes
@@ -460,6 +461,16 @@ module parquet_sorting
     !! ceiling can be A/B'd inside one binary rather than across two builds, which for a crossover is
     !! the only resolution that works (see `feature_sort_report.md` section 12.1).
     integer(int64), save :: dbg_sort_counting_max_threads = -1_int64
+    !> Parallel refine dispatches the last string sort made; 0 means the refine ran entirely serially.
+    !!
+    !! **The refine is the one phase whose threading NOTHING else can observe.** Its serial and
+    !! threaded arms produce byte-identical permutations -- that is what makes the serial fallback
+    !! safe -- so every correctness test passes either way, and the phase sat unthreaded through the
+    !! whole parallel-sort campaign while a shared-prefix column scaled 1.06x from 1 to 64 threads.
+    !! Counting dispatches rather than setting a flag is what lets a test tell the two threaded levels
+    !! apart: refining over many runs reports the run count, while one giant run reports the number of
+    !! sub-bucket loops that opened a team.
+    integer(int64), save :: dbg_sort_refine_runs = 0_int64
     !> Overrides the distinct-value count the split digit must reach; NEGATIVE restores
     !! `SORT_SPLIT_MIN_CARD`.
     !!
@@ -1907,6 +1918,10 @@ def emit_engine_interfaces(w):
     w("        module subroutine parquet_debug_set_sort_counting_max_threads(n)")
     w("            integer(int64), intent(in) :: n !! forced ceiling, or a negative value to restore.")
     w("        end subroutine parquet_debug_set_sort_counting_max_threads")
+    w("        !> Test-only count of parallel refine dispatches in the last string sort; 0 = serial.")
+    w("        module function parquet_debug_sort_refine_runs() result(n)")
+    w("            integer(int64) :: n !! runs refined by a team, or sub-bucket loops that opened one.")
+    w("        end function parquet_debug_sort_refine_runs")
     w("        !> Test-only override for the split's minimum distinct-value count; NEGATIVE restores")
     w("        !! the built-in `SORT_SPLIT_MIN_CARD`.")
     w("        !!")

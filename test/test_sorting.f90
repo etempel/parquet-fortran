@@ -257,7 +257,11 @@ contains
             new_unittest("engine: the threading floor scales with the team and declines small columns", &
                 test_engine_thread_floor), &
             new_unittest("engine: a small team still takes the counting path on a narrow range", &
-                test_counting_small_team) &
+                test_counting_small_team), &
+            new_unittest("engine: the multi-key chain threads a STRING key's radix", &
+                test_multi_string_threads), &
+            new_unittest("engine: the string refine threads, at both of its two levels", &
+                test_refine_threads) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -449,6 +453,116 @@ contains
         if (allocated(error)) return
         call check(error, all(gotold == ref), "the forced-radix arm must not change the answer either")
     end subroutine test_counting_small_team
+    !
+    !> The multi-key chain must run a STRING key's radix on the team, not serially.
+    !!
+    !! **Why this cannot be an answer test.** `sort_radix_lsd_chain`'s serial arms produce exactly the
+    !! permutation its threaded arm does -- that is what makes the serial fallback safe -- so every
+    !! correctness test in this file passes whether or not the string key ever reaches a thread. The
+    !! string pass was in fact serial for the whole of the parallel-sort campaign and nothing failed:
+    !! `multi3` scaled 1.49x against `multi2`'s 3.01x, and only a benchmark could see it.
+    !!
+    !! **Both keys are strings on purpose.** `dbg_sort_design` is set to 1 in exactly two places --
+    !! `sort_radix_design_a`, which only the SINGLE-key path reaches, and the threaded arm of
+    !! `sort_radix_lsd_chain`. So for a multi-key sort whose every key is a string, `design == 1` can
+    !! only mean the string pass itself threaded. Add a numeric key and the assertion goes vacuous,
+    !! because that key's own pass would set it.
+    subroutine test_multi_string_threads(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: n = 40000_int64
+        character(len=8) :: a(n), b(n)
+        type(pf_sort_keys) :: keys
+        integer(int64), allocatable :: ref(:), got(:)
+        integer(int64) :: d_serial, d_threaded, i
+        !
+        ! 40000 rows clears the engine's own threading floor (max(32768, 2048*nt)) at four threads.
+        ! The two keys tie often enough that the second one really is consulted.
+        do i = 1_int64, n
+            write (a(i), '(a,i5.5)') "k", mod(i, 400_int64)
+            write (b(i), '(a,i5.5)') "z", mod(i * 7_int64, 9973_int64)
+        end do
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call keys%clear()
+        call keys%add(a)
+        call keys%add(b)
+        !
+        call pf_argsort(keys, ref, threads=1)
+        d_serial = parquet_debug_sort_design()
+        call pf_argsort(keys, got, threads=4)
+        d_threaded = parquet_debug_sort_design()
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, d_threaded == 1_int64, &
+            "a multi-key STRING radix must run on the team: design 1 comes only from the shared chain")
+        if (allocated(error)) return
+        call check(error, d_serial == 0_int64, &
+            "at one thread the chain must not report a threaded design, or the check above is vacuous")
+        if (allocated(error)) return
+        call check(error, size(got) == size(ref) .and. all(got == ref), &
+            "threading a string key must give the serial permutation exactly")
+    end subroutine test_multi_string_threads
+    !
+    !> The string refine must run on the team, at whichever of its two levels has the work.
+    !!
+    !! **Nothing else can see this.** `sort_radix_refine_run`'s serial and threaded arms produce
+    !! byte-identical permutations, so every correctness test in this file passes whether or not the
+    !! refine ever reaches a thread -- and it did not, for the whole parallel-sort campaign. A
+    !! 5e6-row column whose values shared a leading prefix scaled **1.06x from 1 to 64 threads**
+    !! before this, against 2.94x for the same column with no shared prefix.
+    !!
+    !! **Both levels are asserted because they are reached by opposite fixtures.** A prefix SHORTER
+    !! than the radix window still separates rows into many small runs, so the parallelism is over
+    !! runs; a prefix that covers the whole window collapses the column into ONE run, the run-level
+    !! loop has nothing to spread, and the only parallelism left is that run's own 256-way
+    !! sub-bucket loop. A test using either fixture alone would leave the other level unguarded.
+    subroutine test_refine_threads(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: n = 200000_int64
+        character(len=12) :: many(n), one(n)
+        integer(int64), allocatable :: ref(:), got(:)
+        integer(int64) :: d_many, d_one, d_serial, i, q
+        !
+        ! `many`: 4 shared leading characters, so the 8-byte radix window still splits the column
+        ! into thousands of small runs. `one`: 8 shared, covering the whole window, so every row
+        ! lands in a single run and only the sub-bucket loop can thread.
+        do i = 1_int64, n
+            q = mod(i * 2654435761_int64, 100000_int64)
+            write (many(i), '(a,i7.7)') "aaaa", q
+            write (one(i), '(a,i4.4)') "aaaaaaaa", mod(q, 10000_int64)
+        end do
+        !
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call force_parallel_threshold(1_int64)
+        call pf_argsort(many, ref, threads=1)
+        d_serial = parquet_debug_sort_refine_runs()
+        call pf_argsort(many, got, threads=4)
+        d_many = parquet_debug_sort_refine_runs()
+        !
+        call check(error, all(got == ref), "threading the refine must not change the answer")
+        if (allocated(error)) then
+            call force_parallel_threshold(0_int64)
+            call parquet_debug_use_fortran_sort_engine(.false.)
+            return
+        end if
+        call pf_argsort(one, ref, threads=1)
+        call pf_argsort(one, got, threads=4)
+        d_one = parquet_debug_sort_refine_runs()
+        !
+        call force_parallel_threshold(0_int64)
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        !
+        call check(error, d_serial == 0_int64, &
+            "at one thread the refine must dispatch nothing, or the checks below are vacuous")
+        if (allocated(error)) return
+        call check(error, d_many > 0_int64, &
+            "many small runs must be refined by the team: the run-level loop did not thread")
+        if (allocated(error)) return
+        call check(error, d_one > 0_int64, &
+            "one giant run must thread its sub-bucket loop: run-level threading cannot help there")
+        if (allocated(error)) return
+        call check(error, all(got == ref), &
+            "threading a single giant run's sub-buckets must not change the answer")
+    end subroutine test_refine_threads
     !
     !> `perm(k)` must name the element belonging at position k, and gathering by it must sort.
     subroutine test_argsort_basic(error)

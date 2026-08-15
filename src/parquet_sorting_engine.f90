@@ -133,6 +133,11 @@ submodule (parquet_sorting) parquet_sorting_engine
     integer(int64), parameter :: SORT_RADIX_MIN_ROWS = 128_int64
     !> Bytes of a string key that go into the radix; the rest is settled by the refine pass.
     integer(int64), parameter :: SORT_RADIX_PREFIX = 8_int64
+    !> Rows a refine sub-bucket loop must have PER THREAD before it is worth opening a team.
+    !!
+    !! Same reasoning and same value as `SORT_REFINE_ELEMS_PER_THREAD` in `sort_radix_design_b`: the
+    !! pass is threaded over one run's range, so what decides is elements per thread, not total rows.
+    integer(int64), parameter :: SORT_REFINE_MIN_ROWS = 2048_int64
     !> Byte position past which the deep string refine stops recursing and lets the introsort finish.
     !!
     !! Bounds the recursion, whose depth is the run's common prefix length -- caller data, and so
@@ -508,6 +513,7 @@ contains
         ! split produced. A test asserting a decline would then pass or fail on call order.
         dbg_sort_split_buckets = 0_int64
         dbg_sort_design = 0_int64
+        dbg_sort_refine_runs = 0_int64
         ! Nested rather than `.and.`-ed: Fortran does not short-circuit, so the one-line form would
         ! run the candidate's O(n) range scan even with the counting path switched off -- and would
         ! define `lo`/`hi` as a side effect while doing it. CLAUDE.md records both halves of this.
@@ -2241,7 +2247,7 @@ contains
                 perm(value_base + j) = ra(j)
             end do
         end if
-        if (is_str) call sort_radix_refine_strings(keys, 1, ka, ra, nv, value_base, perm, .true.)
+        if (is_str) call sort_radix_refine_strings(keys, 1, ka, ra, nv, value_base, perm, .true., nt)
         !
         ! The two non-value tiers, in row order -- both compare equal under `sort_compare_key`, so
         ! file order is the whole answer for them.
@@ -2289,14 +2295,11 @@ contains
         integer, intent(in) :: nt                 !! team size; 1 runs every pass serially.
         !
         integer(int64), allocatable :: code(:), pb(:), cb(:) !! key images, and the ping-pong buffers.
-        integer(int64), allocatable :: tmp(:)                !! `move_alloc` intermediary.
         integer(int64), allocatable :: cnt(:,:) !! per-thread scatter cursors; unallocated = serial.
-        logical :: threaded_pass !! .true. when this pass's scatter was done by the team.
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
-        integer(int64) :: off(0:255)       !! running output cursor per bucket.
         integer(int64) :: tier(0:2)        !! rows per tier, then the tier pass's output cursor.
-        integer(int64) :: i, j, b, u       !! row, output slot, bucket, shift register.
-        integer :: k, p, r                 !! key index, byte position, tier rank.
+        integer(int64) :: i, j, b          !! row, output slot, bucket.
+        integer :: k, r                    !! key index, tier rank.
         integer :: vrank                   !! the rank a VALUE-tier row has under this key.
         integer :: ios                     !! allocation status; a failure declines, never aborts.
         logical :: has_tiers               !! .true. when this key can put a row outside the value tier.
@@ -2335,7 +2338,7 @@ contains
         !
         do k = size(keys), 1, -1
             if (keys(k)%family == SK_STR) then
-                call sort_radix_string_key_pass(keys, k, n, perm, code, cb, pb, nt)
+                call sort_radix_string_key_pass(keys, k, n, perm, code, cb, pb, cnt, nt)
                 cycle
             end if
             ! The value image, and 0 for a row this key calls null or NaN -- those are ordered by
@@ -2370,74 +2373,9 @@ contains
             !
             ! Reset PER KEY, not once for the whole list, because the copy-back below leaves `perm`
             ! live again at the end of every key.
-            in_pb = .false.
-            do p = 0, 7
-                ! A byte position every row agrees on cannot reorder anything -- the same skip the
-                ! single-key path uses, and the reason a narrow key costs proportionately less.
-                b = iand(ishft(code(1), -8 * p), 255_int64)
-                if (hist(b, p) == n) cycle
-                dbg_sort_radix_passes = dbg_sort_radix_passes + 1_int64
-                i = 1_int64
-                do b = 0_int64, 255_int64
-                    off(b) = i
-                    i = i + hist(b, p)
-                end do
-                ! **Threaded with the same count-prefix-scatter the two single-key designs share.**
-                ! The mapping is exact: `code` is the image array and the rows travelling with it are
-                ! `pb` or `perm` by parity, which is precisely `sort_radix_scatter_par`'s (source
-                ! images, source rows, destination images, destination rows). The multi-key chain
-                ! needed no new mechanism at all.
-                !
-                ! The serial 256-entry prefix above runs either way: it costs nothing beside a pass
-                ! over `n`, and computing it unconditionally leaves the serial arms below exactly as
-                ! they were instead of re-indenting them under another guard.
-                threaded_pass = .false.
-#ifdef _OPENMP
-                if (nt > 1 .and. allocated(cnt)) then
-                    call sort_radix_count_par(code, n, p, cnt, nt)
-                    call sort_radix_cursors(cnt, nt)
-                    if (in_pb) then
-                        call sort_radix_scatter_par(code, pb, cb, perm, n, p, cnt, nt)
-                    else
-                        call sort_radix_scatter_par(code, perm, cb, pb, n, p, cnt, nt)
-                    end if
-                    threaded_pass = .true.
-                    ! Reported as Design A because that is structurally what this is: one
-                    ! synchronised count-prefix-scatter per digit, no bucket decomposition. Without
-                    ! it nothing can observe that the multi-key chain threaded at all -- the serial
-                    ! arms produce the same permutation, so a fallback that always fired would pass
-                    ! every test.
-                    dbg_sort_design = 1_int64
-                end if
-#endif
-                ! Two arms rather than one loop over a pair of pointers: `perm` is a plain dummy
-                ! array, not an allocatable, so it cannot join the `move_alloc` swap that carries the
-                ! images. Duplicating eight lines is what lets it alternate anyway.
-                if (threaded_pass) then
-                    continue
-                else if (in_pb) then
-                    do j = 1_int64, n
-                        b = iand(ishft(code(j), -8 * p), 255_int64)
-                        cb(off(b)) = code(j)
-                        perm(off(b)) = pb(j)
-                        off(b) = off(b) + 1_int64
-                    end do
-                else
-                    do j = 1_int64, n
-                        b = iand(ishft(code(j), -8 * p), 255_int64)
-                        cb(off(b)) = code(j)
-                        pb(off(b)) = perm(j)
-                        off(b) = off(b) + 1_int64
-                    end do
-                end if
-                call move_alloc(code, tmp)
-                call move_alloc(cb, code)
-                call move_alloc(tmp, cb)
-                ! Flipped only when a pass actually EXECUTED. Above the `cycle` it would invert the
-                ! parity for a pass that moved nothing, and every later pass would read the buffer
-                ! that does not hold the permutation -- a wrong answer, not a slower one.
-                in_pb = .not. in_pb
-            end do
+            ! **The chain itself is shared with the STRING key pass** -- they were the same loop
+            ! written twice, and only this copy was ever threaded. See `sort_radix_lsd_chain`.
+            call sort_radix_lsd_chain(code, cb, perm, pb, n, hist, cnt, nt, in_pb)
             ! At most one copy-back per key instead of one per pass, and it must happen HERE: the
             ! tier pass below reads `perm`, and so does the next key's image build.
             if (in_pb) then
@@ -2471,6 +2409,111 @@ contains
         end do
         ok = .true.
     end subroutine sort_radix_multi_permutation
+
+    !> The count-prefix-scatter LSD chain over all eight byte positions of a prebuilt image array.
+    !!
+    !! **Extracted so the multi-key chain's NUMERIC and STRING key passes share one implementation.**
+    !! They were the same loop written twice, and only the numeric copy had ever been threaded -- so a
+    !! `multi3` sort scaled 1.49x against `multi2`'s 3.01x, with the string key's own contribution
+    !! measured at 1.10x across 1 to 64 threads, i.e. not threaded at all. Sharing the loop is what
+    !! gives the string key the threading rather than writing a third copy of it.
+    !!
+    !! **`pr` is the caller's permutation OR A CONTIGUOUS SLICE OF IT.** The numeric pass owns the
+    !! whole column and passes `perm`; the string pass owns only the value tier and passes
+    !! `perm(lo:hi)`. That costs nothing -- every dummy this hands the slice to is plain assumed-shape,
+    !! so it travels as a descriptor and is never copied in or out, and `perm` traces back to an
+    !! allocatable and so is contiguous anyway. An earlier reading of this file recorded the section
+    !! as a copy-in/copy-out hazard and deferred the whole change for it; it is not one.
+    !!
+    !! **The images ping-pong with `move_alloc`, the rows with a parity flag**, for the reason the
+    !! numeric pass already recorded: `pr` is a plain dummy array and cannot join a `move_alloc` swap.
+    !! So the live images are ALWAYS in `code` on return -- there is no image parity to report and no
+    !! image copy to make -- while the live rows are in `pb` when `in_alt` is `.true.` and in `pr`
+    !! when it is `.false.`.
+    subroutine sort_radix_lsd_chain(code, cb, pr, pb, nv, hist, cnt, nt, in_alt)
+        integer(int64), allocatable, intent(inout) :: code(:), cb(:) !! images; swapped every pass.
+        integer(int64), intent(inout) :: pr(:) !! rows in the caller's permutation, or a slice of it.
+        integer(int64), intent(inout) :: pb(:) !! the partner row buffer; `1..nv` are used.
+        integer(int64), intent(in) :: nv       !! rows, occupying `1..nv` of every array here.
+        integer(int64), intent(in) :: hist(0:255, 0:7) !! prebuilt per-digit histograms; valid every pass.
+        integer(int64), allocatable, intent(inout) :: cnt(:,:)
+        !! per-thread cursors; UNALLOCATED is the signal to take the serial arms.
+        integer, intent(in) :: nt              !! team size.
+        logical, intent(out) :: in_alt         !! .true. when the live rows ended in `pb`, not `pr`.
+        !
+        integer(int64), allocatable :: tmp(:)  !! `move_alloc` intermediary for the image swap.
+        integer(int64) :: off(0:255)           !! running output cursor per bucket, serial arms only.
+        integer(int64) :: i, j, b
+        integer :: p
+        logical :: threaded_pass !! .true. when this pass's scatter was done by the team.
+        !
+        in_alt = .false.
+        do p = 0, 7
+            ! A byte position every row agrees on cannot reorder anything. `hist` stays the right
+            ! thing to ask even though rows have moved: a permutation cannot change how many rows
+            ! carry a given digit value. `code(1)` is always the live image array -- that is what
+            ! `move_alloc` buys over a second parity flag.
+            b = iand(ishft(code(1), -8 * p), 255_int64)
+            if (hist(b, p) == nv) cycle
+            dbg_sort_radix_passes = dbg_sort_radix_passes + 1_int64
+            i = 1_int64
+            do b = 0_int64, 255_int64
+                off(b) = i
+                i = i + hist(b, p)
+            end do
+            ! The serial 256-entry prefix above runs either way: it costs nothing beside a pass over
+            ! `nv`, and computing it unconditionally leaves the serial arms below exactly as they are
+            ! instead of re-indenting them under another guard.
+            threaded_pass = .false.
+#ifdef _OPENMP
+            if (nt > 1 .and. allocated(cnt)) then
+                ! Rebuilt every pass, never reused: a row's CHUNK changes when rows move, which is
+                ! `feature_sort_parallel.md` section 6.1's silently-wrong-permutation trap. This is
+                ! the one cost the threaded arm carries that the serial one does not -- the serial
+                ! cursors come from the prebuilt `hist` for free, so a pass goes from one read and
+                ! one write to two reads and one write, divided by the team. Break-even is below two
+                ! threads.
+                call sort_radix_count_par(code, nv, p, cnt, nt)
+                call sort_radix_cursors(cnt, nt)
+                if (in_alt) then
+                    call sort_radix_scatter_par(code, pb, cb, pr, nv, p, cnt, nt)
+                else
+                    call sort_radix_scatter_par(code, pr, cb, pb, nv, p, cnt, nt)
+                end if
+                threaded_pass = .true.
+                ! Reported as Design A because that is structurally what this is: one synchronised
+                ! count-prefix-scatter per digit, no bucket decomposition. Without it nothing can
+                ! observe that the chain threaded at all -- the serial arms produce the same
+                ! permutation, so a fallback that always fired would pass every test.
+                dbg_sort_design = 1_int64
+            end if
+#endif
+            if (threaded_pass) then
+                continue
+            else if (in_alt) then
+                do j = 1_int64, nv
+                    b = iand(ishft(code(j), -8 * p), 255_int64)
+                    cb(off(b)) = code(j)
+                    pr(off(b)) = pb(j)
+                    off(b) = off(b) + 1_int64
+                end do
+            else
+                do j = 1_int64, nv
+                    b = iand(ishft(code(j), -8 * p), 255_int64)
+                    cb(off(b)) = code(j)
+                    pb(off(b)) = pr(j)
+                    off(b) = off(b) + 1_int64
+                end do
+            end if
+            call move_alloc(code, tmp)
+            call move_alloc(cb, code)
+            call move_alloc(tmp, cb)
+            ! Flipped only when a pass actually EXECUTED. Above the `cycle` it would invert the
+            ! parity for a pass that moved nothing, and every later pass would read the buffer that
+            ! does not hold the permutation -- a wrong answer, not a slower one.
+            in_alt = .not. in_alt
+        end do
+    end subroutine sort_radix_lsd_chain
 
     !> One stable pass of the multi-key chain, for a STRING key: the tier split, then a packed-prefix
     !! LSD radix over the value block, then the shared refine for the runs it could not separate.
@@ -2510,25 +2553,28 @@ contains
     !! survives the change of shape: the refine walks runs within a CONTIGUOUS value block, and the
     !! tier split is what makes it contiguous. A string key has no NaN tier, but
     !! `sort_radix_tier_rank` answers for it anyway and costs nothing to reuse.
-    subroutine sort_radix_string_key_pass(keys, kx, n, perm, code, cb, pb, nt)
+    subroutine sort_radix_string_key_pass(keys, kx, n, perm, code, cb, pb, cnt, nt)
         type(sort_key_buf), intent(in) :: keys(:)  !! the keys, in precedence order.
         integer, intent(in) :: kx                  !! which key to order by; family SK_STR.
         integer(int64), intent(in) :: n            !! rows.
         integer(int64), intent(inout) :: perm(:)   !! the permutation, ordered in place.
-        integer(int64), intent(inout) :: code(:)   !! the caller's image buffer, `n` long.
-        integer(int64), intent(inout) :: cb(:)     !! the caller's second image buffer, `n` long.
+        integer(int64), allocatable, intent(inout) :: code(:)
+        !! the caller's image buffer, `n` long. ALLOCATABLE because `sort_radix_lsd_chain` swaps it
+        !! with `cb` by `move_alloc` -- harmless to the caller, which reuses both as scratch across
+        !! keys and never depends on which physical array is which.
+        integer(int64), allocatable, intent(inout) :: cb(:) !! the caller's second image buffer.
         integer(int64), intent(inout) :: pb(:)     !! the caller's scatter buffer, `n` long.
+        integer(int64), allocatable, intent(inout) :: cnt(:,:)
+        !! the caller's per-thread cursors; UNALLOCATED is the signal to run serially.
         integer, intent(in) :: nt                  !! team size; 1 runs every whole-column pass serially.
         !
         integer(int64) :: hist(0:255, 0:7) !! one histogram per byte position, all built in ONE pass.
-        integer(int64) :: off(0:255)     !! running output cursor per bucket.
         integer(int64) :: tier(0:2)      !! rows per tier, then the tier pass's output cursor.
-        integer(int64) :: j, b, t, u     !! row, bucket, prefix-sum accumulator, shift register.
+        integer(int64) :: j, b, t        !! row, bucket, prefix-sum accumulator.
         integer(int64) :: lo, hi, nv     !! the value block's bounds, and how many rows it holds.
         integer(int64) :: base           !! `lo - 1`, added to a 1-based index within the block.
         integer :: r                     !! tier rank.
-        integer :: p                     !! byte position, 0 = least significant.
-        logical :: in_alt                !! .true. when the live pair is (cb, perm), not (code, pb).
+        logical :: in_alt                !! .true. when the chain left the live rows in `pb`.
         !
         ! The tier split, stable, three buckets whose ORDER already carries this key's nulls_first.
         ! A key that cannot have a tier skips all of it: every row is then a value, so the block is
@@ -2567,72 +2613,26 @@ contains
         base = lo - 1_int64
         nv = hi - base
         !
-        ! The value block's rows and their packed prefix images. Rows start in `pb(1:nv)` beside
-        ! images in `code(1:nv)`; a pass moves both to `perm(lo:hi)` and `cb(1:nv)`, the next moves
-        ! them back, and only the last state is copied home.
-        do j = 1_int64, nv
-            pb(j) = perm(base + j)
-        end do
-        call sort_radix_images_threaded(keys(kx), pb, nv, code, nt)
-        !
+        ! **Imaged and ordered IN PLACE in `perm(lo:hi)`, the value tier's own slice.** The rows used
+        ! to be copied into `pb` first purely so the hand-rolled loop below could start with them
+        ! there; the shared chain takes the slice directly, so that whole O(nv) copy is gone. Passing
+        ! the slice costs nothing -- every dummy it reaches is plain assumed-shape, so it travels as a
+        ! descriptor rather than being copied in and out.
+        call sort_radix_images_threaded(keys(kx), perm(lo:hi), nv, code, nt)
         call sort_radix_hist_threaded(code, nv, hist, nt)
-        in_alt = .false.
-        do p = 0, 7
-            ! A byte position every row agrees on cannot reorder anything -- the same skip the
-            ! numeric passes use. Here it is also what makes a SHARED PREFIX nearly free: every row
-            ! agreeing on prefix byte 3 means pass 3 is skipped outright rather than scattering.
-            ! The histogram was built before any pass and stays valid, because a pass permutes the
-            ! images without changing the multiset.
-            if (in_alt) then
-                b = iand(ishft(cb(1), -8 * p), 255_int64)
-            else
-                b = iand(ishft(code(1), -8 * p), 255_int64)
-            end if
-            if (hist(b, p) == nv) cycle
-            dbg_sort_radix_passes = dbg_sort_radix_passes + 1_int64
-            t = 1_int64
-            do b = 0_int64, 255_int64
-                off(b) = t
-                t = t + hist(b, p)
-            end do
-            ! Two arms rather than one loop over a pair of pointers: `perm` is a plain dummy array,
-            ! not an allocatable, so it cannot join a `move_alloc` swap, and duplicating eight lines
-            ! is what lets the rows alternate anyway instead of being copied back every pass.
-            if (in_alt) then
-                do j = 1_int64, nv
-                    b = iand(ishft(cb(j), -8 * p), 255_int64)
-                    code(off(b)) = cb(j)
-                    pb(off(b)) = perm(base + j)
-                    off(b) = off(b) + 1_int64
-                end do
-            else
-                do j = 1_int64, nv
-                    b = iand(ishft(code(j), -8 * p), 255_int64)
-                    cb(off(b)) = code(j)
-                    perm(base + off(b)) = pb(j)
-                    off(b) = off(b) + 1_int64
-                end do
-            end if
-            ! Flipped only when a pass actually EXECUTED -- above the `cycle` it would invert the
-            ! parity for a pass that moved nothing, and the answer would be read from the buffer
-            ! that does not hold it.
-            in_alt = .not. in_alt
-        end do
+        call sort_radix_lsd_chain(code, cb, perm(lo:hi), pb, nv, hist, cnt, nt, in_alt)
         !
-        ! Normalise to images in `code(1:nv)` and rows in BOTH `pb(1:nv)` and `perm(lo:hi)`, which is
-        ! the state `sort_radix_refine_strings` reads: a stable row array beside a `perm` it is about
-        ! to permute, and the two must be different arrays.
+        ! `sort_radix_refine_strings` reads images in `code(1:nv)` -- always live there, because the
+        ! chain ping-pongs them with `move_alloc` -- beside a stable row array in `pb(1:nv)` and the
+        ! `perm(lo:hi)` it is about to permute. **The two must be different arrays**, which is why one
+        ! copy is made here whichever side the chain finished on rather than only when it finished in
+        ! `pb`.
         if (in_alt) then
-            do j = 1_int64, nv
-                code(j) = cb(j)
-                pb(j) = perm(base + j)
-            end do
+            call sort_copy_threaded(pb, perm(lo:hi), nv, nt)
         else
-            do j = 1_int64, nv
-                perm(base + j) = pb(j)
-            end do
+            call sort_copy_threaded(perm(lo:hi), pb, nv, nt)
         end if
-        call sort_radix_refine_strings(keys, kx, code, pb, nv, base, perm, .false.)
+        call sort_radix_refine_strings(keys, kx, code, pb, nv, base, perm, .false., nt)
     end subroutine sort_radix_string_key_pass
 
     !> Which tier one row sits in under one key, as a rank that sorts ASCENDING: 0 first, 2 last.
@@ -2697,7 +2697,7 @@ contains
     !! defined dummy and an `intent(in)` one at once -- which F2018 15.5.2.13 forbids and which
     !! neither compiler here diagnoses. The multi-key caller normalises its buffers specifically to
     !! satisfy this.
-    subroutine sort_radix_refine_strings(keys, kx, ka, ra, nv, value_base, perm, one_key)
+    subroutine sort_radix_refine_strings(keys, kx, ka, ra, nv, value_base, perm, one_key, nt)
         type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
         integer, intent(in) :: kx                 !! which key was radixed; it must be SK_STR.
         integer(int64), intent(in) :: ka(:)       !! the sorted key images, `1..nv`.
@@ -2708,6 +2708,7 @@ contains
         logical, intent(in) :: one_key
         !! .true. when key `kx` is the ONLY key, so a tail may use the whole ordering; .false. in a
         !! multi-key chain, where the tail must order by key `kx` alone and preserve incoming order.
+        integer, intent(in) :: nt !! team size; 1 refines serially.
         !
         integer(int64) :: s, e, j !! first and last index of a run, and a cursor within it.
         integer(int64) :: ln      !! byte length of row `j`.
@@ -2717,8 +2718,24 @@ contains
         integer(int64), allocatable :: buf(:)
         !! scatter scratch for the deep refine, allocated only if some run actually needs it -- so a
         !! column whose values all fit the window never pays for it at all.
+        integer(int64), allocatable :: rlo(:), rhi(:), rmin(:), rmax(:)
+        !! the runs that need refining, collected before any of them is refined.
+        integer(int64) :: nrun, r, cap
+        integer :: ios
         !
         if (nv < 2_int64) return
+        !
+        ! **The runs are COLLECTED first, then refined.** They are disjoint ranges of `perm`, so
+        ! refining them is embarrassingly parallel -- but the boundary scan that finds them is a
+        ! sequential walk, and interleaving the two would serialise the whole thing behind it. The
+        ! two-phase shape is what lets the second phase open a team at all.
+        !
+        ! Measured before this existed, on a fixture whose values share a leading prefix (which is
+        ! what real string columns do -- urls, ids, dates as text): a 5e6-row string sort scaled
+        ! **1.16x from 1 to 64 threads**, against 2.94x for the same column with no shared prefix.
+        ! The refine was the whole difference and none of it was threaded.
+        nrun = 0_int64
+        cap = 0_int64
         s = 1_int64
         do while (s < nv)
             e = s
@@ -2741,12 +2758,110 @@ contains
                     ! A differing length: same image, different string -- see the note above.
                     if (ln > SORT_RADIX_PREFIX .or. ln /= len0) refine = .true.
                 end do
-                if (refine) call sort_radix_refine_run(keys, kx, value_base + s, value_base + e, &
-                    SORT_RADIX_PREFIX, minlen, maxlen, perm, buf, one_key)
+                if (refine) then
+                    ! **The work-list is built ONLY when a team will use it.** Collecting it costs a
+                    ! growing allocation and a store per run, and on a fixture with many small runs
+                    ! that is not free: measured at **+47%** on a 5e6-row column with ~457k runs when
+                    ! the list was built unconditionally. A serial refine has nothing to gain from
+                    ! the list, so it refines each run where it finds it, exactly as before.
+                    if (nt <= 1) then
+                        call sort_radix_refine_run(keys, kx, value_base + s, value_base + e, &
+                            SORT_RADIX_PREFIX, minlen, maxlen, perm, buf, one_key, 1)
+                        s = e + 1_int64
+                        cycle
+                    end if
+                    if (nrun >= cap) then
+                        call grow_run_list(rlo, rhi, rmin, rmax, cap)
+                        if (cap == 0_int64) then
+                            ! Out of memory collecting the list. Refine this run immediately and
+                            ! carry on serially: running out of scratch is a reason to be slower,
+                            ! never a reason to fail or to answer differently.
+                            call sort_radix_refine_run(keys, kx, value_base + s, value_base + e, &
+                                SORT_RADIX_PREFIX, minlen, maxlen, perm, buf, one_key, 1)
+                            s = e + 1_int64
+                            cycle
+                        end if
+                    end if
+                    nrun = nrun + 1_int64
+                    rlo(nrun) = value_base + s
+                    rhi(nrun) = value_base + e
+                    rmin(nrun) = minlen
+                    rmax(nrun) = maxlen
+                end if
             end if
             s = e + 1_int64
         end do
+        if (nrun < 1_int64) return
+        !
+        ! **Threaded over runs only when there are enough of them to fill the team.** With fewer,
+        ! the team would sit mostly idle here AND `sort_radix_refine_run` would then decline to
+        ! thread its own sub-bucket loop, because it refuses to nest -- so the two levels would
+        ! cancel out and the biggest run, the one that matters, would be refined by one thread. The
+        ! serial arm below leaves that decision to the run itself, which is where the work is.
+        ! `2 * nt` for `schedule(dynamic)`'s sake: run sizes here vary by orders of magnitude.
+#ifdef _OPENMP
+        if (nt > 1 .and. nrun >= 2_int64 * int(nt, int64)) then
+            ! Allocated HERE, before the region: `sort_radix_refine_run` allocates it lazily on
+            ! first need, and several threads reaching that at once is a race on an allocatable.
+            allocate(buf(size(perm, kind=int64)), stat=ios)
+            if (ios == 0 .and. dbg_sort_radix_fail_alloc /= 2) then
+                dbg_sort_refine_runs = dbg_sort_refine_runs + nrun
+                !$omp parallel do num_threads(nt) default(shared) private(r) schedule(dynamic)
+                do r = 1_int64, nrun
+                    call sort_radix_refine_run(keys, kx, rlo(r), rhi(r), &
+                        SORT_RADIX_PREFIX, rmin(r), rmax(r), perm, buf, one_key, 1)
+                end do
+                !$omp end parallel do
+                return
+            end if
+            if (allocated(buf)) deallocate(buf)
+        end if
+#endif
+        do r = 1_int64, nrun
+            call sort_radix_refine_run(keys, kx, rlo(r), rhi(r), &
+                SORT_RADIX_PREFIX, rmin(r), rmax(r), perm, buf, one_key, nt)
+        end do
     end subroutine sort_radix_refine_strings
+
+    !> Doubles the refine work-list, or reports failure by leaving `cap` at zero.
+    subroutine grow_run_list(rlo, rhi, rmin, rmax, cap)
+        integer(int64), allocatable, intent(inout) :: rlo(:), rhi(:), rmin(:), rmax(:)
+        integer(int64), intent(inout) :: cap !! capacity in, new capacity out; 0 means it could not grow.
+        integer(int64), allocatable :: t(:)
+        integer(int64) :: newcap
+        integer :: ios
+        !
+        newcap = max(1024_int64, 2_int64 * cap)
+        allocate(t(newcap), stat=ios)
+        if (ios /= 0) then
+            cap = 0_int64
+            return
+        end if
+        if (cap > 0_int64) t(1:cap) = rlo(1:cap)
+        call move_alloc(t, rlo)
+        allocate(t(newcap), stat=ios)
+        if (ios /= 0) then
+            cap = 0_int64
+            return
+        end if
+        if (cap > 0_int64) t(1:cap) = rhi(1:cap)
+        call move_alloc(t, rhi)
+        allocate(t(newcap), stat=ios)
+        if (ios /= 0) then
+            cap = 0_int64
+            return
+        end if
+        if (cap > 0_int64) t(1:cap) = rmin(1:cap)
+        call move_alloc(t, rmin)
+        allocate(t(newcap), stat=ios)
+        if (ios /= 0) then
+            cap = 0_int64
+            return
+        end if
+        if (cap > 0_int64) t(1:cap) = rmax(1:cap)
+        call move_alloc(t, rmax)
+        cap = newcap
+    end subroutine grow_run_list
 
     !> Orders one tied run by continuing the radix a byte at a time, recursing on each new run.
     !!
@@ -2786,7 +2901,8 @@ contains
     !! is exact rather than approximate: a run that did not split has precisely the rows its parent
     !! had, so its extremes are its parent's. Together these take a column of identical long strings
     !! from four passes per byte to one.
-    recursive subroutine sort_radix_refine_run(keys, kx, lo, hi, at_in, minlen, maxlen, perm, buf, one_key)
+    recursive subroutine sort_radix_refine_run(keys, kx, lo, hi, at_in, minlen, maxlen, perm, buf, &
+            one_key, nt)
         type(sort_key_buf), intent(in) :: keys(:)   !! the keys, in precedence order.
         integer, intent(in) :: kx                   !! which key to order by; it must be SK_STR.
         integer(int64), intent(in) :: lo, hi        !! the run, as absolute `perm` positions.
@@ -2798,8 +2914,12 @@ contains
         logical, intent(in) :: one_key
         !! .true. when key `kx` is the ONLY key, so a tail may use the whole ordering; .false. in a
         !! multi-key chain, where the tail must order by key `kx` alone and preserve incoming order.
+        integer, intent(in) :: nt
+        !! team size this run may use for its OWN sub-bucket loop. `sort_radix_refine_strings` passes
+        !! 1 when it has already opened a team over runs, because the two levels must not nest.
         !
         integer(int64) :: cnt(0:255) !! rows per bucket, then the running output cursor.
+        integer(int64) :: blo(0:255) !! each bucket's first slot, so the loop below needs no running cursor.
         integer(int64) :: i, t, b, at !! walk index, prefix-sum accumulator, bucket, byte position.
         integer(int64) :: sub_lo, sub_min, sub_max !! one child run and its own extremes.
         integer(int64) :: ln         !! byte length of one row, while scanning a child's extremes.
@@ -2860,10 +2980,52 @@ contains
         ! `cnt(b)` is now one PAST that bucket's last slot, so the bucket is [previous end, cnt(b)).
         ! The run really split here, so each child's extremes are rescanned -- summed over the
         ! buckets that is one pass over the run, i.e. exactly what scanning in the child would cost.
+        !
+        ! **Each bucket's start is derived from the cursors, not carried in a running `t`.** The
+        ! serial walk could keep one; the threaded loop below cannot, because bucket `b`'s first slot
+        ! has to be computable without having visited `b - 1`. `blo` is that, and it costs one extra
+        ! 256-entry pass.
         t = lo
         do b = 0_int64, 255_int64
-            if (cnt(b) > t) then
-                sub_lo = t
+            blo(b) = t
+            if (cnt(b) > t) t = cnt(b)
+        end do
+        !
+        ! **The sub-buckets are disjoint ranges of `perm`, and of `buf`** -- `buf` is indexed by
+        ! absolute position, so two threads refining different buckets can never touch the same slot.
+        ! That is what makes this safe with one shared scratch array rather than one per thread.
+        !
+        ! Threaded only when this run is the thing worth threading: a column whose whole radix prefix
+        ! is shared collapses into ONE run, so `sort_radix_refine_strings` cannot thread over runs at
+        ! all and this loop is the only parallelism available. `omp_in_parallel` is not consulted --
+        ! the caller says so directly by passing `nt = 1`, which is precise where the ambient test
+        ! would also fire for a caller that merely happens to be inside someone else's region.
+#ifdef _OPENMP
+        if (nt > 1 .and. hi - lo + 1_int64 >= SORT_REFINE_MIN_ROWS * int(nt, int64)) then
+            dbg_sort_refine_runs = dbg_sort_refine_runs + 1_int64
+            !$omp parallel do num_threads(nt) default(shared) private(b, i, sub_lo, sub_min, sub_max, ln) &
+            !$omp schedule(dynamic)
+            do b = 0_int64, 255_int64
+                if (cnt(b) > blo(b)) then
+                    sub_lo = blo(b)
+                    sub_min = huge(0_int64)
+                    sub_max = 0_int64
+                    do i = sub_lo, cnt(b) - 1_int64
+                        ln = keys(kx)%offsets(perm(i) + 1_int64) - keys(kx)%offsets(perm(i))
+                        if (ln < sub_min) sub_min = ln
+                        if (ln > sub_max) sub_max = ln
+                    end do
+                    call sort_radix_refine_run(keys, kx, sub_lo, cnt(b) - 1_int64, at + 1_int64, &
+                        sub_min, sub_max, perm, buf, one_key, 1)
+                end if
+            end do
+            !$omp end parallel do
+            return
+        end if
+#endif
+        do b = 0_int64, 255_int64
+            if (cnt(b) > blo(b)) then
+                sub_lo = blo(b)
                 sub_min = huge(0_int64)
                 sub_max = 0_int64
                 do i = sub_lo, cnt(b) - 1_int64
@@ -2872,8 +3034,7 @@ contains
                     if (ln > sub_max) sub_max = ln
                 end do
                 call sort_radix_refine_run(keys, kx, sub_lo, cnt(b) - 1_int64, at + 1_int64, &
-                    sub_min, sub_max, perm, buf, one_key)
-                t = cnt(b)
+                    sub_min, sub_max, perm, buf, one_key, nt)
             end if
         end do
     end subroutine sort_radix_refine_run
@@ -3555,6 +3716,10 @@ contains
     module procedure parquet_debug_set_sort_task_floor
         dbg_sort_task_floor = n
     end procedure parquet_debug_set_sort_task_floor
+
+    module procedure parquet_debug_sort_refine_runs
+        n = dbg_sort_refine_runs
+    end procedure parquet_debug_sort_refine_runs
 
     module procedure parquet_debug_set_sort_counting_max_threads
         dbg_sort_counting_max_threads = n

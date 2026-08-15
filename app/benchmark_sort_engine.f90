@@ -77,6 +77,7 @@ program benchmark_sort_engine
     integer :: rounds = 5                      !! rounds per figure; the best is kept.
     integer :: permkind = 32                   !! 32 or 64: which permutation kind to ask for.
     integer :: strwidth = 16                   !! declared width of a string key's elements.
+    integer :: strprefix = 0                   !! leading characters held constant across all rows.
     integer :: card_spread = 0
     !! How the low-cardinality values are spread: 0 packs them into `0..card-1`, 1 multiplies by a
     !! stride, 2 hashes them. See the fold in `shape_i` -- 0 cannot reach the balanced split at all,
@@ -761,9 +762,16 @@ contains
         integer(int64) :: q
         integer :: k
         !
+        ! **`strprefix` characters are held CONSTANT at the front.** Without it every row differs in
+        ! its first byte, the 8-byte radix prefix separates essentially everything, and
+        ! `sort_radix_refine_strings` does nothing but scan for run boundaries -- so the arm cannot
+        ! see the refine at all. Real string columns (urls, ids, dates as text) share leading bytes,
+        ! and that is the shape that puts work into the refine. Note the two regimes it selects:
+        ! below 8 the radix still separates rows into MANY small runs, at 8 or above the whole column
+        ! collapses into ONE run and the refine's own recursion is the only thing left to parallelise.
         s = repeat("a", strwidth)
         q = iand(v, 4611686018427387903_int64)
-        do k = 1, strwidth
+        do k = strprefix + 1, strwidth
             s(k:k) = achar(iachar("a") + int(q - q / 26_int64 * 26_int64, kind(k)))
             q = q / 26_int64
         end do
@@ -888,6 +896,7 @@ contains
         write(output_unit,'(a,i0)')   "  rounds (max): ", rounds
         write(output_unit,'(a,i0)')   "  perm kind   : int", permkind
         write(output_unit,'(a,i0)')   "  str width   : ", strwidth
+        write(output_unit,'(a,i0)')   "  str prefix  : ", strprefix
         write(output_unit,'(a,i0,a,i0)') "  lowcard     : ", card_n, "   spread: ", card_spread
         write(output_unit,'(a,i0,a)') "  split card  : ", split_min_card, "   (negative = shipped)"
         write(output_unit,'(a,i0,a)') "  task floor  : ", task_floor, "   (negative = shipped)"
@@ -1153,6 +1162,7 @@ contains
             case ("--rounds");   read(val, *, iostat=ios) rounds
             case ("--perm");     read(val, *, iostat=ios) permkind
             case ("--strwidth"); read(val, *, iostat=ios) strwidth
+            case ("--strprefix"); read(val, *, iostat=ios) strprefix
             case ("--card");     read(val, *, iostat=ios) card_n
             case ("--card-spread"); read(val, *, iostat=ios) card_spread
             case ("--threads");  read(val, *, iostat=ios) threads_hi

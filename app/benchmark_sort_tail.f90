@@ -20,6 +20,9 @@ program benchmark_sort_tail
     integer(int64) :: n
     integer :: reps, maxthreads
     real(real64), allocatable :: v(:)
+    integer(int64), allocatable :: vi(:)
+    character(len=16) :: family !! which key type to time: f64, i64 or i64lo.
+    logical :: serial_policy    !! .true. caps the AUTOMATIC thread count to 1.
     integer(int64), allocatable :: perm64(:)
     integer(int32), allocatable :: perm32(:)
     type(pf_sort_keys) :: keys
@@ -28,15 +31,29 @@ program benchmark_sort_tail
     logical :: use_fortran !! .true. selects the pure-Fortran engine; .false. the shipped C++ one.
     real(real64) :: t0, t1, t_ex, t_en, t_na, t_e2e, b_ex, b_en, b_na, b_e2e
     !
-    call read_args(n, reps, maxthreads, use_fortran)
+    call read_args(n, reps, maxthreads, use_fortran, family, serial_policy)
     ! Without this the shipped C++ comparison engine answers, which is a different measurement
     ! entirely -- it costs 313 ns/element serially where the Fortran radix costs 22.
     call parquet_debug_use_fortran_sort_engine(use_fortran)
-    allocate(v(n))
+    ! **`pf_sort_keys%add` has no thread argument**, so it always takes the automatic count -- which
+    ! means the `thr = 1` row extracts on every core unless the automatic count itself is capped.
+    ! Without this the extract column cannot show the serial arm at all, and a regression that only
+    ! exists there reads as innocent. Same reason the table layer's own parallel paths see it: inside
+    ! a parallel region `pf_sort_threads()` answers 1 by design.
+    if (serial_policy) call parquet_set_sort_threads(1)
+    allocate(v(n), vi(n))
     s = 88172645463325252_int64
     do i = 1_int64, n
         s = ieor(s, ishft(s, 13)); s = ieor(s, ishft(s, -7)); s = ieor(s, ishft(s, 17))
         v(i) = real(s, real64) * 1.0e-9_real64
+        ! `i64lo` folds onto 10 distinct values with a modulus, matching
+        ! `benchmark_sort_engine`'s own low-cardinality fixture -- that is what puts the engine on
+        ! its counting fast path, which is serial by design and so is the control arm here.
+        if (family == "i64lo") then
+            vi(i) = iand(s, huge(1_int64)) - iand(s, huge(1_int64)) / 10_int64 * 10_int64
+        else
+            vi(i) = s
+        end if
     end do
     !
     write (output_unit, '(a)') "=============================================================="
@@ -44,7 +61,8 @@ program benchmark_sort_tail
     write (output_unit, '(a)') "=============================================================="
     write (output_unit, '(a,i0,a,i0,a,i0)') "  n = ", n, "   reps = ", reps, &
         "   omp_get_num_procs() = ", omp_get_num_procs()
-    write (output_unit, '(a,l1)') "  fortran engine = ", use_fortran
+    write (output_unit, '(a,l1,a,a,a,l1)') "  fortran engine = ", use_fortran, &
+        "   family = ", trim(family), "   serial auto-policy = ", serial_policy
     write (output_unit, '(a)') "  all figures ns/element, best of reps"
     write (output_unit, '(a)') ""
     write (output_unit, '(a)') "  thr    extract     engine     narrow   sum(tail+eng)   end-to-end  design buckets"
@@ -59,7 +77,11 @@ program benchmark_sort_tail
             ! --- extraction alone -------------------------------------------------------------
             call keys%clear()
             t0 = omp_get_wtime()
-            call keys%add(v)
+            if (family == "f64") then
+                call keys%add(v)
+            else
+                call keys%add(vi)
+            end if
             t1 = omp_get_wtime()
             t_ex = t1 - t0
             ! --- engine alone, keys already built ---------------------------------------------
@@ -76,7 +98,11 @@ program benchmark_sort_tail
             t_na = t1 - t0
             ! --- the whole thing, as a user writes it -----------------------------------------
             t0 = omp_get_wtime()
-            call pf_argsort(v, perm32, threads=nt)
+            if (family == "f64") then
+                call pf_argsort(v, perm32, threads=nt)
+            else
+                call pf_argsort(vi, perm32, threads=nt)
+            end if
             t1 = omp_get_wtime()
             t_e2e = t1 - t0
             if (rep > 0) then
@@ -98,11 +124,13 @@ contains
         r = t * 1.0e9_real64 / real(n, real64)
     end function ns
     !
-    subroutine read_args(n, reps, maxthreads, use_fortran)
+    subroutine read_args(n, reps, maxthreads, use_fortran, family, serial_policy)
         integer(int64), intent(out) :: n          !! rows.
         integer, intent(out) :: reps              !! timed repetitions; the best is kept.
         integer, intent(out) :: maxthreads        !! highest thread count on the ladder.
         logical, intent(out) :: use_fortran       !! .false. selects the shipped C++ engine.
+        character(len=*), intent(out) :: family   !! f64, i64 or i64lo.
+        logical, intent(out) :: serial_policy     !! .true. caps the automatic thread count to 1.
         character(len=64) :: a
         integer :: i
         !
@@ -110,6 +138,8 @@ contains
         reps = 3
         maxthreads = 64
         use_fortran = .true.
+        family = "f64"
+        serial_policy = .false.
         do i = 1, command_argument_count()
             call get_command_argument(i, a)
             if (a(1:4) == "--n=") then
@@ -120,6 +150,10 @@ contains
                 read (a(11:), *) maxthreads
             else if (a(1:6) == "--cpp") then
                 use_fortran = .false.
+            else if (a(1:9) == "--family=") then
+                family = a(10:)
+            else if (a(1:9) == "--serial") then
+                serial_policy = .true.
             end if
         end do
     end subroutine read_args

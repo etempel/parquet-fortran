@@ -190,6 +190,145 @@ contains
         y = l * q + r
     end function feistel_raw_mod
 
+    !> SplitMix64's finaliser, copied here so the probe can use it as a cheap round function.
+    !!
+    !! `parquet_random`'s own `mix64` is private; if this variant is adopted the module would use
+    !! that one rather than a second copy.
+    pure function pmix64(x) result(z)
+        integer(int64), intent(in) :: x
+        integer(int64) :: z
+        integer(int64), parameter :: A = ior(ishft(int(z'BF58476D', int64), 32), int(z'1CE4E5B9', int64))
+        integer(int64), parameter :: B = ior(ishft(int(z'94D049BB', int64), 32), int(z'133111EB', int64))
+        z = ieor(x, ishft(x, -30))
+        z = z * A
+        z = ieor(z, ishft(z, -27))
+        z = z * B
+        z = ieor(z, ishft(z, -31))
+    end function pmix64
+
+    !> Modular Feistel with **no divisions**, same round function (a full Philox block) as before.
+    !!
+    !! Two `modulo` calls per round become zero, and neither change touches the round function:
+    !!
+    !!   * `modulo(l + f, p)` -> `t = l + f; if (t >= p) t = t - p`. Exact, because `l < p` and
+    !!     `f < p` give `t < 2p`, so at most one subtraction is ever needed.
+    !!   * `modulo(w, p)` -> `ishft(iand(w, M32) * p, -32)`, Lemire's multiply-shift. This maps
+    !!     `[0, 2**32)` onto `[0, p)` with a bias of about `p / 2**32`; a Feistel is a bijection for
+    !!     **any** round function, so a slightly non-uniform `F` costs nothing but a little mixing.
+    !!     Safe while `p < 2**31`, i.e. `m < 2**62`, since the product must stay under `2**63`.
+    pure function feistel_mod_fast(key, rounds, a, b, x) result(y)
+        integer(int64), intent(in) :: key           !! the seed
+        integer, intent(in) :: rounds               !! how many rounds; must be even
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: x             !! input in `[0, a*b)`
+        integer(int64) :: y                         !! output in the same domain
+        integer(int64) :: l, r, t, w0, w1, w2, w3, p, q, sw
+        integer :: k
+        p = a
+        q = b
+        l = x / q
+        r = x - l * q                               ! one division for the split, not two
+        do k = 1, rounds
+            call parquet_debug_random_block(key, int(k, int64), r, w0, w1, w2, w3)
+            t = l + ishft(iand(w0, 4294967295_int64) * p, -32)
+            if (t >= p) t = t - p
+            l = r
+            r = t
+            sw = p
+            p = q
+            q = sw
+        end do
+        y = l * q + r
+    end function feistel_mod_fast
+
+    !> The same network with a **cheap round function**: one `pmix64` instead of a Philox block.
+    !!
+    !! A Feistel is a bijection for any `F`, so `F` need not be a cipher -- it needs enough mixing
+    !! that four rounds are indistinguishable from a random permutation. Philox4x32-10 runs **ten**
+    !! cipher rounds and produces four words of which this construction used one, so it was providing
+    !! roughly forty times the mixing per round that the network can consume. The round keys are
+    !! derived once per permutation and passed in, so the per-element cost is one multiply-heavy
+    !! mixer per round.
+    !!
+    !! **This changes what the permutation is**, so it is a statistical question and not only a
+    !! performance one: the battery in section 3.5.2.1 has to be re-run against it before it could be
+    !! considered, which is exactly what the `stats` mode below does.
+    pure function feistel_mix(rk, rounds, a, b, x) result(y)
+        integer(int64), intent(in) :: rk(:)         !! per-permutation round keys, one per round
+        integer, intent(in) :: rounds               !! how many rounds; must be even
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: x             !! input in `[0, a*b)`
+        integer(int64) :: y                         !! output in the same domain
+        integer(int64) :: l, r, t, w, p, q, sw
+        integer :: k
+        p = a
+        q = b
+        l = x / q
+        r = x - l * q
+        do k = 1, rounds
+            w = pmix64(ieor(rk(k), r))
+            t = l + ishft(iand(ishft(w, -32), 4294967295_int64) * p, -32)
+            if (t >= p) t = t - p
+            l = r
+            r = t
+            sw = p
+            p = q
+            q = sw
+        end do
+        y = l * q + r
+    end function feistel_mix
+
+    !> Round keys for `feistel_mix`, derived once per permutation from the seed.
+    pure subroutine mix_round_keys(seed, rounds, rk)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer, intent(in) :: rounds               !! how many rounds
+        integer(int64), intent(out) :: rk(:)        !! one key per round
+        integer :: k
+        do k = 1, rounds
+            rk(k) = pmix64(ieor(pmix64(seed), int(k, int64) * 2654435761_int64))
+        end do
+    end subroutine mix_round_keys
+
+    !> Cycle-walked division-free modular bijection.
+    pure subroutine mod_fast_at(key, m, rounds, a, b, k, v, trials)
+        integer(int64), intent(in) :: key           !! the seed
+        integer(int64), intent(in) :: m             !! population size
+        integer, intent(in) :: rounds               !! how many rounds
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: k             !! input in `[0, m)`
+        integer(int64), intent(out) :: v            !! output in `[0, m)`
+        integer, intent(out) :: trials              !! network applications used
+        v = k
+        trials = 0
+        do
+            v = feistel_mod_fast(key, rounds, a, b, v)
+            trials = trials + 1
+            if (v < m) exit
+        end do
+    end subroutine mod_fast_at
+
+    !> Cycle-walked cheap-round-function bijection.
+    pure subroutine mix_at(rk, m, rounds, a, b, k, v, trials)
+        integer(int64), intent(in) :: rk(:)         !! per-permutation round keys
+        integer(int64), intent(in) :: m             !! population size
+        integer, intent(in) :: rounds               !! how many rounds
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: k             !! input in `[0, m)`
+        integer(int64), intent(out) :: v            !! output in `[0, m)`
+        integer, intent(out) :: trials              !! network applications used
+        v = k
+        trials = 0
+        do
+            v = feistel_mix(rk, rounds, a, b, v)
+            trials = trials + 1
+            if (v < m) exit
+        end do
+    end subroutine mix_at
+
     !> Cycle-walked unbalanced power-of-two bijection on `[0, m)`.
     pure subroutine unbal_at(key, m, rounds, hl, hr, k, v, trials)
         integer(int64), intent(in) :: key           !! the seed
@@ -291,6 +430,7 @@ program probe_random_feistel
     if (mode == 'width' .or. mode == 'all') call run_width()
     if (mode == 'scale' .or. mode == 'all') call run_scale()
     if (mode == 'cores' .or. mode == 'all') call run_cores()
+    if (mode == 'opt' .or. mode == 'all') call run_opt()
     if (mode == 'speed' .or. mode == 'all') call run_speed()
 
 contains
@@ -356,6 +496,12 @@ contains
         call stats_arm(M, NSEED, 4, 'modular     ', 3)
         call stats_arm(M, NSEED, 6, 'modular     ', 3)
         call stats_arm(M, NSEED, 4, 'unbal-pow2  ', 2)
+        call stats_arm(M, NSEED, 4, 'mod-nodiv   ', 4)
+        call stats_arm(M, NSEED, 2, 'cheap-round ', 5)
+        call stats_arm(M, NSEED, 3, 'cheap-round ', 5)
+        call stats_arm(M, NSEED, 4, 'cheap-round ', 5)
+        call stats_arm(M, NSEED, 6, 'cheap-round ', 5)
+        call stats_arm(M, NSEED, 8, 'cheap-round ', 5)
         write(output_unit, '(a)') ''
         flush(output_unit)
     end subroutine run_statistics
@@ -374,11 +520,12 @@ contains
         integer(int64) :: j, v, key, steps
         real(real64) :: chi_fix, chi_pos, chi_sub, cyc_mean, struct_frac
         integer :: nfix, ncyc, bin, vsel, hl, hr
-        integer(int64) :: fa, fb
+        integer(int64) :: fa, fb, rkey(8)
         logical, allocatable :: seen(:)
 
         vsel = 1
         if (present(variant)) vsel = variant
+        call mix_round_keys(SEED, max(rounds, 1), rkey)
         hl = bits_for(m) / 2
         hr = bits_for(m) - hl
         fa = ceil_sqrt(m)
@@ -393,6 +540,7 @@ contains
 
         do s = 1, nseed
             key = SEED + g_shift * 1000003_int64 + int(s, int64) * 7919_int64
+            if (vsel == 5) call mix_round_keys(key, max(rounds, 1), rkey)
             if (rounds < 0) then
                 call fy_permutation(key, m, perm)
             else
@@ -402,6 +550,10 @@ contains
                         call unbal_at(key, m, rounds, hl, hr, j - 1_int64, v, trials)
                     case (3)
                         call mod_at(key, m, rounds, fa, fb, j - 1_int64, v, trials)
+                    case (4)
+                        call mod_fast_at(key, m, rounds, fa, fb, j - 1_int64, v, trials)
+                    case (5)
+                        call mix_at(rkey, m, rounds, fa, fb, j - 1_int64, v, trials)
                     case default
                         call feistel_at(key, m, rounds, h, j - 1_int64, v, trials)
                     end select
@@ -847,6 +999,67 @@ contains
         write(output_unit, '(a)') ''
         flush(output_unit)
     end subroutine run_cores
+
+    !> Single-core optimisation sweep: baseline modular, division-free, and cheap round function.
+    subroutine run_opt()
+        integer(int64) :: sizes(5) = [1000_int64, 100000_int64, 1000000_int64, &
+                                      10000000_int64, 100000000_int64]
+        integer(int64), allocatable :: perm(:), ref(:)
+        integer(int64) :: m, a, b, j, pv, reps, r, rk(8)
+        integer :: si, trials, rd, vi
+        real(real64) :: t0, t1, best(3)
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'SERIAL OPTIMISATION -- ns per element, single core, 4 rounds'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') '           m    baseline   no-division   cheap-round   nodiv/base  cheap/base'
+        flush(output_unit)
+
+        do si = 1, size(sizes)
+            m = sizes(si)
+            a = ceil_sqrt(m)
+            b = (m + a - 1_int64) / a
+            call mix_round_keys(SEED, 4, rk)
+            allocate(perm(m), ref(m))
+            reps = max(1_int64, min(20000000_int64 / m, 20000_int64))
+
+            do vi = 1, 3
+                best(vi) = huge(1.0_real64)
+                do rd = 1, 3
+                    t0 = wall()
+                    do r = 1_int64, reps
+                        do j = 1_int64, m
+                            select case (vi)
+                            case (1)
+                                call mod_at(SEED, m, 4, a, b, j - 1_int64, pv, trials)
+                            case (2)
+                                call mod_fast_at(SEED, m, 4, a, b, j - 1_int64, pv, trials)
+                            case default
+                                call mix_at(rk, m, 4, a, b, j - 1_int64, pv, trials)
+                            end select
+                            perm(j) = pv
+                        end do
+                    end do
+                    t1 = wall()
+                    best(vi) = min(best(vi), (t1 - t0) / real(reps, real64) / real(m, real64) * 1.0e9_real64)
+                    if (m > 1000000_int64) exit
+                end do
+                call assert_permutation(perm, m, 'optimised variant')
+                if (vi == 1) ref = perm
+            end do
+
+            write(output_unit, '(i12,3f14.3,2f13.2)') m, best(1), best(2), best(3), &
+                best(1) / best(2), best(1) / best(3)
+            flush(output_unit)
+            deallocate(perm, ref)
+        end do
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') 'Note: no-division returns the SAME permutation as the baseline only if the'
+        write(output_unit, '(a)') 'round function is unchanged -- it is not (multiply-shift replaces modulo), so'
+        write(output_unit, '(a)') 'both optimised arms are different permutations and need their own statistics.'
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+    end subroutine run_opt
 
     subroutine speed_one(m)
         integer(int64), intent(in) :: m

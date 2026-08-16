@@ -18,6 +18,8 @@
 !>                          and the `parquet_unit_*`/`parquet_ns_*` constants.
 !>   * `parquet_sorting` -- `pf_sort`/`pf_argsort`/`pf_permute`/`pf_is_sorted`
 !>                          and the `pf_sort_keys` multi-key builder.
+!>   * `parquet_random` -- counter-based random numbers: `pf_random_at` and
+!>                          friends, reproducible under any OpenMP schedule.
 !>   * `parquet_settings`-- process-global settings: thread caps, writer
 !>                          defaults, terminal verbosity and message stream,
 !>                          plus the read-only `parquet_max_*` limits.
@@ -39,6 +41,7 @@ module parquet
     use parquet_strings
     use parquet_temporal
     use parquet_sorting
+    use parquet_random
     use parquet_settings
     ! parquet_maml_base is the one sibling imported with an `only:` list rather than in full. Its
     ! other public names (get_parquet_maml and the parquet_maml_maml_example* accessors) return

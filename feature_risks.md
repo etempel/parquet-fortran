@@ -167,6 +167,7 @@ something a reader is expected to have.
 | [Risk-100](#risk-100--a-lazily-computed-rejection-threshold-is-untested-by-every-width-that-does-not-reject) | A lazily computed rejection threshold is untested by every width that does not reject | 4 — covered |
 | [Risk-101](#risk-101--the-wrapping-route-e-kernel-is-built-by-nothing-routine-and-is-miscompiled-under-lto) | The wrapping route (e) kernel is built by nothing routine, and is miscompiled under LTO | 4 — covered |
 | [Risk-102](#risk-102--a-default-kind-size-wraps-above-231-elements-and-the-fill-fails-silently) | A default-kind `size()` wraps above 2**31 elements, and the fill fails silently | 4 — covered |
+| [Risk-103](#risk-103--the-streams-high-counter-word-is-reached-by-no-ordinary-stream-index) | The stream's high counter word is reached by no ordinary stream index | 4 — covered |
 
 ---
 
@@ -4292,3 +4293,41 @@ contract rather than merely that something was written; and it warns on stderr w
 below 2**31, because a smaller run exercises the fill and **cannot detect this bug at all** — a
 green run at the default size is the only one that means anything. Both failure modes were
 reproduced against the unfixed module through this exact tool before the fix was accepted.
+
+### Risk-103 — The stream's high counter word is reached by no ordinary stream index
+
+`random_block` splits the stream index across Philox counter words `c2` and `c3`, where
+`c3 = ishft(stream, -32)`. That word is **zero for every stream below 2**32 and all-ones for every
+small negative one**, so a suite whose streams are all small never observes it holding anything
+else — and for a long time none of them were. The golden tables use streams
+`{-5, 0, 1, 2, 10**6}`, the agreement sweep ran `-40..40`, and the widest loop reached 50000.
+
+**What that left undetectable.** Deriving `c3` from the stream's SIGN alone reproduces every value
+in the rest of the suite exactly, while making streams `i` and `i + 2**32` **identical**. One draw
+per row of a table with more than 4.3 billion rows is an ordinary use of this module — this library
+exists for data at that size — so the failure is a silently repeated stream in exactly the case the
+counter-based design is sold on. Confirmed by mutation: before the sweep below existed, that change
+passed **all nineteen tests**, including the golden vectors, both agreement sweeps, containment and
+chi-square.
+
+**Why this was the last part of the counter to be pinned, and the shape to recognise.** The draw
+axis had already been extended twice (Risk-100's widths, then the high-draw sweep in `test_edges`),
+and the reference's index arithmetic rebuilt so that no ceiling remains on it. The stream axis got
+none of that, because nothing about it looks like a boundary: no arithmetic overflows there, no
+guard branches on it, and every value is equally valid. *A coordinate that is split across machine
+words is exercised only up to the width a test actually uses* — that generalises past this module,
+and it is the reason to reach for a mutation rather than a coverage report, which showed these lines
+as fully covered throughout.
+
+**Test.** Covered by the extreme-stream sweep at the end of `test_edges` (`test/test_random.f90`),
+over `ishft(1_int64, k) + 12345` for `k = 32..62`, both signs. It carries **two** assertions per
+stream and they fail for different reasons — do not reduce it to one:
+
+- **agreement against `ref_bits`/`ref_at32`** is what catches a wrong `c3`. Unlike the draw axis
+  there is no ceiling to respect: neither side derives a stream index by arithmetic, so every
+  `int64` stream is directly comparable.
+- **`bits(seed, s) /= bits(seed, s - 2**32)`** is what still catches a `c3` that has stopped varying
+  when the reference has acquired the *same* fault. Verified to be non-redundant rather than assumed:
+  with an identical fault applied to both the library and `test_random_reference` and confined to
+  streams above 2**32 — so that no pre-existing assertion sees it — the agreement half passes and
+  this inequality is the only thing in the suite that fails.

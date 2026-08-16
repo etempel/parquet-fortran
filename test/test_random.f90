@@ -13,7 +13,12 @@
 !>     of the contract (`tools/generate_random_golden_vectors.py`). These freeze the values the
 !>     library promises. The same vectors passing under `fpm test`, `--profile release` and
 !>     `--profile debug` IS this project's three-profile bit-identity requirement, and them
-!>     passing on another machine is the cross-machine one.
+!>     passing on another machine is the cross-machine one. **On flang those three are one build
+!>     run three times** -- fpm 0.13.0 alpha defines no flang profiles, so all three emit the same
+!>     flags, and not even `-O`. The requirement is therefore met by gfortran and ifx; a flang run
+!>     needs an explicit optimisation level appended to `FPM_FFLAGS` to vary anything at all, and
+!>     `tools/check_random_kernels.sh` is what sweeps optimisation settings for this module without
+!>     depending on profiles at all.
 !>  3. **Cross-implementation agreement** against `test_random_reference`, which shares no code
 !>     with the library and works entirely on 16-bit limbs. This is the only layer demonstrated to
 !>     catch a miscompiled build.
@@ -540,6 +545,42 @@ contains
         call check(error, pf_random_bits_at(12345_int64, 1_int64, huge(1_int64)) /= &
                           pf_random_bits_at(12345_int64, 1_int64, huge(1_int64) - 1_int64), &
             "the two topmost draws returned the same bits, so the draw index stopped reaching the counter")
+        if (allocated(error)) return
+
+        ! Extreme STREAM indices, which are the other half of the same property and were the last
+        ! part of the counter left unpinned. `random_block` splits the stream across counter words
+        ! c2 and c3, and c3 is `ishft(stream, -32)` -- so it is zero for every stream below 2**32
+        ! and all-ones for every small negative one. Every other stream in this suite is small: the
+        ! golden tables use {-5, 0, 1, 2, 10**6} and the agreement sweep runs -40..40, so nothing
+        ! outside this loop has ever compared a value whose c3 was anything else.
+        !
+        ! What that left undetectable is not subtle. A `c3` derived from the stream's SIGN alone
+        ! reproduces every value in the rest of the suite exactly, and makes streams `i` and
+        ! `i + 2**32` identical -- one draw per row of a table with more than 4.3 billion rows is
+        ! an ordinary use of this module, and it would silently repeat. Confirmed by mutation:
+        ! before this loop existed, that change passed all nineteen tests.
+        !
+        ! The two assertions below fail for different reasons and both are wanted. The agreement
+        ! against the reference is the one that catches a wrong c3; the inequality is what still
+        ! catches a c3 that has stopped varying at all, which agreement alone would not report if
+        ! the reference ever acquired the same fault. Unlike the draw axis there is no ceiling to
+        ! respect: neither side derives a stream index by arithmetic, so every int64 stream is
+        ! directly comparable.
+        do k = 32_int64, 62_int64
+            top = ishft(1_int64, int(k, int32)) + 12345_int64
+            call check(error, pf_random_bits_at(777_int64, top) == ref_bits(777_int64, top, 1_int64), &
+                "pf_random_bits_at disagrees with the strict reference at a stream index above 2**32")
+            if (allocated(error)) return
+            call check(error, pf_random_bits_at(777_int64, -top) == ref_bits(777_int64, -top, 1_int64), &
+                "pf_random_bits_at disagrees with the strict reference at a stream index below -2**32")
+            if (allocated(error)) return
+            call check(error, pf_random32_at(777_int64, top) == ref_at32(777_int64, top, 1_int64), &
+                "pf_random32_at disagrees with the strict reference at a stream index above 2**32")
+            if (allocated(error)) return
+            call check(error, pf_random_bits_at(777_int64, top) /= pf_random_bits_at(777_int64, top - 4294967296_int64), &
+                "streams 2**32 apart returned the same bits, so the stream's high word is not reaching counter word c3")
+            if (allocated(error)) return
+        end do
     end subroutine test_edges
 
     !> A derived key is a seed, so derivations nest.

@@ -127,7 +127,24 @@ case "$FC" in
 esac
 
 fail=0
-declare -A seen_kernel
+
+# The vacuity guard below needs one kernel name per half, so two scalars are all this has to
+# carry. It was an associative array once, and that made the whole script a no-op on macOS:
+# `declare -A` is bash 4, macOS ships bash 3.2, and `/usr/bin/env bash` finds 3.2 there. The
+# declaration failed, the first `seen_kernel[...]` assignment then died under `set -u`, and the
+# script EXITED 0 having run one configuration of twelve -- with the vacuity guard, the part this
+# file's own header calls more important than the assertions, never reached. Two of the three
+# machines in the fleet are macOS, so that was precisely where a hand run said nothing. Keep this
+# script free of bash-4 syntax; `finished`/`trap` below is the backstop for the same class of
+# failure arriving by some other route.
+shipped_kernel=""
+forced_kernel=""
+
+# A run that dies partway through must never look like a clean one. `set -e` is not usable here --
+# build_and_run deliberately inspects non-zero exits -- so instead every deliberate exit happens
+# after `finished=1`, and anything else is reported and forced non-zero.
+finished=0
+trap '[ "$finished" = "1" ] || { echo "check_random_kernels: TERMINATED EARLY -- this run proves nothing" >&2; exit 2; }' EXIT
 
 build_and_run () {
     local label="$1" ; shift
@@ -154,10 +171,16 @@ build_and_run () {
         echo "$res" | grep '\[FAIL\]' | head -5 | sed 's/^/        /'
         fail=1
     fi
-    # Record which kernel this build actually compiled, for the vacuity guard below.
+    # Record which kernel this build actually compiled, for the vacuity guard below. Only the
+    # first configuration of each half is kept: every configuration in a half compiles the same
+    # kernel, so one name per half is what the guard compares.
     local k
     k=$(echo "$res" | tail -1 | sed -n 's/^KERNEL=\([a-z0-9]*\).*/\1/p')
-    seen_kernel["$label"]="$k"
+    case "$label" in
+        shipped\ *) [ -z "$shipped_kernel" ] && shipped_kernel="$k" ;;
+        forced\ *)  [ -z "$forced_kernel" ]  && forced_kernel="$k" ;;
+    esac
+    return 0
 }
 
 echo "=== check_random_kernels: $FC ($($FC --version 2>&1 | head -1)) ==="
@@ -179,25 +202,30 @@ else
     echo "--- $FC already compiles the wrapping kernel; nothing to force ---"
 fi
 
+# Every build has run; from here every exit is a deliberate verdict rather than a crash.
+finished=1
+
 # ---- vacuity guard -------------------------------------------------------------------------
 # Without this the whole script is worthless the moment the -U flag stops working: it would build
 # one kernel twice, pass, and say nothing. Assert the two halves really did differ.
-shipped_k="${seen_kernel["shipped ${CONFIGS[0]}"]:-}"
-if [ -z "$shipped_k" ]; then
+if [ -z "$shipped_kernel" ]; then
     echo "ERROR: could not read the kernel from the driver's output -- the check proves nothing." >&2
     exit 2
 fi
 if [ -n "$UNDEF" ]; then
-    forced_k="${seen_kernel["forced ${CONFIGS[0]}"]:-}"
-    if [ "$shipped_k" = "$forced_k" ]; then
-        echo "ERROR: both builds compiled the '$shipped_k' kernel -- '$UNDEF' no longer defeats the" >&2
-        echo "       allowlist, so the second half of this check tested nothing. Fix the flag before" >&2
-        echo "       trusting a green run here." >&2
+    if [ -z "$forced_kernel" ]; then
+        echo "ERROR: the forced half produced no kernel name -- the check proves nothing." >&2
         exit 2
     fi
-    echo "--- both kernels exercised: shipped=$shipped_k forced=$forced_k ---"
+    if [ "$shipped_kernel" = "$forced_kernel" ]; then
+        echo "ERROR: both builds compiled the '$shipped_kernel' kernel -- '$UNDEF' no longer defeats" >&2
+        echo "       the allowlist, so the second half of this check tested nothing. Fix the flag" >&2
+        echo "       before trusting a green run here." >&2
+        exit 2
+    fi
+    echo "--- both kernels exercised: shipped=$shipped_kernel forced=$forced_kernel ---"
 else
-    echo "--- single kernel exercised: $shipped_k ---"
+    echo "--- single kernel exercised: $shipped_kernel ---"
 fi
 
 if [ $fail -ne 0 ]; then

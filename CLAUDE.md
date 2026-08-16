@@ -94,6 +94,7 @@ working rules).
   - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
   - [A test that asserts a REFUSAL must say what to assert when the refusal lifts](#a-test-that-asserts-a-refusal-must-say-what-to-assert-when-the-refusal-lifts)
   - [A static check that enumerates names goes stale silently](#a-static-check-that-enumerates-names-goes-stale-silently)
+  - [A `tools/*.sh` check must run under bash 3.2, and must never exit 0 having stopped early](#a-toolssh-check-must-run-under-bash-32-and-must-never-exit-0-having-stopped-early)
   - [Measuring test coverage](#measuring-test-coverage)
   - [Coverage tooling never drives design](#coverage-tooling-never-drives-design)
   - [Fortran gcov attribution artifacts](#fortran-gcov-attribution-artifacts)
@@ -3836,6 +3837,39 @@ So: **run it once inside each activated shell** (it is read-only and takes secon
 output "the default environment" and never quote it as a property of the machine. A provenance
 block that disagrees with the `FPM_*` flags printed next to it is reporting two different
 environments, and the flags are the ones that built the binary.
+
+### A `tools/*.sh` check must run under bash 3.2, and must never exit 0 having stopped early
+
+**macOS ships bash 3.2**, and `#!/usr/bin/env bash` finds it there — two of the three machines in
+the fleet are macOS, so a script using bash-4 syntax is a script that does not run where it is most
+often run by hand. The trap is that bash does not refuse the file: it fails at the offending
+construct and carries on, so the damage lands somewhere later and looks like something else.
+
+Confirmed instance, and the reason this is a rule rather than a preference:
+`tools/check_random_kernels.sh` used `declare -A` for a two-entry lookup. On macOS the declaration
+failed, the first assignment into it then died under `set -u`, and **the script exited 0 having run
+one configuration out of twelve** — with the vacuity guard, which its own header calls more
+important than the assertions, never reached. Nothing in the output said so; CI on Linux was green
+and correct throughout. The bash-4 constructs to avoid are associative arrays (`declare -A`),
+`mapfile`/`readarray`, and `${var,,}`/`${var^^}` case conversion. `bash -n script.sh` on a macOS
+machine catches syntax-level cases; the `declare -A` class is a runtime failure and needs an actual
+run.
+
+**Two rules follow, and the second matters even when the first is obeyed:**
+
+- **Keep `tools/*.sh` free of bash-4 syntax.** An indexed array, two scalars, or a `case` will
+  express anything a small check needs. If a script genuinely requires bash 4, it must assert
+  `${BASH_VERSINFO[0]} -ge 4` and exit nonzero — a documented refusal beats a silent no-op.
+- **A check that stops early must not exit 0.** `set -e` is usually unavailable in these scripts
+  because they inspect non-zero exits deliberately, so the portable form is an explicit completion
+  flag: set `finished=0` up front, `finished=1` once every unit of work is done, and
+  `trap '[ "$finished" = "1" ] || { echo "... TERMINATED EARLY -- this run proves nothing" >&2; exit 2; }' EXIT`.
+  Every deliberate `exit` then happens after the flag is set. Verify it by injecting an unbound
+  variable reference mid-script and confirming the exit status is nonzero.
+
+This is the "silence is not success" rule applied to the checking tools themselves. A tool whose
+failure mode is a green report is worse than no tool, because it also removes the doubt that would
+have led someone to look.
 
 ### Measuring test coverage
 

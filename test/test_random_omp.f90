@@ -56,33 +56,48 @@ contains
     !!    iteration therefore does an amount of extra work that depends on its index -- extra draws
     !!    that are stored, so they cannot be optimised away, and that provably do not disturb the
     !!    value being checked, since the module has no state for them to disturb.
-    !!  * **A vacuity guard on the team size.** If the region gets a team of one -- a nested region,
-    !!    a one-core machine, `OMP_NUM_THREADS=1` -- every arm is really the serial arm and the
-    !!    comparison is empty. That must fail loudly rather than pass quietly.
+    !!  * **A vacuity guard on the team size.** If a region gets a team of one, every arm is really
+    !!    the serial arm and the comparison is empty. That must fail loudly rather than pass quietly.
+    !!    The guard asserts what the region ACHIEVED, which is the only thing that answers the
+    !!    question -- an ambient thread count says what was available, not what OpenMP handed out.
     !!  * **Two different thread counts, one of them not a divisor of `n`.** A schedule that
     !!    happens to partition the loop the same way twice would agree for the wrong reason.
+    !!
+    !! **The first two arms ASK for their team rather than accepting the ambient one**, via
+    !! `num_threads(want)` where `want` is `max(2, omp_get_max_threads())`. On any ordinary machine
+    !! that is the ambient count and nothing changes. On a one-core machine, or under
+    !! `OMP_NUM_THREADS=1`, or in a container that pins the count, it is 2 -- and that is the
+    !! difference between a correct library failing its own suite and being tested properly. The
+    !! `num_threads` clause overrides the ambient count for that region, which is exactly what
+    !! `test_seed_across_threads` below has always relied on. The vacuity guard is unchanged and
+    !! still fires if a team of one is somehow handed out anyway; it is now a real assertion about
+    !! OpenMP rather than a report that the environment was small.
     subroutine test_schedule_independence(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         real(real64) :: serial(n), stat(n), dyn(n), few(n), many(n)
         integer(int64) :: burn(n)
-        integer :: i, team_static, team_dynamic
+        integer :: i, team_static, team_dynamic, want
 
         team_static = 1
         team_dynamic = 1
+        want = 2
+#ifdef _OPENMP
+        want = max(2, omp_get_max_threads())
+#endif
 
         do i = 1, n
             serial(i) = draw(i, burn(i))
         end do
 
 #ifdef _OPENMP
-        !$omp parallel do schedule(static) default(shared) private(i)
+        !$omp parallel do schedule(static) num_threads(want) default(shared) private(i)
         do i = 1, n
             if (i == 1) team_static = omp_get_num_threads()
             stat(i) = draw(i, burn(i))
         end do
         !$omp end parallel do
 
-        !$omp parallel do schedule(dynamic, 1) default(shared) private(i)
+        !$omp parallel do schedule(dynamic, 1) num_threads(want) default(shared) private(i)
         do i = 1, n
             ! Captured from whichever thread runs iteration 1 -- under schedule(dynamic,1) that
             ! is not thread 0, and keying the capture on thread 0 would leave this reading 1
@@ -160,10 +175,18 @@ contains
     !! other. The property that matters is that two threads calling at the same moment -- possibly
     !! within the same clock tick -- come away with different seeds, which is what the critical
     !! region around the process-wide counter is for.
+    !!
+    !! **The vacuity guard here is not optional decoration, and its absence would be invisible.**
+    !! `team` says how many threads were ASKED for; `got` says how many the region received. With a
+    !! team of one there is no concurrency, and yet every assertion below still passes -- the
+    !! process-wide counter guarantees distinct values when the calls are serial, so the duplicate
+    !! count is zero for the wrong reason and the race this test exists to catch goes unexercised
+    !! while the test stays green. `test_schedule_independence` above has always guarded this;
+    !! this one did not, and read as passing on a machine where it proved nothing.
     subroutine test_seed_across_threads(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer, parameter :: per_thread = 50
-        integer :: nt, i, j, duplicates, team
+        integer :: nt, i, j, duplicates, team, got
         integer(int64), allocatable :: s(:)
 
         team = 1
@@ -173,17 +196,28 @@ contains
         nt = team * per_thread
         allocate(s(nt))
         s = 0_int64
+        got = 1
 
 #ifdef _OPENMP
         !$omp parallel do schedule(static) num_threads(team) default(shared) private(i)
 #endif
         do i = 1, nt
+            ! Captured from whichever thread runs iteration 1, matching the sibling test's reasoning:
+            ! keying this on thread 0 would read 1 even with a full team under some schedules.
+            if (i == 1) got = team_size()
             s(i) = pf_random_seed()
         end do
 #ifdef _OPENMP
         !$omp end parallel do
 #endif
 
+#ifdef _OPENMP
+        call check(error, got > 1, &
+            "vacuity guard: the seed region ran with a team of one, so no two calls were ever concurrent and " // &
+            "the duplicate check below proves nothing -- check that this suite is still excluded from " // &
+            "test-drive's own per-test parallelism")
+        if (allocated(error)) return
+#endif
         call check(error, all(s >= 1_int64), "pf_random_seed returned a value below 1 from a thread")
         if (allocated(error)) return
         duplicates = 0
@@ -196,5 +230,21 @@ contains
             "two pf_random_seed calls returned the same value -- the process-wide counter is not being incremented " // &
             "atomically, so two threads read it before either wrote it back")
     end subroutine test_seed_across_threads
+
+    !> The current team's size: the real thing under OpenMP, 1 without it.
+    !!
+    !! A helper rather than a bare `omp_get_num_threads()` because its one call site sits in a loop
+    !! body that is compiled on BOTH sides of `#ifdef _OPENMP`. The directives around that loop
+    !! vanish without OpenMP but the loop itself does not, and the runtime routine is not declared
+    !! there -- which is the same portability trap `materialize_marked_parallel` documents in
+    !! `src/parquet_tables_read.f90`, met here in a test rather than in the library.
+    function team_size() result(t)
+        integer :: t                                !! threads in the current team, or 1 without OpenMP
+#ifdef _OPENMP
+        t = omp_get_num_threads()
+#else
+        t = 1
+#endif
+    end function team_size
 
 end module test_random_omp

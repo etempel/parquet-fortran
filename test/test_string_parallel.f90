@@ -24,6 +24,9 @@ module test_string_parallel
     use parquet
     use iso_fortran_env, only : int64
     use testdrive, only : new_unittest, unittest_type, error_type, check
+#ifdef _OPENMP
+    use omp_lib, only : omp_get_max_threads, omp_set_num_threads
+#endif
     !
     implicit none
     private
@@ -31,6 +34,17 @@ module test_string_parallel
     !
     !> Payload floor low enough that a test-sized column reaches the threaded path.
     integer(int64), parameter :: TINY_FLOOR = 64_int64
+    !
+    !> OpenMP thread ceiling these tests raise the process to, so the threaded path is reachable
+    !! whatever `OMP_NUM_THREADS` says.
+    !!
+    !! **It must stay at or above `parquet_strings`' private `STRING_MIN_THREADS`** (4 at the time
+    !! of writing), which is the break-even below which `bulk_threads` declines to thread at all.
+    !! That constant is not visible from here, so this one cannot be derived from it — but the
+    !! coupling is self-reporting rather than silent: if `STRING_MIN_THREADS` ever rises above this
+    !! value, every `ever_threaded` negative control in this file fires at once, and each of their
+    !! messages names this parameter as the thing to raise.
+    integer, parameter :: THREADS_FOR_TEST = 8
     !
 contains
     !
@@ -104,6 +118,57 @@ contains
         res = .true.
     end function same_column
     !
+    !> Raises this process's OpenMP thread ceiling to `THREADS_FOR_TEST`, returning the previous
+    !! value so the caller can put it back. **Every test whose negative control asserts
+    !! `ever_threaded` must call this first.**
+    !!
+    !! **Why the tests must do this rather than take the environment as they find it.** A bulk
+    !! operation's thread count is `min(cap, omp_get_max_threads())`, further reduced to 1 below the
+    !! `STRING_MIN_THREADS` break-even — so on a machine or CI runner running with
+    !! `OMP_NUM_THREADS` below that break-even, *nothing the library exposes can reach the threaded
+    !! path*: neither `parquet_set_string_threads` nor the payload-floor override, because both are
+    !! bounded by that same ceiling. The eight A/B tests here would then compare the serial path
+    !! with itself, their negative controls would fire, and the suite would report eight failures
+    !! that mean "this machine could not run the test" while looking exactly like "the threaded
+    !! rebuild is broken". Measured before this existed: 8 failures at `OMP_NUM_THREADS` of 1, 2 and
+    !! 3, and none at 4.
+    !!
+    !! `omp_set_num_threads` is the one lever that works, because it writes the `nthreads-var` ICV
+    !! that `omp_get_max_threads()` reads — `OMP_NUM_THREADS` only supplies that ICV's *initial*
+    !! value, so a test may raise it afterwards. This does not weaken any assertion: the arms still
+    !! compare a genuinely threaded rebuild against a genuinely serial one, and `ever_threaded`
+    !! still fails the test if the threaded arm silently declined. It removes a dependency on the
+    !! ambient environment, which on a 4+-thread machine was being satisfied by luck.
+    !!
+    !! Writing a process-global ICV is safe here for the same reason the suite may write
+    !! `parquet_set_string_threads` at all: `string_parallel` is excluded from test-drive's own
+    !! `!$omp parallel do` in `run_tester.f90`. Do not copy this into a parallelized suite.
+    !!
+    !! Under a build without OpenMP this is a no-op and the threaded path does not exist to be
+    !! tested — see `collect_tests_string_parallel` for how that case is handled.
+    integer function borrow_threads() result(saved)
+        saved = 1
+#ifdef _OPENMP
+        saved = omp_get_max_threads()
+        if (saved < THREADS_FOR_TEST) call omp_set_num_threads(THREADS_FOR_TEST)
+#endif
+    end function borrow_threads
+    !
+    !> Restores what `borrow_threads` replaced, so the ceiling does not leak into later suites.
+    !!
+    !! Called on each test's success path only. An assertion failure returns early and leaves the
+    !! ceiling raised, which is deliberate: the run is already red at that point, and adding a
+    !! restore to every early return would put cleanup between an assertion and its `return` in
+    !! twenty-odd places for no benefit a failing run can use.
+    subroutine return_threads(saved)
+        integer, intent(in) :: saved                     !! value `borrow_threads` reported.
+#ifdef _OPENMP
+        if (saved < THREADS_FOR_TEST) call omp_set_num_threads(saved)
+#else
+        associate (unused => saved); end associate
+#endif
+    end subroutine return_threads
+    !
     !> **The core contract: the threaded rebuild and the serial one produce identical columns.**
     !!
     !! Both arms reindex the same source with the same permutation; one is forced serial with
@@ -121,8 +186,10 @@ contains
         integer(int64) :: n, k
         integer :: threaded_n
         logical :: ever_threaded
+        integer :: saved_threads
         !
         ever_threaded = .false.
+        saved_threads = borrow_threads()
         do n = 1000_int64, 1007_int64
             call build(src, n, 0_int64)
             allocate(perm(n))
@@ -149,8 +216,10 @@ contains
             if (allocated(error)) return
             deallocate(perm)
         end do
+        call return_threads(saved_threads)
         call check(error, ever_threaded, &
-            "negative control: at least one arm must actually have threaded, or this compares serial with serial")
+            "negative control: at least one arm must actually have threaded, or this compares serial with serial. " // &
+            "If this fires on every test in this suite at once, THREADS_FOR_TEST is below STRING_MIN_THREADS")
     end subroutine test_reindex_threaded_equals_serial
     !
     !> **`%statistics` is threaded too, and it is the one whose wrong answer is quietest.**
@@ -183,8 +252,10 @@ contains
         integer(int64), allocatable :: rlo(:), rhi(:)
         integer :: threaded_n, t
         logical :: ever_threaded
+        integer :: saved_threads
         !
         ever_threaded = .false.
+        saved_threads = borrow_threads()
         do stride = 3_int64, 7_int64, 2_int64
             do n = 1000_int64, 1005_int64
                 call build(col, n, stride)
@@ -239,7 +310,8 @@ contains
             end do
         end do
         call check(error, ever_threaded, &
-            "negative control: at least one arm must actually have threaded, or this compares serial with serial")
+            "negative control: at least one arm must actually have threaded, or this compares serial with serial. " // &
+            "If this fires on every test in this suite at once, THREADS_FOR_TEST is below STRING_MIN_THREADS")
         if (allocated(error)) return
         !
         ! An ALL-NULL column is the one input where the reduction's `hi = -1` seed is load-bearing:
@@ -257,6 +329,7 @@ contains
         call check(error, p_min == 0_int64 .and. p_max == 0_int64, &
             "an all-null column must report min_len/max_len of 0, not the reduction's seed")
         if (allocated(error)) return
+        call return_threads(saved_threads)
         call check(error, p_rows == 1000_int64 .and. p_nulls == 1000_int64, &
             "an all-null column must still report its row and null counts")
     end subroutine test_statistics_threaded_equals_serial
@@ -273,8 +346,10 @@ contains
         integer(int64), allocatable :: perm(:)
         integer(int64) :: n, k, stride
         logical :: ever_threaded
+        integer :: saved_threads
         !
         ever_threaded = .false.
+        saved_threads = borrow_threads()
         do stride = 3_int64, 7_int64, 2_int64
             do n = 997_int64, 1000_int64
                 call build(src, n, stride)
@@ -308,7 +383,9 @@ contains
                 deallocate(perm)
             end do
         end do
-        call check(error, ever_threaded, "negative control: the null arms must actually have threaded")
+        call return_threads(saved_threads)
+        call check(error, ever_threaded, "negative control: the null arms must actually have threaded " // &
+            "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
     end subroutine test_reindex_threaded_nulls
     !
     !> **`to_character`'s fill loop threads with no serial twin, so this asserts a different thing
@@ -324,8 +401,10 @@ contains
         character(len=:), allocatable :: ser(:), par(:)
         integer(int64) :: n, stride
         logical :: ever_threaded
+        integer :: saved_threads
         !
         ever_threaded = .false.
+        saved_threads = borrow_threads()
         do stride = 0_int64, 5_int64, 5_int64      ! 0 = no nulls, 5 = every 5th null
             do n = 1021_int64, 1024_int64
                 call build(col, n, stride)
@@ -360,8 +439,10 @@ contains
                 if (allocated(error)) return
             end do
         end do
+        call return_threads(saved_threads)
         call check(error, ever_threaded, &
-            "negative control: at least one arm must actually have threaded, or this compares serial with serial")
+            "negative control: at least one arm must actually have threaded, or this compares serial with serial. " // &
+            "If this fires on every test in this suite at once, THREADS_FOR_TEST is below STRING_MIN_THREADS")
     end subroutine test_to_character_threaded_equals_serial
     !
     !> **`gather` keeps a serial twin because the phased shape measured 1.5x SLOWER on one thread**,
@@ -377,8 +458,10 @@ contains
         integer(int64), allocatable :: idx(:)
         integer(int64) :: n, k, m, mode, stride
         logical :: ever_threaded
+        integer :: saved_threads
         !
         ever_threaded = .false.
+        saved_threads = borrow_threads()
         do stride = 0_int64, 3_int64, 3_int64
             do mode = 1_int64, 3_int64
                 do n = 1021_int64, 1022_int64
@@ -430,7 +513,9 @@ contains
                 end do
             end do
         end do
-        call check(error, ever_threaded, "negative control: at least one gather arm must have threaded")
+        call return_threads(saved_threads)
+        call check(error, ever_threaded, "negative control: at least one gather arm must have threaded " // &
+            "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
     end subroutine test_gather_threaded_equals_serial
     !
     !> **`build_from`'s threaded fill is a genuinely different shape from its serial one**, so this
@@ -444,8 +529,10 @@ contains
         type(parquet_string), allocatable :: h(:)
         integer(int64) :: n, stride
         logical :: ever_threaded
+        integer :: saved_threads
         !
         ever_threaded = .false.
+        saved_threads = borrow_threads()
         do stride = 0_int64, 3_int64, 3_int64
             do n = 1021_int64, 1024_int64
                 call build(src, n, stride)
@@ -470,7 +557,9 @@ contains
                 deallocate(h)
             end do
         end do
-        call check(error, ever_threaded, "negative control: at least one build_from arm must have threaded")
+        call return_threads(saved_threads)
+        call check(error, ever_threaded, "negative control: at least one build_from arm must have threaded " // &
+            "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
     end subroutine test_build_from_threaded_equals_serial
     !
     !> Builds a column whose elements carry leading and/or trailing blanks in every combination, so
@@ -525,8 +614,10 @@ contains
         integer(int64) :: n, stride
         integer :: op
         logical :: ever_threaded
+        integer :: saved_threads
         !
         ever_threaded = .false.
+        saved_threads = borrow_threads()
         do stride = 0_int64, 5_int64, 5_int64
             do op = 1, 2
                 do n = 1021_int64, 1024_int64
@@ -563,7 +654,9 @@ contains
                 end do
             end do
         end do
-        call check(error, ever_threaded, "negative control: at least one compaction arm must have threaded")
+        call return_threads(saved_threads)
+        call check(error, ever_threaded, "negative control: at least one compaction arm must have threaded " // &
+            "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
     end subroutine test_compact_threaded_equals_serial
     !
     !> **`delete_by_mask` is the only rebuild here whose OUTPUT ROW COUNT differs from its input's**,
@@ -581,8 +674,10 @@ contains
         integer(int64) :: n, k, stride
         integer :: mode
         logical :: ever_threaded
+        integer :: saved_threads
         !
         ever_threaded = .false.
+        saved_threads = borrow_threads()
         do stride = 0_int64, 3_int64, 3_int64
             do mode = 1, 4
                 do n = 1021_int64, 1022_int64
@@ -640,7 +735,9 @@ contains
                 end do
             end do
         end do
-        call check(error, ever_threaded, "negative control: at least one delete_by_mask arm must have threaded")
+        call return_threads(saved_threads)
+        call check(error, ever_threaded, "negative control: at least one delete_by_mask arm must have threaded " // &
+            "(if every test in this suite fires at once, THREADS_FOR_TEST is below STRING_MIN_THREADS)")
     end subroutine test_delete_by_mask_threaded_equals_serial
     !
     !> The thread floor declines below its break-even rather than running a slower shape on two

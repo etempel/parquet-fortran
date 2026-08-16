@@ -1,0 +1,939 @@
+!===========================================
+! Author: Elmo Tempel (elmo.tempel@ut.ee)
+!===========================================
+!
+!> Phase-2 measurement 6: should `pf_random_permutation`/`pf_random_subset` be a keyed bijection?
+!!
+!! `feature_random_phase2.md` §3.5.2 proposes replacing the partial Fisher-Yates with a **Feistel
+!! network keyed by the seed**, cycle-walked onto `[0, m)`. That makes `perm(k)` a pure function of
+!! `(seed, m, k)`: O(1) memory, embarrassingly parallel, and coordinate-addressed like the rest of
+!! the module. The cost is that a round-limited Feistel is **not** uniform over all `m!`
+!! permutations, so the round count is a statistical question, and it is frozen contract.
+!!
+!! This probe answers all three parts of §11 measurement 6:
+!!
+!!   1. **Throughput** against dense Fisher-Yates at m = 10**6, 10**7, 10**8.
+!!   2. **Thread scaling**, 1 to 64 threads -- the whole point of the design.
+!!   3. **Statistical quality by round count**, against oracles for a PERMUTATION rather than a
+!!      stream: fixed-point count, cycle count, position-value uniformity, subset membership, and a
+!!      structural distinguisher that is exact for two rounds.
+!!
+!! **Fisher-Yates is the control throughout, not merely a rival.** Driven by the same generator it
+!! samples uniformly from all `m!`, so running identical statistics on both arms is what turns "is
+!! the Feistel uniform?" into "is it distinguishable from the construction we would otherwise
+!! ship?" -- a question the same code can answer for both.
+!!
+!! The round function is this module's own kernel (`parquet_debug_random_block`), keyed by the seed
+!! with the round number as the stream, so nothing here is a second cipher.
+!!
+!! Not run by `fpm test`, by design (CLAUDE.md, "Manual (never-`fpm test`) large-scale/benchmark
+!! tools"). Build and run with `--profile release`.
+module pf_probe_feistel
+
+    use iso_fortran_env, only: int32, int64, real64
+    use parquet, only: parquet_debug_random_block, pf_random_int_at
+
+    implicit none
+
+contains
+
+    !> Smallest EVEN bit width whose domain covers `m`.
+    !!
+    !! Even so that the two Feistel halves are equal, which is what makes the network provably a
+    !! bijection with the simplest possible round structure. The price is cycle-walking: the domain
+    !! can be up to 4x `m`, so a walk costs up to about 4 applications on average. An unbalanced
+    !! network would allow an odd `b` and roughly halve that at the sizes where it bites -- noted
+    !! here because the measured walk cost below is the argument for or against bothering.
+    pure function width_for(m) result(b)
+        integer(int64), intent(in) :: m
+        integer :: b
+        integer(int64) :: cap
+        b = 2
+        cap = 4_int64
+        do while (cap < m)
+            b = b + 2
+            cap = cap * 4_int64
+        end do
+    end function width_for
+
+    !> One application of the Feistel network on `[0, 2**b)`; a bijection for any round function.
+    pure function feistel_raw(key, rounds, h, x) result(y)
+        integer(int64), intent(in) :: key           !! the seed
+        integer, intent(in) :: rounds               !! how many rounds
+        integer, intent(in) :: h                    !! half-width in bits
+        integer(int64), intent(in) :: x             !! input in `[0, 2**(2h))`
+        integer(int64) :: y                         !! output in `[0, 2**(2h))`
+        integer(int64) :: l, r, t, mask, w0, w1, w2, w3
+        integer :: k
+        mask = ishft(1_int64, h) - 1_int64
+        l = iand(ishft(x, -h), mask)
+        r = iand(x, mask)
+        do k = 1, rounds
+            call parquet_debug_random_block(key, int(k, int64), r, w0, w1, w2, w3)
+            t = ieor(l, iand(w0, mask))
+            l = r
+            r = t
+        end do
+        y = ior(ishft(l, h), r)
+    end function feistel_raw
+
+    !> The cycle-walked bijection on `[0, m)`: apply the network until the value is in range.
+    !!
+    !! Deterministic and exactly bijective -- the walk follows the network's own orbit, and every
+    !! orbit returns, so a value in `[0, m)` maps to a value in `[0, m)` and no two collide. The
+    !! trial count is reported so the walk's real cost is visible rather than assumed.
+    pure subroutine feistel_at(key, m, rounds, h, k, v, trials)
+        integer(int64), intent(in) :: key           !! the seed
+        integer(int64), intent(in) :: m             !! population size
+        integer, intent(in) :: rounds               !! how many rounds
+        integer, intent(in) :: h                    !! half-width in bits
+        integer(int64), intent(in) :: k             !! input in `[0, m)`
+        integer(int64), intent(out) :: v            !! output in `[0, m)`
+        integer, intent(out) :: trials              !! network applications this input needed
+        v = k
+        trials = 0
+        do
+            v = feistel_raw(key, rounds, h, v)
+            trials = trials + 1
+            if (v < m) exit
+        end do
+    end subroutine feistel_at
+
+    !> Smallest bit width whose domain covers `m` -- no evenness requirement.
+    pure function bits_for(m) result(b)
+        integer(int64), intent(in) :: m
+        integer :: b
+        integer(int64) :: cap
+        b = 1
+        cap = 2_int64
+        do while (cap < m)
+            b = b + 1
+            cap = cap * 2_int64
+        end do
+    end function bits_for
+
+    !> Integer square root, rounded up: the left factor of the modular variant's domain.
+    pure function ceil_sqrt(m) result(a)
+        integer(int64), intent(in) :: m
+        integer(int64) :: a
+        a = int(sqrt(real(m, real64)), int64)
+        do while (a * a < m)
+            a = a + 1_int64
+        end do
+        do while ((a - 1_int64) * (a - 1_int64) >= m .and. a > 1_int64)
+            a = a - 1_int64
+        end do
+    end function ceil_sqrt
+
+    !> UNBALANCED power-of-two Feistel: halves of `hl` and `hr` bits, `hl + hr` exactly `bits_for(m)`.
+    !!
+    !! Dropping the evenness requirement is the whole point -- the domain becomes `2**bits_for(m)`
+    !! rather than up to four times `m`, which is where the balanced form's cycle-walk cost comes
+    !! from. The two halves swap widths every round, so the round count must be **even** for the
+    !! output to be encoded the same way as the input; 4 is.
+    pure function feistel_raw_unbal(key, rounds, hl, hr, x) result(y)
+        integer(int64), intent(in) :: key           !! the seed
+        integer, intent(in) :: rounds               !! how many rounds; must be even
+        integer, intent(in) :: hl                   !! left half width in bits
+        integer, intent(in) :: hr                   !! right half width in bits
+        integer(int64), intent(in) :: x             !! input in `[0, 2**(hl+hr))`
+        integer(int64) :: y                         !! output in the same domain
+        integer(int64) :: l, r, t, w0, w1, w2, w3
+        integer :: k, p, q, sw
+        p = hl
+        q = hr
+        l = ishft(x, -q)
+        r = iand(x, ishft(1_int64, q) - 1_int64)
+        do k = 1, rounds
+            call parquet_debug_random_block(key, int(k, int64), r, w0, w1, w2, w3)
+            t = ieor(l, iand(w0, ishft(1_int64, p) - 1_int64))
+            l = r
+            r = t
+            sw = p
+            p = q
+            q = sw
+        end do
+        y = ior(ishft(l, q), r)
+    end function feistel_raw_unbal
+
+    !> MODULAR Feistel on `Z_a x Z_b`, where `a*b` can sit essentially on top of `m`.
+    !!
+    !! Black-Rogaway's construction for an arbitrary finite domain. Where the power-of-two forms are
+    !! stuck with a domain that is a power of two, this one picks `a = ceil(sqrt(m))` and
+    !! `b = ceil(m/a)`, so the walk very nearly disappears. The price is a `mod` by a runtime value
+    !! per round -- a hardware division, against a mask for the other two.
+    !!
+    !! The round function's `mod p` is slightly biased (a 32-bit word reduced mod ~10**4), which is
+    !! harmless: a Feistel is a bijection for **any** round function, and the bias is about 2**-18.
+    pure function feistel_raw_mod(key, rounds, a, b, x) result(y)
+        integer(int64), intent(in) :: key           !! the seed
+        integer, intent(in) :: rounds               !! how many rounds; must be even
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: x             !! input in `[0, a*b)`
+        integer(int64) :: y                         !! output in the same domain
+        integer(int64) :: l, r, t, w0, w1, w2, w3, p, q, sw
+        integer :: k
+        p = a
+        q = b
+        l = x / q
+        r = modulo(x, q)
+        do k = 1, rounds
+            call parquet_debug_random_block(key, int(k, int64), r, w0, w1, w2, w3)
+            t = modulo(l + modulo(w0, p), p)
+            l = r
+            r = t
+            sw = p
+            p = q
+            q = sw
+        end do
+        y = l * q + r
+    end function feistel_raw_mod
+
+    !> Cycle-walked unbalanced power-of-two bijection on `[0, m)`.
+    pure subroutine unbal_at(key, m, rounds, hl, hr, k, v, trials)
+        integer(int64), intent(in) :: key           !! the seed
+        integer(int64), intent(in) :: m             !! population size
+        integer, intent(in) :: rounds               !! how many rounds
+        integer, intent(in) :: hl                   !! left half width
+        integer, intent(in) :: hr                   !! right half width
+        integer(int64), intent(in) :: k             !! input in `[0, m)`
+        integer(int64), intent(out) :: v            !! output in `[0, m)`
+        integer, intent(out) :: trials              !! network applications used
+        v = k
+        trials = 0
+        do
+            v = feistel_raw_unbal(key, rounds, hl, hr, v)
+            trials = trials + 1
+            if (v < m) exit
+        end do
+    end subroutine unbal_at
+
+    !> Cycle-walked modular bijection on `[0, m)`.
+    pure subroutine mod_at(key, m, rounds, a, b, k, v, trials)
+        integer(int64), intent(in) :: key           !! the seed
+        integer(int64), intent(in) :: m             !! population size
+        integer, intent(in) :: rounds               !! how many rounds
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: k             !! input in `[0, m)`
+        integer(int64), intent(out) :: v            !! output in `[0, m)`
+        integer, intent(out) :: trials              !! network applications used
+        v = k
+        trials = 0
+        do
+            v = feistel_raw_mod(key, rounds, a, b, v)
+            trials = trials + 1
+            if (v < m) exit
+        end do
+    end subroutine mod_at
+
+    !> A dense partial Fisher-Yates over coordinate-addressed draws: the control construction.
+    subroutine fy_permutation(seed, m, perm)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(out) :: perm(:)      !! filled with a permutation of `0 .. m-1`
+        integer(int64) :: j, r, tmp
+        do j = 1_int64, m
+            perm(j) = j - 1_int64
+        end do
+        do j = 1_int64, m
+            r = pf_random_int_at(seed, 0_int64, j, m, j)
+            ! `tmp` is NOT optional: by step j, slot j may already hold a value some earlier step
+            ! swapped in, so writing the literal `j-1` here would duplicate one value and lose
+            ! another. The result still looks plausible and is not a permutation -- it hung the
+            ! cycle-count walk below, which was the only thing that noticed.
+            tmp = perm(j)
+            perm(j) = perm(r)
+            perm(r) = tmp
+        end do
+    end subroutine fy_permutation
+
+end module pf_probe_feistel
+
+!> Drives the throughput, thread-scaling and statistical arms.
+program probe_random_feistel
+
+    use iso_fortran_env, only: int8, int32, int64, real64, output_unit
+    use pf_probe_feistel
+    use parquet, only: pf_random_int_at
+#ifdef _OPENMP
+    use omp_lib, only: omp_get_wtime, omp_get_max_threads
+#endif
+
+    implicit none
+
+    integer(int64), parameter :: SEED = 20260816_int64
+    integer :: g_rounds_default = 4
+    integer(int64) :: g_shift = 0_int64
+    integer :: thread_list(7) = [1, 2, 4, 8, 16, 32, 64]
+    integer :: max_threads
+    character(len=32) :: mode
+
+    max_threads = 1
+#ifdef _OPENMP
+    max_threads = omp_get_max_threads()
+#endif
+
+    call get_mode(mode)
+
+    write(output_unit, '(a)') 'probe_random_feistel: keyed bijection against partial Fisher-Yates'
+#ifdef _OPENMP
+    write(output_unit, '(a,i0)') 'OpenMP available, omp_get_max_threads() = ', max_threads
+#else
+    write(output_unit, '(a)') 'built WITHOUT OpenMP -- the thread sweep will report one thread only'
+#endif
+    write(output_unit, '(a,i0)') 'default rounds = ', g_rounds_default
+    write(output_unit, '(a)') ''
+    flush(output_unit)
+
+    if (mode == 'stats' .or. mode == 'all') call run_statistics()
+    if (mode == 'width' .or. mode == 'all') call run_width()
+    if (mode == 'scale' .or. mode == 'all') call run_scale()
+    if (mode == 'cores' .or. mode == 'all') call run_cores()
+    if (mode == 'speed' .or. mode == 'all') call run_speed()
+
+contains
+
+    subroutine get_mode(m)
+        character(len=*), intent(out) :: m
+        integer :: k
+        character(len=64) :: buf
+        m = 'all'
+        do k = 1, command_argument_count()
+            call get_command_argument(k, buf)
+            if (index(buf, '--mode=') == 1) m = trim(buf(8:))
+            if (index(buf, '--rounds=') == 1) read(buf(10:), *) g_rounds_default
+            if (index(buf, '--shift=') == 1) read(buf(9:), *) g_shift
+        end do
+    end subroutine get_mode
+
+    real(real64) function wall()
+#ifdef _OPENMP
+        wall = omp_get_wtime()
+#else
+        block
+            integer(int64) :: t, rate
+            call system_clock(t, rate)
+            wall = real(t, real64) / real(rate, real64)
+        end block
+#endif
+    end function wall
+
+    ! ================================================================================
+    ! Part 3 -- statistical quality by round count
+    ! ================================================================================
+
+    subroutine run_statistics()
+        integer(int64), parameter :: M = 1000_int64
+        integer, parameter :: NSEED = 4000
+        integer :: rounds_list(5) = [2, 3, 4, 6, 8]
+        integer :: ri
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'PART 3 -- statistical quality of the permutation'
+        write(output_unit, '(a,i0,a,i0,a)') 'm = ', M, ', independent permutations = ', NSEED, &
+            ' (one per seed)'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') 'chi2 columns: a value far above its df is a detected departure.'
+        write(output_unit, '(a)') 'fix   = fixed-point count vs Poisson(1),        df 5'
+        write(output_unit, '(a)') 'pos   = value at position 0 vs uniform, 20 bins, df 19'
+        write(output_unit, '(a)') 'sub   = membership of the first 4 elements,      df 19'
+        write(output_unit, '(a)') 'cyc   = mean cycle count (expected H_m = 7.485)'
+        write(output_unit, '(a)') 'struct= P(same output high half | same input low half), ALL pairs;'
+        write(output_unit, '(a)') '        a random permutation of the 1024-element domain gives 31/1023 = 0.03030;'
+        write(output_unit, '(a)') '        the control has no halves, so it reports -1 rather than a number'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') '   arm        rounds       fix        pos        sub      cyc     struct'
+        flush(output_unit)
+
+        call stats_arm(M, NSEED, -1, 'Fisher-Yates')
+        do ri = 1, size(rounds_list)
+            call stats_arm(M, NSEED, rounds_list(ri), 'bal-pow2    ', 1)
+        end do
+        call stats_arm(M, NSEED, 2, 'modular     ', 3)
+        call stats_arm(M, NSEED, 3, 'modular     ', 3)
+        call stats_arm(M, NSEED, 4, 'modular     ', 3)
+        call stats_arm(M, NSEED, 6, 'modular     ', 3)
+        call stats_arm(M, NSEED, 4, 'unbal-pow2  ', 2)
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+    end subroutine run_statistics
+
+    !> Runs every statistic on one arm. `rounds < 0` selects the Fisher-Yates control.
+    subroutine stats_arm(m, nseed, rounds, label, variant)
+        integer(int64), intent(in) :: m
+        integer, intent(in) :: nseed
+        integer, intent(in) :: rounds
+        character(len=*), intent(in) :: label
+        integer, intent(in), optional :: variant
+        integer(int64), allocatable :: perm(:)
+        integer :: fix_hist(0:5), pos_hist(0:19), sub_hist(0:19)
+        integer(int64) :: cyc_total
+        integer :: s, h, trials, k
+        integer(int64) :: j, v, key, steps
+        real(real64) :: chi_fix, chi_pos, chi_sub, cyc_mean, struct_frac
+        integer :: nfix, ncyc, bin, vsel, hl, hr
+        integer(int64) :: fa, fb
+        logical, allocatable :: seen(:)
+
+        vsel = 1
+        if (present(variant)) vsel = variant
+        hl = bits_for(m) / 2
+        hr = bits_for(m) - hl
+        fa = ceil_sqrt(m)
+        fb = (m + fa - 1_int64) / fa
+
+        allocate(perm(m), seen(0:m - 1))
+        fix_hist = 0
+        pos_hist = 0
+        sub_hist = 0
+        cyc_total = 0_int64
+        h = width_for(m) / 2
+
+        do s = 1, nseed
+            key = SEED + g_shift * 1000003_int64 + int(s, int64) * 7919_int64
+            if (rounds < 0) then
+                call fy_permutation(key, m, perm)
+            else
+                do j = 1_int64, m
+                    select case (vsel)
+                    case (2)
+                        call unbal_at(key, m, rounds, hl, hr, j - 1_int64, v, trials)
+                    case (3)
+                        call mod_at(key, m, rounds, fa, fb, j - 1_int64, v, trials)
+                    case default
+                        call feistel_at(key, m, rounds, h, j - 1_int64, v, trials)
+                    end select
+                    perm(j) = v
+                end do
+            end if
+
+            ! Fixed points.
+            nfix = 0
+            do j = 1_int64, m
+                if (perm(j) == j - 1_int64) nfix = nfix + 1
+            end do
+            fix_hist(min(nfix, 5)) = fix_hist(min(nfix, 5)) + 1
+
+            ! Value at position 0, binned into 20 equal bins.
+            bin = int(perm(1) * 20_int64 / m, int32)
+            pos_hist(min(bin, 19)) = pos_hist(min(bin, 19)) + 1
+
+            ! Membership of the first four elements, binned the same way.
+            do k = 1, 4
+                bin = int(perm(k) * 20_int64 / m, int32)
+                sub_hist(min(bin, 19)) = sub_hist(min(bin, 19)) + 1
+            end do
+
+            ! Cycle count.
+            seen = .false.
+            ncyc = 0
+            do j = 0_int64, m - 1_int64
+                if (seen(j)) cycle
+                ncyc = ncyc + 1
+                v = j
+                steps = 0_int64
+                do
+                    seen(v) = .true.
+                    v = perm(v + 1_int64)
+                    steps = steps + 1_int64
+                    if (v == j) exit
+                    if (steps > m) then
+                        ! Only reachable if `perm` is not a bijection, in which case this walk never
+                        ! closes. Report it: an unbounded walk here is a hang, not a wrong number.
+                        write(output_unit, '(a,a,a,i0)') 'FATAL: ', label, &
+                            ' produced a non-permutation at seed ', s
+                        error stop 1
+                    end if
+                end do
+            end do
+            cyc_total = cyc_total + int(ncyc, int64)
+        end do
+
+        chi_fix = chi2_poisson1(fix_hist, nseed)
+        chi_pos = chi2_uniform(pos_hist, nseed)
+        chi_sub = chi2_uniform(sub_hist, 4 * nseed)
+        cyc_mean = real(cyc_total, real64) / real(nseed, real64)
+        struct_frac = -1.0_real64
+        if (vsel == 1) struct_frac = structure_probe(m, rounds, h)
+
+        if (rounds < 0) then
+            write(output_unit, '(a,a,3f11.1,f9.3,f11.5)') '   ', label // '     -', &
+                chi_fix, chi_pos, chi_sub, cyc_mean, struct_frac
+        else
+            write(output_unit, '(a,a,i6,3f11.1,f9.3,f11.5)') '   ', label, rounds, &
+                chi_fix, chi_pos, chi_sub, cyc_mean, struct_frac
+        end if
+        flush(output_unit)
+        deallocate(perm, seen)
+    end subroutine stats_arm
+
+    !> The structural distinguisher: does sharing an input low half make outputs share a high half?
+    !!
+    !! **Enumerated exhaustively over the raw domain, not sampled.** A first version drew 200000
+    !! pairs from `mod(p * odd_constant, 2**h)`, which has period `2**h` in `p` -- so it visited only
+    !! **32 distinct pairs**, each 6250 times, and every result it produced was an exact multiple of
+    !! 1/32. It reported 0.00000 for three round counts and 0.06250 for another, which reads as a
+    !! precise measurement and is a quantisation artefact of a probe with 32 samples. The domain here
+    !! is small enough to enumerate, so it now is.
+    !!
+    !! Two rounds is the case this exists for. The output's high half after two rounds is exactly
+    !! `L xor F1(R)`, so two inputs sharing `R` and differing in `L` **cannot** share an output high
+    !! half -- probability 0 against 31/1023 for a random permutation, which is as sharp a
+    !! distinguisher in the negative direction as the coincidence would have been in the positive.
+    !! (An earlier comment here predicted 1.0; that was the identity read backwards.)
+    !!
+    !! Run on the RAW network, before cycle-walking, because walking mixes the structure and would
+    !! hide what is being asked.
+    function structure_probe(m, rounds, h) result(frac)
+        integer(int64), intent(in) :: m
+        integer, intent(in) :: rounds
+        integer, intent(in) :: h
+        real(real64) :: frac
+        integer(int64) :: lo, l1, l2, hi_n, ya, yb, npair, hits
+        if (rounds < 0) then
+            frac = -1.0_real64                      ! the control has no halves; see the header row
+            return
+        end if
+        hi_n = ishft(1_int64, h)
+        npair = 0_int64
+        hits = 0_int64
+        do lo = 0_int64, hi_n - 1_int64
+            do l1 = 0_int64, hi_n - 2_int64
+                ya = feistel_raw(SEED, rounds, h, ior(ishft(l1, h), lo))
+                do l2 = l1 + 1_int64, hi_n - 1_int64
+                    yb = feistel_raw(SEED, rounds, h, ior(ishft(l2, h), lo))
+                    npair = npair + 1_int64
+                    if (ishft(ya, -h) == ishft(yb, -h)) hits = hits + 1_int64
+                end do
+            end do
+        end do
+        frac = real(hits, real64) / real(npair, real64)
+    end function structure_probe
+
+    !> Chi-square of a fixed-point histogram against Poisson(1), bins 0..4 and 5+.
+    real(real64) function chi2_poisson1(hist, n)
+        integer, intent(in) :: hist(0:5)
+        integer, intent(in) :: n
+        real(real64) :: p(0:5), e, fact
+        integer :: k
+        fact = 1.0_real64
+        p(0) = exp(-1.0_real64)
+        do k = 1, 4
+            fact = fact * real(k, real64)
+            p(k) = exp(-1.0_real64) / fact
+        end do
+        p(5) = 1.0_real64 - sum(p(0:4))
+        chi2_poisson1 = 0.0_real64
+        do k = 0, 5
+            e = p(k) * real(n, real64)
+            if (e > 0.0_real64) chi2_poisson1 = chi2_poisson1 + (real(hist(k), real64) - e)**2 / e
+        end do
+    end function chi2_poisson1
+
+    !> Chi-square of a histogram against a uniform expectation over its bins.
+    real(real64) function chi2_uniform(hist, n)
+        integer, intent(in) :: hist(0:19)
+        integer, intent(in) :: n
+        real(real64) :: e
+        integer :: k
+        e = real(n, real64) / 20.0_real64
+        chi2_uniform = 0.0_real64
+        do k = 0, 19
+            chi2_uniform = chi2_uniform + (real(hist(k), real64) - e)**2 / e
+        end do
+    end function chi2_uniform
+
+    ! ================================================================================
+    ! Parts 1 and 2 -- throughput and thread scaling
+    ! ================================================================================
+
+    subroutine run_speed()
+        integer(int64) :: sizes(3) = [1000000_int64, 10000000_int64, 100000000_int64]
+        integer :: si
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'PARTS 1 and 2 -- throughput and thread scaling'
+        write(output_unit, '(a,i0,a)') 'Feistel at ', g_rounds_default, ' rounds; times in ms'
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+        do si = 1, size(sizes)
+            call speed_one(sizes(si))
+        end do
+    end subroutine run_speed
+
+    !> Measures the three width rules side by side at one size: walk cost, one core, and 64 cores.
+    subroutine width_one(m)
+        integer(int64), intent(in) :: m
+        integer(int64), allocatable :: perm(:)
+        integer :: hb, hl, hr, h2, trials, ti, nt
+        integer(int64) :: a, b, j, pv
+        real(real64) :: t0, t1, w(3), t1c(3), t64(3)
+        integer :: vi
+
+        allocate(perm(m))
+        h2 = width_for(m) / 2                       ! balanced: b even
+        hb = bits_for(m)                            ! unbalanced: b exact
+        hl = hb / 2
+        hr = hb - hl
+        a = ceil_sqrt(m)
+        b = (m + a - 1_int64) / a                   ! modular: a*b just covers m
+
+        write(output_unit, '(a,i0)') '---- m = ', m
+        write(output_unit, '(a,i0,a,f7.4)') '   balanced   domain 2**', 2 * h2, &
+            '   ratio ', real(ishft(1_int64, 2 * h2), real64) / real(m, real64)
+        write(output_unit, '(a,i0,a,f7.4)') '   unbalanced domain 2**', hb, &
+            '   ratio ', real(ishft(1_int64, hb), real64) / real(m, real64)
+        write(output_unit, '(a,i0,a,i0,a,f7.4)') '   modular    domain ', a, ' x ', b, &
+            '   ratio ', real(a * b, real64) / real(m, real64)
+        flush(output_unit)
+
+        do vi = 1, 3
+            do ti = 1, 2
+                nt = merge(1, 64, ti == 1)
+                if (nt > max_threads) cycle
+                t0 = wall()
+#ifdef _OPENMP
+                !$omp parallel do num_threads(nt) default(shared) private(j, trials, pv) schedule(static)
+#endif
+                do j = 1_int64, m
+                    select case (vi)
+                    case (1)
+                        call feistel_at(SEED, m, g_rounds_default, h2, j - 1_int64, pv, trials)
+                    case (2)
+                        call unbal_at(SEED, m, g_rounds_default, hl, hr, j - 1_int64, pv, trials)
+                    case default
+                        call mod_at(SEED, m, g_rounds_default, a, b, j - 1_int64, pv, trials)
+                    end select
+                    perm(j) = pv
+                end do
+#ifdef _OPENMP
+                !$omp end parallel do
+#endif
+                t1 = wall()
+                if (ti == 1) then
+                    t1c(vi) = (t1 - t0) * 1000.0_real64
+                    call assert_permutation(perm, m, 'width variant')
+                else
+                    t64(vi) = (t1 - t0) * 1000.0_real64
+                end if
+            end do
+            w(vi) = 0.0_real64
+            do j = 1_int64, min(m, 200000_int64)
+                select case (vi)
+                case (1)
+                    call feistel_at(SEED, m, g_rounds_default, h2, j - 1_int64, pv, trials)
+                case (2)
+                    call unbal_at(SEED, m, g_rounds_default, hl, hr, j - 1_int64, pv, trials)
+                case default
+                    call mod_at(SEED, m, g_rounds_default, a, b, j - 1_int64, pv, trials)
+                end select
+                w(vi) = w(vi) + real(trials, real64)
+            end do
+            w(vi) = w(vi) / real(min(m, 200000_int64), real64)
+        end do
+
+        write(output_unit, '(a)') '   variant        applications   1 core (ms)   64 cores (ms)   vs balanced'
+        write(output_unit, '(a,f12.4,f14.1,f16.1,f14.2)') '   balanced   ', w(1), t1c(1), t64(1), 1.0_real64
+        write(output_unit, '(a,f12.4,f14.1,f16.1,f14.2)') '   unbalanced ', w(2), t1c(2), t64(2), t1c(1) / t1c(2)
+        write(output_unit, '(a,f12.4,f14.1,f16.1,f14.2)') '   modular    ', w(3), t1c(3), t64(3), t1c(1) / t1c(3)
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+        deallocate(perm)
+    end subroutine width_one
+
+    subroutine run_width()
+        integer(int64) :: sizes(3) = [1000000_int64, 10000000_int64, 100000000_int64]
+        integer :: si
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'WIDTH RULE -- balanced vs unbalanced vs modular, 4 rounds'
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+        do si = 1, size(sizes)
+            call width_one(sizes(si))
+        end do
+    end subroutine run_width
+
+    !> Single-core scaling sweep, plus the thread-independence check.
+    subroutine run_scale()
+        integer(int64) :: sizes(8) = [10_int64, 100_int64, 1000_int64, 10000_int64, &
+                                      100000_int64, 1000000_int64, 10000000_int64, 100000000_int64]
+        integer(int64), allocatable :: perm(:), other(:)
+        integer(int64) :: m, a, b, j, pv, reps, r
+        integer :: si, trials, rd
+        real(real64) :: t0, t1, best_fy, best_bj, e
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'SINGLE-CORE SCALING -- Fisher-Yates vs bijection (modular, 4 rounds)'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') '           m        FY total     bij total      FY/elem    bij/elem   FY/bij'
+        write(output_unit, '(a)') '                        (ms)          (ms)         (ns)        (ns)'
+        flush(output_unit)
+
+        do si = 1, size(sizes)
+            m = sizes(si)
+            a = ceil_sqrt(m)
+            b = (m + a - 1_int64) / a
+            allocate(perm(m))
+            reps = max(1_int64, 20000000_int64 / m)     ! ~2e7 element-operations per timed region
+
+            best_fy = huge(1.0_real64)
+            best_bj = huge(1.0_real64)
+            do rd = 1, 3
+                t0 = wall()
+                do r = 1_int64, reps
+                    call fy_permutation(SEED + r, m, perm)
+                end do
+                t1 = wall()
+                best_fy = min(best_fy, (t1 - t0) / real(reps, real64) * 1000.0_real64)
+
+                t0 = wall()
+                do r = 1_int64, reps
+                    do j = 1_int64, m
+                        call mod_at(SEED + r, m, 4, a, b, j - 1_int64, pv, trials)
+                        perm(j) = pv
+                    end do
+                end do
+                t1 = wall()
+                best_bj = min(best_bj, (t1 - t0) / real(reps, real64) * 1000.0_real64)
+                if (m > 1000000_int64) exit             ! one round is enough at the big sizes
+            end do
+
+            write(output_unit, '(i12,2f14.4,2f13.3,f9.2)') m, best_fy, best_bj, &
+                best_fy * 1.0e6_real64 / real(m, real64), best_bj * 1.0e6_real64 / real(m, real64), &
+                best_fy / best_bj
+            flush(output_unit)
+            deallocate(perm)
+        end do
+
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') '---- thread independence: is the bijection bit-identical at 1 and 64 threads?'
+        flush(output_unit)
+        do si = 6, 8
+            m = sizes(si)
+            a = ceil_sqrt(m)
+            b = (m + a - 1_int64) / a
+            allocate(perm(m), other(m))
+            do j = 1_int64, m
+                call mod_at(SEED, m, 4, a, b, j - 1_int64, pv, trials)
+                perm(j) = pv
+            end do
+#ifdef _OPENMP
+            !$omp parallel do num_threads(64) default(shared) private(j, trials, pv) schedule(dynamic, 997)
+#endif
+            do j = 1_int64, m
+                call mod_at(SEED, m, 4, a, b, j - 1_int64, pv, trials)
+                other(j) = pv
+            end do
+#ifdef _OPENMP
+            !$omp end parallel do
+#endif
+            e = 0.0_real64
+            do j = 1_int64, m
+                if (perm(j) /= other(j)) e = e + 1.0_real64
+            end do
+            write(output_unit, '(a,i12,a,i0,a)') '   m = ', m, ':  differing elements = ', &
+                int(e, int64), merge('   IDENTICAL', '   MISMATCH!', e == 0.0_real64)
+            flush(output_unit)
+            deallocate(perm, other)
+        end do
+
+        ! Fisher-Yates is deterministic too, but only because it is serial: the same call twice
+        ! gives the same answer, and there is no parallel form of it to disagree with.
+        m = 1000000_int64
+        allocate(perm(m), other(m))
+        call fy_permutation(SEED, m, perm)
+        call fy_permutation(SEED, m, other)
+        e = 0.0_real64
+        do j = 1_int64, m
+            if (perm(j) /= other(j)) e = e + 1.0_real64
+        end do
+        write(output_unit, '(a,i0)') '   Fisher-Yates, same seed twice, differing elements = ', int(e, int64)
+        write(output_unit, '(a)') ''
+        deallocate(perm, other)
+        flush(output_unit)
+    end subroutine run_scale
+
+    !> The scaling sweep extended across thread counts, to locate the crossover per size.
+    !!
+    !! The parallel region is opened INSIDE the repetition loop, once per permutation, because that
+    !! is what a caller experiences: `pf_random_perm_at` is elemental and the caller writes the loop,
+    !! so the team is created and joined per call. Hoisting it outside would measure a configuration
+    !! nobody runs and would hide the small-`m` result entirely, which is the interesting one.
+    subroutine run_cores()
+        integer(int64) :: sizes(8) = [10_int64, 100_int64, 1000_int64, 10000_int64, &
+                                      100000_int64, 1000000_int64, 10000000_int64, 100000000_int64]
+        integer :: tlist(5) = [1, 2, 4, 8, 16]
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: m, a, b, j, pv, reps, r
+        integer :: si, ti, nt, trials, rd, cross
+        real(real64) :: t0, t1, t_fy, t_bj(5), best
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'CROSSOVER -- Fisher-Yates (serial) against the bijection at 1..16 cores'
+        write(output_unit, '(a)') 'ms per permutation; best of 3 where repetition is affordable'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') '           m       FY      bij@1      bij@2      bij@4      bij@8     bij@16   cross'
+        flush(output_unit)
+
+        do si = 1, size(sizes)
+            m = sizes(si)
+            a = ceil_sqrt(m)
+            b = (m + a - 1_int64) / a
+            allocate(perm(m))
+
+            reps = max(1_int64, min(20000000_int64 / m, 2000000_int64))
+            best = huge(1.0_real64)
+            do rd = 1, 3
+                t0 = wall()
+                do r = 1_int64, reps
+                    call fy_permutation(SEED + r, m, perm)
+                end do
+                t1 = wall()
+                best = min(best, (t1 - t0) / real(reps, real64) * 1000.0_real64)
+                if (m > 1000000_int64) exit
+            end do
+            t_fy = best
+
+            do ti = 1, size(tlist)
+                nt = tlist(ti)
+                if (nt > max_threads) then
+                    t_bj(ti) = -1.0_real64
+                    cycle
+                end if
+                reps = max(1_int64, min(20000000_int64 / m, 20000_int64))
+                best = huge(1.0_real64)
+                do rd = 1, 3
+                    t0 = wall()
+                    do r = 1_int64, reps
+#ifdef _OPENMP
+                        !$omp parallel do num_threads(nt) default(shared) private(j, trials, pv) &
+                        !$omp     schedule(static)
+#endif
+                        do j = 1_int64, m
+                            call mod_at(SEED + r, m, 4, a, b, j - 1_int64, pv, trials)
+                            perm(j) = pv
+                        end do
+#ifdef _OPENMP
+                        !$omp end parallel do
+#endif
+                    end do
+                    t1 = wall()
+                    best = min(best, (t1 - t0) / real(reps, real64) * 1000.0_real64)
+                    if (m > 1000000_int64) exit
+                end do
+                t_bj(ti) = best
+            end do
+
+            cross = 0
+            do ti = 1, size(tlist)
+                if (t_bj(ti) > 0.0_real64 .and. t_bj(ti) < t_fy) then
+                    cross = tlist(ti)
+                    exit
+                end if
+            end do
+
+            if (cross > 0) then
+                write(output_unit, '(i12,6f11.4,i8)') m, t_fy, t_bj(1), t_bj(2), t_bj(3), &
+                    t_bj(4), t_bj(5), cross
+            else
+                write(output_unit, '(i12,6f11.4,a)') m, t_fy, t_bj(1), t_bj(2), t_bj(3), &
+                    t_bj(4), t_bj(5), '     >16'
+            end if
+            flush(output_unit)
+            deallocate(perm)
+        end do
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+    end subroutine run_cores
+
+    subroutine speed_one(m)
+        integer(int64), intent(in) :: m
+        integer(int64), allocatable :: perm(:)
+        real(real64) :: t0, t1, t_fy, t_f, t_one
+        integer :: h, ti, nt, trials
+        integer(int64) :: j, pv
+        real(real64) :: walk_mean
+
+        allocate(perm(m))
+        h = width_for(m) / 2
+        t_one = 0.0_real64
+
+        write(output_unit, '(a,i0,a,i0,a,i0)') '---- m = ', m, '   domain = 2**', 2 * h, &
+            ', walk ratio x1000 = ', ishft(1_int64, 2 * h) * 1000_int64 / m
+        flush(output_unit)
+
+        ! Fisher-Yates: serial by construction, so measured once.
+        t0 = wall()
+        call fy_permutation(SEED, m, perm)
+        t1 = wall()
+        t_fy = (t1 - t0) * 1000.0_real64
+        call assert_permutation(perm, m, 'Fisher-Yates')
+        write(output_unit, '(a,f12.1,a)') '   Fisher-Yates (serial only)      ', t_fy, ' ms'
+        flush(output_unit)
+
+        ! The bijection, at each thread count.
+        do ti = 1, size(thread_list)
+            nt = thread_list(ti)
+            if (nt > max_threads) cycle
+            t0 = wall()
+#ifdef _OPENMP
+            !$omp parallel do num_threads(nt) default(shared) private(j, trials, pv) schedule(static)
+#endif
+            do j = 1_int64, m
+                call feistel_at(SEED, m, g_rounds_default, h, j - 1_int64, pv, trials)
+                perm(j) = pv
+            end do
+#ifdef _OPENMP
+            !$omp end parallel do
+#endif
+            t1 = wall()
+            t_f = (t1 - t0) * 1000.0_real64
+            if (ti == 1) then
+                call assert_permutation(perm, m, 'Feistel')
+                t_one = t_f
+            end if
+            write(output_unit, '(a,i4,a,f12.1,a,f8.2,a,f8.2)') '   Feistel, threads =', nt, '   ', &
+                t_f, ' ms   vs FY x', t_fy / t_f, '   scaling x', t_one / t_f
+            flush(output_unit)
+        end do
+
+        ! What the cycle-walk actually costs at this size.
+        walk_mean = 0.0_real64
+        do j = 1_int64, min(m, 200000_int64)
+            call feistel_at(SEED, m, g_rounds_default, h, j - 1_int64, pv, trials)
+            walk_mean = walk_mean + real(trials, real64)
+        end do
+        walk_mean = walk_mean / real(min(m, 200000_int64), real64)
+        write(output_unit, '(a,f8.4)') '   mean network applications per element: ', walk_mean
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+        deallocate(perm)
+    end subroutine speed_one
+
+    !> Verifies the result really is a permutation of `0 .. m-1`; a bijection that is not one is
+    !! the single failure this whole construction has to be held to.
+    subroutine assert_permutation(perm, m, what)
+        integer(int64), intent(in) :: perm(:)
+        integer(int64), intent(in) :: m
+        character(len=*), intent(in) :: what
+        integer(int8), allocatable :: hit(:)
+        integer(int64) :: j
+        allocate(hit(0:m - 1))
+        hit = 0_int8
+        do j = 1_int64, m
+            if (perm(j) < 0_int64 .or. perm(j) >= m) then
+                write(output_unit, '(a,a,a,i0)') 'FATAL: ', what, ' produced out-of-range ', perm(j)
+                error stop 1
+            end if
+            if (hit(perm(j)) /= 0_int8) then
+                write(output_unit, '(a,a,a,i0)') 'FATAL: ', what, ' is not a bijection, repeat at ', perm(j)
+                error stop 1
+            end if
+            hit(perm(j)) = 1_int8
+        end do
+        deallocate(hit)
+    end subroutine assert_permutation
+
+end program probe_random_feistel

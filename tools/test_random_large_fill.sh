@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual large-scale check that `pf_random_fill_at` is correct past 2**31 elements.
+# Manual large-scale check that `pf_random_fill_draws` is correct past 2**31 elements.
 #
 # Both fill routines take their length from `size(v)`, which without an explicit `kind=` returns a
 # DEFAULT-kind integer and wraps above 2**31 elements. The wrap fails silently: a length that wraps

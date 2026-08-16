@@ -298,7 +298,7 @@ module test_random_vectors
         2272459864431828475_int64, 8766464950418114028_int64, -2783115713689908592_int64, -6013933026377920385_int64, &
         3785747940022282957_int64, 6514504133438201533_int64, 3284898822272062517_int64]
 
-    ! ---- pf_random_fill_at ----
+    ! ---- pf_random_fill_draws ----
     !
     ! Case c fills fill_count(c) values starting at draw fill_start(c); its expected
     ! values are fill_at_bits(fill_first(c) : fill_first(c) + fill_count(c) - 1).

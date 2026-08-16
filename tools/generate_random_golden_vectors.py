@@ -14,7 +14,7 @@ at build time, so the fpm build stays dependency-free):
   test/test_random_vectors.f90    module `test_random_vectors`: the Random123 known-answer
                                   vectors, and golden tables for pf_random_at, pf_random32_at,
                                   pf_random_bits_at, pf_random_int_at, pf_random_key and
-                                  pf_random_fill_at.
+                                  pf_random_fill_draws.
 
 Usage:  tools/generate_random_golden_vectors.py [--check] [--self-test]
 
@@ -581,7 +581,7 @@ def gen_module():
     L.append("")
 
     # -- fills ------------------------------------------------------------------------------------
-    L.append("    ! ---- pf_random_fill_at ----")
+    L.append("    ! ---- pf_random_fill_draws ----")
     L.append("    !")
     L.append("    ! Case c fills fill_count(c) values starting at draw fill_start(c); its expected")
     L.append("    ! values are fill_at_bits(fill_first(c) : fill_first(c) + fill_count(c) - 1).")

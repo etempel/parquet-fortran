@@ -99,24 +99,67 @@ collision-free.
 - **`pf_random32_at(seed, i [, draw])`** — `real(real32)` in `[0, 1)`.
 - **`pf_random_bits_at(seed, i [, draw])`** — `integer(int64)`, 64 raw bits, every pattern possible.
 - **`pf_random_int_at(seed, i, lo, hi [, draw])`** — a uniform integer in `[lo, hi]`.
-- **`pf_random_fill_at(seed, i, v [, draw])`** — fills a rank-1 `real64` or `real32` array with
-  consecutive draws.
+- **`pf_random_fill_draws(seed, i, v [, draw])`** — fills a rank-1 `real64` or `real32` array with
+  consecutive draws of **one** stream.
+- **`pf_random_fill_streams(seed, i0, v [, draw])`** — fills a rank-1 `real64` or `real32` array
+  with **one** draw of each of consecutive streams.
 - **`pf_random_seed()`** — a fresh, nondeterministic seed.
 
 All the scalar draws are `pure elemental`, so they accept conformable arrays as well as scalars.
-For bulk work, prefer the scalar call inside your own loop, or `pf_random_fill_at`; a whole-array
-elemental call over a constructed index array is much slower than either.
+For bulk work, prefer the scalar call inside your own loop or one of the two fills; a whole-array
+elemental call over a constructed index array is much slower than any of them.
+
+### Which fill: the two axes
+
+The two fills walk the two axes, and the names say which:
+
+```
+                draw ->      1     2     3     4
+    stream 1              [ a ]  [ b ]  [ c ]  [ d ]      pf_random_fill_draws(seed, 1, v)
+      |    2                e      f      g      h        fills one ROW
+      v    3                i      j      k      l
+           4                m      n      o      p
+
+                           pf_random_fill_streams(seed, 1, v)
+                           fills one COLUMN (a, e, i, m)
+```
+
+Use `pf_random_fill_draws` when one thing needs several numbers — a particle needs `x`, `y`, `z`.
+Use `pf_random_fill_streams` when many things need one number each, which is the bulk form of the
+loop at the top of this page:
+
+```fortran
+real(real64) :: x(n)
+
+call pf_random_fill_streams(seed, 1, x)      ! x(i) == pf_random_at(seed, i), for every i
+```
+
+Both are prefix-consistent and interchangeable with the matching scalar calls, so neither changes
+a single value — they are faster ways to ask for numbers you could already have asked for.
+
+**They are not equally cheap, and the reason is worth knowing.** One enciphering produces four
+32-bit words. `pf_random_fill_draws` walks along a stream, so it spends all four on consecutive
+values — two `real64`s, or four `real32`s, per enciphering. `pf_random_fill_streams` walks across
+streams, and consecutive streams are *different* streams, so each value needs its own enciphering
+and the remaining words belong to draws this call was not asked for. So the stream-axis fill is a
+worthwhile saving over the scalar loop it replaces (measured about 1.3× on gfortran and 1.5× on
+ifx), while the draw-axis fill is roughly twice as fast again per value. If you need several values
+per stream, ask for them along the draw axis.
+
+Each fill has a precondition on the axis it walks: the last position it addresses must be
+representable in `integer(int64)` — `draw + size(v) - 1` for one, `i0 + size(v) - 1` for the other.
+Ordinary calls are nowhere near either.
 
 ### Filling several values at once
 
-`pf_random_fill_at` fills `v` with the values at positions `draw .. draw+size(v)-1` of one stream —
+`pf_random_fill_draws` fills `v` with the values at positions `draw .. draw+size(v)-1` of one stream —
 the same values the matching scalar calls give, so the two forms are interchangeable:
 
 ```fortran
 real(real64) :: components(3)
 
 do i = 1, n
-    call pf_random_fill_at(seed, i, components)    ! draws 1, 2, 3 of stream i
+    call pf_random_fill_draws(seed, i, components)    ! draws 1, 2, 3 of stream i
     call place_particle(components(1), components(2), components(3))
 end do
 ```

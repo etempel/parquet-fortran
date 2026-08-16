@@ -631,7 +631,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read side changes: a Fortran reader still selects its parse from the declared type of `value`.
 
 - **A counter-based random number generator, `parquet_random`** (`pf_random_at`, `pf_random32_at`,
-  `pf_random_bits_at`, `pf_random_int_at`, `pf_random_fill_at`, `pf_random_seed`, `pf_random_key`,
+  `pf_random_bits_at`, `pf_random_int_at`, `pf_random_fill_draws`, `pf_random_fill_streams`,
+  `pf_random_seed`, `pf_random_key`,
   `pf_random_algorithm`), re-exported by `use parquet` and usable on its own as
   `use parquet_random`. Every value is a pure function of `(seed, i [, draw])` rather than of call
   order, so a parallel loop returns the same numbers under `schedule(static)`,
@@ -643,7 +644,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrowing of the `real64` one; `pf_random_bits_at` gives 64 raw bits, of which `pf_random_at` is
   contractually the top 53; `pf_random_int_at` is exactly unbiased at every width, including above
   2**63 where the obvious implementations silently make part of the range unreachable, and swaps
-  `lo > hi` rather than failing; `pf_random_fill_at` fills a rank-1 `real64`/`real32` array with
+  `lo > hi` rather than failing; `pf_random_fill_draws` fills a rank-1 `real64`/`real32` array with
   consecutive draws, prefix-consistently and more cheaply than the equivalent scalar calls, its one
   precondition being that the final position `draw + size(v) - 1` stays representable in `int64`
   (a fill ending exactly at `huge(int64)` is exact); and

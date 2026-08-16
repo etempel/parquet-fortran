@@ -1,7 +1,7 @@
 !===========================================
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
-!> Manual large-scale check that `pf_random_fill_at` still works past 2**31 elements.
+!> Manual large-scale check that `pf_random_fill_draws` still works past 2**31 elements.
 !>
 !> **What this exists to catch, and why no `fpm test` can.** Both fill routines take their length
 !> from `size(v)`. Asked without an explicit `kind=`, that returns a DEFAULT-kind integer, which
@@ -80,7 +80,7 @@ contains
             return
         end if
         v = sentinel
-        call pf_random_fill_at(12345_int64, 7_int64, v)
+        call pf_random_fill_draws(12345_int64, 7_int64, v)
 
         do j = 1, size(probe_fractions)
             p = probe_position(n, j)
@@ -112,7 +112,7 @@ contains
             return
         end if
         v = sentinel
-        call pf_random_fill_at(12345_int64, 7_int64, v)
+        call pf_random_fill_draws(12345_int64, 7_int64, v)
 
         do j = 1, size(probe_fractions)
             p = probe_position(n, j)

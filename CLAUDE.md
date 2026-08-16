@@ -1059,7 +1059,7 @@ Follow these when adding new public API, types, or internal helpers:
   all. There are two: `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays),
   whose procedures are `pf_sort`, `pf_argsort`, `pf_permute`, … and whose type is `pf_sort_keys`;
   and `parquet_random` (counter-based random numbers over nothing but a seed and an index), whose
-  procedures are `pf_random_at`, `pf_random_int_at`, `pf_random_fill_at`, … with the frozen contract
+  procedures are `pf_random_at`, `pf_random_int_at`, `pf_random_fill_draws`, … with the frozen contract
   identifier `pf_random_algorithm`. Note the one deliberate exception in each: a **test-only debug
   hook keeps the project-wide `parquet_debug_*` spelling** rather than the module's own prefix
   (`parquet_debug_random_uses_int128`), because that convention is what marks a procedure as a debug

@@ -70,7 +70,8 @@ module parquet_random
     public :: pf_random32_at
     public :: pf_random_bits_at
     public :: pf_random_int_at
-    public :: pf_random_fill_at
+    public :: pf_random_fill_draws
+    public :: pf_random_fill_streams
     public :: pf_random_seed
     public :: pf_random_key
     public :: parquet_debug_random_uses_int128
@@ -198,12 +199,46 @@ module parquet_random
     !! and it silently receives wrapped ones. Everything up to and including the boundary is exact:
     !! a fill whose final position is `huge(int64)` itself is correct, and is tested. The scalar
     !! entry points have no such limit, since every representable `draw` is a valid one.
-    interface pf_random_fill_at
-        module procedure pf_random_fill_at_r64_i32
-        module procedure pf_random_fill_at_r64_i64
-        module procedure pf_random_fill_at_r32_i32
-        module procedure pf_random_fill_at_r32_i64
-    end interface pf_random_fill_at
+    interface pf_random_fill_draws
+        module procedure pf_random_fill_draws_r64_i32
+        module procedure pf_random_fill_draws_r64_i64
+        module procedure pf_random_fill_draws_r32_i32
+        module procedure pf_random_fill_draws_r32_i64
+    end interface pf_random_fill_draws
+
+    !> Fills `v` with ONE draw of each of `size(v)` consecutive streams, starting at stream `i0`.
+    !!
+    !! The other axis. Where `pf_random_fill_draws` fixes the stream and walks the draws, this fixes
+    !! the draw and walks the streams -- so it is the bulk form of the loop this module's own
+    !! documentation opens with, `x(i) = pf_random_at(seed, i)`. Element `k` is exactly
+    !! `pf_random_at(seed, i0 + k - 1 [, draw])`, so the two forms are interchangeable and a prefix
+    !! is a prefix.
+    !!
+    !! `v` is a rank-1 `real(real64)` or `real(real32)` array, `intent(out)`; `i0` is
+    !! `integer(int32)` or `integer(int64)`; `seed` and `draw` are `integer(int64)`, and `draw`
+    !! (default 1) is which draw of every one of those streams to take. A zero-sized `v` is a
+    !! defined no-op.
+    !!
+    !! **Precondition, on the STREAM axis this time: `i0 + size(v) - 1` must not exceed
+    !! `huge(int64)`.** Same reasoning as the draw-axis fill's own precondition -- the last element's
+    !! stream has to be nameable. Note `i0` may be negative, and usually the whole range is nowhere
+    !! near the boundary.
+    !!
+    !! **It cannot be as cheap per value as `pf_random_fill_draws`, and that is the contract rather
+    !! than the implementation.** Each stream needs its own block, and one `real64` value consumes
+    !! two of that block's four words -- the other two belong to draw 2 of the same stream, which
+    !! this call is not asking for. A `real32` value consumes one of four. So where the draw-axis
+    !! fill amortises one enciphering over two (or four) values, this one enciphers per value and
+    !! wins only by removing the per-element call. Measured on machine B against the scalar loop it
+    !! replaces: **1.28x on gfortran and 1.48x on ifx** for `real64`, **1.47x and 1.60x** for
+    !! `real32`. When several values per stream
+    !! are wanted, `pf_random_fill_draws` remains much the cheaper shape.
+    interface pf_random_fill_streams
+        module procedure pf_random_fill_streams_r64_i32
+        module procedure pf_random_fill_streams_r64_i64
+        module procedure pf_random_fill_streams_r32_i32
+        module procedure pf_random_fill_streams_r32_i64
+    end interface pf_random_fill_streams
 
     !> Derives an independent seed from a seed and a label, so one seed can fan out into families.
     !!
@@ -299,41 +334,77 @@ contains
         r = int_at_impl(seed, i, lo, hi, draw_or_1(draw))
     end function pf_random_int_at_i64
 
-    !> `pf_random_fill_at` filling `real64` from an `integer(int32)` stream index.
-    pure subroutine pf_random_fill_at_r64_i32(seed, i, v, draw)
+    !> `pf_random_fill_draws` filling `real64` from an `integer(int32)` stream index.
+    pure subroutine pf_random_fill_draws_r64_i32(seed, i, v, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
         real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
         integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
         call fill_r64(seed, int(i, int64), v, draw_or_1(draw))
-    end subroutine pf_random_fill_at_r64_i32
+    end subroutine pf_random_fill_draws_r64_i32
 
-    !> `pf_random_fill_at` filling `real64` from an `integer(int64)` stream index.
-    pure subroutine pf_random_fill_at_r64_i64(seed, i, v, draw)
+    !> `pf_random_fill_draws` filling `real64` from an `integer(int64)` stream index.
+    pure subroutine pf_random_fill_draws_r64_i64(seed, i, v, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: i             !! stream index; every value is valid
         real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
         integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
         call fill_r64(seed, i, v, draw_or_1(draw))
-    end subroutine pf_random_fill_at_r64_i64
+    end subroutine pf_random_fill_draws_r64_i64
 
-    !> `pf_random_fill_at` filling `real32` from an `integer(int32)` stream index.
-    pure subroutine pf_random_fill_at_r32_i32(seed, i, v, draw)
+    !> `pf_random_fill_draws` filling `real32` from an `integer(int32)` stream index.
+    pure subroutine pf_random_fill_draws_r32_i32(seed, i, v, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
         real(real32), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
         integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
         call fill_r32(seed, int(i, int64), v, draw_or_1(draw))
-    end subroutine pf_random_fill_at_r32_i32
+    end subroutine pf_random_fill_draws_r32_i32
 
-    !> `pf_random_fill_at` filling `real32` from an `integer(int64)` stream index.
-    pure subroutine pf_random_fill_at_r32_i64(seed, i, v, draw)
+    !> `pf_random_fill_draws` filling `real32` from an `integer(int64)` stream index.
+    pure subroutine pf_random_fill_draws_r32_i64(seed, i, v, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: i             !! stream index; every value is valid
         real(real32), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
         integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
         call fill_r32(seed, i, v, draw_or_1(draw))
-    end subroutine pf_random_fill_at_r32_i64
+    end subroutine pf_random_fill_draws_r32_i64
+
+    !> `pf_random_fill_streams` filling `real64` from an `integer(int32)` first stream index.
+    pure subroutine pf_random_fill_streams_r64_i32(seed, i0, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i0            !! first stream index; sign-extends, so any value is valid
+        real(real64), intent(out) :: v(:)           !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
+        call fill_streams_r64(seed, int(i0, int64), v, draw_or_1(draw))
+    end subroutine pf_random_fill_streams_r64_i32
+
+    !> `pf_random_fill_streams` filling `real64` from an `integer(int64)` first stream index.
+    pure subroutine pf_random_fill_streams_r64_i64(seed, i0, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index; every value is valid
+        real(real64), intent(out) :: v(:)           !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
+        call fill_streams_r64(seed, i0, v, draw_or_1(draw))
+    end subroutine pf_random_fill_streams_r64_i64
+
+    !> `pf_random_fill_streams` filling `real32` from an `integer(int32)` first stream index.
+    pure subroutine pf_random_fill_streams_r32_i32(seed, i0, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i0            !! first stream index; sign-extends, so any value is valid
+        real(real32), intent(out) :: v(:)           !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
+        call fill_streams_r32(seed, int(i0, int64), v, draw_or_1(draw))
+    end subroutine pf_random_fill_streams_r32_i32
+
+    !> `pf_random_fill_streams` filling `real32` from an `integer(int64)` first stream index.
+    pure subroutine pf_random_fill_streams_r32_i64(seed, i0, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index; every value is valid
+        real(real32), intent(out) :: v(:)           !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
+        call fill_streams_r32(seed, i0, v, draw_or_1(draw))
+    end subroutine pf_random_fill_streams_r32_i64
 
     ! ================================================================================
     ! Seeding and key derivation
@@ -769,6 +840,89 @@ contains
             end if
         end if
     end subroutine fill_r32
+
+    !> Fills `v` with one draw of each of `size(v)` consecutive streams, starting at `i0`.
+    !!
+    !! **Why this is a plain loop over `random_block` and not a lane-blocked kernel.** Both were
+    !! measured on machine B, over ten prototypes gated bit-identical to `pf_random_at` first. The
+    !! win here is almost entirely from having a bulk entry point at all -- not from batching:
+    !!
+    !! | form | gfortran | ifx |
+    !! |---|---|---|
+    !! | scalar loop (what this replaces) | 19.74 ns | 14.95 ns |
+    !! | **this: one stream per body, rounds a loop** | **15.76 (1.25x)** | **9.51 (1.57x)** |
+    !! | 4 streams per body, rounds a loop | 19.71 (1.00x) | 11.42 (1.31x) |
+    !! | 4 streams per body, rounds UNROLLED | 15.91 (1.24x) | 7.39 (2.02x) |
+    !!
+    !! So lane blocking is worth **nothing on gfortran** -- whose release profile carries
+    !! `-funroll-loops`, and which is therefore indifferent to the round form -- and a further 29 %
+    !! on ifx, but only when the ten rounds are also written out. That reproduces
+    !! `feature_random_reference.md`'s "must use the unrolled kernel; with loop rounds it is a
+    !! 1.3x-1.6x loss" **as an ifx-specific effect**, which is worth knowing before anyone quotes it
+    !! as a general rule. Writing four lanes x ten rounds out costs roughly 800 lines per worker and
+    !! a second hand-maintained copy of the cipher, which is exactly the duplication this module
+    !! exists to avoid; `random_block`'s own header already schedules lane-blocked kernels for the
+    !! phase that introduces the rest of the bulk tier. Take that work there, with a generator, not
+    !! here.
+    !!
+    !! The `second` test is hoisted out of the loop rather than being recomputed per element, and
+    !! `blk` with it: both are functions of `draw` alone.
+    pure subroutine fill_streams_r64(seed, i0, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index
+        real(real64), intent(out) :: v(:)           !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: k, m, blk, w0, w1, w2, w3
+        logical :: second                           ! does `draw` sit in its block's second pair?
+        ! `size(v, kind=int64)` for the reason `fill_r64` spells out: a default-kind length wraps
+        ! above 2**31 elements and fails silently.
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        blk = (draw - 1_int64) / 2_int64
+        second = (modulo(draw - 1_int64, 2_int64) == 1_int64)
+        do k = 1_int64, m
+            call random_block(seed, i0 + k - 1_int64, blk, w0, w1, w2, w3)
+            if (second) then
+                v(k) = to_real64(ior(ishft(w3, 32), w2))
+            else
+                v(k) = to_real64(ior(ishft(w1, 32), w0))
+            end if
+        end do
+    end subroutine fill_streams_r64
+
+    !> Fills `v` with one `real32` draw of each of `size(v)` consecutive streams, starting at `i0`.
+    !!
+    !! One word of four per stream, so this is the least block-efficient entry point in the module
+    !! -- see `pf_random_fill_streams`' own note, where that is stated as contract rather than as a
+    !! shortcoming. Measured 21.96 -> 14.96 ns (gfortran) and 14.67 -> 9.19 (ifx) against the scalar
+    !! loop it replaces. Same shape as `fill_streams_r64`: `blk` and `slot` are functions of `draw`
+    !! alone and are hoisted -- and one stream per body wins here too, beating the 2- and 4-lane
+    !! prototypes on both compilers, so the `real64` verdict below carries across unchanged.
+    pure subroutine fill_streams_r32(seed, i0, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index
+        real(real32), intent(out) :: v(:)           !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: k, m, blk, c0, c1, c2, c3
+        integer :: slot                             ! 0..3 within one block; default kind is ample
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        blk = (draw - 1_int64) / 4_int64
+        slot = int(modulo(draw - 1_int64, 4_int64), int32)
+        do k = 1_int64, m
+            call random_block(seed, i0 + k - 1_int64, blk, c0, c1, c2, c3)
+            select case (slot)
+            case (0)
+                v(k) = to_real32(c0)
+            case (1)
+                v(k) = to_real32(c1)
+            case (2)
+                v(k) = to_real32(c2)
+            case default
+                v(k) = to_real32(c3)
+            end select
+        end do
+    end subroutine fill_streams_r32
 
     ! ================================================================================
     ! The integer rule -- exact rejection

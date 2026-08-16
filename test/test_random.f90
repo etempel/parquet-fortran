@@ -53,8 +53,9 @@ contains
             new_unittest("golden vectors: pf_random_at, pf_random32_at, pf_random_bits_at", test_golden_scalar), &
             new_unittest("golden vectors: pf_random_int_at, including every contract edge", test_golden_int), &
             new_unittest("golden vectors: pf_random_key", test_golden_key), &
-            new_unittest("golden vectors: pf_random_fill_at", test_golden_fill), &
+            new_unittest("golden vectors: pf_random_fill_draws", test_golden_fill), &
             new_unittest("cross-form: fill agrees with the scalar draws, prefixes are prefixes", test_cross_form), &
+            new_unittest("the stream-axis fill agrees with the scalar draws on every shape", test_fill_streams), &
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
             new_unittest("the integer draw shares a block with the real draw at one coordinate", &
                 test_int_shares_block), &
@@ -190,7 +191,7 @@ contains
             if (allocated(error)) return
         end do
 
-        call pf_random_fill_at(0_int64, 0_int64, v32)
+        call pf_random_fill_draws(0_int64, 0_int64, v32)
         do k = 1, 4
             want32 = real(ishft(kat_out(k), -8), real32) * 2.0_real32**(-24)
             call check(error, v32(k) == want32, "library: a real32 fill does not reproduce KAT 1's four words")
@@ -303,14 +304,14 @@ contains
         real(real32) :: v32(16)
 
         do c = 1, n_fill
-            call pf_random_fill_at(fill_seed(c), fill_stream(c), v64(1:fill_count(c)), fill_start(c))
-            call pf_random_fill_at(fill_seed(c), fill_stream(c), v32(1:fill_count(c)), fill_start(c))
+            call pf_random_fill_draws(fill_seed(c), fill_stream(c), v64(1:fill_count(c)), fill_start(c))
+            call pf_random_fill_draws(fill_seed(c), fill_stream(c), v32(1:fill_count(c)), fill_start(c))
             do k = 1, fill_count(c)
                 call check(error, transfer(v64(k), 0_int64) == fill_at_bits(fill_first(c) + k - 1), &
-                    "pf_random_fill_at (real64) does not match its golden bit pattern")
+                    "pf_random_fill_draws (real64) does not match its golden bit pattern")
                 if (allocated(error)) return
                 call check(error, transfer(v32(k), 0_int32) == fill_at32_bits(fill_first(c) + k - 1), &
-                    "pf_random_fill_at (real32) does not match its golden bit pattern")
+                    "pf_random_fill_draws (real32) does not match its golden bit pattern")
                 if (allocated(error)) return
             end do
         end do
@@ -329,32 +330,32 @@ contains
         real(real32) :: s_one(1), s_six(6), s_top6(6)
         real(real64) :: empty(0)
 
-        call pf_random_fill_at(12345_int64, 1_int64, one)
+        call pf_random_fill_draws(12345_int64, 1_int64, one)
         call check(error, one(1) == pf_random_at(12345_int64, 1_int64), &
             "a one-element fill is not the scalar draw")
         if (allocated(error)) return
 
-        call pf_random_fill_at(12345_int64, 1_int64, six)
+        call pf_random_fill_draws(12345_int64, 1_int64, six)
         do k = 1, 6
             call check(error, six(k) == pf_random_at(12345_int64, 1_int64, int(k, int64)), &
                 "element k of a fill is not the scalar draw at position k")
             if (allocated(error)) return
         end do
 
-        call pf_random_fill_at(12345_int64, 1_int64, three)
+        call pf_random_fill_draws(12345_int64, 1_int64, three)
         call check(error, all(three == six(1:3)), "a short fill is not a prefix of a longer one")
         if (allocated(error)) return
 
-        call pf_random_fill_at(12345_int64, 1_int64, tail, 4_int64)
+        call pf_random_fill_draws(12345_int64, 1_int64, tail, 4_int64)
         call check(error, all(tail == six(4:6)), "a fill starting at draw 4 is not the tail of the whole prefix")
         if (allocated(error)) return
 
-        call pf_random_fill_at(12345_int64, 1_int64, s_one)
+        call pf_random_fill_draws(12345_int64, 1_int64, s_one)
         call check(error, s_one(1) == pf_random32_at(12345_int64, 1_int64), &
             "a one-element real32 fill is not the scalar real32 draw")
         if (allocated(error)) return
 
-        call pf_random_fill_at(12345_int64, 1_int64, s_six)
+        call pf_random_fill_draws(12345_int64, 1_int64, s_six)
         do k = 1, 6
             call check(error, s_six(k) == pf_random32_at(12345_int64, 1_int64, int(k, int64)), &
                 "element k of a real32 fill is not the scalar real32 draw at position k")
@@ -362,7 +363,7 @@ contains
         end do
 
         ! A zero-sized fill is a defined no-op, not an error and not an out-of-bounds write.
-        call pf_random_fill_at(12345_int64, 1_int64, empty)
+        call pf_random_fill_draws(12345_int64, 1_int64, empty)
         call check(error, size(empty) == 0, "a zero-sized fill must be a defined no-op")
         if (allocated(error)) return
 
@@ -373,8 +374,8 @@ contains
         ! Asserted against the reference AND against the scalar draws: the first says the values
         ! are right, the second says the fill still agrees with the rest of the API up here.
         base = huge(1_int64) - 6_int64
-        call pf_random_fill_at(12345_int64, 1_int64, top6, base + 1_int64)
-        call pf_random_fill_at(12345_int64, 1_int64, s_top6, base + 1_int64)
+        call pf_random_fill_draws(12345_int64, 1_int64, top6, base + 1_int64)
+        call pf_random_fill_draws(12345_int64, 1_int64, s_top6, base + 1_int64)
         do k = 1, 6
             call check(error, top6(k) == ref_at(12345_int64, 1_int64, base + int(k, int64)), &
                 "a real64 fill ending exactly at huge(int64) disagrees with the strict reference")
@@ -387,6 +388,89 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_cross_form
+
+    !> `pf_random_fill_streams` is exactly the matching scalar draws, on every shape that matters.
+    !!
+    !! This entry point needs **no golden vectors of its own**: its contract is that element `k` is
+    !! `pf_random_at(seed, i0 + k - 1 [, draw])`, and those values are already frozen by the scalar
+    !! grid in `test_random_vectors`. What has to be asserted is the identity itself -- which is
+    !! also the only thing that can break, since the values come from the same `random_block`.
+    !!
+    !! Four shapes are deliberate rather than decorative. **`draw` is swept over 1..5** because the
+    !! `real64` worker branches on the draw's parity within its block and the `real32` worker on its
+    !! slot of four, so a single `draw` would exercise one arm of two, or one of four, and leave a
+    !! wrong-word bug in the others invisible. **A negative `i0`** because stream indices are signed
+    !! and a fill starting below zero must still walk upwards. **Length 0** because a zero-sized
+    !! fill is a documented no-op rather than an error. And **the far end of the stream axis**,
+    !! where `i0 + size(v) - 1` is exactly `huge(int64)`, because that is this entry point's
+    !! documented precondition and the golden vectors do not reach it -- the stream-axis counterpart
+    !! of the `huge(int64)` draw-axis case in `test_cross_form`.
+    subroutine test_fill_streams(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer :: k, d
+        integer(int64) :: dr, base
+        real(real64) :: v(7), top(4)
+        real(real32) :: s(7), stop4(4)
+        real(real64) :: empty(0)
+
+        ! Every draw parity (real64) and every slot of four (real32).
+        do d = 1, 5
+            dr = int(d, int64)
+            call pf_random_fill_streams(12345_int64, 1_int64, v, dr)
+            call pf_random_fill_streams(12345_int64, 1_int64, s, dr)
+            do k = 1, 7
+                call check(error, v(k) == pf_random_at(12345_int64, int(k, int64), dr), &
+                    "a real64 stream-axis fill element is not the scalar draw for that stream")
+                if (allocated(error)) return
+                call check(error, s(k) == pf_random32_at(12345_int64, int(k, int64), dr), &
+                    "a real32 stream-axis fill element is not the scalar real32 draw for that stream")
+                if (allocated(error)) return
+            end do
+        end do
+
+        ! The default `draw` is 1, and an int32 first-stream index gives the same values as int64.
+        call pf_random_fill_streams(12345_int64, 1_int64, v)
+        do k = 1, 7
+            call check(error, v(k) == pf_random_at(12345_int64, int(k, int64)), &
+                "a stream-axis fill with the default draw is not draw 1 of each stream")
+            if (allocated(error)) return
+        end do
+        call pf_random_fill_streams(12345_int64, 1_int32, s)
+        do k = 1, 7
+            call check(error, s(k) == pf_random32_at(12345_int64, int(k, int64)), &
+                "an int32 first-stream index does not agree with the int64 one")
+            if (allocated(error)) return
+        end do
+
+        ! Negative first stream index: the walk is upwards from it, through zero.
+        call pf_random_fill_streams(12345_int64, -3_int64, v, 2_int64)
+        do k = 1, 7
+            call check(error, v(k) == pf_random_at(12345_int64, -4_int64 + int(k, int64), 2_int64), &
+                "a stream-axis fill from a negative first index does not walk upwards through zero")
+            if (allocated(error)) return
+        end do
+
+        ! A zero-sized fill is a defined no-op.
+        call pf_random_fill_streams(12345_int64, 1_int64, empty)
+        call check(error, size(empty) == 0, "a zero-sized stream-axis fill must be a defined no-op")
+        if (allocated(error)) return
+
+        ! The documented ceiling of the STREAM axis: last stream is exactly huge(int64).
+        base = huge(1_int64) - 4_int64
+        call pf_random_fill_streams(12345_int64, base + 1_int64, top)
+        call pf_random_fill_streams(12345_int64, base + 1_int64, stop4)
+        do k = 1, 4
+            call check(error, top(k) == pf_random_at(12345_int64, base + int(k, int64)), &
+                "a stream-axis fill ending exactly at stream huge(int64) disagrees with the scalar draw")
+            if (allocated(error)) return
+            call check(error, top(k) == ref_at(12345_int64, base + int(k, int64), 1_int64), &
+                "a stream-axis fill ending exactly at stream huge(int64) disagrees with the strict reference")
+            if (allocated(error)) return
+            call check(error, stop4(k) == ref_at32(12345_int64, base + int(k, int64), 1_int64), &
+                "a real32 stream-axis fill at the top of the stream axis disagrees with the strict reference")
+            if (allocated(error)) return
+        end do
+    end subroutine test_fill_streams
 
     !> `pf_random_at` is exactly the top 53 bits of `pf_random_bits_at`, over a sweep.
     subroutine test_bits_identity(error)
@@ -467,7 +551,7 @@ contains
 
     !> The `int32` specifics must be bit-identical to the `int64` ones at equal argument values.
     !!
-    !! All five generics are covered, `pf_random_fill_at` included -- nothing else in the suite
+    !! All five generics are covered, `pf_random_fill_draws` included -- nothing else in the suite
     !! calls its two `int32`-stream specifics, so half of that generic would otherwise ship
     !! untested. The integer specific is additionally driven across the FULL `int32` range, where
     !! the width is 2**32: every other range tested here is small enough that a truncating narrowing
@@ -496,11 +580,11 @@ contains
 
             ! The fill generic's int32-stream specifics, once with the default start draw and once
             ! with an explicit one, so the argument is not merely defaulted past.
-            call pf_random_fill_at(seed, i32, f64_a)
-            call pf_random_fill_at(seed, int(i32, int64), f64_b)
+            call pf_random_fill_draws(seed, i32, f64_a)
+            call pf_random_fill_draws(seed, int(i32, int64), f64_b)
             if (any(f64_a /= f64_b)) bad_fill = bad_fill + 1
-            call pf_random_fill_at(seed, i32, f32_a, 3_int64)
-            call pf_random_fill_at(seed, int(i32, int64), f32_b, 3_int64)
+            call pf_random_fill_draws(seed, i32, f32_a, 3_int64)
+            call pf_random_fill_draws(seed, int(i32, int64), f32_b, 3_int64)
             if (any(f32_a /= f32_b)) bad_fill = bad_fill + 1
 
             if (int(pf_random_int_at(seed, i32, lo32, hi32), int64) /= &
@@ -510,7 +594,7 @@ contains
             "an int32 specific disagrees with its int64 twin -- an int32 stream or label must sign-extend")
         if (allocated(error)) return
         call check(error, bad_fill == 0, &
-            "an int32-stream pf_random_fill_at disagrees with its int64-stream twin")
+            "an int32-stream pf_random_fill_draws disagrees with its int64-stream twin")
         if (allocated(error)) return
         call check(error, bad_wide == 0, &
             "the int32 pf_random_int_at disagrees with its int64 twin over the full int32 range, whose width is 2**32")
@@ -913,8 +997,8 @@ contains
         do i = -3_int64, 3_int64
             do m = 1, 9
                 do start = 1_int64, 6_int64
-                    call pf_random_fill_at(12345_int64, i, v64(1:m), start)
-                    call pf_random_fill_at(12345_int64, i, v32(1:m), start)
+                    call pf_random_fill_draws(12345_int64, i, v64(1:m), start)
+                    call pf_random_fill_draws(12345_int64, i, v32(1:m), start)
                     do k = 1, m
                         if (v64(k) /= ref_at(12345_int64, i, start + int(k, int64) - 1_int64)) bad64 = bad64 + 1
                         if (v32(k) /= ref_at32(12345_int64, i, start + int(k, int64) - 1_int64)) bad32 = bad32 + 1
@@ -945,8 +1029,8 @@ contains
         bad_neg = 0
         do i = 1_int64, 6_int64                         ! provably non-negative, as its own loop
             do m = 1, 9
-                call pf_random_fill_at(12345_int64, i, v64(1:m))
-                call pf_random_fill_at(12345_int64, i, v32(1:m))
+                call pf_random_fill_draws(12345_int64, i, v64(1:m))
+                call pf_random_fill_draws(12345_int64, i, v32(1:m))
                 do k = 1, m
                     if (v64(k) /= ref_at(12345_int64, i, int(k, int64))) bad_pos = bad_pos + 1
                     if (v32(k) /= ref_at32(12345_int64, i, int(k, int64))) bad_pos = bad_pos + 1
@@ -955,8 +1039,8 @@ contains
         end do
         do i = -6_int64, -1_int64                       ! strictly negative, as its own loop
             do m = 1, 9
-                call pf_random_fill_at(12345_int64, i, v64(1:m))
-                call pf_random_fill_at(12345_int64, i, v32(1:m))
+                call pf_random_fill_draws(12345_int64, i, v64(1:m))
+                call pf_random_fill_draws(12345_int64, i, v32(1:m))
                 do k = 1, m
                     if (v64(k) /= ref_at(12345_int64, i, int(k, int64))) bad_neg = bad_neg + 1
                     if (v32(k) /= ref_at32(12345_int64, i, int(k, int64))) bad_neg = bad_neg + 1

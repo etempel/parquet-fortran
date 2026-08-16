@@ -4389,7 +4389,7 @@ overflow-free, the `--shipped-only` restriction should be lifted in the same cha
 
 `size(v)` asked without an explicit `kind=` returns a **default-kind** integer. For an array of
 2**31 elements or more that value wraps, and in a bulk loop the wrap does not fail loudly — it
-produces a length the loop then obeys. Both `pf_random_fill_at` routines held their length that way,
+produces a length the loop then obeys. Both `pf_random_fill_draws` routines held their length that way,
 and both failure modes were measured on the shipped module:
 
 | array size | `size(v)` | what happened |

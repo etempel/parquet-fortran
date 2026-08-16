@@ -113,8 +113,8 @@ contains
         real(real64) :: v64(16)
         real(real32) :: v32(16)
         do c = 1, n_fill
-            call pf_random_fill_at(fill_seed(c), fill_stream(c), v64(1:fill_count(c)), fill_start(c))
-            call pf_random_fill_at(fill_seed(c), fill_stream(c), v32(1:fill_count(c)), fill_start(c))
+            call pf_random_fill_draws(fill_seed(c), fill_stream(c), v64(1:fill_count(c)), fill_start(c))
+            call pf_random_fill_draws(fill_seed(c), fill_stream(c), v32(1:fill_count(c)), fill_start(c))
             do k = 1, fill_count(c)
                 if (transfer(v64(k), 0_int64) /= fill_at_bits(fill_first(c) + k - 1)) call bad("golden fill real64")
                 if (transfer(v32(k), 0_int32) /= fill_at32_bits(fill_first(c) + k - 1)) call bad("golden fill real32")

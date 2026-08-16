@@ -12,7 +12,8 @@
 !> Driver for unit testing
 program tester
     use, intrinsic :: iso_fortran_env, only : error_unit
-    use testdrive, only : run_testsuite, new_testsuite, testsuite_type, select_suite, run_selected,get_argument,init_color_output
+    use testdrive, only : run_testsuite, new_testsuite, testsuite_type, unittest_type, select_suite, run_selected, &
+        get_argument, init_color_output
     use test_writing, only : collect_tests_parquet_writing
     use test_reading, only : collect_tests_parquet_reading
     use test_maml, only : collect_tests_parquet_maml
@@ -128,8 +129,7 @@ program tester
                 end if
             else
                 write(error_unit, fmt) "Testing:", testsuites(is)%name
-                call run_testsuite(testsuites(is)%collect, error_unit, stat, &
-                    parallel=suite_is_safe_to_parallelize(testsuites(is)%name))
+                call run_suite(testsuites(is), error_unit, stat)
             end if
         else
             write(error_unit, fmt) "Available testsuites"
@@ -141,8 +141,7 @@ program tester
     else
         do is = 1, size(testsuites)
             write(error_unit, fmt) "Testing:", testsuites(is)%name
-            call run_testsuite(testsuites(is)%collect, error_unit, stat, &
-                parallel=suite_is_safe_to_parallelize(testsuites(is)%name))
+            call run_suite(testsuites(is), error_unit, stat)
         end do
     end if
     !
@@ -152,6 +151,66 @@ program tester
     end if
     !
 contains
+
+    !> Runs one suite, choosing between test-drive's own parallel driver and a serial loop here.
+    !!
+    !! **A suite excluded from test-drive's per-test parallelism must not go through
+    !! `run_testsuite` at all, and `parallel=.false.` is not enough.** That argument leaves the
+    !! `!$omp parallel do` in place and switches it off with an `if` clause, which still OPENS a
+    !! parallel region -- an inactive one, with a team of a single thread. Inside it
+    !! `omp_get_level()` is 1 while `omp_in_parallel()` is `.false.`, so every test in the suite
+    !! runs one level down from the top of the program, and any OpenMP team the library then opens
+    !! is a NESTED team.
+    !!
+    !! libgomp deadlocks on that shape. Measured on gfortran 15.2 / macOS arm64: a full `fpm test`
+    !! hung about one run in three, always somewhere in "sorting", with the main thread and its
+    !! workers parked on one libgomp mutex that nobody held. See `feature_risks.md` Risk-104 for
+    !! the reduction and the bisect. `parquet_sorting` now refuses to open a team when it can see
+    !! it would be nested, which is the library-side half of that fix -- but the refusal would then
+    !! apply to EVERY test in an excluded suite, including the nine whose whole purpose is to assert
+    !! that a requested team really is opened. Those nine would have had to stop asserting it.
+    !!
+    !! Driving the tests through `run_selected` instead runs each with no enclosing region at all.
+    !! The library sees `omp_get_level() == 0` and threads exactly as it does for a caller in a
+    !! serial program, so the suite keeps both properties: no nested team is ever built, and the
+    !! threading assertions stay meaningful.
+    !!
+    !! The progress line is reproduced here because `run_testsuite` prints it from inside its own
+    !! loop. Losing it would cost the one diagnostic that says which test a hang stopped in, which
+    !! is how this bug was located in the first place.
+    subroutine run_suite(suite, unit, stat)
+        type(testsuite_type), intent(in) :: suite       !! the suite to run
+        integer, intent(in) :: unit                     !! unit the results are written to
+        integer, intent(inout) :: stat                  !! running count of failed tests
+        type(unittest_type), allocatable :: tests(:)
+        character(len=32) :: counter
+        integer :: it, jt
+
+        if (suite_is_safe_to_parallelize(suite%name)) then
+            call run_testsuite(suite%collect, unit, stat, parallel=.true.)
+            return
+        end if
+
+        call suite%collect(tests)
+        ! `run_selected` finds its test BY NAME, so two tests sharing one name would run the first
+        ! twice and the second never -- silently, with the count still looking right. test-drive's
+        ! own loop indexes instead and cannot notice, so nothing else would report it.
+        do it = 1, size(tests)
+            do jt = it + 1, size(tests)
+                if (tests(it)%name == tests(jt)%name) then
+                    write(unit, '(a)') "run_suite: suite '" // trim(suite%name) // "' has two tests named '" // &
+                        trim(tests(it)%name) // "'; a name-selected run would skip one of them"
+                    error stop 1
+                end if
+            end do
+        end do
+
+        do it = 1, size(tests)
+            write(counter, '("(",i0,"/",i0,")")') it, size(tests)
+            write(unit, '(1x, 3(1x, a))') "Starting", trim(tests(it)%name), "... " // trim(counter)
+            call run_selected(suite%collect, tests(it)%name, unit, stat)
+        end do
+    end subroutine run_suite
 
     !> "sorting" is excluded for the same reason as "filter_screen": its counting-fast-path and
     !> parallel-threshold tests drive parquet_set_sort_counting_path and

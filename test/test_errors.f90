@@ -1117,7 +1117,7 @@ contains
                 test_table_get_file_metadata_missing_key_aborts), &
             new_unittest("kind of an unknown column aborts", &
                 test_table_kind_unknown_column_aborts), &
-            new_unittest("prefetching an unknown column aborts", &
+            new_unittest("table: prefetching an unknown column aborts", &
                 test_table_prefetch_unknown_column_aborts), &
             new_unittest("prefetching an unsupported column aborts", &
                 test_table_prefetch_unsupported_column_aborts), &

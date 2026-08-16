@@ -1761,7 +1761,7 @@ contains
     module procedure pf_sort_threads
         use parquet_settings, only : parquet_get_sort_threads
 #ifdef _OPENMP
-        use omp_lib, only : omp_get_max_threads, omp_in_parallel, omp_get_num_procs
+        use omp_lib, only : omp_get_max_threads, omp_get_level, omp_get_num_procs
 #endif
         integer :: cap
         !
@@ -1774,7 +1774,24 @@ contains
         ! OpenMP threads would each ask for T more, and T*T oversubscription is slower than not
         ! threading at all. An EXPLICIT threads= is still honoured there -- see
         ! resolve_thread_count, which only consults this when the caller said nothing.
-        if (.not. omp_in_parallel()) n = omp_get_max_threads()
+        !
+        ! **The predicate is `omp_get_level`, NOT `omp_in_parallel`, and the difference is not
+        ! pedantic.** `omp_in_parallel` answers "is the enclosing region ACTIVE", i.e. does its
+        ! team have more than one thread. It is therefore `.false.` inside a region that exists
+        ! but runs on one thread -- `!$omp parallel if(cond)` with `cond` false, or any region at
+        ! all under `OMP_NUM_THREADS=1`. That is still a nested region, and the rule above still
+        ! applies to it, so the old spelling let every such caller open a full team one level down.
+        !
+        ! It also deadlocks. libgomp (gfortran 15.2, macOS arm64) intermittently hangs when a team
+        ! is opened from inside a one-thread enclosing region: main thread and workers all park on
+        ! one libgomp mutex that nobody holds. Reduced to twenty lines with no library code --
+        ! `!$omp parallel num_threads(1)` / `!$omp single` / `!$omp parallel do num_threads(3)` --
+        ! it hangs 7 runs in 8. Bisected, every clause is load-bearing: `master` instead of
+        ! `single` never hangs, an enclosing team of 2 never hangs, and no environment setting
+        ! fixes it (`GOMP_SPINCOUNT=0` only moves 7/8 to 2/8). The library's own code is
+        ! standard-conforming; this predicate is what stops it building the shape. See
+        ! feature_risks.md Risk-104.
+        if (omp_get_level() == 0) n = omp_get_max_threads()
 #endif
         ! parquet_set_sort_threads CAPS the automatic answer; it never raises it, and it never
         ! overrides the parallel-region rule above -- a caller who capped sorting at 8 said nothing
@@ -1796,7 +1813,7 @@ contains
     !
     module procedure resolve_thread_count
 #ifdef _OPENMP
-        use omp_lib, only : omp_get_num_procs
+        use omp_lib, only : omp_get_num_procs, omp_get_level, omp_get_active_level
 #endif
         !
         if (present(threads)) then
@@ -1804,6 +1821,23 @@ contains
             ! region: the caller has said what they want, and refusing it there would leave no way
             ! to thread a sort at all from code that is itself parallel.
             count = max(1_int64, int(threads, int64))
+#ifdef _OPENMP
+            ! **One exception, and it is narrow on purpose: an enclosing region that is not
+            ! actually running in parallel.** `omp_get_level() > 0` says a region encloses this
+            ! call; `omp_get_active_level() == 0` says its team has one thread. Opening a team
+            ! there is the exact shape libgomp deadlocks on -- see the reduction in
+            ! `pf_sort_threads` above and feature_risks.md Risk-104 -- and it is the one shape
+            ! that was measured hanging. An enclosing team of two or more never reproduced it in
+            ! any configuration tried, so a genuinely parallel caller keeps the promise above
+            ! untouched: that is the whole reason this clamp tests the ACTIVE level rather than
+            ! simply refusing every nested request.
+            !
+            ! **This costs the Fortran paths only.** The C++ engine threads with `std::thread`,
+            ! not OpenMP, so an explicit `threads=` inside such a region still reaches it and
+            ! `parquet_debug_get_sort_threads_used` still reports it -- which is why
+            ! `test_threads_auto_in_parallel` keeps asserting 3 and is not weakened by this.
+            if (omp_get_level() > 0 .and. omp_get_active_level() == 0) count = 1_int64
+#endif
         else
             count = int(pf_sort_threads(), int64)
         end if

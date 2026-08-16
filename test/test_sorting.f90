@@ -186,6 +186,7 @@ contains
             new_unittest("a threaded sort equals the serial one", test_threads_identical), &
             new_unittest("threads are really created", cpp_test_threads_really_used), &
             new_unittest("auto is serial inside a parallel region", cpp_test_threads_auto_in_parallel), &
+            new_unittest("no team is opened one level down, on either arm", test_nested_team_guard), &
             new_unittest("threads=1 forces serial", cpp_test_threads_one_is_serial), &
             new_unittest("unique and rank take threads too", test_threads_on_derived), &
             new_unittest("every size from 2 to 400 threads identically", test_merge_size_sweep), &
@@ -4484,6 +4485,65 @@ contains
     !> oversubscribing: with `threads=` absent, auto takes the machine in a serial region and stays
     !> SERIAL inside a parallel one, because T OpenMP threads each asking for T more would be T*T
     !> threads. An explicit `threads=` is still honoured there -- the caller has said what they want.
+    !> Neither half of the nested-team guard may open a team one level down. See Risk-104.
+    !!
+    !! **A deadlock cannot be asserted directly**, so this asserts the DECISION that leads to one
+    !! instead: what the library resolves as its thread count, in a region that exists but runs on
+    !! a single thread. That is the state libgomp hangs in, and it is reachable in ordinary user
+    !! code -- `!$omp parallel if(cond)` with `cond` false, or any region under
+    !! `OMP_NUM_THREADS=1`. `omp_in_parallel()` reads `.false.` there while `omp_get_level()` is 1,
+    !! which is exactly why the old predicate missed it.
+    !!
+    !! Both arms carry a level-0 negative control taken first. Without them the test passes on a
+    !! single-core machine, or against a library that had stopped threading altogether, while
+    !! proving nothing about the guard.
+    subroutine test_nested_team_guard(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion.
+        integer(int64), allocatable :: v(:), perm(:)
+        integer(int64) :: auto_top, auto_inactive, used_top, used_inactive, st, i
+        !
+        allocate(v(40000))
+        st = 88172645463325252_int64
+        do i = 1_int64, 40000_int64
+            st = ieor(st, ishft(st, 13)); st = ieor(st, ishft(st, -7)); st = ieor(st, ishft(st, 17))
+            v(i) = st
+        end do
+        !
+        ! Arm 1: the AUTOMATIC answer, read straight from the public policy function.
+        auto_top = int(pf_sort_threads(), int64)
+        auto_inactive = -1_int64
+        !$omp parallel if(.false.)
+        auto_inactive = int(pf_sort_threads(), int64)
+        !$omp end parallel
+        !
+        ! Arm 2: an EXPLICIT threads= reaching the Fortran engine, which is what `resolve_thread_count`
+        ! clamps. The C++ engine threads with std::thread rather than OpenMP and is deliberately not
+        ! clamped, so this arm has to pin the Fortran one to observe the rule at all.
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call pf_argsort(v, perm, threads=4)
+        used_top = fortran_threads_used()
+        used_inactive = -1_int64
+        !$omp parallel if(.false.)
+        call pf_argsort(v, perm, threads=4)
+        used_inactive = fortran_threads_used()
+        !$omp end parallel
+        call restore_engine_default()
+        !
+        call check(error, auto_top >= 2_int64, &
+            "negative control: the automatic answer must exceed 1 at the top level, or the guard below is vacuous")
+        if (allocated(error)) return
+        call check(error, auto_inactive == 1_int64, &
+            "pf_sort_threads must resolve to 1 inside an inactive parallel region: omp_get_level() is 1 there even " // &
+            "though omp_in_parallel() is .false., and a team opened one level down deadlocks libgomp (Risk-104)")
+        if (allocated(error)) return
+        call check(error, used_top >= 2_int64, &
+            "negative control: an explicit threads=4 must open a team at the top level, or the guard below is vacuous")
+        if (allocated(error)) return
+        call check(error, used_inactive == 1_int64, &
+            "an explicit threads= must be clamped to serial inside an INACTIVE parallel region -- the one shape " // &
+            "measured deadlocking; an enclosing team of two or more still honours it")
+    end subroutine test_nested_team_guard
+    !
     subroutine test_threads_auto_in_parallel(error)
         type(error_type), allocatable, intent(out) :: error
         real(real64) :: v(2000)

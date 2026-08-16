@@ -3586,6 +3586,21 @@ a whole suite from that parallelism, but reach for it only when the suite genuin
 concurrently — narrowing the guard is the better fix, since the suite's parallelism is itself an
 ongoing regression check.
 
+**An excluded suite runs with NO enclosing OpenMP region at all, and that is deliberate rather than
+incidental.** The obvious spelling — `run_testsuite(..., parallel=.false.)` — does *not* achieve it:
+that argument leaves test-drive's `!$omp parallel do` in place and switches it off with an `if`
+clause, which still **opens** a region, an inactive one with a team of one. Inside it
+`omp_get_level()` is 1 while `omp_in_parallel()` is `.false.`, so every test in the suite ran one
+level down from the top of the program and any team the library opened was a nested team — which
+deadlocks libgomp intermittently (`feature_risks.md` Risk-104, and the reason `fpm test` used to
+hang about one run in three). `run_tester`'s `run_suite` therefore drives excluded suites through
+`run_selected` per test, which calls `run_unittest` with no region at all. Two consequences worth
+knowing: a test in an excluded suite may assume it is at `omp_get_level() == 0`, which is what lets
+those suites keep asserting that a requested thread team is really opened; and because
+`run_selected` finds its test **by name**, `run_suite` refuses a suite containing two tests with
+the same name — otherwise it would run the first twice and the second never, silently, with the
+count still looking right.
+
 ### An intermittent test failure has THREE causes, and the third is not concurrency at all
 
 The section above supplies two explanations for a test that fails once and then passes ten times — a

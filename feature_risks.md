@@ -168,6 +168,7 @@ something a reader is expected to have.
 | [Risk-101](#risk-101--the-wrapping-route-e-kernel-is-built-by-nothing-routine-and-is-miscompiled-under-lto) | The wrapping route (e) kernel is built by nothing routine, and is miscompiled under LTO | 4 — covered |
 | [Risk-102](#risk-102--a-default-kind-size-wraps-above-231-elements-and-the-fill-fails-silently) | A default-kind `size()` wraps above 2**31 elements, and the fill fails silently | 4 — covered |
 | [Risk-103](#risk-103--the-streams-high-counter-word-is-reached-by-no-ordinary-stream-index) | The stream's high counter word is reached by no ordinary stream index | 4 — covered |
+| [Risk-104](#risk-104--a-thread-team-opened-one-level-down-deadlocks-libgomp) | A thread team opened one level down deadlocks libgomp | 4 — covered |
 | [Risk-104](#risk-104--an-allocate-extent-from-a-default-kind-size-overflows-the-array-it-just-allocated) | An allocate extent from a default-kind `size()` overflows the array it just allocated | 4 — covered |
 
 ---
@@ -4358,6 +4359,71 @@ stream and they fail for different reasons — do not reduce it to one:
   with an identical fault applied to both the library and `test_random_reference` and confined to
   streams above 2**32 — so that no pre-existing assertion sees it — the agreement half passes and
   this inequality is the only thing in the suite that fails.
+
+### Risk-104 — A thread team opened one level down deadlocks libgomp
+
+`pf_sort_threads` used to decide whether to thread by asking `omp_in_parallel()`. That predicate
+answers **"is the enclosing region ACTIVE"** — does its team have more than one thread — and it is
+therefore `.false.` inside a region that exists but runs on one thread: `!$omp parallel if(cond)`
+with `cond` false, or any region at all under `OMP_NUM_THREADS=1`. `omp_get_level()` is 1 there.
+So the library believed itself to be at the top of the program, opened a full team, and built a
+**nested** one.
+
+**libgomp deadlocks on that shape.** Measured on gfortran 15.2 / macOS arm64: a full `fpm test`
+hung roughly one run in three, always somewhere in `sorting`, at 0 % CPU with the main thread and
+its workers parked on a single libgomp mutex that **nobody held** — four workers for a team of
+eight, i.e. `gomp_team_start` stopped mid-spawn. Reduced to twenty lines with no library code at
+all:
+
+```fortran
+!$omp parallel num_threads(1)        ! enclosing team of ONE
+!$omp single
+!$omp parallel do num_threads(3)     ! nested team
+do j = 1, n
+    b(j) = a(j)
+end do
+!$omp end parallel do
+!$omp end single
+!$omp end parallel
+```
+
+That hangs **7 runs in 8** within 20000 rounds. Every clause is load-bearing, by bisection:
+`master` in place of `single` never hangs, no enclosing region never hangs, an enclosing
+`parallel do` never hangs, and an enclosing team of **two or more** never hangs. The nested count
+does not matter — 2, 3 and 4 all hang non-deterministically, which is what identifies it as a race
+rather than a specific combination. **No environment setting fixes it**: `GOMP_SPINCOUNT=0` moves
+7/8 to 2/8, `OMP_MAX_ACTIVE_LEVELS=1` and `OMP_WAIT_POLICY=passive` do nothing.
+
+**The library's code is standard-conforming; this is a compiler-runtime defect.** What the library
+can do is decline to build the shape, and that is the fix.
+
+**The rules this forbids.**
+
+*Do not restore `omp_in_parallel()` as the automatic predicate.* It is the wrong question. The rule
+being expressed is "am I nested", and only `omp_get_level()` answers it.
+
+*Do not widen the explicit-`threads=` clamp to every nested call.* It fires only when
+`omp_get_level() > 0 .and. omp_get_active_level() == 0` — a region that exists and is running on
+one thread. That is the only shape measured hanging, and narrowing to it is what lets a genuinely
+parallel caller keep the documented promise that an explicit request is honoured. Widening it to
+all nesting would also have silently disabled threading for the whole test suite, for the reason in
+the next rule.
+
+*Do not run an excluded suite through `run_testsuite(..., parallel=.false.)`.* That argument keeps
+test-drive's `!$omp parallel do` and disables it with an `if` clause, which still **opens** an
+inactive region — so every test in every excluded suite sat at `omp_get_level() == 1`, which is
+both the deadlock shape and, once the clamp existed, a blanket refusal to thread. `run_tester`'s
+`run_suite` drives those suites through `run_selected` instead, which runs each test with no
+enclosing region at all. It also checks the suite for duplicate test names first, because
+`run_selected` finds its test **by name** and two tests sharing one would run the first twice and
+the second never — silently, with the count still looking right. That check found a real instance
+the moment it was written (`errors` had two "prefetching an unknown column aborts").
+
+**Test.** `test_nested_team_guard` (`test/test_sorting.f90`) asserts the DECISION rather than the
+outcome, since a deadlock cannot be asserted: `pf_sort_threads()` must return 1 inside an inactive
+region, and an explicit `threads=4` reaching the Fortran engine must resolve to 1 there. Both arms
+carry a level-0 negative control taken first, and both were verified by reverting their guard
+independently — each mutation fails its own assertion and no other.
 
 ### Risk-104 — An allocate extent from a default-kind `size()` overflows the array it just allocated
 

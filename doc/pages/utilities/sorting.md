@@ -565,15 +565,24 @@ answer. `threads=` is a performance control and nothing else.
 | situation | threads used |
 |---|---|
 | ordinary serial code | `omp_get_max_threads()` |
-| inside an `!$omp parallel` region | **1** — serial |
-| explicit `threads=n` | `n`, wherever it is called from |
+| inside any `!$omp parallel` region | **1** — serial |
+| explicit `threads=n`, inside a region running on 2+ threads | `n` — honoured |
+| explicit `threads=n`, inside a region running on 1 thread | **1** — see below |
+| explicit `threads=n`, ordinary serial code | `n` |
 | array below the minimum-work threshold | 1 |
 | a low-cardinality integer key | 1 (see below) |
 
 The second row is the one worth knowing. Inside a parallel region, auto stays serial because
 *nested regions are the caller's business* — eight OpenMP threads each asking for eight more would
 be sixty-four threads, slower than not threading at all. If you genuinely want a threaded sort from
-inside your own parallel region, say so with an explicit `threads=`; it is always honoured.
+inside your own parallel region, say so with an explicit `threads=`.
+
+**The one place an explicit `threads=` is not honoured is a region that exists but is running on a
+single thread** — `!$omp parallel if(cond)` with `cond` false, or any region at all under
+`OMP_NUM_THREADS=1`. A sort there runs serially however many threads you asked for. This is not a
+policy choice: opening a thread team one level down from such a region deadlocks GNU's OpenMP
+runtime, intermittently and with no diagnostic, and refusing is the only reliable way to avoid it.
+A region running on two or more threads is unaffected and honours `threads=` exactly as before.
 
 `pf_sort_threads()` reports what auto would do right now, if you want to log it or size something
 against it.

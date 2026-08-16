@@ -74,6 +74,7 @@ module parquet_random
     public :: pf_random_seed
     public :: pf_random_key
     public :: parquet_debug_random_uses_int128
+    public :: parquet_debug_random_block
 
     !> Identifies the algorithm together with every mapping this module freezes -- the cipher, the
     !! key and counter layout, the word order, the integer rule and its retry key. Its value changes
@@ -399,6 +400,43 @@ contains
 #endif
     end function parquet_debug_random_uses_int128
 
+    !> Runs the Philox block function directly, on raw counter and key words. **Test-only.**
+    !!
+    !! **This exists so the LIBRARY'S OWN kernel can be known-answer-checked against all three
+    !! published Random123 vectors, rather than only the one the public API can reach.** The mapping
+    !! puts the 0-based block index in counter words 0 and 1, and the block index comes from an
+    !! `integer(int64)` draw — so it cannot exceed roughly `2**62`, while KAT 2 needs `0xffffffff`
+    !! there and KAT 3 about `9.6e18`. Both are unreachable through `pf_random_at` and friends by
+    !! construction, for any seed, stream or draw. Note the *key* is not restricted in the same way:
+    !! it is derived from the seed by a bijection, so every 64-bit key is reachable; it is only the
+    !! counter that is bounded.
+    !!
+    !! Without this, KAT 2 and KAT 3 could only be asserted against `test_random_reference.f90`, and
+    !! the library kernel was tied to them transitively — directly known-answer-checked **once** and
+    !! indirectly **twice**, through a reference that is itself checked three times. That chain is
+    !! sound but it is a chain, and it leaves the one arithmetic that actually ships less directly
+    !! evidenced than the reference written to check it. This hook makes all three direct.
+    !!
+    !! Public only because it has to be, exactly as `parquet_debug_random_uses_int128` is: this
+    !! module reaches no `bind(C)` surface, so the C++-side debug-hook convention is unavailable to
+    !! it. It is excluded from README's API overview, no library code calls it, and it is a pure
+    !! observation with no setter — it cannot change what any draw returns.
+    !!
+    !! Arguments are the module's own coordinates, not Philox's four counter words: `key` splits
+    !! into key words 0 and 1 (low half first), `stream` into counter words 2 and 3, and `index`
+    !! into counter words 0 and 1. So KAT 2 — every counter and key word `0xffffffff` — is the call
+    !! `parquet_debug_random_block(-1_int64, -1_int64, -1_int64, ...)`.
+    pure subroutine parquet_debug_random_block(key, stream, index, w0, w1, w2, w3)
+        integer(int64), intent(in) :: key           !! 64-bit key: key words 0 and 1, low half first
+        integer(int64), intent(in) :: stream        !! splits into counter words 2 and 3
+        integer(int64), intent(in) :: index         !! 0-based block index: counter words 0 and 1
+        integer(int64), intent(out) :: w0           !! output word `c0`
+        integer(int64), intent(out) :: w1           !! output word `c1`
+        integer(int64), intent(out) :: w2           !! output word `c2`
+        integer(int64), intent(out) :: w3           !! output word `c3`
+        call random_block(key, stream, index, w0, w1, w2, w3)
+    end subroutine parquet_debug_random_block
+
     ! ================================================================================
     ! The cipher
     ! ================================================================================
@@ -641,8 +679,25 @@ contains
     !! probability 1, the worst chain measured is 7, and at a range of a few million the retry
     !! probability is around 2**-40.
     !!
-    !! Unlike `pf_random_at` and `pf_random_bits_at`, which read the same two words as each other,
-    !! this shares no value identity with anything -- a rejection moves it to a different key.
+    !! **At the same coordinate this reads the SAME two words as `pf_random_at` and
+    !! `pf_random_bits_at`, so the three are not independent draws.** The block index is `draw - 1`
+    !! here and `(draw - 1)/2` there, and those coincide at draw 1 -- which is the default and by
+    !! far the commonest call. They diverge from draw 2 onwards, where this takes block 1 while the
+    !! real draws take block 0's second pair.
+    !!
+    !! The returned *value* differs, because Lemire's reduction is a different function of those
+    !! bits and a rejection re-keys; but "different value" is not "independent", and at a small
+    !! range the integer is a **deterministic function** of the real. Measured on two machines and
+    !! two architectures: `pf_random_int_at(seed, i, 1, 6)` equals `1 + floor(6 * pf_random_at(seed,
+    !! i))` for **20000 of 20000** streams, against 1-in-6 when the integer is taken at draw 2. So a
+    !! caller wanting one real and one integer per iteration must separate them on the draw axis or
+    !! with `pf_random_key`, exactly as `doc/pages/utilities/random.md` says.
+    !!
+    !! An earlier version of this comment opened "Unlike `pf_random_at` and `pf_random_bits_at`,
+    !! which read the same two words as each other" -- asserting that this procedure does *not*.
+    !! It does. Do not restore that reading; and note the rejection clause cannot rescue it, since
+    !! at a realistic range the retry probability is around 2**-40, so the no-rejection case is
+    !! effectively the only case.
     pure function int_at_impl(seed, stream, lo, hi, draw) result(r)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index

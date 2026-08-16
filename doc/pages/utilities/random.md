@@ -190,6 +190,24 @@ enciphering per value and uses half of it — which costs nothing today and is w
 are counting: a future bulk integer fill will be roughly 0.6× the throughput of its `real64`
 sibling for that reason.
 
+**So do not take a real and an integer at the same coordinate and expect two independent numbers.**
+"No identity" means the two *values* are not equal; it does not mean they are unrelated. Reading
+the same words makes them the same randomness twice, and a rejection is what would separate them —
+but at any realistic range that happens with probability around 2⁻⁴⁰, so in practice it never does.
+At a small range the integer is simply a function of the real: `pf_random_int_at(seed, i, 1, 6)`
+equals `1 + floor(6 * pf_random_at(seed, i))` for 20000 of 20000 streams measured, where taking the
+integer one draw along gives the 1-in-6 agreement independence predicts.
+
+The fix is the one this page already recommends for any two values in one iteration — walk the draw
+axis, or derive a separate family:
+
+```fortran
+do i = 1, n
+    x(i)   = pf_random_at(seed, i)                       ! draw 1
+    die(i) = pf_random_int_at(seed, i, 1, 6, 2_int64)    ! draw 2: independent of x(i)
+end do
+```
+
 ### Not cryptographic
 
 The generator is fast and statistically excellent, and it is **not** cryptographic. The seed is

@@ -56,6 +56,8 @@ contains
             new_unittest("golden vectors: pf_random_fill_at", test_golden_fill), &
             new_unittest("cross-form: fill agrees with the scalar draws, prefixes are prefixes", test_cross_form), &
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
+            new_unittest("the integer draw shares a block with the real draw at one coordinate", &
+                test_int_shares_block), &
             new_unittest("the int32 specifics equal the int64 specifics", test_kind_specifics), &
             new_unittest("elemental calls equal elementwise scalar calls", test_elemental), &
             new_unittest("contract edges: swap, clamp, degenerate and extreme arguments", test_edges), &
@@ -78,13 +80,27 @@ contains
 
     !> The three published Random123 `philox4x32 10` vectors.
     !!
-    !! Asserted against the strict reference rather than the library, because two of the three use
-    !! counter words no draw index can produce -- `ctr1` would have to reach 2**32-1, which needs a
-    !! block index no `draw` in `integer(int64)` can reach. KAT 1 IS reachable through the public
-    !! surface (seed 0 and stream 0 give an all-zero key and counter, so block 0 is that vector), so
-    !! it is checked there as well, which is what ties the reference and the library to the same
-    !! cipher. Both real surfaces reach it: `real64` takes two words per value, so block 0 is draws
-    !! 1 and 2, and `real32` takes one, so the same block is draws 1 to 4.
+    !! **All three are asserted twice: against the strict reference, and against the library's own
+    !! kernel.** Only KAT 1 is reachable through the PUBLIC draw API -- seed 0 and stream 0 give an
+    !! all-zero key and counter, so block 0 is that vector -- because the other two need counter
+    !! words 0 and 1 to hold values a block index cannot produce: that index comes from an
+    !! `integer(int64)` draw and so cannot exceed roughly 2**62, while KAT 2 needs `0xffffffff`
+    !! there and KAT 3 about 9.6e18. No seed, stream or draw reaches either.
+    !!
+    !! The library kernel is therefore reached for KAT 2 and KAT 3 through
+    !! `parquet_debug_random_block`, which runs the Philox block function on raw words. **Without
+    !! it these two were tied to the library only transitively** -- checked against the reference,
+    !! with the library tied to the reference by the `test_agreement_*` sweeps -- so the arithmetic
+    !! that actually ships was directly known-answer-checked once and indirectly twice, through a
+    !! reference that is itself checked three times. That chain was sound but it was a chain, and it
+    !! left the shipped kernel less directly evidenced than the code written to check it. Note the
+    !! *key* was never the obstacle: it is derived from the seed by a bijection, so every 64-bit key
+    !! is reachable; only the counter is bounded.
+    !!
+    !! KAT 1 stays checked through the public surface as well, which is what ties the public mapping
+    !! -- not just the kernel -- to the published cipher. Both real surfaces reach it: `real64`
+    !! takes two words per value, so block 0 is draws 1 and 2, and `real32` takes one, so the same
+    !! block is draws 1 to 4.
     !!
     !! **The `real32` half is the only assertion in this suite that pins a `real32` value to
     !! something outside this project.** Its golden vectors and the strict reference's `real32` arm
@@ -98,6 +114,7 @@ contains
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer :: k
         integer(int64) :: o0, o1, o2, o3, bits1, bits2
+        integer(int64) :: kkey, kstream, kindex
         real(real32) :: want32, v32(4)
 
         do k = 1, n_kat
@@ -112,6 +129,38 @@ contains
             call check(error, o3 == kat_out(4 * k), "reference Philox: KAT word 3 mismatch")
             if (allocated(error)) return
         end do
+
+        ! The SAME three vectors through the LIBRARY's own kernel, which is the arithmetic that
+        ! ships. The hook takes the module's coordinates rather than Philox's four counter words,
+        ! so each vector is repacked: counter words 0 and 1 are the block index (low half first),
+        ! words 2 and 3 the stream, and the two key words the 64-bit key. Every combined value is a
+        ! bit pattern, not a magnitude -- KAT 2's are all-ones, i.e. -1 as int64 -- which is exactly
+        ! why these vectors cannot be reached through a draw: the block index is bounded by
+        ! `integer(int64)` at roughly 2**62.
+        do k = 1, n_kat
+            kindex  = ior(kat_ctr(4 * k - 3), ishft(kat_ctr(4 * k - 2), 32))
+            kstream = ior(kat_ctr(4 * k - 1), ishft(kat_ctr(4 * k), 32))
+            kkey    = ior(kat_key(2 * k - 1), ishft(kat_key(2 * k), 32))
+            call parquet_debug_random_block(kkey, kstream, kindex, o0, o1, o2, o3)
+            call check(error, o0 == kat_out(4 * k - 3), "library kernel: KAT word 0 mismatch")
+            if (allocated(error)) return
+            call check(error, o1 == kat_out(4 * k - 2), "library kernel: KAT word 1 mismatch")
+            if (allocated(error)) return
+            call check(error, o2 == kat_out(4 * k - 1), "library kernel: KAT word 2 mismatch")
+            if (allocated(error)) return
+            call check(error, o3 == kat_out(4 * k), "library kernel: KAT word 3 mismatch")
+            if (allocated(error)) return
+        end do
+
+        ! Negative control for the repacking above: if the three vectors' coordinates all collapsed
+        ! to the same value -- the way a mis-shifted `ishft` could make every high half vanish --
+        ! the loop would be checking one vector three times and still pass on KAT 1's row alone.
+        ! These are the three vectors' block indices, which must differ from each other.
+        call check(error, ior(kat_ctr(1), ishft(kat_ctr(2), 32)) /= ior(kat_ctr(5), ishft(kat_ctr(6), 32)) .and. &
+                          ior(kat_ctr(5), ishft(kat_ctr(6), 32)) /= ior(kat_ctr(9), ishft(kat_ctr(10), 32)), &
+            "negative control: the three KATs must repack to three DIFFERENT block indices, or the " // &
+            "loop above is checking one vector three times")
+        if (allocated(error)) return
 
         ! KAT 1 through the library: seed 0 and stream 0 give an all-zero key and counter, so
         ! block 0's four words are exactly that vector -- draw 1 carries words 0 and 1, draw 2
@@ -358,6 +407,63 @@ contains
         call check(error, mismatches == 0, &
             "pf_random_at is not the top 53 bits of pf_random_bits_at everywhere -- the two are contractually identical")
     end subroutine test_bits_identity
+
+    !> **The integer draw and the real draws read the SAME block at the same coordinate**, so they
+    !! are not independent draws — this pins that mechanism rather than the wording that describes
+    !! it.
+    !!
+    !! `int_at_impl`'s block index is `draw - 1` and `bits_of`'s is `(draw - 1)/2`; those coincide
+    !! at draw 1, which is the default and the commonest call. The consequence is measurable and is
+    !! what this asserts: at a small range the integer is a **deterministic function** of the real,
+    !! agreeing for every stream tried, where taking the integer one draw along agrees at the 1-in-6
+    !! rate independence predicts.
+    !!
+    !! **Why this test exists at all.** Nothing else in the suite asserts the relationship in either
+    !! direction, so a refactor that changed either block index would silently leave both the
+    !! doc-comment on `int_at_impl` and the "Endpoints and identities" section of
+    !! `doc/pages/utilities/random.md` describing something the code no longer does — and that has
+    !! already happened once, in the direction of claiming the words are *not* shared. Both texts
+    !! were corrected against measurements taken on two machines; this is what stops them drifting
+    !! back.
+    !!
+    !! The draw-2 arm is a **negative control**, not decoration: without it, a change that made the
+    !! integer rule agree with the real draw at *every* draw would pass the first assertion while
+    !! destroying the very separation the documentation tells callers to rely on.
+    !!
+    !! Note the module passes the **seed itself** as Philox's key, so `parquet_debug_random_block`
+    !! at block index 0 reaches exactly the block a draw-1 call uses — no key derivation stands
+    !! between them.
+    subroutine test_int_shares_block(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: seed = 987654321_int64
+        integer(int64), parameter :: nstream = 2000_int64
+        integer(int64) :: i, w0, w1, w2, w3, bits, want, agree_d1, agree_d2
+        real(real64) :: rv
+
+        agree_d1 = 0_int64
+        agree_d2 = 0_int64
+        do i = 1_int64, nstream
+            call parquet_debug_random_block(seed, i, 0_int64, w0, w1, w2, w3)
+            bits = ior(ishft(w1, 32), w0)
+            call check(error, pf_random_bits_at(seed, i, 1_int64) == bits, &
+                "draw 1 of pf_random_bits_at must be block 0's first two words, low half first")
+            if (allocated(error)) return
+            rv = real(ishft(bits, -11), real64) * 2.0_real64**(-53)
+            call check(error, pf_random_at(seed, i, 1_int64) == rv, &
+                "draw 1 of pf_random_at must be that same block's top 53 bits scaled into [0, 1)")
+            if (allocated(error)) return
+            want = 1_int64 + int(6.0_real64 * rv, int64)
+            if (pf_random_int_at(seed, i, 1_int64, 6_int64) == want) agree_d1 = agree_d1 + 1_int64
+            if (pf_random_int_at(seed, i, 1_int64, 6_int64, 2_int64) == want) agree_d2 = agree_d2 + 1_int64
+        end do
+        call check(error, agree_d1 == nstream, &
+            "at draw 1 the integer draw must be a deterministic function of the real draw -- both read " // &
+            "block 0, so pf_random_int_at(seed, i, 1, 6) is 1 + floor(6 * pf_random_at(seed, i))")
+        if (allocated(error)) return
+        call check(error, agree_d2 < nstream / 2_int64, &
+            "negative control: taking the integer at draw 2 must BREAK that agreement -- it reads block 1 " // &
+            "while the real draw reads block 0, so agreement should fall to roughly 1 in 6")
+    end subroutine test_int_shares_block
 
     !> The `int32` specifics must be bit-identical to the `int64` ones at equal argument values.
     !!

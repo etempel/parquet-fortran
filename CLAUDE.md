@@ -1992,6 +1992,15 @@ directly contrary to this project's enforced 132-column limit, so **a build on B
 verify line length** — a too-long line compiles cleanly there and fails elsewhere. Check line length
 on A or C, or with `tools/run_lint_check.sh`.
 
+**Machines A and C cannot be told apart from a compiler listing — only `uname -m` separates them.**
+Both run macOS, both carry MacPorts gfortran 15.2 and flang 22.x, and both are on Arrow 25.0.0; they
+differ in *architecture*, A being Apple M1 Pro (arm64, NEON-128) and C Intel (x86-64, AVX2). So a
+report that identifies its machine by listing compilers has not identified it. This has already gone
+wrong once: a gfortran 15.2 result taken on C was first written up as "macOS arm64", which would have
+turned a **confirmation of an existing `feature_risks.md` entry** into a spurious claim about a
+**new architecture**. Have every run print `uname -m` — `tools/machine_report.sh` does, and takes
+seconds — and read it before writing any figure down.
+
 **What each machine is good for:**
 
 - **A** — everyday development, and the only machine with a local `flang`. Quiet, so it gives the

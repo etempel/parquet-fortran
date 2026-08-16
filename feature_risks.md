@@ -4208,6 +4208,29 @@ contract. Measured on gfortran 14.2.1 (Linux, Zen 4) and reported independently 
 each remove it; no LTO removes it; `-O2` does not exhibit it. ifx is clean on the kernel it actually
 ships, at `-O0` through `-O3 -xHost -ipo`.
 
+**flang 22.1.8 compiles the same wrapping source CORRECTLY under LTO, and that is what identifies
+this as a gfortran code-generation bug rather than a property of the arithmetic.** On machine C
+(x86-64, AVX2, macOS) `FC=flang-mp-22 tools/check_random_kernels.sh` passes **both** halves at all
+six settings — including `-O3 -flto` and `-Ofast -flto`, where the same command under gfortran 15.2
+on the same machine fails with **432** mismatches each. Before this datum the evidence was equally
+compatible with a latent fragility in the wrapping arithmetic that ifx merely had not yet exploited
+— which is not an idle hypothesis here, since `src/parquet_random.f90`'s own header records ifx
+wrapping one expression faithfully while using the undefinedness of *another* to delete a branch
+hundreds of lines away (Risk-94). It is now **two unrelated toolchains clean** (flang's LLVM
+`-flto`, ifx's `-ipo`) against **two gfortran releases broken on the same source**, which supports
+the code-generation explanation far better than the fragility one.
+
+**flang is also the only compiler in the fleet that can build BOTH kernels and be checked for
+agreement between them**, which is worth more than a second clean row: ifx cannot form the `int128`
+arm at all (`selected_int_kind(38)` is `-1` there, and the module's `pf_int128_assert` turns that
+into a compile error by design), so on ifx the strict reference and the golden vectors are the only
+oracles and there is no second kernel to cross-check against.
+
+**Per-release failure counts, for anyone comparing a future run**: gfortran 14.2.1 reports **480**
+(144 from the positive stream arm, 336 from the negative — see the breakdown below); gfortran 15.2
+on machine C reports **432**. The figures are driver-specific as well as release-specific, so a
+count that differs is not by itself evidence of anything; the verdict is PASS versus FAIL.
+
 **Which draws break depends on the range, and "it is a `pf_random32_at` bug" is the non-negative
 half of the answer only.** Uncapped per-label counts from the driver at `-O3 -flto`, forced
 wrapping: over `1..24` only `pf_random32_at` comes back wrong (144 failures), while over `-24..-1`

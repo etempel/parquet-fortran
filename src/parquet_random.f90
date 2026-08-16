@@ -507,14 +507,33 @@ contains
     end subroutine random_block
 
     !> Word `index` (0-based) of a stream: blocks 0, 1, 2, ... each giving `c0, c1, c2, c3`.
+    !!
+    !! **The four words are named scalars selected by `select case`, not a local array indexed at
+    !! run time**, which is worth about 5-7 % of `pf_random32_at` on x86-64 -- 18.32 -> 17.37 ns on
+    !! machine C (gfortran 15.2) and 22.33 -> 20.86 / 15.75 -> 14.67 on machine B (gfortran 14.2.1 /
+    !! ifx). Machine A (arm64) measures no change, so this is positive-or-neutral rather than
+    !! universal. Note it is the array indexing that pays and **not** the `/` and `modulo`:
+    !! rewriting those as `ishft`/`iand` -- valid, since `index` is `draw - 1` with `draw` clamped
+    !! to at least 1 -- was measured at nothing on both machines that tried it, so that spelling was
+    !! deliberately NOT taken. It would trade a form correct for every input for one correct only
+    !! for non-negative inputs, and buy zero.
     pure function word_of(seed, stream, index) result(w)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
         integer(int64), intent(in) :: index         !! 0-based word index within the stream
         integer(int64) :: w                         !! that word, in `[0, 2**32)`
-        integer(int64) :: c(0:3)
-        call random_block(seed, stream, index / 4_int64, c(0), c(1), c(2), c(3))
-        w = c(int(modulo(index, 4_int64), int32))
+        integer(int64) :: c0, c1, c2, c3
+        call random_block(seed, stream, index / 4_int64, c0, c1, c2, c3)
+        select case (int(modulo(index, 4_int64), int32))
+        case (0)
+            w = c0
+        case (1)
+            w = c1
+        case (2)
+            w = c2
+        case default
+            w = c3
+        end select
     end function word_of
 
     !> The 64-bit pattern of `real64`/raw-bits value `draw` (1-based) of a stream.
@@ -584,12 +603,30 @@ contains
     !! `m` values enciphers about `m/2` blocks where `m` scalar calls would encipher `m`. The
     !! values are identical to those scalar calls either way -- that is what makes a prefix a
     !! prefix.
+    !!
+    !! **Shape: an alignment head, a TWO-BLOCK steady state, then a one-block and a one-value
+    !! tail.** Two blocks rather than one because consecutive Philox blocks are independent, so
+    !! enciphering two in the same body interleaves two 10-round dependency chains and fills the
+    !! issue slots one chain leaves idle. No value moves -- the same blocks are computed in the
+    !! same order. **Two is the measured optimum and more is worse**: machine C measured 1 / 2 / 3 /
+    !! 4 blocks at 7.85 / 6.40 / 8.87 / 7.93 ns per value, register pressure giving back more than
+    !! the extra parallelism buys past two, and that held whether the extra block state was named
+    !! scalars or an array. Re-derive the shape of that curve before changing the count, rather
+    !! than the winner.
+    !!
+    !! **The head is what removes the per-iteration parity test AND the overflow guard this loop
+    !! used to need.** Aligning once means the steady state advances `blk` by increment, and `blk`
+    !! tops out at `(huge - 1)/2`, so no index here can overflow -- where the previous form derived
+    !! a position from `draw + k` each pass and needed a guard against forming `huge + 1` on the
+    !! final, dead iteration. `position + 1` in the head cannot overflow either: it fires only when
+    !! `position` is odd, and the largest odd `position` is `huge - 2`.
     pure subroutine fill_r64(seed, stream, v, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
         real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
         integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
-        integer(int64) :: position, w0, w1, w2, w3
+        integer(int64) :: position, blk
+        integer(int64) :: w0, w1, w2, w3, x0, x1, x2, x3
         ! Both counters and the length are int64, and `size` is asked for that kind EXPLICITLY.
         ! `size(v)` defaults to a default-kind result, which wraps for an array of 2**31 elements
         ! or more -- and this fails silently rather than loudly: a wrapped negative length returns
@@ -603,43 +640,64 @@ contains
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         k = 0_int64
-        position = draw
-        do while (k < m)
-            call random_block(seed, stream, (position - 1_int64) / 2_int64, w0, w1, w2, w3)
-            if (modulo(position - 1_int64, 2_int64) == 0_int64) then
-                k = k + 1_int64
-                v(k) = to_real64(ior(ishft(w1, 32), w0))
-                if (k < m) then
-                    k = k + 1_int64
-                    v(k) = to_real64(ior(ishft(w3, 32), w2))
-                end if
-            else
-                k = k + 1_int64
-                v(k) = to_real64(ior(ishft(w3, 32), w2))
-            end if
-            ! The guard is what keeps this from being a THIRD unguarded signed-overflow site, and
-            ! it is not about invalid input. `k` has already reached `m` on the final pass, so an
-            ! unguarded `draw + k` computes the position one PAST the last element -- which is
-            ! `huge(int64) + 1` for a perfectly valid fill whose every requested position is
-            ! representable. The result is dead (the loop exits immediately), which is exactly why
-            ! the answers stayed right and why `-ftrapv` never trapped it; it is also exactly the
-            ! situation `width_of` documents, where a compiler used a dead overflow's undefinedness
-            ! to reason about live code elsewhere. `fill_r32` needs no such guard: it derives its
-            ! position at the TOP of the loop, so it never forms an index past the last element.
-            if (k < m) position = draw + k
+        position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
+        ! Head: one value when `draw` lands on a block's SECOND pair, after which we are aligned.
+        if (iand(position, 1_int64) /= 0_int64) then
+            call random_block(seed, stream, ishft(position, -1), w0, w1, w2, w3)
+            k = 1_int64
+            v(1) = to_real64(ior(ishft(w3, 32), w2))
+            position = position + 1_int64
+        end if
+        blk = ishft(position, -1)
+        do while (k + 4_int64 <= m)                 ! steady state: two blocks, four values
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, blk + 1_int64, x0, x1, x2, x3)
+            v(k + 1_int64) = to_real64(ior(ishft(w1, 32), w0))
+            v(k + 2_int64) = to_real64(ior(ishft(w3, 32), w2))
+            v(k + 3_int64) = to_real64(ior(ishft(x1, 32), x0))
+            v(k + 4_int64) = to_real64(ior(ishft(x3, 32), x2))
+            k = k + 4_int64
+            blk = blk + 2_int64
         end do
+        do while (k + 2_int64 <= m)                 ! tail: whole blocks
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(k + 1_int64) = to_real64(ior(ishft(w1, 32), w0))
+            v(k + 2_int64) = to_real64(ior(ishft(w3, 32), w2))
+            k = k + 2_int64
+            blk = blk + 1_int64
+        end do
+        if (k < m) then                             ! tail: a final half-block
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(m) = to_real64(ior(ishft(w1, 32), w0))
+        end if
     end subroutine fill_r64
 
     !> Fills `v` with consecutive `real32` values of one stream, starting at `draw`.
     !!
     !! Four values to a block, since a `real32` value is one word. Same contract as `fill_r64`:
     !! identical to the matching scalar calls, so prefixes agree.
+    !!
+    !! **Same three-part shape as `fill_r64` -- head, two-block steady state, tail -- and it is
+    !! worth more here than there** (machine C: 4.85 -> 3.15 ns per value, 1.54x, against 1.23x for
+    !! `real64`). The extra gain is not extra batching: it is that the steady state no longer runs
+    !! the `do while (slot <= 3 .and. k < m)` inner loop this subroutine used to carry on **every**
+    !! block. That loop wrote through a local array indexed by a runtime `slot` and tested a
+    !! compound condition four times per block, where an aligned block is simply four straight-line
+    !! writes from named scalars. The head and tail still need slot handling and still have it, in
+    !! the unrolled `if` form -- **`slot <= 0` is deliberately unreachable in the head** (which
+    !! fires only for `slot /= 0`), and is written that way so the four lines read as one aligned
+    !! pattern rather than three special cases.
+    !!
+    !! The words are named scalars rather than an array for the reason `random_block`'s header
+    !! gives: an array whose subscript is not a compile-time constant is liable to be spilled, and
+    !! spilling it here would give back exactly what removing the inner loop won.
     pure subroutine fill_r32(seed, stream, v, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
         real(real32), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
         integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
-        integer(int64) :: position, c(0:3)
+        integer(int64) :: position, blk
+        integer(int64) :: c0, c1, c2, c3, d0, d1, d2, d3
         ! int64 counters and an explicit `kind=` on `size`, for the reason spelled out in
         ! `fill_r64`: a default-kind length wraps above 2**31 elements and fails silently, either
         ! writing nothing or writing a short prefix of the caller's `intent(out)` array.
@@ -648,16 +706,68 @@ contains
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         k = 0_int64
-        do while (k < m)
-            position = draw + k - 1_int64                    ! 0-based word index
-            call random_block(seed, stream, position / 4_int64, c(0), c(1), c(2), c(3))
-            slot = int(modulo(position, 4_int64), int32)
-            do while (slot <= 3 .and. k < m)
+        position = draw - 1_int64                   ! 0-based word index; `draw` >= 1, so >= 0
+        blk = position / 4_int64
+        slot = int(modulo(position, 4_int64), int32)
+        ! Head: finish the first block when the start is not block-aligned.
+        if (slot /= 0) then
+            call random_block(seed, stream, blk, c0, c1, c2, c3)
+            if (slot <= 0 .and. k < m) then
                 k = k + 1_int64
-                v(k) = to_real32(c(slot))
-                slot = slot + 1
-            end do
+                v(k) = to_real32(c0)
+            end if
+            if (slot <= 1 .and. k < m) then
+                k = k + 1_int64
+                v(k) = to_real32(c1)
+            end if
+            if (slot <= 2 .and. k < m) then
+                k = k + 1_int64
+                v(k) = to_real32(c2)
+            end if
+            if (slot <= 3 .and. k < m) then
+                k = k + 1_int64
+                v(k) = to_real32(c3)
+            end if
+            blk = blk + 1_int64
+        end if
+        do while (k + 8_int64 <= m)                 ! steady state: two blocks, eight values
+            call random_block(seed, stream, blk, c0, c1, c2, c3)
+            call random_block(seed, stream, blk + 1_int64, d0, d1, d2, d3)
+            v(k + 1_int64) = to_real32(c0)
+            v(k + 2_int64) = to_real32(c1)
+            v(k + 3_int64) = to_real32(c2)
+            v(k + 4_int64) = to_real32(c3)
+            v(k + 5_int64) = to_real32(d0)
+            v(k + 6_int64) = to_real32(d1)
+            v(k + 7_int64) = to_real32(d2)
+            v(k + 8_int64) = to_real32(d3)
+            k = k + 8_int64
+            blk = blk + 2_int64
         end do
+        do while (k + 4_int64 <= m)                 ! tail: whole blocks
+            call random_block(seed, stream, blk, c0, c1, c2, c3)
+            v(k + 1_int64) = to_real32(c0)
+            v(k + 2_int64) = to_real32(c1)
+            v(k + 3_int64) = to_real32(c2)
+            v(k + 4_int64) = to_real32(c3)
+            k = k + 4_int64
+            blk = blk + 1_int64
+        end do
+        if (k < m) then                             ! tail: a final partial block, at most 3 values
+            call random_block(seed, stream, blk, c0, c1, c2, c3)
+            if (k < m) then
+                k = k + 1_int64
+                v(k) = to_real32(c0)
+            end if
+            if (k < m) then
+                k = k + 1_int64
+                v(k) = to_real32(c1)
+            end if
+            if (k < m) then
+                k = k + 1_int64
+                v(k) = to_real32(c2)
+            end if
+        end if
     end subroutine fill_r32
 
     ! ================================================================================
@@ -881,25 +991,61 @@ contains
 
     !> The full 128-bit product of two unsigned 64-bit patterns, as a low and a high half.
     !!
-    !! UB site 2 of 2, and the only one carried on BOTH sides of the fork: each 32x32 partial
-    !! product can exceed `huge(int64)` and wrap. Route (e) does not cover it, and a strictly
-    !! overflow-free spelling was measured at 1.31x on gfortran and 2.05x on ifx for the whole
-    !! integer path -- far more than any other fix here, because the cost is the product itself
-    !! (four 32x32 replaced by sixteen 16x16) rather than a few range operations. It is carried
-    !! deliberately and guarded by the suite's cross-implementation agreement sweep, which is the
-    !! only thing that would notice a compiler starting to exploit it.
+    !! **Route (e) now covers this, so the wrapping arm is the `#else` arm only.** It used to be
+    !! "UB site 2 of 2, and the only one carried on BOTH sides of the fork" -- each 32x32 partial
+    !! product can exceed `huge(int64)` and wrap -- and where a 128-bit kind exists that is no
+    !! longer so. The remaining wrapping sites are both on the `#else` arm: this one, and
+    !! `random_block`'s multiplies. See `feature_risks.md` Risk-95.
     !!
-    !! That guard is now the ONLY protection this site has. The width arithmetic used to be a
-    !! third such site, carried on the same reasoning -- that ifx had been verified to wrap -- and
-    !! ifx was then caught using the overflow's undefinedness to delete a branch somewhere else
-    !! entirely (see `width_of`). Nothing in that finding says this site is safe; it says the
-    !! evidence thought to make it safe was never evidence about this question. Treat a future
-    !! agreement failure here as the expected outcome rather than as a surprise.
+    !! **Why only ONE operand is split, and why the obvious spelling is wrong.** The full unsigned
+    !! product reaches nearly 2**128, which does NOT fit a signed 128-bit integer -- so
+    !! `iand(int(a,k128), MASK64_128) * iand(int(b,k128), MASK64_128)` **overflows**, and would add
+    !! a third wrapping site while appearing to remove one. It measures faster than what ships here
+    !! (a single wide multiply against two) and must not be adopted on that basis: Risk-95's first
+    !! rule is that a wrapping measurement is not evidence. Splitting `b` alone bounds each product
+    !! by 2**96 and every intermediate below 2**97, which is provably in range.
+    !!
+    !! **Cost.** Two wide multiplies against four narrow ones plus their carries: `pf_random_int_at`
+    !! at a narrow range measured 26.14 -> 25.03 ns and at a rejecting width 48.12 -> 41.64 on
+    !! machine B (gfortran 14.2.1, release flags), the larger part of the second figure coming from
+    !! `mul64_lo_strict` on the retry path rather than from here. So this arm is both faster and
+    !! free of undefined behaviour, which is why it is taken despite the strict 16-bit-limb spelling
+    !! having been rejected on cost (1.31x gfortran / 2.05x ifx for the whole integer path).
+    !!
+    !! **The `#else` arm keeps every word of its former warning.** It is guarded by the suite's
+    !! cross-implementation agreement sweep and by nothing else -- that is the only thing that would
+    !! notice a compiler starting to exploit it. The width arithmetic used to be a third such site,
+    !! carried on the same reasoning -- that ifx had been verified to wrap -- and ifx was then
+    !! caught using the overflow's undefinedness to delete a branch somewhere else entirely (see
+    !! `width_of`). Nothing in that finding says this site is safe; it says the evidence thought to
+    !! make it safe was never evidence about this question. Treat a future agreement failure on that
+    !! arm as the expected outcome rather than as a surprise.
     pure subroutine mulhilo64(a, b, low, high)
         integer(int64), intent(in) :: a             !! one factor, read as unsigned
         integer(int64), intent(in) :: b             !! the other factor, read as unsigned
         integer(int64), intent(out) :: low          !! bits 0..63 of the product
         integer(int64), intent(out) :: high         !! bits 64..127 of the product
+#ifdef PF_INT128
+        integer(k128) :: au, bhi, blo, t0, t1, s, wl, wh
+        ! ONE operand is split, not both, and that is what keeps this in range. The full unsigned
+        ! product reaches nearly 2**128 and so does NOT fit a signed 128-bit integer -- forming it
+        ! as a single wide multiply of two unsigned-masked operands overflows, and would be a THIRD
+        ! wrapping site rather than the removal of one. Splitting `b` into 32-bit halves bounds each
+        ! product by 2**96 and every intermediate below 2**97, so nothing here can overflow at all.
+        au = iand(int(a, k128), MASK64_128)
+        bhi = ishft(iand(int(b, k128), MASK64_128), -32)
+        blo = iand(int(b, k128), M32_128)
+        t0 = au * blo                               ! < 2**96
+        t1 = au * bhi                               ! < 2**96
+        ! a*b = (t1 >> 32)*2**64 + s, where s gathers t1's low limb and the whole of t0.
+        s = t0 + ishft(iand(t1, M32_128), 32)       ! < 2**97
+        wl = iand(s, MASK64_128)
+        wh = ishft(t1, -32) + ishft(s, -64)         ! below 2**64 because the product is
+        if (wl >= TWO63_128) wl = wl - TWO64_128
+        if (wh >= TWO63_128) wh = wh - TWO64_128
+        low = int(wl, int64)
+        high = int(wh, int64)
+#else
         integer(int64) :: a0, a1, b0, b1, p00, p01, p10, p11, mid, mid2
         a0 = iand(a, M32)
         a1 = ishft(a, -32)
@@ -913,6 +1059,7 @@ contains
         mid2 = iand(mid, M32) + p01
         low = ior(ishft(mid2, 32), iand(p00, M32))
         high = p11 + ishft(mid, -32) + ishft(mid2, -32)
+#endif
     end subroutine mulhilo64
 
     !> Unsigned `a < b` for two 64-bit patterns.
@@ -944,22 +1091,42 @@ contains
         z = ieor(z, ishft(z, -31))
     end function mix64
 
-    !> The low 64 bits of `a * b`, computed on 16-bit limbs so that nothing ever overflows.
+    !> The low 64 bits of `a * b`, computed so that nothing ever overflows -- by the route (e) fork.
     !!
-    !! **This spelling is a blocker-grade requirement, not a precaution.** Written as a plain
-    !! `int64` multiply, gfortran folds the whole of `mix64` at `-O2` AND `-O3`, on three
-    !! architectures and two major versions, to the single constant `z'7FFFFFFF00000000'` for every
-    !! input -- so `pf_random_key` would return one key for every seed and every label, with no
-    !! abort, no warning, and downstream output that still looks random.
+    !! **Neither arm may be replaced by a plain `int64` multiply, and this is blocker-grade rather
+    !! than a precaution.** Written that way, gfortran folds the whole of `mix64` at `-O2` AND `-O3`,
+    !! on three architectures and two major versions, to the single constant `z'7FFFFFFF00000000'`
+    !! for every input -- so `pf_random_key` would return one key for every seed and every label,
+    !! with no abort, no warning, and downstream output that still looks random.
     !!
-    !! Splitting into 32x32 products is NOT sufficient: a 32x32 product still exceeds `int64`.
-    !! On 16-bit limbs nothing exceeds 2**35, so this is correct by construction on any compiler at
-    !! any optimisation level, and needs no 128-bit kind -- which is what makes it available to the
-    !! compiler that has none. It costs about 10 ns, paid once per stream family, never per draw.
+    !! **Where a 128-bit kind exists the product is formed in it**, where two `int64` operands give
+    !! at most 2**126 and so cannot overflow: there is no undefined behaviour left for an optimiser
+    !! to fold from, which is why this arm does not reintroduce the miscompilation above. The low
+    !! half is signedness-independent -- two's-complement multiplication gives
+    !! `(a + 2**64 m)(b + 2**64 n) = ab (mod 2**64)` -- so the operands are used as they come and
+    !! only the result is folded back into signed range, exactly as `width_of` does.
+    !!
+    !! **The `#else` arm keeps the 16-bit limbs**, and 16 is the load-bearing number: splitting into
+    !! 32x32 products is NOT sufficient, since a 32x32 product still exceeds `int64`. On 16-bit limbs
+    !! nothing exceeds 2**35, so that arm is correct by construction on any compiler at any
+    !! optimisation level and needs no wide kind -- which is what makes it available to the compiler
+    !! that has none.
+    !!
+    !! **Cost, and why it is not "once per stream family".** The limb form is sixteen 16x16 products;
+    !! the wide form is one multiply. Measured on machine A (arm64, gfortran 15.2, release flags):
+    !! `pf_random_key` 7.68 -> 4.66 ns (1.65x), and a rejecting-width `pf_random_int_at` 54.4 -> 42.4
+    !! (1.28x) -- because `retry_key_of` calls `mix64` twice on **every retry**, so this sits on the
+    !! integer draw's rejection path and not only on key derivation.
     pure function mul64_lo_strict(a, b) result(r)
         integer(int64), intent(in) :: a             !! one factor
         integer(int64), intent(in) :: b             !! the other factor
         integer(int64) :: r                         !! bits 0..63 of the product
+#ifdef PF_INT128
+        integer(k128) :: p
+        p = iand(int(a, k128) * int(b, k128), MASK64_128)
+        if (p >= TWO63_128) p = p - TWO64_128       ! fold to the signed pattern before narrowing
+        r = int(p, int64)
+#else
         integer(int64) :: a0, a1, a2, a3, b0, b1, b2, b3, acc, d0, d1, d2, d3
         a0 = iand(a, M16)
         a1 = iand(ishft(a, -16), M16)
@@ -980,6 +1147,7 @@ contains
         acc = ishft(acc, -16) + a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0
         d3 = iand(acc, M16)
         r = ior(ior(d0, ishft(d1, 16)), ior(ishft(d2, 32), ishft(d3, 48)))
+#endif
     end function mul64_lo_strict
 
     !> `pf_random_key`'s derivation, shared by both label kinds.

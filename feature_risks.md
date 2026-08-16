@@ -3996,12 +3996,27 @@ vectors passed on both.
 
 ### Risk-95 — `parquet_random`'s remaining wrapping sites rest on one test and nothing else
 
-Two signed-overflow sites remain in `src/parquet_random.f90` after Risk-94's fix, both deliberate:
-the Philox round multiply where there is no 128-bit kind (`random_block`'s `#else` arm, ifx only),
-and `mulhilo64`'s four 32x32 partial products, which are carried on **both** sides of the route (e)
-fork. Both are recorded in the module's own comments, and a strictly overflow-free `mulhilo64` was
-measured at 1.31x on gfortran and 2.05x on ifx for the whole integer path, which is why it is not
-simply written that way.
+Two signed-overflow sites remain in `src/parquet_random.f90` after Risk-94's fix, both deliberate,
+and **both are now on the route (e) `#else` arm only**: the Philox round multiply
+(`random_block`'s `#else`) and `mulhilo64`'s four 32x32 partial products. Both are recorded in the
+module's own comments. **A build with a 128-bit integer kind — gfortran and flang — therefore
+carries no deliberate signed overflow at all**, and the sites below are ifx's alone.
+
+`mulhilo64` was the one that used to be carried on **both** sides, and it moved for a reason worth
+keeping: the wide arm is *both* faster and overflow-free, so the trade that kept it wrapping no
+longer exists. A strictly overflow-free spelling on **16-bit limbs** was what had been measured at
+1.31x on gfortran and 2.05x on ifx for the whole integer path — that spelling is still too expensive
+and is still not used; the 128-bit one is a different candidate and measured 26.14 -> 25.03 ns at a
+narrow range on machine B.
+
+**One spelling of it must never be adopted, and it is the fast-looking one.** Forming the product as
+a single wide multiply of two unsigned-masked operands, `iand(int(a,k128), MASK64_128) *
+iand(int(b,k128), MASK64_128)`, **overflows**: the full unsigned product of two 64-bit values reaches
+nearly 2**128 and a signed 128-bit integer stops at 2**127 - 1. It measures *faster* than the form
+that ships (one wide multiply against two) and it passes every test, because int128 wrapping happens
+to give the right bits — which is exactly the reasoning the first rule below forbids. It was measured
+and written up as a gain on machine B before the overflow was noticed. Split **one** operand into
+32-bit halves, as the shipped code does, which bounds every intermediate below 2**97.
 
 **What Risk-94 changes about them is not their status but their EVIDENCE.** Each was carried partly
 on the reasoning that the compilers in use had been observed to wrap. That reasoning is now known to
@@ -4230,6 +4245,15 @@ oracles and there is no second kernel to cross-check against.
 (144 from the positive stream arm, 336 from the negative — see the breakdown below); gfortran 15.2
 on machine C reports **432**. The figures are driver-specific as well as release-specific, so a
 count that differs is not by itself evidence of anything; the verdict is PASS versus FAIL.
+
+**The count also moves when code OUTSIDE the fork changes, which is the most confusing way to meet
+it.** The forced-wrapping build compiles the `#else` arms together with every procedure common to
+both arms, so an edit to a fill or to `word_of` changes what LTO has to work with and therefore how
+much it gets wrong. Confirmed: the same gfortran 14.2.1 went from **480** to **528** across the
+`fill_r64`/`fill_r32`/`word_of` restructuring, with no new failure class (the labels stayed
+`literal-seed at32` and `literal-seed bits`) and with every **shipped** configuration passing at
+every setting including `-O3 -flto`. So a moved count after an unrelated change is expected; a moved
+*verdict* on a shipped arm would not be.
 
 **Which draws break depends on the range, and "it is a `pf_random32_at` bug" is the non-negative
 half of the answer only.** Uncapped per-label counts from the driver at `-O3 -flto`, forced

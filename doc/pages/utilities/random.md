@@ -233,11 +233,12 @@ and fpm passes it no `-O` in either of the other two.
 
 ## A note for the curious: two multiply paths
 
-The cipher's inner loop multiplies two 32-bit values into a 64-bit result, which does not fit in a
-signed 64-bit integer. Where the compiler offers a 128-bit integer kind — gfortran and flang do —
-the module forms that product in it, which makes the multiply provably in range. Where there is no
-such kind — ifx — it uses the wrapping 64-bit product, under an assumption verified on that
-compiler rather than assumed.
+Three multiplies inside the module produce results too wide for a signed 64-bit integer: the
+cipher's inner loop, which multiplies two 32-bit values into a 64-bit result; the full 128-bit
+product behind every integer draw; and the one behind key derivation. Where the compiler offers a
+128-bit integer kind — gfortran and flang do — the module forms each of them in it, which makes
+them provably in range. Where there is no such kind — ifx — it computes them on narrower pieces,
+or accepts a wrapping product under an assumption verified on that compiler rather than assumed.
 
 **Both paths produce identical values**, which the suite asserts on every machine it runs on, and
 `pf_random_algorithm` is the same either way. The choice is made at compile time from the compiler

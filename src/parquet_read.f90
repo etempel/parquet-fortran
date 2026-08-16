@@ -9,11 +9,15 @@
 !> the whole-column-read-avoidance row-group helpers.
 submodule (parquet_core) parquet_read
     use ieee_arithmetic, only: ieee_is_nan
-    ! The read-time sort threads automatically, on the same rule pf_argsort follows -- see
-    ! pf_sort_threads' own doc-comment for why that rule lives in parquet_sorting and is asked
-    ! for here rather than reimplemented. parquet_sorting does not use parquet_core, so this
-    ! import is acyclic.
-    use parquet_sorting, only: pf_sort_threads
+    ! The read-time sort BUILDS ITS PERMUTATION HERE, with the same radix engine pf_argsort gives
+    ! every other caller -- so `parquet_open_reader(..., sort_by=)`, `parquet_reader_set_sort` and
+    ! `parquet_table%sort_by` all run one comparator, and cannot disagree about null placement, NaN
+    ! placement or tie order. The C++ side still owns the decode and the Arrow type reduction; only
+    ! the ordering moved. parquet_sorting does not use parquet_core, so this import is acyclic.
+    ! iso_c_binding is NOT imported here: parquet_core does an unrestricted `use iso_c_binding`,
+    ! so c_loc/c_null_ptr/c_int/c_int8_t all arrive by host association, and naming them again is
+    ! a symbol conflict rather than a clarification.
+    use parquet_sorting, only: pf_sort_threads, pf_sort_keys, pf_argsort
     implicit none
 
     !> Expression-node kinds in the postfix (RPN) node list a parsed filter becomes: one LEAF per
@@ -499,12 +503,14 @@ contains
         character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
         character(len=sort_key_name_len), allocatable :: key_name(:)
         integer(int8), allocatable :: descending(:), nulls_first(:)
-        character(kind=c_char), allocatable :: names_packed(:)
         character(len=:), allocatable :: name, errmsg, key_text, name_suffix
         logical :: ok, desc
         character(len=1024) :: c_err
         integer(c_long_long) :: status
         integer :: i
+        type(pf_sort_keys) :: skeys
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: nrows
 
         if (sort_by%n == 0) return
         allocate(key_name(sort_by%n), descending(sort_by%n), nulls_first(sort_by%n))
@@ -520,17 +526,127 @@ contains
         end do
 
         call parquet_render_sort_keys(key_name, descending, nulls_first, sort_by%n, key_text)
-        call pack_fixed_width_strings(key_name(1:sort_by%n), names_packed)
+        call reader_filename_suffix(reader, name_suffix)
+
+        ! Every key is pulled across, reduced, and appended in order of precedence; the C++ side
+        ! still owns the decode and the Arrow type reduction, so which columns are sortable and
+        ! what a refusal says are unchanged by the engine swap.
+        nrows = -1_int64
+        do i = 1, sort_by%n
+            call add_read_sort_key(reader, trim(key_name(i)), descending(i), nulls_first(i), &
+                trim(context) // name_suffix, skeys, nrows)
+        end do
+
+        allocate(perm(nrows))
+        call pf_argsort(skeys, perm)
+        ! pf_argsort produces 1-based indices; Arrow's Take consumes 0-based ones. Done here rather
+        ! than in C++ so the conversion sits next to the call that creates the obligation.
+        perm = perm - 1_int64
 
         c_err = ""
-        status = c_reader_set_sort(reader%handle, names_packed, int(sort_key_name_len, kind=c_long_long), &
-            descending(1:sort_by%n), nulls_first(1:sort_by%n), int(sort_by%n, kind=c_long_long), &
-            key_text//char(0), int(pf_sort_threads(), kind=c_long_long), c_err, &
-            int(len(c_err), kind=c_long_long))
-
-        call reader_filename_suffix(reader, name_suffix)
+        status = parquet_reader_sort_install(reader%handle, perm, int(nrows, kind=c_long_long), &
+            key_text//char(0), c_err, int(len(c_err), kind=c_long_long))
         if (status /= 0) error stop trim(context) // ": " // trim(c_err) // name_suffix
     end subroutine parquet_apply_sort
+    !> Pulls one read-time sort key across the bind(C) boundary and appends it to `skeys`.
+    !>
+    !> **Two calls per key, `_info` then `_fetch`.** Only the C++ side knows which of the three
+    !> reduced families a column lands in -- boolean and every temporal type arrive as integers --
+    !> so the sizes have to come back before the buffers can exist. Both calls bind the key; the
+    !> decode behind them does not repeat, because `get_single_chunk_array` serves the second from
+    !> the reader's column cache. See `parquet_wrapper.cpp` for why that repeat is preferred over
+    !> staging the bound key on the reader handle.
+    !>
+    !> **The local buffers do not have to outlive this call**: `%add` EXTRACTS into the key list's
+    !> own `sort_key_buf` rather than retaining what it was handed.
+    subroutine add_read_sort_key(reader, name, descending, nulls_first, context, skeys, nrows)
+        type(parquet_reader), intent(in) :: reader !! open reader the key column is read from.
+        character(len=*), intent(in) :: name !! key column, possibly a dotted struct-leaf path.
+        integer(int8), intent(in) :: descending !! nonzero for descending order.
+        integer(int8), intent(in) :: nulls_first !! nonzero to place this key's nulls first.
+        character(len=*), intent(in) :: context !! caller's name plus file suffix, for messages.
+        type(pf_sort_keys), intent(inout) :: skeys !! key list this key is appended to.
+        integer(int64), intent(inout) :: nrows !! row count; set from the first key, then reused.
+        integer(c_int) :: family
+        integer(c_long_long) :: nk, nbytes, status
+        integer(c_int8_t) :: has_nulls
+        character(len=1024) :: c_err
+        integer(int64), allocatable, target :: iv(:), off(:)
+        real(real64), allocatable, target :: rv(:)
+        integer(int8), allocatable, target :: valid(:)
+        character(kind=c_char), allocatable, target :: dat(:)
+        logical, allocatable :: mask(:)
+        type(parquet_string_column) :: scol
+        integer(int64) :: k
+        logical :: desc, nlo
+
+        desc = descending /= 0_int8
+        nlo = nulls_first /= 0_int8
+
+        c_err = ""
+        status = parquet_reader_sort_key_info(reader%handle, name//char(0), descending, nulls_first, &
+            family, nk, nbytes, has_nulls, c_err, int(len(c_err), kind=c_long_long))
+        if (status /= 0) error stop trim(context) // ": " // trim(c_err)
+        if (nrows < 0_int64) nrows = int(nk, int64)
+
+        ! Allocated unconditionally, because c_loc of an unallocated array is not a thing that can
+        ! be passed; the C++ side writes it only when the key really carries nulls. One byte per
+        ! row, against the alternative of branching the fetch call four ways.
+        allocate(valid(max(nk, 1_c_long_long)))
+
+        select case (family)
+        case (0)
+            allocate(iv(max(nk, 1_c_long_long)))
+            status = parquet_reader_sort_key_fetch(reader%handle, name//char(0), descending, nulls_first, &
+                c_loc(iv), c_null_ptr, c_null_ptr, c_null_ptr, c_loc(valid), c_err, &
+                int(len(c_err), kind=c_long_long))
+            if (status /= 0) error stop trim(context) // ": " // trim(c_err)
+            call build_valid_mask(valid, nk, has_nulls, mask)
+            ! `mask` is unallocated when the key has no nulls, and an unallocated allocatable
+            ! passed to an optional dummy is ABSENT (F2018 15.5.2.12) -- which is what puts the
+            ! engine on its no-mask fast path instead of walking an all-true mask.
+            call skeys%add(iv(1:nk), descending=desc, nulls_first=nlo, is_valid=mask)
+        case (1)
+            allocate(rv(max(nk, 1_c_long_long)))
+            status = parquet_reader_sort_key_fetch(reader%handle, name//char(0), descending, nulls_first, &
+                c_null_ptr, c_loc(rv), c_null_ptr, c_null_ptr, c_loc(valid), c_err, &
+                int(len(c_err), kind=c_long_long))
+            if (status /= 0) error stop trim(context) // ": " // trim(c_err)
+            call build_valid_mask(valid, nk, has_nulls, mask)
+            call skeys%add(rv(1:nk), descending=desc, nulls_first=nlo, is_valid=mask)
+        case default
+            allocate(off(0:max(nk, 1_c_long_long)), dat(max(nbytes, 1_c_long_long)))
+            status = parquet_reader_sort_key_fetch(reader%handle, name//char(0), descending, nulls_first, &
+                c_null_ptr, c_null_ptr, c_loc(off), c_loc(dat), c_loc(valid), c_err, &
+                int(len(c_err), kind=c_long_long))
+            if (status /= 0) error stop trim(context) // ": " // trim(c_err)
+            ! Built through the buffer handoff rather than a character array, so a value's exact
+            ! bytes survive: a fixed-width character array would blank-pad, and a string with real
+            ! trailing spaces would then order as though it did not have them.
+            call scol%append_buffers(int(nk, int64), int(nbytes, int64), c_loc(off), c_loc(dat), &
+                c_null_ptr, .false.)
+            ! `add_strcol` takes no is_valid -- a string column carries its own null state -- so
+            ! the nulls go onto the column instead of alongside it.
+            if (has_nulls /= 0_c_int8_t) then
+                do k = 1_int64, int(nk, int64)
+                    if (valid(k) == 0_int8) call scol%set_null(k)
+                end do
+            end if
+            call skeys%add(scol, descending=desc, nulls_first=nlo)
+        end select
+    end subroutine add_read_sort_key
+    !> Turns the C++ side's int8 validity flags into the `logical` mask `%add` takes, leaving the
+    !> result UNALLOCATED when the key carries no nulls -- see the call sites for why that matters.
+    subroutine build_valid_mask(valid, nk, has_nulls, mask)
+        integer(int8), intent(in) :: valid(:) !! per element: 0 marks a null.
+        integer(c_long_long), intent(in) :: nk !! number of key elements.
+        integer(c_int8_t), intent(in) :: has_nulls !! nonzero when the key carries any null.
+        logical, allocatable, intent(out) :: mask(:) !! the mask, or unallocated when null-free.
+
+        if (has_nulls == 0_c_int8_t) return
+        allocate(mask(nk))
+        mask = valid(1:nk) /= 0_int8
+    end subroutine build_valid_mask
     !> Refuses any row-group-scoped operation while a read-time sort is active. A sort permutation
     !> destroys row-group locality outright -- sorted row 5 may come from row group 47 and row 6
     !> from row group 3 -- so there is no coherent "row group N of the sorted output" to serve.

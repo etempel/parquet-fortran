@@ -3878,16 +3878,36 @@ extern "C"
 		*patch = PARQUET_VERSION_PATCH;
 	}
 
-	// ==== Sort engine: permutation building (std::sort comparator + integer counting fast path) ====
+	// ==== Sort engine: the REFERENCE implementation (std::sort comparator + counting fast path) ====
+	//
+	// **Nothing in the shipped library sorts with this engine any more, and that is not a reason to
+	// delete it.** Every ordering a user can reach -- `parquet_open_reader(..., sort_by=)`,
+	// `parquet_reader_set_sort`, `parquet_table%sort_by`, and every `pf_sort`/`pf_argsort` call --
+	// is produced by the Fortran radix engine in `src/parquet_sorting_engine.f90`. What this code
+	// is now is the **independent oracle that engine is tested against**: `pf_sort_keys`' seven
+	// operations (argsort, partial argsort, nth element, is_sorted, build_runs, search, merge) each
+	// keep a branch selecting it, reached only through the test-only
+	// `parquet_debug_use_fortran_sort_engine(.false.)`, and roughly thirty test call sites across
+	// test_sort.f90 / test_sorting.f90 / test_diagnostics.f90 / test_settings.f90 compare the two
+	// answer for answer.
+	//
+	// That is worth more than the lines cost. A radix sort and a comparator sort share no code and
+	// fail in different ways, so an A/B between them catches a class of defect no single-engine
+	// test can: a comparator that is subtly wrong about a tie, a null tier, or a NaN would have to
+	// be wrong *identically* in both to survive. **Deleting this engine would silently convert
+	// those thirty-odd tests from "two implementations agree" into "one implementation is
+	// self-consistent"** -- with every one of them still passing on the day it happened, which is
+	// exactly the shape of regression this project's own testing rules exist to refuse.
+	//
+	// Two consequences for anyone maintaining it. It must keep answering *correctly*, so a change
+	// here is as load-bearing as a change to the shipped engine even though no user reaches it --
+	// and it does NOT need to keep being fast, so nothing below this banner should be optimised
+	// again, and no performance claim about the library should be measured on it.
 	//
 	// Deliberately self-contained: the core below knows nothing about ParquetReaderHandle, reads no
-	// reader state, and receives its keys as plain typed vectors. Two reasons, both forward-looking.
-	// First, the same engine is the intended replacement for a Fortran-side sort of an
-	// already-assembled parquet_table (whose Arrow buffers are gone by then): that path binds raw
-	// arrays instead of Arrow ones, and only sort_bind_arrow_key is Arrow-specific, so it is the one
-	// function needing a sibling. Second, it may later be exposed as a public sort over any 1-D array
-	// this library supports -- keeping it free of read-path entanglement is what makes that a lift
-	// rather than a rewrite. Do not reach for reader state from anything below this banner.
+	// reader state, and receives its keys as plain typed vectors. Do not reach for reader state
+	// from anything below this banner -- that independence is what lets it serve as an oracle for
+	// a Fortran-side sort whose Arrow buffers are long gone.
 	//
 	// Ordering semantics reproduce arrow::compute::SortIndices EXACTLY. This is deliberate, not
 	// incidental: it is what anyone cross-checking against pyarrow will see, and it was verified
@@ -4246,8 +4266,9 @@ extern "C"
 	// published `sort_parallel_min_rows` setting; that knob was retired once the Fortran engine
 	// stopped reading it, since it then governed only this engine and a setting whose scope is "one
 	// of two engines, depending on which entry point you called" is worse than no setting at all.
-	// This engine still ships: parquet_reader_set_sort and parquet_open_reader(..., sort_by=) reach
-	// it with no selector in the path.
+	// Both floors are now internal, and this one governs an engine no user-facing path reaches --
+	// see this section's banner. It still matters that the threshold behaves, because an A/B that
+	// silently ran both arms serially would compare nothing.
 	//
 	// **A test that needs the parallel path at a small row count therefore cannot lower a setting
 	// any more** -- it has to use parquet_debug_set_sort_engine_min_rows, which is what
@@ -6997,81 +7018,159 @@ extern "C"
 		return 0;
 	}
 
-	int64_t parquet_reader_set_sort(void *handle,
-		const char *names_packed, int64_t name_len,
-		const int8_t *descending, const int8_t *nulls_first,
-		int64_t n,
-		const char *key_text,
-		int64_t threads,
-		char *err_out, int64_t err_cap)
+	// Validates one sort key's name, decodes its column and binds it. Returns false with err_out
+	// filled on any refusal. **Shared by parquet_reader_set_sort and by the Fortran-engine export
+	// below**, so the two cannot disagree about which columns are sortable, about struct-path
+	// resolution, or about the wording of a refusal -- three rules that would otherwise be stated
+	// twice and drift apart silently.
+	static bool bind_one_sort_key(ParquetReaderHandle *reader_handle, const char *name_in,
+		bool descending, bool nulls_first, SortKeyData &out, char *err_out, int64_t err_cap)
 	{
-		auto reader_handle = as_reader_handle(handle);
-		if (n <= 0) return 0;
-		// Defensive backstop, unreachable through the public API: both Fortran callers already
-		// refuse to reach here with a sort already active -- parquet_open_reader calls this only
-		// once, at open time, before any sort_perm could exist, and the post-open
-		// parquet_reader_set_sort (parquet.f90) checks parquet_reader_has_sort itself and aborts
-		// on the Fortran side before ever calling down to this function. Kept in case a future
-		// caller reaches this entry point some other way -- same class of unreachable guard as the
-		// "malformed expression" backstops in evaluate_nodes above.
-		if (reader_handle->sort_perm)
-		{ // GCOVR_EXCL_START
-			std::snprintf(err_out, static_cast<size_t>(err_cap), "a sort is already active on this reader");
-			return 1;
+		std::string name = trim_right_spaces_and_nuls(std::string(name_in));
+		if (!struct_path_exists(reader_handle->schema, name.c_str()))
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "unknown column in sort key: %s", name.c_str());
+			return false;
+		}
+		// A vector column has no single value per row to order by. Answered from the schema so
+		// the rejection costs no read at all.
+		auto leaf_type = resolve_struct_path(reader_handle->schema, name.c_str()).leaf_field->type()->id();
+		if (leaf_type == arrow::Type::FIXED_SIZE_LIST || leaf_type == arrow::Type::LIST ||
+			leaf_type == arrow::Type::LARGE_LIST)
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"sort key '%s' is a vector column; sorting only supports scalar columns", name.c_str());
+			return false;
+		}
+
+		std::shared_ptr<arrow::Array> array;
+		try
+		{
+			array = get_single_chunk_array(reader_handle, name.c_str());
+		}
+		// GCOVR_EXCL_START -- file-I/O backstop on an already-validated column name; the same
+		// class of unreachable catch documented on parquet_reader_set_filter's own.
+		catch (const std::exception &e)
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to read sort key column '%s': %s", name.c_str(), e.what());
+			return false;
 		}
 		// GCOVR_EXCL_STOP
 
-		std::vector<SortKeyData> keys;
-		keys.reserve(static_cast<size_t>(n));
-		for (int64_t i = 0; i < n; ++i)
+		if (!sort_bind_arrow_key(array, descending, nulls_first, out))
 		{
-			std::string name(names_packed + i * name_len, static_cast<size_t>(name_len));
-			name = trim_right_spaces_and_nuls(name);
-			if (!struct_path_exists(reader_handle->schema, name.c_str()))
-			{
-				std::snprintf(err_out, static_cast<size_t>(err_cap), "unknown column in sort key: %s", name.c_str());
-				return 1;
-			}
-			// A vector column has no single value per row to order by. Answered from the schema so
-			// the rejection costs no read at all.
-			auto leaf_type = resolve_struct_path(reader_handle->schema, name.c_str()).leaf_field->type()->id();
-			if (leaf_type == arrow::Type::FIXED_SIZE_LIST || leaf_type == arrow::Type::LIST ||
-				leaf_type == arrow::Type::LARGE_LIST)
-			{
-				std::snprintf(err_out, static_cast<size_t>(err_cap),
-					"sort key '%s' is a vector column; sorting only supports scalar columns", name.c_str());
-				return 1;
-			}
-
-			std::shared_ptr<arrow::Array> array;
-			try
-			{
-				array = get_single_chunk_array(reader_handle, name.c_str());
-			}
-			// GCOVR_EXCL_START -- file-I/O backstop on an already-validated column name; the same
-			// class of unreachable catch documented on parquet_reader_set_filter's own.
-			catch (const std::exception &e)
-			{
-				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to read sort key column '%s': %s", name.c_str(), e.what());
-				return 1;
-			}
-			// GCOVR_EXCL_STOP
-
-			SortKeyData key;
-			if (!sort_bind_arrow_key(array, descending[i] != 0, nulls_first[i] != 0, key))
-			{
-				std::snprintf(err_out, static_cast<size_t>(err_cap),
-					"sort key '%s' has an unsupported column type: %s", name.c_str(), array->type()->ToString().c_str());
-				return 1;
-			}
-			keys.push_back(std::move(key));
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"sort key '%s' has an unsupported column type: %s", name.c_str(), array->type()->ToString().c_str());
+			return false;
 		}
+		return true;
+	}
 
-		int64_t nrows = reader_handle->nrows;
-		auto perm = sort_build_permutation_threaded(keys, nrows, threads);
+	// ---- Exporting a sort key to the Fortran engine ----
+	//
+	// The read-time sort builds its permutation with parquet_sorting's radix engine rather than
+	// with the comparator engine above; these three entry points are the whole bridge. Fortran
+	// asks what family and how large a key is, copies the reduced values out, sorts, and hands the
+	// permutation back.
+	//
+	// **Nothing is staged on the reader handle between calls.** Each entry point binds the key it
+	// was asked about and discards it, so there is no lifetime to get wrong, nothing to free on an
+	// error path, and no pointer that can outlive what it points into -- the failure mode
+	// last_whole_column_buffers_array exists to patch elsewhere in this file. The cost is that
+	// _info and _fetch each bind, i.e. the value copy happens twice; the decode itself does not,
+	// because get_single_chunk_array serves the second call from column_cache. Binding was
+	// measured at 1.4-3% of a read-time sort, so this is inside the noise, and it buys the
+	// guarantee that the size _info promised is the size _fetch writes, by construction rather
+	// than by two code paths agreeing.
 
+	// Reports a sort key's reduced family and dimensions.
+	//   family: 0 = integer (boolean and every temporal type reduce to this), 1 = real, 2 = string
+	//   nbytes: total payload bytes, family 2 only; 0 otherwise
+	//   has_nulls: 1 when the key carries a validity vector at all. Fortran uses this to skip
+	//              allocating a mask entirely, which lets it pass an unallocated optional and so
+	//              reach pf_argsort's no-mask fast path (F2018 15.5.2.12).
+	int64_t parquet_reader_sort_key_info(void *handle, const char *name, int8_t descending,
+		int8_t nulls_first, int32_t *family, int64_t *nrows, int64_t *nbytes, int8_t *has_nulls,
+		char *err_out, int64_t err_cap)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		SortKeyData key;
+		if (!bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap)) return 1;
+
+		*nbytes = 0;
+		switch (key.kind)
+		{
+		case SortValueKind::Integer:
+			*family = 0;
+			*nrows = static_cast<int64_t>(key.ints.size());
+			break;
+		case SortValueKind::Real:
+			*family = 1;
+			*nrows = static_cast<int64_t>(key.reals.size());
+			break;
+		default:
+			*family = 2;
+			*nrows = static_cast<int64_t>(key.strs.size());
+			for (const auto &s : key.strs) *nbytes += static_cast<int64_t>(s.size());
+			break;
+		}
+		*has_nulls = key.valid.empty() ? 0 : 1;
+		return 0;
+	}
+
+	// Copies one bound sort key's reduced values into Fortran-owned buffers. Exactly one of
+	// ints/reals/(offsets,data) is written, per the family _info reported; the unused pointers may
+	// be null. `valid` is written only when _info reported has_nulls, and `offsets` is written
+	// 0-based with offsets[0] = 0, which is the form parquet_string_column%append_buffers takes.
+	int64_t parquet_reader_sort_key_fetch(void *handle, const char *name, int8_t descending,
+		int8_t nulls_first, int64_t *ints, double *reals, int64_t *offsets, char *data,
+		int8_t *valid, char *err_out, int64_t err_cap)
+	{
+		auto reader_handle = as_reader_handle(handle);
+		SortKeyData key;
+		if (!bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap)) return 1;
+
+		switch (key.kind)
+		{
+		case SortValueKind::Integer:
+			std::memcpy(ints, key.ints.data(), key.ints.size() * sizeof(int64_t));
+			break;
+		case SortValueKind::Real:
+			std::memcpy(reals, key.reals.data(), key.reals.size() * sizeof(double));
+			break;
+		default:
+		{
+			int64_t at = 0;
+			offsets[0] = 0;
+			for (size_t i = 0; i < key.strs.size(); ++i)
+			{
+				if (!key.strs[i].empty()) std::memcpy(data + at, key.strs[i].data(), key.strs[i].size());
+				at += static_cast<int64_t>(key.strs[i].size());
+				offsets[i + 1] = at;
+			}
+			break;
+		}
+		}
+		if (!key.valid.empty())
+		{
+			for (size_t i = 0; i < key.valid.size(); ++i) valid[i] = static_cast<int8_t>(key.valid[i]);
+		}
+		return 0;
+	}
+
+	// Installs a permutation built by the Fortran engine, and applies it to everything already
+	// decoded. Everything after the engine call in parquet_reader_set_sort below, and it must stay
+	// that way: the permutation has to reach sort_perm as an arrow::Int64Array because
+	// apply_row_transform and the column_cache re-Take both consume it as one.
+	//
+	// `perm` arrives 0-based, which is what Arrow's Take wants and what the Fortran side converts
+	// to on its way out -- pf_argsort produces 1-based indices.
+	int64_t parquet_reader_sort_install(void *handle, const int64_t *perm, int64_t n,
+		const char *key_text, char *err_out, int64_t err_cap)
+	{
+		auto reader_handle = as_reader_handle(handle);
 		arrow::Int64Builder perm_builder;
-		auto append_status = perm_builder.AppendValues(perm.data(), static_cast<int64_t>(perm.size()));
+		auto append_status = perm_builder.AppendValues(perm, n);
 		if (!append_status.ok())
 		{ // GCOVR_EXCL_START -- Int64Builder allocation backstop, not fixture-triggerable
 			std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to build sort permutation: %s", append_status.ToString().c_str());
@@ -7091,10 +7190,7 @@ extern "C"
 
 		// Every key column was decoded above, before sort_perm existed, and any column the caller
 		// prefetched earlier is in the same position -- re-Take the whole cache so nothing can be
-		// handed back in physical order later. (set_filter re-Filters only the columns IT touched,
-		// because a filter can only be installed before any other column is read; a sort has the
-		// same restriction, so in practice this loop sees exactly the key columns plus any
-		// prefetched ones.)
+		// handed back in physical order later.
 		ensure_compute_initialized();
 		for (auto &entry : reader_handle->column_cache)
 		{

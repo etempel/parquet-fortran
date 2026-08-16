@@ -2,8 +2,8 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Turns a `parquet_table`'s key columns into a row permutation, using the library's own C++
-!! `std::sort` engine -- the SAME engine the read-time `sort_by=` runs on.
+!> Turns a `parquet_table`'s key columns into a row permutation, using the library's own Fortran
+!! radix engine -- the SAME engine the read-time `sort_by=` runs on.
 !!
 !! **That sharing is the whole point of this file.** A table can be ordered two ways: by reading
 !! a file with `parquet_open_reader(..., sort_by=...)`, or by `%sort_by` on an already-assembled

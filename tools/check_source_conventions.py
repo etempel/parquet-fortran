@@ -1807,7 +1807,60 @@ def check_no_aliased_output_argument():
     return problems
 
 
+def check_build_tree_names_carry_the_compiler():
+    """A wrapper that names its own `FPM_BUILD_DIR` must put the COMPILER in the name.
+
+    `tools/run_error_scenarios.sh` resolves its executable with
+    `find "${FPM_BUILD_DIR:-build}" -type f -name error_scenarios | head -n 1`. fpm keeps different
+    compilers' objects apart in its own per-compiler subdirectory, but that lookup does not -- so a
+    build tree named for the CONFIGURATION alone collects one `error_scenarios` per toolchain the
+    moment someone runs the wrapper under a second `FPM_FC`, and the lookup then picks one
+    arbitrarily.
+
+    **The failure is a false green, not an error**: the run prints "error scenarios : PASS" having
+    tested the other compiler's binary. It cost real coverage twice before it was fixed -- one
+    machine deleted the trees by hand between ifx and gfortran, and another declined to run a second
+    compiler at all rather than risk it.
+
+    Every wrapper carries a compiler tag today. This check exists so the next one does too, because
+    nothing about writing a new benchmark wrapper suggests the tree name is load-bearing, and the
+    consequence of omitting it is invisible until two toolchains are compared. Matched by SHAPE --
+    any `FPM_BUILD_DIR=` assignment naming a literal path -- rather than from a list of known
+    scripts, so a new wrapper is covered without editing this check.
+    """
+    assign_re = re.compile(r"""FPM_BUILD_DIR=["']?([^"'\s]+)""")
+    # A tree name is usually held in a variable; follow one level, allowing the
+    # `local`/`export`/`declare` prefixes a shell function uses.
+    DECL_RE = r"^\s*(?:local\s+|export\s+|declare\s+\S+\s+)?%s=(.+)$"
+    problems = []
+    for path in sorted(TOOLS.glob("*.sh")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if "FPM_BUILD_DIR:-" in line:      # a READ with a default, not an assignment
+                continue
+            m = assign_re.search(line)
+            if not m:
+                continue
+            value = m.group(1)
+            # A tree named by a variable defined elsewhere in the script is resolved by looking at
+            # what that variable itself expands to, so `bdir` and friends are followed one level.
+            names = re.findall(r"\$\{?(\w+)", value)
+            expanded = value
+            for name in names:
+                for dm in re.finditer(DECL_RE % re.escape(name), text, re.M):
+                    expanded += " " + dm.group(1)
+            if not re.search(r"\bfc\b|FC_TAG|\btag\b|compiler", expanded, re.I):
+                problems.append("%s:%d: build tree '%s' does not vary by compiler"
+                                % (path.relative_to(REPO_ROOT), lineno, value))
+    if problems:
+        return ["a benchmark wrapper's build tree must include the compiler, or a second toolchain's",
+                "error_scenarios binary lands in the same tree and `find ... | head -n 1` picks one",
+                "arbitrarily -- a false green rather than an error:"] + problems
+    return []
+
+
 CHECKS = (
+    ("benchmark build-tree names carry the compiler", check_build_tree_names_carry_the_compiler),
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("MAML block headers are matched case-insensitively", check_maml_keys_case_insensitive),
     ("table pointers are reached through %cache", check_pointers_go_through_cache),

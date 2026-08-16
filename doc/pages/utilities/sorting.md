@@ -2,12 +2,12 @@
 title: Sorting arrays and columns
 ---
 
-`parquet_sorting` sorts plain Fortran arrays and this library's own column types. It orders rows
-exactly as a read-time `parquet_open_reader(..., sort_by=)` does, and `parquet_table%sort_by` goes
-through it — so a read-time sort, a table sort and a raw-array sort can never disagree about where
-nulls go, where NaNs go, or how ties are broken. That agreement is the point, and it is asserted
-directly: the three are checked against each other over the same data rather than merely intended
-to match.
+`parquet_sorting` sorts plain Fortran arrays and this library's own column types. It is also the
+engine behind every other ordering the library performs: a read-time
+`parquet_open_reader(..., sort_by=)`, a post-open `parquet_reader_set_sort` and
+`parquet_table%sort_by` all go through it. So a read-time sort, a table sort and a raw-array sort
+cannot disagree about where nulls go, where NaNs go, or how ties are broken — not because three
+implementations are kept in step, but because there is only one, and it is this one.
 
 Everything here is reachable from `use parquet`.
 
@@ -232,10 +232,10 @@ Asking for `group_offsets` costs one extra copy of a single key. Without it a on
 borrows the key it just extracted; with it the call goes through the builder, which owns its keys.
 That is the price of one engine entry point serving three operations instead of three of them.
 
-`pf_sort_keys` holds no C handle — its keys are ordinary allocatable Fortran arrays, and the C++
-side is created, used and freed entirely inside `pf_argsort`. That keeps the type free of a
-finalizer, which in turn makes it usable per-thread in the obvious way (a finalizable type must
-never be given to OpenMP's `private()` — see [Thread safety](../operating/thread-safety.html)).
+`pf_sort_keys` holds no handle of any kind — its keys are ordinary allocatable Fortran arrays, and
+nothing outside the type outlives a call. That keeps it free of a finalizer, which in turn makes it
+usable per-thread in the obvious way (a finalizable type must never be given to OpenMP's
+`private()` — see [Thread safety](../operating/thread-safety.html)).
 
 ## Validating a permutation
 

@@ -209,8 +209,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fortran generic cannot offer "an optional second array of any type"; the same object also works
   with `pf_is_sorted` and `pf_partial_argsort`, and `%nkeys_added()` counts the keys you added, one
   per `%add`, whatever their types. These agree **exactly** with a read-time
-  `parquet_open_reader(..., sort_by=)` and with `parquet_table%sort_by` — the three can never
-  disagree about null placement, NaN placement or tie order; every sort is stable,
+  `parquet_open_reader(..., sort_by=)`, with a post-open `parquet_reader_set_sort` and with
+  `parquet_table%sort_by`, because all of them are **one engine** rather than several that match:
+  they cannot disagree about null placement, NaN placement or tie order, since there is only one
+  answer to disagree about. Consolidating on that engine also made read-time sorting substantially
+  faster, most of all on large files and on string keys. Every sort is stable,
   `descending=` reverses the values without moving the null/NaN tiers, and the six types with no
   null state of their own take an optional `is_valid=` mask. `pf_permute` validates that its
   permutation really is one before writing anything, since an invalid one silently duplicates some

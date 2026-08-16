@@ -63,7 +63,8 @@ contains
             new_unittest("parquet_reader_set_sort matches open-time sorting", test_set_sort_post_open), &
             new_unittest("a prefetched column comes back sorted", test_prefetch_is_sorted), &
             new_unittest("an empty sort_by at open time is a no-op", test_open_time_empty_sort_by_is_noop), &
-            new_unittest("a TIME32 key and a foreign UINT64 key", test_time32_and_uint64_keys) &
+            new_unittest("a TIME32 key and a foreign UINT64 key", test_time32_and_uint64_keys), &
+            new_unittest("the read-time sort runs on the Fortran engine", test_read_time_sort_uses_fortran_engine) &
             ]
     end subroutine collect_tests_sort
     !
@@ -593,6 +594,56 @@ contains
         if (allocated(error)) return
         call check(error, all(fast == [2, 4, 1, 6, 3, 5]), "both paths must give the expected order")
     end subroutine test_counting_path_matches
+    !
+    !> The read-time sort must be ordered by the FORTRAN engine, and must agree with the C++
+    !> reference implementation while doing it.
+    !>
+    !> **Two assertions, and the first is what stops the second being vacuous.** `parquet_apply_sort`
+    !> builds its permutation with `pf_argsort`, which honours `dbg_fortran_engine` -- so flipping
+    !> the selector really does move the read-time sort onto the other engine, and the Fortran-side
+    !> observable moving in one arm and not the other is the proof that two different engines ran.
+    !> Without that check an "identical results" test would pass just as happily against a routing
+    !> that had been reverted to C++ on both arms.
+    !>
+    !> This is the regression test for R1: if the read-time sort is ever routed back to the C++
+    !> engine, the first check fails rather than the suite quietly continuing to pass.
+    subroutine test_read_time_sort_uses_fortran_engine(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64) :: cmp_fortran, cmp_cpp
+        integer(int32), allocatable :: ids_fortran(:), ids_cpp(:)
+        character(len=*), parameter :: file = "test_run/sort_engine_routing.parquet"
+
+        call write_basic_fixture(file)
+        ! The counting path is disabled for BOTH arms, so the C++ arm reaches its comparator and
+        ! the comparison counter can tell the engines apart at all -- on this fixture's small
+        ! integer range it would otherwise take its own counting path and report zero comparisons,
+        ! which is exactly what the Fortran arm reports, and the discriminator would be blind.
+        call parquet_set_sort_counting_path(.false.)
+
+        call arm_sort_comparisons()
+        call sorted_ids(file, "v asc", ids_fortran)          ! shipped configuration
+        cmp_fortran = sort_comparisons()
+
+        call parquet_debug_use_fortran_sort_engine(.false.)
+        call arm_sort_comparisons()
+        call sorted_ids(file, "v asc", ids_cpp)              ! forced onto the C++ reference
+        cmp_cpp = sort_comparisons()
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call parquet_set_sort_counting_path(.true.)
+
+        call check(error, cmp_fortran == 0_int64, &
+            "the read-time sort must reach the Fortran engine, which never calls the C++ comparator")
+        if (allocated(error)) return
+        call check(error, cmp_cpp > 0_int64, &
+            "the forced arm must reach the C++ comparator, or the two arms ran the same engine " // &
+            "and the agreement below is vacuous")
+        if (allocated(error)) return
+        call check(error, all(ids_fortran == ids_cpp), &
+            "the Fortran engine and the C++ reference must order a read-time sort identically")
+        if (allocated(error)) return
+        call check(error, all(ids_fortran == [2, 4, 1, 6, 3, 5]), &
+            "the read-time sort must give the expected order")
+    end subroutine test_read_time_sort_uses_fortran_engine
     !
     !> Filter first, then sort within the survivors -- the documented composition order.
     subroutine test_sort_with_filter(error)

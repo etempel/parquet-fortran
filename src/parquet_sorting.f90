@@ -8,10 +8,15 @@
 !
 !> Sorting for plain Fortran arrays and for this library's own column types.
 !!
-!! This module is the public face of the same C++ `std::sort` engine that orders a read-time
-!! `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`. Sharing one engine is the
-!! point: a read-time sort, a table sort and a raw-array sort can never disagree about where
-!! nulls go, where NaNs go, or how ties are broken.
+!! This module is the public face of the radix engine that orders **everything** this library
+!! sorts: a read-time `parquet_open_reader(..., sort_by=)`, a post-open `parquet_reader_set_sort`,
+!! `parquet_table%sort_by`, and a raw-array `pf_sort`/`pf_argsort` alike. Sharing one engine is
+!! the point: those paths can never disagree about where nulls go, where NaNs go, or how ties are
+!! broken, because there is only one answer to disagree about.
+!!
+!! The ordering reproduces `arrow::compute::SortIndices` exactly, and a second, independent C++
+!! implementation is kept in `src/parquet_wrapper.cpp` purely so the tests can check this one
+!! against it -- see that file's sort-engine banner. No user-facing path reaches it.
 !!
 !! **Naming.** Everything public here carries the `pf_` prefix (parquet-fortran) rather than
 !! `parquet_`, because the subject is not a parquet file -- see CLAUDE.md's "Naming

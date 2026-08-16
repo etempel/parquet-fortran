@@ -60,7 +60,8 @@ module parquet_bindings
     public :: parquet_writer_set_protected_column
     public :: c_reader_set_filter, parquet_reader_has_decoded_columns, parquet_reader_has_filter_clauses
     public :: parquet_reader_has_chunk_reads
-    public :: c_reader_set_sort, parquet_reader_has_sort
+    public :: parquet_reader_has_sort
+    public :: parquet_reader_sort_key_info, parquet_reader_sort_key_fetch, parquet_reader_sort_install
     public :: parquet_sort_builder_new, parquet_sort_builder_add_key_int64
     public :: parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string
     public :: parquet_sort_builder_build, parquet_sort_builder_is_sorted, parquet_sort_builder_free
@@ -660,29 +661,59 @@ module parquet_bindings
             integer(c_long_long) :: status
         end function
 
-        !> Installs a read-time sort on `reader`: `n` keys, each a fixed-width
-        !> `name_len` column name in `names_packed` plus one `descending` and
-        !> one `nulls_first` int8 flag, applied in the order given.
-        !> `key_text` is the whole key list re-rendered for
-        !> parquet_reader_print_stat's "sort:" line and is never parsed by the
-        !> C++ side. Returns 0 on success, or 1 with a NUL-terminated message
-        !> in `err_out` (capacity `err_cap`), so the Fortran caller owns the
-        !> error stop text -- the same convention c_reader_set_filter uses.
-        !> Named c_reader_set_sort on this side because the public API
-        !> procedure parquet_reader_set_sort (parquet_core.f90) owns that name; the
-        !> bind(C) symbol, and so parquet_wrapper.cpp, is unchanged.
-        function c_reader_set_sort(reader, names_packed, name_len, descending, nulls_first, &
-                n, key_text, threads, err_out, err_cap) &
-                bind(C, name="parquet_reader_set_sort") result(status)
+        !> Reports one sort key's reduced family and dimensions, without copying any values.
+        !> Paired with `parquet_reader_sort_key_fetch` below: this call sizes the buffers, that one
+        !> fills them. Both bind the key, which is deliberate -- see the C++ side for why the
+        !> repeated bind is preferred over staging the key on the reader handle.
+        function parquet_reader_sort_key_info(reader, name, descending, nulls_first, family, &
+                nrows, nbytes, has_nulls, err_out, err_cap) &
+                bind(C, name="parquet_reader_sort_key_info") result(status)
             import
             type(c_ptr), value :: reader !! open reader handle.
-            character(kind=c_char) :: names_packed(*) !! `n` blank-padded column names, `name_len` chars each.
-            integer(c_long_long), value :: name_len !! width of one packed name.
-            integer(c_int8_t) :: descending(*) !! per key: nonzero for descending order.
-            integer(c_int8_t) :: nulls_first(*) !! per key: nonzero to place nulls before values.
-            integer(c_long_long), value :: n !! number of sort keys.
+            character(kind=c_char) :: name(*) !! NUL-terminated column name, possibly a struct path.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            integer(c_int) :: family !! 0 = integer (incl. boolean/temporal), 1 = real, 2 = string.
+            integer(c_long_long) :: nrows !! number of key elements.
+            integer(c_long_long) :: nbytes !! total payload bytes; family 2 only, else 0.
+            integer(c_int8_t) :: has_nulls !! nonzero when the key carries a validity vector.
+            character(kind=c_char) :: err_out(*) !! receives the failure message, if any.
+            integer(c_long_long), value :: err_cap !! capacity of err_out, in characters.
+            integer(c_long_long) :: status !! 0 on success, 1 on failure.
+        end function
+
+        !> Copies one sort key's reduced values into caller-owned buffers sized by
+        !> `parquet_reader_sort_key_info`. Exactly one of `ints`/`reals`/(`offsets`,`data`) is
+        !> written, per the family reported there; the unused ones may be `C_NULL_PTR`. `valid` is
+        !> written only when that call reported `has_nulls`.
+        function parquet_reader_sort_key_fetch(reader, name, descending, nulls_first, ints, reals, &
+                offsets, data, valid, err_out, err_cap) &
+                bind(C, name="parquet_reader_sort_key_fetch") result(status)
+            import
+            type(c_ptr), value :: reader !! open reader handle.
+            character(kind=c_char) :: name(*) !! NUL-terminated column name, possibly a struct path.
+            integer(c_int8_t), value :: descending !! nonzero for descending order.
+            integer(c_int8_t), value :: nulls_first !! nonzero to place nulls before values.
+            type(c_ptr), value :: ints !! -> nrows int64 values, or C_NULL_PTR.
+            type(c_ptr), value :: reals !! -> nrows float64 values, or C_NULL_PTR.
+            type(c_ptr), value :: offsets !! -> nrows+1 int64 offsets, offsets(0)=0, or C_NULL_PTR.
+            type(c_ptr), value :: data !! -> nbytes payload bytes, or C_NULL_PTR.
+            type(c_ptr), value :: valid !! -> nrows int8 flags, 1 = valid, or C_NULL_PTR.
+            character(kind=c_char) :: err_out(*) !! receives the failure message, if any.
+            integer(c_long_long), value :: err_cap !! capacity of err_out, in characters.
+            integer(c_long_long) :: status !! 0 on success, 1 on failure.
+        end function
+
+        !> Installs a permutation built by the Fortran engine and applies it to every column already
+        !> decoded on this reader. `perm` is 0-based, which is what Arrow's Take consumes --
+        !> `pf_argsort` produces 1-based indices, so the caller converts on the way out.
+        function parquet_reader_sort_install(reader, perm, n, key_text, err_out, err_cap) &
+                bind(C, name="parquet_reader_sort_install") result(status)
+            import
+            type(c_ptr), value :: reader !! open reader handle.
+            integer(c_int64_t) :: perm(*) !! 0-based row permutation of length `n`.
+            integer(c_long_long), value :: n !! number of rows the permutation covers.
             character(kind=c_char) :: key_text(*) !! whole key list, for print_stat only.
-            integer(c_long_long), value :: threads !! resolved thread count; <= 1 sorts serially.
             character(kind=c_char) :: err_out(*) !! receives the failure message, if any.
             integer(c_long_long), value :: err_cap !! capacity of err_out, in characters.
             integer(c_long_long) :: status !! 0 on success, 1 on failure.

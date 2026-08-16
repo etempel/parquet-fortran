@@ -6116,11 +6116,27 @@ contains
         ! would cross it (on CI's GNU xargs it would not, so the failure would be macOS-only).
         ! `exit 0` is equally load-bearing: most scenarios die by SIGABRT, and BSD xargs stops
         ! dispatching entirely the moment a child is killed by a signal.
-        cmd = "sed -n '/^scenarios=(/,/^)/p' " // scenario_list_file // &
+        ! A per-scenario wall-clock cap, resolved once here and exported so the inner `sh -c`
+        ! can use it. Without it one wedged scenario stalls the whole priming step and, with
+        ! it, every suite that follows -- observed when a concurrency scenario hung inside
+        ! glibc's abort() under ifx at -O0. SIGKILL rather than the default SIGTERM, because
+        ! the Fortran runtimes catch SIGTERM to print a traceback and a wedged process cannot
+        ! run that handler either. An absent `timeout` (stock macOS has none; coreutils calls
+        ! it `gtimeout`) leaves the variable empty, which runs the scenario unguarded rather
+        ! than breaking the run. `timeout` reports 124 when it fires, which is the sentinel
+        ! check_scenario_exit_status and its siblings key on.
+        cmd = "PF_SCENARIO_TIMEOUT=''; " // &
+            "if command -v timeout >/dev/null 2>&1; then PF_SCENARIO_TIMEOUT=" // dq // &
+            "timeout -s KILL ${PARQUET_SCENARIO_TIMEOUT:-120}" // dq // "; " // &
+            "elif command -v gtimeout >/dev/null 2>&1; then PF_SCENARIO_TIMEOUT=" // dq // &
+            "gtimeout -s KILL ${PARQUET_SCENARIO_TIMEOUT:-120}" // dq // "; fi; " // &
+            "export PF_SCENARIO_TIMEOUT; "
+        cmd = trim(cmd) // " sed -n '/^scenarios=(/,/^)/p' " // scenario_list_file // &
             " | grep -oE '" // dq // "[a-z0-9_]+:[01]" // dq // "' | tr -d '" // dq // "' | cut -d: -f1" // &
             " | xargs -P " // dq // "${PARQUET_TEST_PRIME_JOBS:-" // &
             "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}" // dq // " -n 1 sh -c '" // &
-            trim(bin) // " " // dq // "$0" // dq // " > " // prime_dir // "/" // dq // "$0" // dq // ".out" // &
+            "${PF_SCENARIO_TIMEOUT} " // trim(bin) // " " // dq // "$0" // dq // " > " // prime_dir // "/" // &
+            dq // "$0" // dq // ".out" // &
             " 2> " // prime_dir // "/" // dq // "$0" // dq // ".err" // &
             " ; echo $? > " // prime_dir // "/" // dq // "$0" // dq // ".status ; exit 0'"
         call execute_command_line(cmd, wait=.true., cmdstat=cstat)
@@ -6295,6 +6311,18 @@ contains
             "scenario name not recognized by error_scenarios.f90 (typo?): "//trim(scenario))
         if (allocated(error)) return
 
+        ! 124 and 137 are what `timeout` reports when the per-scenario cap fires: the scenario
+        ! neither finished nor aborted. Both have to be singled out, because every check below
+        ! reads a nonzero exit as "aborted" -- so a hung scenario would otherwise PASS as a
+        ! successful abort, which is the failure mode the cap exists to expose rather than hide.
+        ! 124 is the documented code; 137 (128+9) is what comes back instead when the cap kills
+        ! with SIGKILL, which is what this harness asks for because the Fortran runtimes catch
+        ! SIGTERM and a wedged process cannot run that handler either. Keying on 124 alone was
+        ! tried and let a forced timeout report PASS.
+        call check(error, exitstat /= 124 .and. exitstat /= 137, &
+            "scenario TIMED OUT and was killed (neither finished nor aborted): "//trim(scenario))
+        if (allocated(error)) return
+
         aborted = (exitstat /= 0)
         call check(error, aborted .eqv. expect_abort, failure_message)
     end subroutine check_scenario_exit_status
@@ -6329,6 +6357,18 @@ contains
             "scenario name not recognized by error_scenarios.f90 (typo?): "//trim(scenario))
         if (allocated(error)) return
 
+        ! 124 and 137 are what `timeout` reports when the per-scenario cap fires: the scenario
+        ! neither finished nor aborted. Both have to be singled out, because every check below
+        ! reads a nonzero exit as "aborted" -- so a hung scenario would otherwise PASS as a
+        ! successful abort, which is the failure mode the cap exists to expose rather than hide.
+        ! 124 is the documented code; 137 (128+9) is what comes back instead when the cap kills
+        ! with SIGKILL, which is what this harness asks for because the Fortran runtimes catch
+        ! SIGTERM and a wedged process cannot run that handler either. Keying on 124 alone was
+        ! tried and let a forced timeout report PASS.
+        call check(error, exitstat /= 124 .and. exitstat /= 137, &
+            "scenario TIMED OUT and was killed (neither finished nor aborted): "//trim(scenario))
+        if (allocated(error)) return
+
         aborted = (exitstat /= 0)
         call check(error, aborted .eqv. expect_abort, failure_message)
         if (allocated(error)) return
@@ -6360,6 +6400,18 @@ contains
         if (allocated(error)) return
         call check(error, exitstat /= 97, &
             "scenario name not recognized by error_scenarios.f90 (typo?): "//trim(scenario))
+        if (allocated(error)) return
+
+        ! 124 and 137 are what `timeout` reports when the per-scenario cap fires: the scenario
+        ! neither finished nor aborted. Both have to be singled out, because every check below
+        ! reads a nonzero exit as "aborted" -- so a hung scenario would otherwise PASS as a
+        ! successful abort, which is the failure mode the cap exists to expose rather than hide.
+        ! 124 is the documented code; 137 (128+9) is what comes back instead when the cap kills
+        ! with SIGKILL, which is what this harness asks for because the Fortran runtimes catch
+        ! SIGTERM and a wedged process cannot run that handler either. Keying on 124 alone was
+        ! tried and let a forced timeout report PASS.
+        call check(error, exitstat /= 124 .and. exitstat /= 137, &
+            "scenario TIMED OUT and was killed (neither finished nor aborted): "//trim(scenario))
         if (allocated(error)) return
 
         call file_contains(out_file, text, on_out)
@@ -6417,6 +6469,18 @@ contains
 
         call check(error, exitstat /= 97, &
             "scenario name not recognized by error_scenarios.f90 (typo?): "//trim(scenario))
+        if (allocated(error)) return
+
+        ! 124 and 137 are what `timeout` reports when the per-scenario cap fires: the scenario
+        ! neither finished nor aborted. Both have to be singled out, because every check below
+        ! reads a nonzero exit as "aborted" -- so a hung scenario would otherwise PASS as a
+        ! successful abort, which is the failure mode the cap exists to expose rather than hide.
+        ! 124 is the documented code; 137 (128+9) is what comes back instead when the cap kills
+        ! with SIGKILL, which is what this harness asks for because the Fortran runtimes catch
+        ! SIGTERM and a wedged process cannot run that handler either. Keying on 124 alone was
+        ! tried and let a forced timeout report PASS.
+        call check(error, exitstat /= 124 .and. exitstat /= 137, &
+            "scenario TIMED OUT and was killed (neither finished nor aborted): "//trim(scenario))
         if (allocated(error)) return
 
         aborted = (exitstat /= 0)

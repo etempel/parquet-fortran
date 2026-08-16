@@ -14,6 +14,30 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# A per-scenario wall-clock cap, so one wedged scenario cannot stall the whole run.
+#
+# This is not hypothetical: a scenario that provokes the concurrency guard from many OpenMP
+# threads was observed hanging forever inside glibc's abort() (192 threads parked on one lock),
+# which stalled a full `fpm test --profile debug` under ifx indefinitely. The library-side fix is
+# in src/parquet_wrapper.cpp's fatal path; this cap is the belt to that braces, and it is what
+# turns any future hang -- from any cause -- into a reported failure instead of a hung pipeline.
+#
+# SIGKILL rather than the default SIGTERM on purpose: the Fortran runtimes install a SIGTERM
+# handler that prints a traceback, and a process wedged inside a lock cannot run it either, so a
+# TERM would be ignored by exactly the processes this needs to kill. `timeout` still reports 124
+# when it fires, which is the sentinel the callers below and test_errors.f90 key on.
+#
+# macOS ships no `timeout` (coreutils installs it as `gtimeout`), so an absent one degrades to
+# running unguarded rather than failing the run.
+SCENARIO_TIMEOUT="${PARQUET_SCENARIO_TIMEOUT:-120}"
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout -s KILL $SCENARIO_TIMEOUT"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout -s KILL $SCENARIO_TIMEOUT"
+else
+    TIMEOUT_CMD=""
+fi
+
 # Worker mode: this script re-invokes itself (via xargs -P below) as
 #   run_error_scenarios.sh __worker__ <bin> <results_dir> <idx> <scenario> <expect_abort>
 # to run exactly one scenario and record its PASS/FAIL line + status to
@@ -32,8 +56,23 @@ if [ "${1:-}" = "__worker__" ]; then
     scenario="$5"
     expect_abort="$6"
 
-    "$bin" "$scenario" > /dev/null 2>&1
+    $TIMEOUT_CMD "$bin" "$scenario" > /dev/null 2>&1
     exitstat=$?
+
+    # The cap above fired: the scenario neither finished nor aborted. That is a hang, and it must
+    # be reported as one -- a bare "nonzero exit" test would otherwise read it as a successful
+    # abort and PASS, which is the failure this cap exists to expose rather than hide.
+    #
+    # BOTH codes are the timeout, and checking only the documented one is wrong: `timeout` exits
+    # 124 when it fires, EXCEPT that with `-s KILL` the child dies by a signal it cannot catch and
+    # the status is 128+9 = 137 instead. Verified here rather than assumed -- keying on 124 alone
+    # let a forced timeout report [PASS] with exit=137.
+    if [ "$exitstat" -eq 124 ] || [ "$exitstat" -eq 137 ]; then
+        echo "FAIL" > "$results_dir/$idx.status"
+        printf "[FAIL] %-50s TIMED OUT after %ss (killed; neither finished nor aborted)\n" \
+            "$scenario" "$SCENARIO_TIMEOUT" > "$results_dir/$idx.line"
+        exit 0
+    fi
 
     # exit code 97 means error_scenarios.f90's `case default` was hit --
     # i.e. this scenario name isn't recognized there (typo, or renamed on
@@ -969,8 +1008,13 @@ done
 echo
 echo "Concurrency scenarios (best-effort, need FPM_FFLAGS with a real OpenMP flag to reliably trigger):"
 for scenario in "${concurrency_scenarios[@]}"; do
-    if "$bin" "$scenario" > /dev/null 2>&1; then
+    $TIMEOUT_CMD "$bin" "$scenario" > /dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         printf "[INFO] %-50s did not abort (skipped or single-threaded: needs genuine OpenMP concurrency)\n" "$scenario"
+    elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        printf "[FAIL] %-50s TIMED OUT after %ss (killed; neither finished nor aborted)\n" "$scenario" "$SCENARIO_TIMEOUT"
+        failures=$((failures + 1))
     else
         printf "[PASS] %-50s aborted as expected\n" "$scenario"
     fi

@@ -163,6 +163,7 @@ something a reader is expected to have.
 | [Risk-96](#risk-96--a-wide-width-integer-draw-can-be-silently-non-uniform-while-every-obvious-test-passes) | A wide-width integer draw can be silently non-uniform while every obvious test passes | 4 — covered |
 | [Risk-97](#risk-97--a-wrongly-selected-route-e-fork-silently-ships-the-wrapping-kernel-on-a-capable-compiler) | A wrongly selected route (e) fork silently ships the wrapping kernel on a capable compiler | 4 — covered |
 | [Risk-98](#risk-98--a-schedule-dependent-draw-reintroduces-irreproducibility-and-every-structural-test-still-passes) | A schedule-dependent draw reintroduces irreproducibility, and every structural test still passes | 4 — covered |
+| [Risk-99](#risk-99--a-fatal-path-reached-by-several-threads-at-once-hangs-instead-of-terminating) | A fatal path reached by several threads at once hangs instead of terminating | 4 — covered |
 
 ---
 
@@ -170,7 +171,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-99**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-100**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4090,3 +4091,49 @@ faulty capture during development and is the only thing standing between this te
 pass; and the suite's **exclusion from test-drive's own per-test parallelism**
 (`suite_is_safe_to_parallelize`, `test/run_tester.f90`), without which each region here is nested,
 gets a team of one, and tests nothing.
+
+### Risk-99 — A fatal path reached by several threads at once hangs instead of terminating
+
+The concurrency guard in `src/parquet_wrapper.cpp` exists to catch a caller driving one
+reader/writer from a parallel region — so it is **designed** to be reached by many threads at the
+same instant. It used to end the process with `std::abort()`, and `abort()` takes a lock inside
+glibc: when enough threads reach it together they pile up on that lock and the process never dies.
+
+Measured on machine B under ifx at `-O0 -check all`: **192 threads** parked in `futex_wait_queue`,
+every stack reading `__lll_lock_wait_private <- abort <- … <- __kmp_invoke_microtask`. The process
+survived `SIGTERM` (the Fortran runtime catches it to print a traceback, and a wedged process cannot
+run that handler either) and needed `SIGKILL`. The same configuration also produced an occasional
+`SIGSEGV` in the same path. A full `fpm test --profile debug` under ifx could not complete.
+
+**Why this is a silent-failure risk rather than a bug that announces itself.** The guard is the
+library's only defence against shared-handle misuse, and its diagnostic is what tells a user what
+they did wrong. A hang replaces that diagnostic with nothing at all — no message, no exit status, no
+core — and the user's own program is what appears to be stuck. It is also **not reproducible on
+demand**: 12 sequential and 24 concurrent isolated runs all terminated cleanly, and only a loaded
+full-suite run hung, so an investigation that starts from "can I reproduce it" concludes there is
+nothing there.
+
+**The rules this forbids.** *No fatal path in `parquet_wrapper.cpp` may call `abort()`, `exit()` or
+anything else that takes a lock.* Every one goes through `claim_fatal_path_or_park()` — an atomic
+claim, so exactly one thread reports — followed by `fatal_exit()`, which is `std::_Exit(134)`: a
+bare `exit_group` syscall, no lock, no `atexit` handler, defined from any thread inside or outside a
+parallel region. And `g_fatal_claimed` must stay a single object: per-translation-unit copies would
+admit one thread *each*, which is the pile-up itself (see CLAUDE.md's translation-unit-split note).
+
+**Test.** Covered from two directions, because neither alone is enough.
+
+*That exactly one thread reports*: `concurrent_calls_into_shared_writer` and its reader twin now
+produce **one** stderr line where the old code produced one per colliding thread, and still exit
+134. The line count is the observable that distinguishes the two implementations — the exit status
+does not, which is why "it still aborts" was not sufficient evidence.
+
+*That a hang is reported rather than waited on*: every scenario now runs under a wall-clock cap
+(`tools/run_error_scenarios.sh` and `prime_error_scenarios`, overridable with
+`PARQUET_SCENARIO_TIMEOUT`, default 120 s), and a scenario that trips it is a hard FAIL rather than
+a nonzero exit read as a successful abort. **The cap keys on exit 124 AND 137**: `timeout` documents
+124, but returns 128+9 = 137 when — as here — it kills with `SIGKILL`, which it must, because
+`SIGTERM` is caught. Keying on 124 alone was written first and let a forced timeout report `[PASS]`
+with `exit=137`; both sentinels were then verified by forcing a timeout in each path
+(a 1-second cap on a 30-second sleep for the shell runner, a 20 ms cap for the Fortran side, which
+turned 613 tests into explicit `TIMED OUT` failures). A guard that has never been made to fire is
+not a guard.

@@ -102,14 +102,63 @@
 // two), so they stay, but their comments no longer claim an abort would
 // follow.
 //
-// Deliberately calls std::abort() here instead of throwing: this guard is
+// Deliberately terminates here instead of throwing: this guard is
 // meant to be hit from worker threads inside a caller's own !$omp/#pragma omp
 // parallel region (that's the whole misuse case it exists to catch), and the
 // OpenMP specification does not guarantee well-defined behavior for a C++
 // exception that escapes a parallel region uncaught -- different compiler/
-// OpenMP-runtime combinations are free to handle that differently. Aborting
+// OpenMP-runtime combinations are free to handle that differently. Terminating
 // directly sidesteps that entirely: it is well-defined from any thread,
-// inside or outside any parallel construct, on every platform.
+// inside or outside any parallel construct, on every platform. See the
+// fatal-path note below for why that termination is _Exit and not std::abort().
+
+// ==== The fatal path ====
+//
+// A fatal error here can be reached by SEVERAL THREADS AT ONCE -- the concurrency guard below
+// is meant to be, since its whole purpose is to catch a caller driving one handle from a
+// parallel region, where every thread trips it at the same moment.
+//
+// std::abort() is not safe under that. It takes a lock inside glibc, and when many OpenMP
+// threads reach it together they pile up on that lock and the process HANGS FOREVER instead of
+// dying. Measured on machine B under ifx at -O0 -check all: 192 threads all parked in
+// futex_wait_queue with `__lll_lock_wait_private <- abort` on every stack, surviving SIGTERM
+// (the Fortran runtime catches it and its own handler deadlocks too) and killable only with
+// SIGKILL. The same configuration also produced an occasional SIGSEGV inside that path. Neither
+// is reproducible on demand -- both need enough threads to arrive together -- which is exactly
+// what makes relying on abort() here a bad trade.
+//
+// So: exactly ONE thread reports and terminates. It ends the process with _Exit, a bare
+// exit_group syscall -- no lock, no atexit handler, no static destructor, well defined from any
+// thread inside or outside a parallel region. Every other thread parks and is reaped when the
+// winner ends the process, because a losing thread has nothing useful left to do and any exit
+// path it could take is the pile-up this exists to avoid.
+//
+// Exit code 134 is what a shell reports for a SIGABRT death, so this is indistinguishable from
+// the previous behaviour to everything that observes it: the error scenarios, their
+// `exitstat /= 0` checks, and the exit status the guide documents.
+//
+// Coverage is unaffected: _Exit skips the atexit-registered gcov flush exactly as abort() did,
+// so every GCOVR_EXCL marker resting on that mechanism stays correct.
+//
+// NOTE for a future split of this file into several translation units (see CLAUDE.md): this
+// flag must become a single `extern` definition, exactly like the g_debug_*/settings-mirror
+// globals and the token counter below. Per-TU copies would each admit one thread, which is the
+// multi-thread abort this prevents, reintroduced by the back door.
+static std::atomic<bool> g_fatal_claimed{false};
+
+// Returns only for the FIRST thread to reach a fatal path; every later one parks forever.
+static void claim_fatal_path_or_park()
+{
+	if (!g_fatal_claimed.exchange(true, std::memory_order_acq_rel)) return;
+	for (;;) std::this_thread::sleep_for(std::chrono::hours(1));
+}
+
+// Ends the process once a fatal message has been written. Never returns, takes no lock.
+[[noreturn]] static void fatal_exit()
+{
+	std::fflush(stderr);
+	std::_Exit(134);
+}
 
 // Monotonic source of the per-thread ownership tokens above. Never reused and
 // never 0, so 0 unambiguously means "this handle is idle".
@@ -138,14 +187,16 @@ public:
 		if (!handle_->guard_owner.compare_exchange_strong(expected, me, std::memory_order_acq_rel,
 				std::memory_order_acquire) &&
 			expected != me)
-		{ // GCOVR_EXCL_START -- same std::abort() gcov-loss mechanism as report_fatal_error's own GCOVR_EXCL comment
+		{ // GCOVR_EXCL_START -- same gcov-loss mechanism as report_fatal_error's own GCOVR_EXCL comment
+			// This is the site that MUST tolerate many threads arriving together: see the
+			// fatal-path comment above claim_fatal_path_or_park. Only the first gets past here.
+			claim_fatal_path_or_park();
 			std::fprintf(stderr,
 				"parquet-fortran: concurrent access to a single %s detected: each thread must use "
 				"its own independent parquet_reader/parquet_writer instance (see the README's Thread "
 				"safety section) -- do not call into the same one from more than one thread at a time. "
 				"Aborting.\n", what);
-			std::fflush(stderr);
-			std::abort();
+			fatal_exit();
 		}
 		// GCOVR_EXCL_STOP
 		// Only ever incremented by the owning thread, so it needs no atomicity of its own.
@@ -834,14 +885,14 @@ extern "C"
 	//
 	// GCOVR_EXCL'd (this function's body, plus every one of its ~112 call sites elsewhere in
 	// this file -- see .gitlab-ci.yml's --exclude-lines-by-pattern for the single-line ones):
-	// std::abort() skips the atexit-registered gcov-flush handler a normal process exit relies
+	// the fatal exit skips the atexit-registered gcov-flush handler a normal process exit relies
 	// on, so any process that reaches this function loses that whole run's coverage data --
 	// unobservable by gcov no matter how well-tested, not merely hard to trigger.
 	[[noreturn]] static void report_fatal_error(const char *context, const std::string &message) // GCOVR_EXCL_START
 	{
+		claim_fatal_path_or_park();   // several threads can reach a fatal error at once
 		std::fprintf(stderr, "parquet-fortran: %s: %s\n", context, message.c_str());
-		std::fflush(stderr);
-		std::abort();
+		fatal_exit();
 	}
 	// GCOVR_EXCL_STOP
 
@@ -2155,7 +2206,7 @@ extern "C"
 	// there even though clang doesn't catch it).
 	// real_to_int32_checked is genuinely exercised by a passing (non-aborting) float/double->int32
 	// round trip. real_to_int64_checked just below is not: it's only ever reached via the
-	// extended_real_*_int64 error scenarios, all of which end in std::abort() -- and std::abort()
+	// extended_real_*_int64 error scenarios, all of which end in the fatal exit -- and that exit
 	// discards that whole process's gcov coverage, including the kOk/kNonIntegral lines that ran
 	// before it, not just the abort line itself.
 	static NumericConvertStatus real_to_int32_checked(double v, int32_t &out)
@@ -3429,7 +3480,7 @@ extern "C"
 		if (writer_handle->row_group_writer)
 		{ // GCOVR_EXCL_START -- this throw is never caught anywhere in the call chain, so it crosses
 		  // the extern "C" boundary uncaught -> std::terminate() -> abort, which discards that whole
-		  // process's gcov coverage just like std::abort() does; tested via
+		  // process's gcov coverage just like the fatal exit does; tested via
 		  // scenario_row_group_whole_column_after_streaming_started
 			throw std::runtime_error("Column written via parquet_write_column after the streaming row-group API "
 				"already started writing row groups: " + name + " -- every column must be written via "
@@ -3589,7 +3640,7 @@ extern "C"
 		if (!result.ok())
 		{
 			delete handle; // GCOVR_EXCL_LINE -- runs in open_writer_bad_path, but the report_fatal_error()
-			                // below calls std::abort(), which discards that whole process's gcov data,
+			                // below takes the fatal exit, which discards that whole process's gcov data,
 			                // including this line that ran just before it.
 			report_fatal_error("create_parquet_writer",
 				std::string("failed to open '") + filename + "' for writing: " + result.status().ToString()); // GCOVR_EXCL_LINE
@@ -8895,7 +8946,7 @@ extern "C"
 			break;
 		}
 		// GCOVR_EXCL_START -- this int64-source branch of convert_values_to_int32 is only reached
-		// via an abort-ending extended-source-type overflow scenario (std::abort() there discards
+		// via an abort-ending extended-source-type overflow scenario (the fatal exit there discards
 		// that whole process's gcov coverage, including the lines that ran before it). The case
 		// label itself is included in this exclusion (not just the body): under GCC, a case label
 		// reachable only via an abort-ending scenario shows uncovered in its own right, distinct
@@ -11757,7 +11808,7 @@ extern "C"
 	// GCOVR_EXCL'd: scenario_col_size_overflow always ends by aborting via
 	// check_col_size_fits_arrow_limit's report_fatal_error, which discards the whole process's
 	// gcov data -- so this setter, though genuinely called every time, never shows as covered
-	// either. Collateral of the same std::abort()-discards-coverage mechanism, not a separate gap.
+	// either. Collateral of the same fatal-exit-discards-coverage mechanism, not a separate gap.
 	void parquet_debug_set_col_size_limit(int64_t n) // GCOVR_EXCL_START
 	{
 		g_debug_col_size_limit = n;

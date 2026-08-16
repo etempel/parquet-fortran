@@ -1230,6 +1230,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fortran does not guarantee short-circuit evaluation, so the unused mask's size was queried
   regardless. Harmless in an ordinary build, but it aborted at close under `-fcheck=all`.
 
+- Fixed the concurrency guard **hanging instead of aborting** when several threads trip it at the
+  same moment — which is exactly how it is meant to be tripped, since it exists to catch one
+  reader/writer being driven from a parallel region. It ended the process with `abort()`, and
+  `abort()` takes a lock inside glibc: with enough threads arriving together they pile up on that
+  lock and nothing terminates. Observed with 192 threads all parked on it, surviving `SIGTERM` and
+  needing `SIGKILL`, with no diagnostic reaching the user at all. Exactly one thread now reports
+  and the process ends with `_Exit`, which takes no lock; the exit status is unchanged (134, what a
+  shell reports for a SIGABRT death) and the message is unchanged apart from being printed once
+  rather than once per colliding thread. Every fatal path in the C++ layer goes through the same
+  route, so this covers the whole `report_fatal_error` family and not just the guard.
+
 ## [1.0.0] - 2026-07-27
 
 **Toolchain floor:** gfortran ≥ 13 (13 on CI; 15.2.0 the primary development target), Intel

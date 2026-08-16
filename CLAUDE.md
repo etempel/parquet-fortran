@@ -2441,6 +2441,28 @@ applied to the harness instead of the source.
   is genuinely kept for speed, it must be guarded by a comparison against an independent
   overflow-free implementation, because nothing else will notice. See `feature_risks.md` Risk-94.
 
+- **`std::abort()` is not safe to call from many threads at once — it can hang the process
+  forever.** glibc's `abort()` takes an internal lock, so when several threads reach it together
+  they pile up on that lock and nothing ever terminates. Measured on machine B under ifx at
+  `-O0 -check all`: the `concurrent_calls_into_shared_writer` error scenario left **192 threads**
+  parked in `futex_wait_queue`, every stack reading `__lll_lock_wait_private <- abort <- …
+  <- __kmp_invoke_microtask`. It survived `SIGTERM` — the Fortran runtimes install a traceback
+  handler for it and a wedged process cannot run that either — and needed `SIGKILL`. The same
+  configuration also produced an occasional `SIGSEGV` in that path, and neither outcome is
+  reproducible on demand: both need enough threads to arrive together, so 12 sequential and 24
+  concurrent isolated runs all terminated cleanly while a loaded full-suite run hung.
+
+  **This matters here because the concurrency guard is MEANT to be hit from many threads** — that
+  is the misuse it exists to catch. The fix in `src/parquet_wrapper.cpp` is
+  `claim_fatal_path_or_park()` plus `fatal_exit()`: an atomic claim so exactly one thread reports,
+  and `std::_Exit(134)` instead of `abort()` — a bare `exit_group` syscall, no lock, no `atexit`
+  handler, well defined from any thread inside or outside a parallel region. 134 is what a shell
+  reports for a SIGABRT death, so nothing that observes the exit status can tell the difference.
+  Coverage is unaffected: `_Exit` skips the gcov flush exactly as `abort()` did, so every
+  `GCOVR_EXCL` marker resting on that mechanism stays correct. **Any new fatal path must go through
+  those two helpers rather than calling `abort()`/`exit()` directly.** See `feature_risks.md`
+  Risk-99.
+
 - **`-128_int8` trips gfortran's range check** (it parses `128` then negates). Build the high bit
   with `ibset(0_int8, 7)` in constant expressions. Also: an array-constructor implied-do index
   (`[(f(b), b=0,7)]`) has no implicit type under `implicit none` — list the elements explicitly.
@@ -3019,11 +3041,19 @@ library's one defence against concurrent misuse into a silent no-op on exactly t
 exists to protect. Nothing would fail to build, no test asserts a token value, and the symptom
 would be the heap corruption the guard was added to prevent.
 
-Before any split, promote every global in both families — and this counter — to a genuine `extern`
+**`g_fatal_claimed` is a fourth case, and per-TU copies would restore a hang that was measured.**
+It is the flag that lets exactly ONE thread report a fatal error and end the process; every other
+thread parks. One copy per translation unit would admit one thread *per TU*, which is precisely the
+several-threads-terminating-at-once situation it exists to prevent — see the "many threads calling
+`abort()`" note under "Compiler & language gotchas".
+
+Before any split, promote every global in all three families — and this counter and this flag — to a
+genuine `extern`
 global with exactly one definition in a shared internal header (not `static`), re-run every affected
 error scenario to confirm the override still takes effect, re-run `test/test_settings.f90`'s
 observed-effect tests to confirm each mirrored setting still reaches the code that reads it, and
-re-run both `concurrent_calls_into_shared_*` scenarios to confirm the guard still fires.
+re-run both `concurrent_calls_into_shared_*` scenarios to confirm the guard still fires **and that
+exactly one message reaches stderr**.
 
 ### Stale `fpm` build cache
 

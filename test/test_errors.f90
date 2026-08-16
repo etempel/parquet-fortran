@@ -369,6 +369,14 @@ contains
                 test_sorting_column_no_kind_aborts), &
             new_unittest("sorting: merging unsorted input aborts", &
                 test_sorting_merge_unsorted_aborts), &
+            new_unittest("a stream refuses to draw past its last addressable word", &
+                test_random_stream_exhausted_aborts), &
+            new_unittest("a stream refuses to jump past its last addressable word", &
+                test_random_stream_jump_overflow_aborts), &
+            new_unittest("a stream refuses to seek back before its first word", &
+                test_random_stream_jump_before_start_aborts), &
+            new_unittest("a stream refuses a rewind below position 1", &
+                test_random_stream_rewind_below_one_aborts), &
             new_unittest("metadata: a caller's own <KEY>.datatype wins, with a warning", &
                 test_metadata_datatype_key_collision_warns), &
             new_unittest("metadata: no <KEY>.datatype collision means no warning", &
@@ -4009,6 +4017,49 @@ contains
             failure_message="merging unsorted input was expected to abort", &
             required_stderr="b is not sorted")
     end subroutine test_sorting_merge_unsorted_aborts
+
+    !> Stream exhaustion: see scenario_random_stream_exhausted in test/error_scenarios.f90.
+    !> The scenario draws successfully from one word below the ceiling first, so a guard that
+    !> fired unconditionally would fail there rather than passing this test vacuously.
+    subroutine test_random_stream_exhausted_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_stream_exhausted", &
+            expect_abort=.true., &
+            failure_message="drawing past the end of a stream was expected to abort", &
+            required_stderr="the stream is exhausted")
+    end subroutine test_random_stream_exhausted_aborts
+
+    !> `%jump` past the ceiling: see scenario_random_stream_jump_overflow.
+    subroutine test_random_stream_jump_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_stream_jump_overflow", &
+            expect_abort=.true., &
+            failure_message="jumping past the end of a stream was expected to abort", &
+            required_stderr="seek would pass the last addressable word")
+    end subroutine test_random_stream_jump_overflow_aborts
+
+    !> A backward `%jump` past the start: see scenario_random_stream_jump_before_start. The
+    !> message must distinguish this from the forward case, since the two are opposite mistakes.
+    subroutine test_random_stream_jump_before_start_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_stream_jump_before_start", &
+            expect_abort=.true., &
+            failure_message="seeking before the start of a stream was expected to abort", &
+            required_stderr="backward seek would pass position 1")
+    end subroutine test_random_stream_jump_before_start_aborts
+
+    !> `%rewind(0)`: see scenario_random_stream_rewind_below_one.
+    subroutine test_random_stream_rewind_below_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_stream_rewind_below_one", &
+            expect_abort=.true., &
+            failure_message="rewinding below position 1 was expected to abort", &
+            required_stderr="position must be at least 1")
+    end subroutine test_random_stream_rewind_below_one_aborts
 
     !> A caller's own "<KEY>.datatype" entry beside a typed <KEY>: see
     !> scenario_metadata_datatype_key_collision in test/error_scenarios.f90. The write SUCCEEDS

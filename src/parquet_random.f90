@@ -199,11 +199,27 @@ module parquet_random
     !! and it silently receives wrapped ones. Everything up to and including the boundary is exact:
     !! a fill whose final position is `huge(int64)` itself is correct, and is tested. The scalar
     !! entry points have no such limit, since every representable `draw` is a valid one.
+    !!
+    !! **An INTEGER `v` takes two further required arguments, `lo` and `hi`**, which share `v`'s kind
+    !! -- `call pf_random_fill_draws(seed, i, v, lo, hi [, draw])`. Element `k` is then exactly
+    !! `pf_random_int_at(seed, i, lo, hi, draw+k-1)`, the same identity the real forms have with
+    !! `pf_random_at`. The specifics are distinguishable on `v`'s type alone, so the generic resolves
+    !! without ambiguity, and `lo > hi` is swapped rather than refused, exactly as in the scalar draw.
+    !!
+    !! **The integer form saves the call overhead and nothing else, deliberately.** An integer draw
+    !! consumes a whole block by contract (`int_at_impl` reads words 0 and 1 of block `draw-1`), so
+    !! consecutive integer draws are always consecutive *blocks* and there is no second pair to
+    !! amortise -- unlike `real64`, where one block serves two values. Do not "optimise" this by
+    !! pairing draws into one block: that would change every value the module returns.
     interface pf_random_fill_draws
         module procedure pf_random_fill_draws_r64_i32
         module procedure pf_random_fill_draws_r64_i64
         module procedure pf_random_fill_draws_r32_i32
         module procedure pf_random_fill_draws_r32_i64
+        module procedure pf_random_fill_draws_i32_i32
+        module procedure pf_random_fill_draws_i32_i64
+        module procedure pf_random_fill_draws_i64_i32
+        module procedure pf_random_fill_draws_i64_i64
     end interface pf_random_fill_draws
 
     !> Fills `v` with ONE draw of each of `size(v)` consecutive streams, starting at stream `i0`.
@@ -233,11 +249,21 @@ module parquet_random
     !! replaces: **1.28x on gfortran and 1.48x on ifx** for `real64`, **1.47x and 1.60x** for
     !! `real32`. When several values per stream
     !! are wanted, `pf_random_fill_draws` remains much the cheaper shape.
+    !!
+    !! **An INTEGER `v` takes two further required arguments, `lo` and `hi`**, which share `v`'s kind
+    !! -- `call pf_random_fill_streams(seed, i0, v, lo, hi [, draw])`. Element `k` is exactly
+    !! `pf_random_int_at(seed, i0+k-1, lo, hi [, draw])`. This axis was already one enciphering per
+    !! value for the real kinds, so unlike the draw-axis integer form there is nothing given up here
+    !! at all: it is the same work with the per-element call removed.
     interface pf_random_fill_streams
         module procedure pf_random_fill_streams_r64_i32
         module procedure pf_random_fill_streams_r64_i64
         module procedure pf_random_fill_streams_r32_i32
         module procedure pf_random_fill_streams_r32_i64
+        module procedure pf_random_fill_streams_i32_i32
+        module procedure pf_random_fill_streams_i32_i64
+        module procedure pf_random_fill_streams_i64_i32
+        module procedure pf_random_fill_streams_i64_i64
     end interface pf_random_fill_streams
 
     !> Derives an independent seed from a seed and a label, so one seed can fan out into families.
@@ -248,6 +274,115 @@ module parquet_random
         module procedure pf_random_key_i32
         module procedure pf_random_key_i64
     end interface pf_random_key
+
+    ! ================================================================================
+    ! Tier 1 -- the stateful stream
+    ! ================================================================================
+
+    !> Highest 0-based word position a stream may hold. A stream addresses `2**63` words, which at
+    !! the measured cost of a draw is some thousands of times the age of the universe -- so this
+    !! bound exists to keep the position arithmetic provably free of signed overflow, not because a
+    !! program will approach it. **That is a correctness requirement, not tidiness**: Risk-94 records
+    !! this module being caught with a compiler using one overflowing expression's undefinedness to
+    !! delete a branch hundreds of lines away, so a new unguarded overflow site on a hot path would
+    !! be a regression against Risk-95's "every remaining wrapping site is `#else`-arm only".
+    integer(int64), parameter :: stream_pos_max = huge(1_int64)
+
+    !> A walk along one stream: the same values tier 0 addresses, reached in sequence.
+    !!
+    !! Tier 0 answers "what is the value at this coordinate?". Some programs cannot ask that,
+    !! because how many values they need is data-dependent -- a rejection sampler, a random walk, a
+    !! resample of unknown length. This type carries the position so the caller does not have to,
+    !! and hands out consecutive values of one stream.
+    !!
+    !! **It changes no value.** A freshly seeded stream's `k`-th `%uniform` is exactly
+    !! `pf_random_at(seed, stream, k)`, its `k`-th `%uniform32` exactly `pf_random32_at(seed,
+    !! stream, k)`. The stream is a different way to reach the same grid, never a second generator.
+    !!
+    !! **Reproducibility is per iteration, and that is the discipline to follow**: seed at the top of
+    !! each loop iteration from a run-invariant label, then draw as many values as that iteration
+    !! needs.
+    !!
+    !! ```fortran
+    !! type(pf_random_stream) :: rng
+    !! !$omp parallel do schedule(dynamic) private(...)
+    !! do i = 1, n
+    !!     call rng%seed(seed, i)              ! O(1), no warm-up
+    !!     do while (...)                      ! however many draws this iteration turns out to need
+    !!         call rng%uniform(x)
+    !!     end do
+    !! end do
+    !! ```
+    !!
+    !! What can never be reproducible is one long-lived stream consumed *across* the iterations of a
+    !! dynamically scheduled loop -- the value an iteration receives then depends on how many draws
+    !! ran before it, which depends on the schedule. That is a property of every stateful generator,
+    !! not a limitation of this one; the answer to it is that `%seed` costs nothing.
+    !!
+    !! **Position is measured in 32-bit words, 1-based, and the word cost of each producer is
+    !! contract** -- `%jump`, `%position` and `%rewind` are denominated in it: `%uniform` 2,
+    !! `%uniform32` 1, `%bits` 2, `%int_range` 4. `%int_range` additionally starts on a block
+    !! boundary, advancing to the next one first if the stream is not on one, so a sequence mixing it
+    !! with the others can spend up to three further words on that alignment. This is what keeps an
+    !! `%int_range` equal to the `pf_random_int_at` at the same coordinate rather than re-reading
+    !! words a previous draw already used.
+    !!
+    !! **The type is plain scalars: no allocatable components, no `FINAL`, deliberately and
+    !! permanently.** gfortran does not reliably default-initialise an OpenMP `private()` copy of a
+    !! finalizable type, and ifx segfaults on a block-local instance of a type with allocatable
+    !! components inside a parallel region (`feature_risks.md` Risk-45). A type that is neither is
+    !! safe in both shapes, which is what makes a per-thread instance usable at all. Adding either to
+    !! this type would break every parallel use of it, on one compiler or the other.
+    !!
+    !! It holds the block it last enciphered, keyed by that block's index. One enciphering carries
+    !! two `real64` values or four `real32`s, so keeping it is worth **1.70x (gfortran) / 1.78x (ifx)**
+    !! on `real64` and **2.88x / 3.35x** on `real32` -- measured, and enough to take the stream from
+    !! slower than a tier-0 loop to faster than one. Because the cache is *keyed* rather than
+    !! consumed, it reaches nothing in the contract: `%position` still means a word index, and a
+    !! stream saved and restored through `%position` alone is exact.
+    !!
+    !! **`pf_random_fill_draws` is still cheaper again** (1.87x / 1.67x against this type), so bulk
+    !! work whose length is known in advance belongs there, not in a loop over a stream.
+    type, public :: pf_random_stream
+        private
+        integer(int64) :: key = 0_int64             !! the stream family's seed
+        integer(int64) :: stream = 0_int64          !! which stream of that family
+        integer(int64) :: pos = 0_int64             !! 0-based word position; `%position` reports `pos+1`
+        integer(int64) :: blk = -1_int64            !! block index held below, or -1 when none is
+        integer(int64) :: c0 = 0_int64              !! held word 0
+        integer(int64) :: c1 = 0_int64              !! held word 1
+        integer(int64) :: c2 = 0_int64              !! held word 2
+        integer(int64) :: c3 = 0_int64              !! held word 3
+    contains
+        procedure, private :: seed_base => stream_seed_base   !! `%seed` with no stream index
+        procedure, private :: seed_i32 => stream_seed_i32     !! `%seed` with an `int32` stream index
+        procedure, private :: seed_i64 => stream_seed_i64     !! `%seed` with an `int64` stream index
+        !> (Re)seeds the stream to position 1. O(1), with no warm-up; `stream` defaults to 0.
+        generic :: seed => seed_base, seed_i32, seed_i64
+        procedure :: uniform => stream_uniform      !! Next `real64` in `[0, 1)`; costs 2 words.
+        procedure :: uniform32 => stream_uniform32  !! Next `real32` in `[0, 1)`; costs 1 word.
+        procedure :: bits => stream_bits            !! Next 64 raw bits; costs 2 words.
+        procedure, private :: int_range_i32 => stream_int_range_i32  !! `%int_range`, `int32`
+        procedure, private :: int_range_i64 => stream_int_range_i64  !! `%int_range`, `int64`
+        !> Next integer in `[lo, hi]`, exactly unbiased; costs one block, taken block-aligned.
+        generic :: int_range => int_range_i32, int_range_i64
+        procedure, private :: fill_arr_r64 => stream_fill_r64        !! `%fill`, `real64`
+        procedure, private :: fill_arr_r32 => stream_fill_r32        !! `%fill`, `real32`
+        procedure, private :: fill_arr_i32 => stream_fill_i32        !! `%fill`, `int32`
+        procedure, private :: fill_arr_i64 => stream_fill_i64        !! `%fill`, `int64`
+        !> Fills `v` with the next `size(v)` values; an integer `v` also takes `lo` and `hi`.
+        generic :: fill => fill_arr_r64, fill_arr_r32, fill_arr_i32, fill_arr_i64
+        procedure, private :: jump_i32 => stream_jump_i32            !! `%jump`, `int32`
+        procedure, private :: jump_i64 => stream_jump_i64            !! `%jump`, `int64`
+        !> Seeks `n` words, in O(1). Negative seeks backwards; the result must stay in range.
+        generic :: jump => jump_i32, jump_i64
+        procedure, private :: rewind_base => stream_rewind_base      !! `%rewind` to position 1
+        procedure, private :: rewind_i32 => stream_rewind_i32        !! `%rewind`, `int32`
+        procedure, private :: rewind_i64 => stream_rewind_i64        !! `%rewind`, `int64`
+        !> Sets the position; with no argument, back to 1. Accepts any value `%position` gave.
+        generic :: rewind => rewind_base, rewind_i32, rewind_i64
+        procedure :: position => stream_position    !! Current 1-based word position.
+    end type pf_random_stream
 
 contains
 
@@ -405,6 +540,98 @@ contains
         integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
         call fill_streams_r32(seed, i0, v, draw_or_1(draw))
     end subroutine pf_random_fill_streams_r32_i64
+
+    ! The eight integer specifics. The two-token suffix reads value-kind first and stream-index-kind
+    ! second, exactly as `_r64_i32` does -- so `_i32_i64` fills an `integer(int32)` array from an
+    ! `integer(int64)` stream index.
+
+    !> `pf_random_fill_draws` filling `integer(int32)` from an `integer(int32)` stream index.
+    pure subroutine pf_random_fill_draws_i32_i32(seed, i, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        integer(int32), intent(out) :: v(:)         !! filled with values `draw .. draw+size(v)-1`
+        integer(int32), intent(in) :: lo            !! one end of the closed range
+        integer(int32), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_draws_i32(seed, int(i, int64), v, lo, hi, draw_or_1(draw))
+    end subroutine pf_random_fill_draws_i32_i32
+
+    !> `pf_random_fill_draws` filling `integer(int32)` from an `integer(int64)` stream index.
+    pure subroutine pf_random_fill_draws_i32_i64(seed, i, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int32), intent(out) :: v(:)         !! filled with values `draw .. draw+size(v)-1`
+        integer(int32), intent(in) :: lo            !! one end of the closed range
+        integer(int32), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_draws_i32(seed, i, v, lo, hi, draw_or_1(draw))
+    end subroutine pf_random_fill_draws_i32_i64
+
+    !> `pf_random_fill_draws` filling `integer(int64)` from an `integer(int32)` stream index.
+    pure subroutine pf_random_fill_draws_i64_i32(seed, i, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        integer(int64), intent(out) :: v(:)         !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_draws_i64(seed, int(i, int64), v, lo, hi, draw_or_1(draw))
+    end subroutine pf_random_fill_draws_i64_i32
+
+    !> `pf_random_fill_draws` filling `integer(int64)` from an `integer(int64)` stream index.
+    pure subroutine pf_random_fill_draws_i64_i64(seed, i, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int64), intent(out) :: v(:)         !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_draws_i64(seed, i, v, lo, hi, draw_or_1(draw))
+    end subroutine pf_random_fill_draws_i64_i64
+
+    !> `pf_random_fill_streams` filling `integer(int32)` from an `integer(int32)` first stream index.
+    pure subroutine pf_random_fill_streams_i32_i32(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i0            !! first stream index; sign-extends, so any value is valid
+        integer(int32), intent(out) :: v(:)         !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int32), intent(in) :: lo            !! one end of the closed range
+        integer(int32), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
+        call fill_streams_i32(seed, int(i0, int64), v, lo, hi, draw_or_1(draw))
+    end subroutine pf_random_fill_streams_i32_i32
+
+    !> `pf_random_fill_streams` filling `integer(int32)` from an `integer(int64)` first stream index.
+    pure subroutine pf_random_fill_streams_i32_i64(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index; every value is valid
+        integer(int32), intent(out) :: v(:)         !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int32), intent(in) :: lo            !! one end of the closed range
+        integer(int32), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
+        call fill_streams_i32(seed, i0, v, lo, hi, draw_or_1(draw))
+    end subroutine pf_random_fill_streams_i32_i64
+
+    !> `pf_random_fill_streams` filling `integer(int64)` from an `integer(int32)` first stream index.
+    pure subroutine pf_random_fill_streams_i64_i32(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i0            !! first stream index; sign-extends, so any value is valid
+        integer(int64), intent(out) :: v(:)         !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
+        call fill_streams_i64(seed, int(i0, int64), v, lo, hi, draw_or_1(draw))
+    end subroutine pf_random_fill_streams_i64_i32
+
+    !> `pf_random_fill_streams` filling `integer(int64)` from an `integer(int64)` first stream index.
+    pure subroutine pf_random_fill_streams_i64_i64(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index; every value is valid
+        integer(int64), intent(out) :: v(:)         !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end; `lo > hi` is swapped, not an error
+        integer(int64), intent(in), optional :: draw !! which draw of each stream; absent means 1
+        call fill_streams_i64(seed, i0, v, lo, hi, draw_or_1(draw))
+    end subroutine pf_random_fill_streams_i64_i64
 
     ! ================================================================================
     ! Seeding and key derivation
@@ -924,6 +1151,92 @@ contains
         end do
     end subroutine fill_streams_r32
 
+    !> Fills `v` with consecutive `integer(int64)` draws of one stream, starting at `draw`.
+    !!
+    !! **A plain loop over `int_at_impl`, and that is the whole implementation on purpose.** The
+    !! real-valued draw-axis fill is fast because one block carries two `real64` values; an integer
+    !! draw consumes a block on its own (`int_at_impl` reads words 0 and 1 of block `draw-1`), so
+    !! consecutive integer draws are consecutive blocks with nothing left over to amortise. There is
+    !! no block-walking form of this loop that returns the same values, and returning different ones
+    !! is a contract change, not an optimisation.
+    !!
+    !! Two things it does still buy over a caller's own loop: one call instead of `size(v)`, and the
+    !! `lo`/`hi` normalisation done once per call rather than once per element by the elemental
+    !! scalar entry point.
+    pure subroutine fill_draws_i64(seed, stream, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(out) :: v(:)         !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end
+        integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
+        integer(int64) :: k, m
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        do k = 1_int64, m
+            v(k) = int_at_impl(seed, stream, lo, hi, draw + k - 1_int64)
+        end do
+    end subroutine fill_draws_i64
+
+    !> `fill_draws_i64` narrowed to `integer(int32)`.
+    !!
+    !! The result is inside `[min(lo,hi), max(lo,hi)]` by construction, so the narrowing is exact --
+    !! the same argument `pf_random_int_at_i32` rests on.
+    pure subroutine fill_draws_i32(seed, stream, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int32), intent(out) :: v(:)         !! filled with values `draw .. draw+size(v)-1`
+        integer(int32), intent(in) :: lo            !! one end of the closed range
+        integer(int32), intent(in) :: hi            !! the other end
+        integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
+        integer(int64) :: k, m, a, b
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        a = int(lo, int64)
+        b = int(hi, int64)
+        do k = 1_int64, m
+            v(k) = int(int_at_impl(seed, stream, a, b, draw + k - 1_int64), int32)
+        end do
+    end subroutine fill_draws_i32
+
+    !> Fills `v` with one `integer(int64)` draw of each of `size(v)` consecutive streams.
+    !!
+    !! Unlike `fill_draws_i64` this gives up nothing at all against the real-valued form on the same
+    !! axis: that one already enciphered a block per value, because each element belongs to a
+    !! different stream.
+    pure subroutine fill_streams_i64(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index
+        integer(int64), intent(out) :: v(:)         !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: k, m
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        do k = 1_int64, m
+            v(k) = int_at_impl(seed, i0 + k - 1_int64, lo, hi, draw)
+        end do
+    end subroutine fill_streams_i64
+
+    !> `fill_streams_i64` narrowed to `integer(int32)`; exact for the same reason.
+    pure subroutine fill_streams_i32(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index
+        integer(int32), intent(out) :: v(:)         !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int32), intent(in) :: lo            !! one end of the closed range
+        integer(int32), intent(in) :: hi            !! the other end
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: k, m, a, b
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        a = int(lo, int64)
+        b = int(hi, int64)
+        do k = 1_int64, m
+            v(k) = int(int_at_impl(seed, i0 + k - 1_int64, a, b, draw), int32)
+        end do
+    end subroutine fill_streams_i32
+
     ! ================================================================================
     ! The integer rule -- exact rejection
     ! ================================================================================
@@ -1311,5 +1624,329 @@ contains
         integer(int64) :: r                         !! an independent seed
         r = mix64(ieor(mix64(seed), label))
     end function key_from
+
+    ! ================================================================================
+    ! Tier 1 -- the stateful stream
+    ! ================================================================================
+    !
+    ! These live in this file rather than in a `parquet_random_stream` submodule, and the reason is
+    ! a compiler fact rather than a preference. gfortran does not emit an out-of-line copy of a
+    ! private module-contained procedure whose in-module calls it has all inlined, so a submodule
+    ! calling `random_block`, `to_real64`, `int_at_impl` or any of the fill workers fails at LINK
+    ! time with `undefined reference` -- confirmed here, and the shape CLAUDE.md's "A private
+    ! procedure contained directly in a module ... fails at LINK time" note describes. The documented
+    ! fix is to give each such helper an interface in the module and a body in a submodule, which
+    ! for these eight would mean moving the cipher and its route (e) fork out of this file. That is
+    ! exactly what `feature_random_phase2.md` §6 says must not happen: `random_block`, `mulhilo64`,
+    ! `mul64_lo_strict` and `width_of` are what the whole correctness story rests on and belong
+    ! together. So the split was dropped, not the helpers.
+    !
+    ! Two things below are load-bearing and easy to undo by accident.
+    !
+    ! The BLOCK CACHE is keyed on the block index (`self%blk`), never drained as a queue. That is
+    ! what keeps it out of the contract: `%position` means a word index and nothing else, `%rewind`
+    ! just sets it, and a stream restored from a saved `%position` is exact because the cache is
+    ! derivable state that either matches or is replaced. A queue-shaped buffer would compute the
+    ! same values while putting a buffer state into everything `%position` means.
+    !
+    ! The POSITION GUARDS (`advance_by`, `seek_by`) exist so that no arithmetic on `pos` can
+    ! overflow. This module has already been caught once with a compiler using an overflowing
+    ! expression's undefinedness to delete a branch far away (`feature_risks.md` Risk-94), so an
+    ! unguarded `pos + 2` on the hot path would be a real regression rather than a theoretical one.
+
+    !> `%seed` with no stream index: stream 0.
+    pure subroutine stream_seed_base(self, seed)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to reseed
+        integer(int64), intent(in) :: seed              !! the stream family's seed
+        call reseed(self, seed, 0_int64)
+    end subroutine stream_seed_base
+
+    !> `%seed` with an `integer(int32)` stream index; sign-extends, so any value is valid.
+    pure subroutine stream_seed_i32(self, seed, stream)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to reseed
+        integer(int64), intent(in) :: seed              !! the stream family's seed
+        integer(int32), intent(in) :: stream            !! which stream of that family
+        call reseed(self, seed, int(stream, int64))
+    end subroutine stream_seed_i32
+
+    !> `%seed` with an `integer(int64)` stream index; every value is valid.
+    pure subroutine stream_seed_i64(self, seed, stream)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to reseed
+        integer(int64), intent(in) :: seed              !! the stream family's seed
+        integer(int64), intent(in) :: stream            !! which stream of that family
+        call reseed(self, seed, stream)
+    end subroutine stream_seed_i64
+
+    !> The current 1-based word position.
+    pure function stream_position(self) result(p)
+        class(pf_random_stream), intent(in) :: self     !! the stream to query
+        integer(int64) :: p                             !! 1-based word position
+        p = self%pos + 1_int64
+    end function stream_position
+
+    !> `%rewind` with no argument: back to position 1.
+    pure subroutine stream_rewind_base(self)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to reposition
+        call set_pos(self, 1_int64)
+    end subroutine stream_rewind_base
+
+    !> `%rewind` to an `integer(int32)` position.
+    pure subroutine stream_rewind_i32(self, pos)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to reposition
+        integer(int32), intent(in) :: pos               !! 1-based word position
+        call set_pos(self, int(pos, int64))
+    end subroutine stream_rewind_i32
+
+    !> `%rewind` to an `integer(int64)` position.
+    pure subroutine stream_rewind_i64(self, pos)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to reposition
+        integer(int64), intent(in) :: pos               !! 1-based word position
+        call set_pos(self, pos)
+    end subroutine stream_rewind_i64
+
+    !> `%jump` by an `integer(int32)` word count.
+    pure subroutine stream_jump_i32(self, n)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to seek
+        integer(int32), intent(in) :: n                 !! words to seek; negative seeks backwards
+        call seek_by(self, int(n, int64))
+    end subroutine stream_jump_i32
+
+    !> `%jump` by an `integer(int64)` word count.
+    pure subroutine stream_jump_i64(self, n)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to seek
+        integer(int64), intent(in) :: n                 !! words to seek; negative seeks backwards
+        call seek_by(self, n)
+    end subroutine stream_jump_i64
+
+    !> The next `real64` in `[0, 1)`, advancing two words.
+    pure subroutine stream_uniform(self, x)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: x                  !! a uniform draw in `[0, 1)`
+        integer(int64) :: w0, w1
+        call advance_by(self, 2_int64)
+        call word_at(self, self%pos - 2_int64, w0)
+        call word_at(self, self%pos - 1_int64, w1)
+        x = to_real64(ior(ishft(w1, 32), w0))
+    end subroutine stream_uniform
+
+    !> The next `real32` in `[0, 1)`, advancing one word.
+    pure subroutine stream_uniform32(self, x)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real32), intent(out) :: x                  !! a uniform draw in `[0, 1)`
+        integer(int64) :: w
+        call advance_by(self, 1_int64)
+        call word_at(self, self%pos - 1_int64, w)
+        x = to_real32(w)
+    end subroutine stream_uniform32
+
+    !> The next 64 raw bits, advancing two words -- the same two `%uniform` would have read.
+    pure subroutine stream_bits(self, b)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        integer(int64), intent(out) :: b                !! 64 raw bits
+        integer(int64) :: w0, w1
+        call advance_by(self, 2_int64)
+        call word_at(self, self%pos - 2_int64, w0)
+        call word_at(self, self%pos - 1_int64, w1)
+        b = ior(ishft(w1, 32), w0)
+    end subroutine stream_bits
+
+    !> `%int_range` for `integer(int64)` bounds and result.
+    pure subroutine stream_int_range_i64(self, lo, hi, r)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        integer(int64), intent(in) :: lo                !! one end of the closed range
+        integer(int64), intent(in) :: hi                !! the other end; `lo > hi` is swapped
+        integer(int64), intent(out) :: r                !! a uniform integer in the closed range
+        integer(int64) :: blk
+        call take_block(self, blk)
+        r = int_at_impl(self%key, self%stream, lo, hi, blk + 1_int64)
+    end subroutine stream_int_range_i64
+
+    !> `%int_range` for `integer(int32)` bounds and result.
+    !!
+    !! The result is inside the closed range by construction, so the narrowing is exact -- the same
+    !! argument `pf_random_int_at_i32` rests on.
+    pure subroutine stream_int_range_i32(self, lo, hi, r)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        integer(int32), intent(in) :: lo                !! one end of the closed range
+        integer(int32), intent(in) :: hi                !! the other end; `lo > hi` is swapped
+        integer(int32), intent(out) :: r                !! a uniform integer in the closed range
+        integer(int64) :: blk
+        call take_block(self, blk)
+        r = int(int_at_impl(self%key, self%stream, int(lo, int64), int(hi, int64), blk + 1_int64), int32)
+    end subroutine stream_int_range_i32
+
+    !> `%fill` for a `real64` array.
+    !!
+    !! Routes to `fill_r64` whenever the position is pair-aligned, because the bulk fills walk
+    !! blocks rather than values and beat even the cached stream by 1.67-1.87x. The values are
+    !! identical either way; only the number of encipherings differs.
+    pure subroutine stream_fill_r64(self, v)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: v(:)               !! filled with the next `size(v)` values
+        integer(int64) :: m, k, start
+        real(real64) :: x
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                        ! a zero-sized fill is a defined no-op
+        call advance_by(self, 2_int64 * m)              ! guard first: an abort writes nothing
+        start = self%pos - 2_int64 * m
+        if (modulo(start, 2_int64) == 0_int64) then
+            call fill_r64(self%key, self%stream, v, start / 2_int64 + 1_int64)
+        else
+            ! Started mid-pair, so every value straddles a pair boundary -- a position no tier-2
+            ! entry point addresses. Correct rather than fast, and rare.
+            self%pos = start
+            do k = 1_int64, m
+                call stream_uniform(self, x)
+                v(k) = x
+            end do
+        end if
+    end subroutine stream_fill_r64
+
+    !> `%fill` for a `real32` array. Every position is aligned for it: one value is one word.
+    pure subroutine stream_fill_r32(self, v)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real32), intent(out) :: v(:)               !! filled with the next `size(v)` values
+        integer(int64) :: m
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                        ! a zero-sized fill is a defined no-op
+        call advance_by(self, m)
+        call fill_r32(self%key, self%stream, v, self%pos - m + 1_int64)
+    end subroutine stream_fill_r32
+
+    !> `%fill` for an `integer(int64)` array; aligns to a block first, exactly as `%int_range` does.
+    pure subroutine stream_fill_i64(self, v, lo, hi)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        integer(int64), intent(out) :: v(:)             !! filled with the next `size(v)` values
+        integer(int64), intent(in) :: lo                !! one end of the closed range
+        integer(int64), intent(in) :: hi                !! the other end; `lo > hi` is swapped
+        integer(int64) :: m, blk
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                        ! a zero-sized fill is a defined no-op
+        call align_to_block(self)
+        blk = self%pos / 4_int64
+        call advance_by(self, 4_int64 * m)
+        call fill_draws_i64(self%key, self%stream, v, lo, hi, blk + 1_int64)
+    end subroutine stream_fill_i64
+
+    !> `%fill` for an `integer(int32)` array.
+    pure subroutine stream_fill_i32(self, v, lo, hi)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        integer(int32), intent(out) :: v(:)             !! filled with the next `size(v)` values
+        integer(int32), intent(in) :: lo                !! one end of the closed range
+        integer(int32), intent(in) :: hi                !! the other end; `lo > hi` is swapped
+        integer(int64) :: m, blk
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                        ! a zero-sized fill is a defined no-op
+        call align_to_block(self)
+        blk = self%pos / 4_int64
+        call advance_by(self, 4_int64 * m)
+        call fill_draws_i32(self%key, self%stream, v, lo, hi, blk + 1_int64)
+    end subroutine stream_fill_i32
+
+    !> Points the stream at `(seed, stream)`, position 1, holding nothing.
+    !!
+    !! Dropping the cache is required, not tidiness: `blk` indexes the *previous* family's blocks,
+    !! and a reseeded stream that kept it would answer its next draw from the old seed's words.
+    !! `-1` is unreachable as a real block index, since a position is never negative.
+    pure subroutine reseed(self, seed, stream)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to reseed
+        integer(int64), intent(in) :: seed              !! the stream family's seed
+        integer(int64), intent(in) :: stream            !! which stream of that family
+        self%key = seed
+        self%stream = stream
+        self%pos = 0_int64
+        self%blk = -1_int64
+    end subroutine reseed
+
+    !> Sets the 1-based position, refusing one that names no word.
+    pure subroutine set_pos(self, pos)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to reposition
+        integer(int64), intent(in) :: pos               !! 1-based word position
+        if (pos < 1_int64) then
+            error stop "pf_random_stream%rewind: position must be at least 1 (positions are 1-based)"
+        end if
+        self%pos = pos - 1_int64
+    end subroutine set_pos
+
+    !> Seeks `n` words, forwards or backwards, refusing to leave the addressable range.
+    !!
+    !! Both comparisons are written as subtractions from the bound rather than as `pos + n`,
+    !! precisely so that the check itself cannot overflow the thing it is checking.
+    pure subroutine seek_by(self, n)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to seek
+        integer(int64), intent(in) :: n                 !! words to seek; negative seeks backwards
+        if (n >= 0_int64) then
+            if (self%pos > stream_pos_max - n) then
+                error stop "pf_random_stream%jump: seek would pass the last addressable word of the stream"
+            end if
+        else
+            if (self%pos < -n) then
+                error stop "pf_random_stream%jump: backward seek would pass position 1"
+            end if
+        end if
+        self%pos = self%pos + n
+    end subroutine seek_by
+
+    !> Reserves the next `w` words and advances past them; the reads then use `pos-w .. pos-1`.
+    !!
+    !! Advancing BEFORE reading is what makes the guard total: a producer that aborts here has
+    !! written nothing and moved nothing, so an exhausted stream is left exactly where it was.
+    pure subroutine advance_by(self, w)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        integer(int64), intent(in) :: w                 !! words this producer consumes
+        if (self%pos > stream_pos_max - w) then
+            error stop "pf_random_stream: the stream is exhausted -- it addresses at most 2**63 words"
+        end if
+        self%pos = self%pos + w
+    end subroutine advance_by
+
+    !> Advances to the next block boundary if the stream is not already on one.
+    !!
+    !! `%int_range` and the integer fills need this because the integer rule addresses a *block*
+    !! (`int_at_impl` reads words 0 and 1 of block `draw-1`), not a word pair. Without it, an integer
+    !! draw taken at word 2 would re-read words 0 and 1 -- bits an earlier `%uniform` had already
+    !! handed out. Aligning costs at most three words, and is what keeps a stream's `%int_range`
+    !! equal to the `pf_random_int_at` at the same coordinate.
+    pure subroutine align_to_block(self)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to align
+        integer(int64) :: off
+        off = modulo(self%pos, 4_int64)
+        if (off /= 0_int64) call advance_by(self, 4_int64 - off)
+    end subroutine align_to_block
+
+    !> Aligns, then reserves one whole block, returning its index.
+    pure subroutine take_block(self, blk)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        integer(int64), intent(out) :: blk              !! index of the block reserved
+        call align_to_block(self)
+        blk = self%pos / 4_int64
+        call advance_by(self, 4_int64)
+    end subroutine take_block
+
+    !> One word of the stream, from the held block when it is the right one.
+    !!
+    !! The only place the cache is read or written. `p` is always a position this call's own
+    !! `advance_by` has already checked, so it is in range by construction.
+    pure subroutine word_at(self, p, w)
+        class(pf_random_stream), intent(inout) :: self  !! the stream holding the cache
+        integer(int64), intent(in) :: p                 !! 0-based word position
+        integer(int64), intent(out) :: w                !! that word, in `[0, 2**32)`
+        integer(int64) :: want
+        want = p / 4_int64
+        if (want /= self%blk) then
+            call random_block(self%key, self%stream, want, self%c0, self%c1, self%c2, self%c3)
+            self%blk = want
+        end if
+        select case (int(modulo(p, 4_int64), int32))
+        case (0)
+            w = self%c0
+        case (1)
+            w = self%c1
+        case (2)
+            w = self%c2
+        case default
+            w = self%c3
+        end select
+    end subroutine word_at
 
 end module parquet_random

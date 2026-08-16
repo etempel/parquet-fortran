@@ -56,6 +56,11 @@ contains
             new_unittest("golden vectors: pf_random_fill_draws", test_golden_fill), &
             new_unittest("cross-form: fill agrees with the scalar draws, prefixes are prefixes", test_cross_form), &
             new_unittest("the stream-axis fill agrees with the scalar draws on every shape", test_fill_streams), &
+            new_unittest("the integer bulk fills agree with pf_random_int_at on both axes", test_fill_int), &
+            new_unittest("a stream walks exactly the tier-0 grid, on every producer", test_stream_values), &
+            new_unittest("stream positioning: jump, rewind, position, and the block-aligned draw", &
+                         test_stream_position), &
+            new_unittest("stream fills equal the scalar bindings, aligned and unaligned", test_stream_fill), &
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
             new_unittest("the integer draw shares a block with the real draw at one coordinate", &
                 test_int_shares_block), &
@@ -471,6 +476,533 @@ contains
             if (allocated(error)) return
         end do
     end subroutine test_fill_streams
+
+    !> The integer bulk fills return exactly what `pf_random_int_at` returns at the same coordinate.
+    !!
+    !! No new golden vectors: every value here is already frozen by the tier-0 integer grid in
+    !! `test_random_vectors`, so what has to be asserted is the identity -- and the identity is also
+    !! the only thing that can break, since both forms reach the same `int_at_impl`.
+    !!
+    !! The shapes are chosen against the ways a bulk form can differ from its scalar twin rather
+    !! than for coverage: **both value kinds and both stream-index kinds** (four specifics per
+    !! generic, and a wrongly wired one would silently fill from the wrong axis); **a swept `draw`**,
+    !! because the draw-axis worker offsets each element and an off-by-one there is invisible at
+    !! `draw = 1`; **`lo > hi`**, which is documented as swapped rather than refused and is handled
+    !! once per call here against once per element in the elemental scalar; **`lo == hi`** and **the
+    !! full int64 width**, which are the two ranges that take their own arms inside `int_at_impl`;
+    !! **a negative `i0`**, since stream indices are signed; **a zero-sized fill**, a documented
+    !! no-op; and **prefix consistency**, which is what makes a bulk fill interchangeable with a
+    !! shorter one.
+    subroutine test_fill_int(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer :: k, d
+        integer(int64) :: dr
+        integer(int64) :: v(7), wide(5), short(3)
+        integer(int32) :: v32(7)
+        integer(int64) :: empty(0)
+
+        ! Draw axis, both value kinds, swept over five draws.
+        do d = 1, 5
+            dr = int(d, int64)
+            call pf_random_fill_draws(999_int64, 4_int64, v, 1_int64, 6_int64, dr)
+            call pf_random_fill_draws(999_int64, 4_int32, v32, 1_int32, 6_int32, dr)
+            do k = 1, 7
+                call check(error, v(k) == pf_random_int_at(999_int64, 4_int64, 1_int64, 6_int64, &
+                                                           dr + int(k, int64) - 1_int64), &
+                    "an int64 draw-axis fill element is not the scalar integer draw at that position")
+                if (allocated(error)) return
+                call check(error, v32(k) == pf_random_int_at(999_int64, 4_int32, 1_int32, 6_int32, &
+                                                             dr + int(k, int64) - 1_int64), &
+                    "an int32 draw-axis fill element is not the scalar int32 integer draw")
+                if (allocated(error)) return
+            end do
+        end do
+
+        ! The default `draw` is 1, and the two stream-index kinds agree.
+        call pf_random_fill_draws(999_int64, 4_int64, v, 1_int64, 6_int64)
+        do k = 1, 7
+            call check(error, v(k) == pf_random_int_at(999_int64, 4_int64, 1_int64, 6_int64, int(k, int64)), &
+                "an integer draw-axis fill with the default draw is not draw 1 onwards")
+            if (allocated(error)) return
+        end do
+        call pf_random_fill_draws(999_int64, 4_int32, v, 1_int64, 6_int64)
+        do k = 1, 7
+            call check(error, v(k) == pf_random_int_at(999_int64, 4_int64, 1_int64, 6_int64, int(k, int64)), &
+                "an int32 stream index does not agree with the int64 one on the integer draw axis")
+            if (allocated(error)) return
+        end do
+
+        ! `lo > hi` is swapped, not refused -- and the swap is done once per call here.
+        call pf_random_fill_draws(999_int64, 4_int64, v, 6_int64, 1_int64)
+        do k = 1, 7
+            call check(error, v(k) == pf_random_int_at(999_int64, 4_int64, 1_int64, 6_int64, int(k, int64)), &
+                "a reversed range in an integer fill does not equal the swapped range")
+            if (allocated(error)) return
+        end do
+
+        ! The two ranges with their own arms inside int_at_impl: degenerate, and the full width.
+        call pf_random_fill_draws(999_int64, 4_int64, v, 42_int64, 42_int64)
+        do k = 1, 7
+            call check(error, v(k) == 42_int64, "a degenerate range in an integer fill must return that value")
+            if (allocated(error)) return
+        end do
+        call pf_random_fill_draws(999_int64, 4_int64, wide, -huge(1_int64) - 1_int64, huge(1_int64))
+        do k = 1, 5
+            call check(error, wide(k) == pf_random_int_at(999_int64, 4_int64, -huge(1_int64) - 1_int64, &
+                                                          huge(1_int64), int(k, int64)), &
+                "a full-width integer fill disagrees with the scalar draw")
+            if (allocated(error)) return
+        end do
+        ! The full-width draw IS the raw bits -- but only at draw 1, where the integer rule's block
+        ! index `draw-1` and `bits_of`'s `(draw-1)/2` coincide. They diverge from draw 2 onwards, and
+        ! asserting the identity across the whole fill would be asserting something untrue of the
+        ! shipped scalar draw too.
+        call check(error, wide(1) == pf_random_bits_at(999_int64, 4_int64, 1_int64), &
+            "a full-width integer draw at draw 1 must be the raw bits at that coordinate")
+        if (allocated(error)) return
+        call check(error, wide(2) /= pf_random_bits_at(999_int64, 4_int64, 2_int64), &
+            "the full-width draw and the raw bits must diverge from draw 2, as int_at_impl documents")
+        if (allocated(error)) return
+
+        ! Prefix consistency: a shorter fill is a prefix of a longer one.
+        call pf_random_fill_draws(999_int64, 4_int64, short, 1_int64, 6_int64)
+        call pf_random_fill_draws(999_int64, 4_int64, v, 1_int64, 6_int64)
+        do k = 1, 3
+            call check(error, short(k) == v(k), "an integer fill's prefix is not a prefix of a longer fill")
+            if (allocated(error)) return
+        end do
+
+        ! Stream axis, both value kinds, and a negative first stream index.
+        call pf_random_fill_streams(999_int64, 1_int64, v, 1_int64, 6_int64, 3_int64)
+        call pf_random_fill_streams(999_int64, 1_int32, v32, 1_int32, 6_int32, 3_int64)
+        do k = 1, 7
+            call check(error, v(k) == pf_random_int_at(999_int64, int(k, int64), 1_int64, 6_int64, 3_int64), &
+                "an int64 stream-axis integer fill element is not the scalar draw for that stream")
+            if (allocated(error)) return
+            call check(error, int(v32(k), int64) == v(k), &
+                "the int32 stream-axis integer fill disagrees with the int64 one")
+            if (allocated(error)) return
+        end do
+        call pf_random_fill_streams(999_int64, -3_int64, v, 1_int64, 6_int64)
+        do k = 1, 7
+            call check(error, v(k) == pf_random_int_at(999_int64, -4_int64 + int(k, int64), &
+                                                       1_int64, 6_int64), &
+                "a stream-axis integer fill from a negative first index does not walk upwards")
+            if (allocated(error)) return
+        end do
+
+        ! Zero-sized fills on both axes are defined no-ops.
+        call pf_random_fill_draws(999_int64, 4_int64, empty, 1_int64, 6_int64)
+        call pf_random_fill_streams(999_int64, 4_int64, empty, 1_int64, 6_int64)
+        call check(error, size(empty) == 0, "a zero-sized integer fill must be a defined no-op")
+        if (allocated(error)) return
+
+        ! **Every one of the eight specifics, called explicitly.** The sweeps above resolve to
+        ! whichever specific their literals happen to select, and three of the eight were reached by
+        ! none of them -- found by mutation testing, not by reading: rewiring
+        ! `pf_random_fill_draws_i32_i64` to the stream-axis worker survived the whole suite. Eight
+        ! near-identical specifics differing only in two kind tokens are exactly the shape where a
+        ! copy-paste defect hides, so each is named here with a distinct value/index kind pair.
+        call check_specifics(error)
+    end subroutine test_fill_int
+
+    !> Calls each of the eight integer fill specifics by name-resolving literal kinds, and checks it
+    !! against the scalar draw at the same coordinate.
+    !!
+    !! Separate from `test_fill_int`'s body only because it is mechanical: the point is exhaustive
+    !! reach over the generic's specifics, not another property.
+    subroutine check_specifics(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64) :: d64(4)
+        integer(int32) :: d32(4)
+        integer(int64), parameter :: SD = 4242_int64
+        integer(int64), parameter :: ST = 11_int64
+
+        ! ---- draw axis: v kind x stream-index kind ----
+        call pf_random_fill_draws(SD, int(ST, int32), d32, 1_int32, 100_int32, 2_int64)   ! i32_i32
+        call expect32(error, d32, SD, ST, 1_int32, 100_int32, 2_int64, .true., "draws i32_i32")
+        if (allocated(error)) return
+        call pf_random_fill_draws(SD, ST, d32, 1_int32, 100_int32, 2_int64)               ! i32_i64
+        call expect32(error, d32, SD, ST, 1_int32, 100_int32, 2_int64, .true., "draws i32_i64")
+        if (allocated(error)) return
+        call pf_random_fill_draws(SD, int(ST, int32), d64, 1_int64, 100_int64, 2_int64)   ! i64_i32
+        call expect64(error, d64, SD, ST, 1_int64, 100_int64, 2_int64, .true., "draws i64_i32")
+        if (allocated(error)) return
+        call pf_random_fill_draws(SD, ST, d64, 1_int64, 100_int64, 2_int64)               ! i64_i64
+        call expect64(error, d64, SD, ST, 1_int64, 100_int64, 2_int64, .true., "draws i64_i64")
+        if (allocated(error)) return
+
+        ! ---- stream axis ----
+        call pf_random_fill_streams(SD, int(ST, int32), d32, 1_int32, 100_int32, 2_int64) ! i32_i32
+        call expect32(error, d32, SD, ST, 1_int32, 100_int32, 2_int64, .false., "streams i32_i32")
+        if (allocated(error)) return
+        call pf_random_fill_streams(SD, ST, d32, 1_int32, 100_int32, 2_int64)             ! i32_i64
+        call expect32(error, d32, SD, ST, 1_int32, 100_int32, 2_int64, .false., "streams i32_i64")
+        if (allocated(error)) return
+        call pf_random_fill_streams(SD, int(ST, int32), d64, 1_int64, 100_int64, 2_int64) ! i64_i32
+        call expect64(error, d64, SD, ST, 1_int64, 100_int64, 2_int64, .false., "streams i64_i32")
+        if (allocated(error)) return
+        call pf_random_fill_streams(SD, ST, d64, 1_int64, 100_int64, 2_int64)             ! i64_i64
+        call expect64(error, d64, SD, ST, 1_int64, 100_int64, 2_int64, .false., "streams i64_i64")
+
+        ! The two axes must DISAGREE on this fixture, or the checks above would pass for a specific
+        ! wired to either worker -- which is precisely the defect that survived before they existed.
+        if (allocated(error)) return
+        call pf_random_fill_draws(SD, ST, d64, 1_int64, 100_int64, 2_int64)
+        call pf_random_fill_streams(SD, ST, d32, 1_int32, 100_int32, 2_int64)
+        call check(error, .not. all(int(d32, int64) == d64), &
+            "the draw and stream axes agree on this fixture, so an axis mix-up would be invisible")
+    end subroutine check_specifics
+
+    !> Checks an `int32` integer fill against the scalar draw; `by_draw` selects which axis walks.
+    subroutine expect32(error, v, seed, stream, lo, hi, draw, by_draw, what)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int32), intent(in) :: v(:)          !! the filled array
+        integer(int64), intent(in) :: seed          !! the seed used
+        integer(int64), intent(in) :: stream        !! the stream (or first stream) used
+        integer(int32), intent(in) :: lo            !! range low end
+        integer(int32), intent(in) :: hi            !! range high end
+        integer(int64), intent(in) :: draw          !! the starting (or fixed) draw
+        logical, intent(in) :: by_draw              !! `.true.` for the draw axis
+        character(len=*), intent(in) :: what        !! the specific's name, for the failure message
+        integer :: k
+        do k = 1, size(v)
+            if (by_draw) then
+                call check(error, v(k) == pf_random_int_at(seed, stream, int(lo, int64), int(hi, int64), &
+                                                           draw + int(k, int64) - 1_int64), what)
+            else
+                call check(error, v(k) == pf_random_int_at(seed, stream + int(k, int64) - 1_int64, &
+                                                           int(lo, int64), int(hi, int64), draw), what)
+            end if
+            if (allocated(error)) return
+        end do
+    end subroutine expect32
+
+    !> `expect32` for an `int64` fill.
+    subroutine expect64(error, v, seed, stream, lo, hi, draw, by_draw, what)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), intent(in) :: v(:)          !! the filled array
+        integer(int64), intent(in) :: seed          !! the seed used
+        integer(int64), intent(in) :: stream        !! the stream (or first stream) used
+        integer(int64), intent(in) :: lo            !! range low end
+        integer(int64), intent(in) :: hi            !! range high end
+        integer(int64), intent(in) :: draw          !! the starting (or fixed) draw
+        logical, intent(in) :: by_draw              !! `.true.` for the draw axis
+        character(len=*), intent(in) :: what        !! the specific's name, for the failure message
+        integer :: k
+        do k = 1, size(v)
+            if (by_draw) then
+                call check(error, v(k) == pf_random_int_at(seed, stream, lo, hi, &
+                                                           draw + int(k, int64) - 1_int64), what)
+            else
+                call check(error, v(k) == pf_random_int_at(seed, stream + int(k, int64) - 1_int64, &
+                                                           lo, hi, draw), what)
+            end if
+            if (allocated(error)) return
+        end do
+    end subroutine expect64
+
+    !> A freshly seeded stream hands out exactly the tier-0 values, for every producer.
+    !!
+    !! **No new golden vectors, and that is a property of the design rather than an omission.**
+    !! `feature_random_phase2.md` §8 anticipated tier 1 needing its own vectors "because `%uniform`
+    !! is a new mapping from position to value". It is not: a block-cached stream reads the same
+    !! words at the same positions as the tier-0 grid, which the existing vectors already freeze. So
+    !! the thing to assert is the identity -- and the identity is also the only thing that can break,
+    !! since a wrong cache, a wrong word order or a wrong advance all show up as a disagreement here.
+    !!
+    !! The mixed-producer case at the end is the sharp one: `%uniform32` leaves the position odd, so
+    !! the following `%uniform` reads a pair that straddles a block boundary. That pair is a position
+    !! no tier-0 entry point names, so it is checked against the raw block words instead.
+    subroutine test_stream_values(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_random_stream) :: rng, dflt
+        integer :: k
+        real(real64) :: x, ref(6)
+        real(real32) :: y
+        integer(int64) :: b, ir
+        integer(int32) :: ir32
+        integer(int64) :: w0, w1, w2, w3, v0, v1, v2, v3
+
+        ! %uniform walks the draw axis of one stream.
+        call rng%seed(777_int64, 3_int64)
+        do k = 1, 6
+            call rng%uniform(x)
+            call check(error, x == pf_random_at(777_int64, 3_int64, int(k, int64)), &
+                "a stream's k-th %uniform is not pf_random_at at draw k")
+            if (allocated(error)) return
+        end do
+
+        ! ... and equals the bulk draw-axis fill over the same range.
+        call pf_random_fill_draws(777_int64, 3_int64, ref)
+        call rng%seed(777_int64, 3_int64)
+        do k = 1, 6
+            call rng%uniform(x)
+            call check(error, x == ref(k), "a stream disagrees with pf_random_fill_draws over the same range")
+            if (allocated(error)) return
+        end do
+
+        ! %uniform32 is one word per value, so it walks the real32 grid.
+        call rng%seed(777_int64, 3_int64)
+        do k = 1, 6
+            call rng%uniform32(y)
+            call check(error, y == pf_random32_at(777_int64, 3_int64, int(k, int64)), &
+                "a stream's k-th %uniform32 is not pf_random32_at at draw k")
+            if (allocated(error)) return
+        end do
+
+        ! %bits reads the same two words %uniform would have.
+        call rng%seed(777_int64, 3_int64)
+        do k = 1, 6
+            call rng%bits(b)
+            call check(error, b == pf_random_bits_at(777_int64, 3_int64, int(k, int64)), &
+                "a stream's k-th %bits is not pf_random_bits_at at draw k")
+            if (allocated(error)) return
+        end do
+
+        ! %int_range takes one block per draw, so it walks the integer grid.
+        call rng%seed(777_int64, 3_int64)
+        do k = 1, 6
+            call rng%int_range(1_int64, 1000_int64, ir)
+            call check(error, ir == pf_random_int_at(777_int64, 3_int64, 1_int64, 1000_int64, int(k, int64)), &
+                "a stream's k-th %int_range is not pf_random_int_at at draw k")
+            if (allocated(error)) return
+        end do
+        call rng%seed(777_int64, 3_int64)
+        call rng%int_range(1_int32, 1000_int32, ir32)
+        call check(error, int(ir32, int64) == pf_random_int_at(777_int64, 3_int64, 1_int64, 1000_int64), &
+            "the int32 %int_range specific disagrees with the int64 one")
+        if (allocated(error)) return
+
+        ! Seeding with no stream index means stream 0, and the two kind specifics agree.
+        call rng%seed(777_int64)
+        call rng%uniform(x)
+        call check(error, x == pf_random_at(777_int64, 0_int64), "%seed with no stream index is not stream 0")
+        if (allocated(error)) return
+        call rng%seed(777_int64, 3_int32)
+        call rng%uniform(x)
+        call check(error, x == pf_random_at(777_int64, 3_int64), &
+            "%seed with an int32 stream index disagrees with the int64 one")
+        if (allocated(error)) return
+
+        ! A default-initialised stream is %seed(0, 0) -- there is no constructor to lean on, since
+        ! the type deliberately has no FINAL and no allocatable components.
+        call dflt%uniform(x)
+        call rng%seed(0_int64, 0_int64)
+        call rng%uniform(ref(1))
+        call check(error, x == ref(1), "a default-initialised stream is not %seed(0, 0)")
+        if (allocated(error)) return
+
+        ! Mixed producers: %uniform32 leaves the position odd, so the next %uniform reads words 1
+        ! and 2 of the block -- a pair no tier-0 entry point addresses. Check it against the words.
+        call parquet_debug_random_block(777_int64, 3_int64, 0_int64, w0, w1, w2, w3)
+        call parquet_debug_random_block(777_int64, 3_int64, 1_int64, v0, v1, v2, v3)
+        call rng%seed(777_int64, 3_int64)
+        call rng%uniform32(y)
+        call check(error, rng%position() == 2_int64, "%uniform32 must cost exactly one word")
+        if (allocated(error)) return
+        call rng%uniform(x)
+        call check(error, x == to_r64_local(ior(ishft(w2, 32), w1)), &
+            "a straddling %uniform did not read words 1 and 2, low half first")
+        if (allocated(error)) return
+        call rng%uniform(x)
+        call check(error, x == to_r64_local(ior(ishft(v0, 32), w3)), &
+            "a %uniform spanning a block boundary did not read word 3 then word 0 of the next block")
+    end subroutine test_stream_values
+
+    !> `%jump`, `%rewind`, `%position`, and the block alignment `%int_range` performs.
+    subroutine test_stream_position(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_random_stream) :: rng, ref
+        integer :: k
+        real(real64) :: a(4), b(4), x
+        real(real32) :: y
+        integer(int64) :: saved, ir
+
+        ! A fresh stream is at position 1, and each producer costs its documented number of words.
+        call rng%seed(5_int64, 2_int64)
+        call check(error, rng%position() == 1_int64, "a freshly seeded stream is not at position 1")
+        if (allocated(error)) return
+        call rng%uniform(x)
+        call check(error, rng%position() == 3_int64, "%uniform must cost exactly two words")
+        if (allocated(error)) return
+        call rng%bits(saved)
+        call check(error, rng%position() == 5_int64, "%bits must cost exactly two words")
+        if (allocated(error)) return
+        call rng%int_range(1_int64, 6_int64, ir)
+        call check(error, rng%position() == 9_int64, "%int_range from a block boundary must cost four words")
+        if (allocated(error)) return
+
+        ! From an unaligned position, %int_range first advances to the next block boundary.
+        call rng%seed(5_int64, 2_int64)
+        call rng%uniform32(y)                        ! position 2, which is not a block boundary
+        call rng%int_range(1_int64, 6_int64, ir)
+        call check(error, rng%position() == 9_int64, &
+            "%int_range from an unaligned position must align first, then cost four words")
+        if (allocated(error)) return
+        call check(error, ir == pf_random_int_at(5_int64, 2_int64, 1_int64, 6_int64, 2_int64), &
+            "an aligned %int_range must equal the integer draw of the block it landed on")
+        if (allocated(error)) return
+
+        ! %jump(n) equals discarding n words' worth of draws.
+        call rng%seed(5_int64, 2_int64)
+        call rng%jump(6_int64)                       ! six words == three real64 draws
+        call rng%uniform(x)
+        call check(error, x == pf_random_at(5_int64, 2_int64, 4_int64), &
+            "%jump by six words did not land on draw 4")
+        if (allocated(error)) return
+        call ref%seed(5_int64, 2_int64)
+        do k = 1, 3
+            call ref%uniform(a(1))
+        end do
+        call ref%uniform(a(2))
+        call check(error, a(2) == x, "%jump does not equal discarding the same number of words")
+        if (allocated(error)) return
+
+        ! A negative jump seeks backwards; the int32 specific agrees with the int64 one.
+        call rng%jump(-2_int32)
+        call rng%uniform(x)
+        call check(error, x == pf_random_at(5_int64, 2_int64, 4_int64), &
+            "a backward %jump did not return to the draw just taken")
+        if (allocated(error)) return
+
+        ! %rewind round-trips through whatever %position gave.
+        call rng%seed(5_int64, 2_int64)
+        call rng%uniform(x)
+        saved = rng%position()
+        do k = 1, 4
+            call rng%uniform(a(k))
+        end do
+        call rng%rewind(saved)
+        do k = 1, 4
+            call rng%uniform(b(k))
+        end do
+        do k = 1, 4
+            call check(error, a(k) == b(k), "%rewind to a saved %position did not reproduce the same values")
+            if (allocated(error)) return
+        end do
+        call rng%rewind(int(saved, int32))
+        call rng%uniform(x)
+        call check(error, x == a(1), "the int32 %rewind specific disagrees with the int64 one")
+        if (allocated(error)) return
+
+        ! %rewind with no argument is position 1.
+        call rng%rewind()
+        call check(error, rng%position() == 1_int64, "%rewind with no argument is not position 1")
+        if (allocated(error)) return
+        call rng%uniform(x)
+        call check(error, x == pf_random_at(5_int64, 2_int64, 1_int64), &
+            "%rewind with no argument did not return to the first draw")
+        if (allocated(error)) return
+
+        ! Reseeding must drop the held block: it indexes the PREVIOUS family's words.
+        call rng%seed(5_int64, 2_int64)
+        call rng%uniform(x)
+        call rng%seed(6_int64, 2_int64)
+        call rng%uniform(x)
+        call check(error, x == pf_random_at(6_int64, 2_int64, 1_int64), &
+            "a reseeded stream answered from the previous seed's block")
+    end subroutine test_stream_position
+
+    !> `%fill` equals a loop of the matching scalar binding, from both aligned and unaligned starts.
+    subroutine test_stream_fill(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        type(pf_random_stream) :: rng, ref
+        integer :: k
+        real(real64) :: v(5), w(5)
+        real(real32) :: s(5), t(5)
+        integer(int64) :: iv(5), iw(5)
+        integer(int32) :: jv(5), jw(5)
+        real(real64) :: empty(0)
+
+        ! real64, from a pair-aligned start: the fast path.
+        call rng%seed(31_int64, 4_int64)
+        call rng%fill(v)
+        call ref%seed(31_int64, 4_int64)
+        do k = 1, 5
+            call ref%uniform(w(k))
+        end do
+        do k = 1, 5
+            call check(error, v(k) == w(k), "a real64 %fill disagrees with a loop of %uniform")
+            if (allocated(error)) return
+        end do
+        call check(error, rng%position() == ref%position(), &
+            "a real64 %fill left the position somewhere a loop of %uniform would not")
+        if (allocated(error)) return
+
+        ! real64, from an UNALIGNED start: the slow path, which no tier-2 entry point can serve.
+        call rng%seed(31_int64, 4_int64)
+        call rng%uniform32(s(1))
+        call rng%fill(v)
+        call ref%seed(31_int64, 4_int64)
+        call ref%uniform32(t(1))
+        do k = 1, 5
+            call ref%uniform(w(k))
+        end do
+        do k = 1, 5
+            call check(error, v(k) == w(k), &
+                "an unaligned real64 %fill disagrees with a loop of %uniform from the same position")
+            if (allocated(error)) return
+        end do
+        call check(error, rng%position() == ref%position(), &
+            "an unaligned real64 %fill left the position somewhere a loop of %uniform would not")
+        if (allocated(error)) return
+
+        ! real32: one value per word, so every start is aligned.
+        call rng%seed(31_int64, 4_int64)
+        call rng%uniform32(s(1))                     ! deliberately start off a block boundary
+        call rng%fill(s)
+        call ref%seed(31_int64, 4_int64)
+        call ref%uniform32(t(1))
+        do k = 1, 5
+            call ref%uniform32(t(k))
+        end do
+        do k = 1, 5
+            call check(error, s(k) == t(k), "a real32 %fill disagrees with a loop of %uniform32")
+            if (allocated(error)) return
+        end do
+
+        ! Integer fills align to a block first, exactly as %int_range does.
+        call rng%seed(31_int64, 4_int64)
+        call rng%fill(iv, 1_int64, 50_int64)
+        call ref%seed(31_int64, 4_int64)
+        do k = 1, 5
+            call ref%int_range(1_int64, 50_int64, iw(k))
+        end do
+        do k = 1, 5
+            call check(error, iv(k) == iw(k), "an int64 %fill disagrees with a loop of %int_range")
+            if (allocated(error)) return
+        end do
+        call check(error, rng%position() == ref%position(), &
+            "an int64 %fill left the position somewhere a loop of %int_range would not")
+        if (allocated(error)) return
+
+        call rng%seed(31_int64, 4_int64)
+        call rng%uniform32(s(1))                     ! unaligned, so the fill must align first
+        call rng%fill(jv, 1_int32, 50_int32)
+        call ref%seed(31_int64, 4_int64)
+        call ref%uniform32(t(1))
+        do k = 1, 5
+            call ref%int_range(1_int32, 50_int32, jw(k))
+        end do
+        do k = 1, 5
+            call check(error, jv(k) == jw(k), &
+                "an unaligned int32 %fill disagrees with a loop of %int_range from the same position")
+            if (allocated(error)) return
+        end do
+
+        ! A zero-sized fill is a defined no-op that moves nothing.
+        call rng%seed(31_int64, 4_int64)
+        call rng%fill(empty)
+        call check(error, rng%position() == 1_int64, "a zero-sized %fill must not move the position")
+    end subroutine test_stream_fill
+
+    !> The module's `real64` mapping, repeated here so a straddling pair can be checked directly.
+    pure function to_r64_local(bits) result(r)
+        integer(int64), intent(in) :: bits          !! any 64-bit pattern
+        real(real64) :: r                           !! `[0, 1)`
+        r = real(ishft(bits, -11), real64) * 2.0_real64**(-53)
+    end function to_r64_local
 
     !> `pf_random_at` is exactly the top 53 bits of `pf_random_bits_at`, over a sweep.
     subroutine test_bits_identity(error)

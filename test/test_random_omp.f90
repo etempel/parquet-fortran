@@ -43,7 +43,8 @@ contains
 
         testsuite = [ &
             new_unittest("draws are identical under every schedule and thread count", test_schedule_independence), &
-            new_unittest("pf_random_seed differs across concurrent threads", test_seed_across_threads) &
+            new_unittest("pf_random_seed differs across concurrent threads", test_seed_across_threads), &
+            new_unittest("a per-iteration stream reproduces under every schedule", test_stream_schedule) &
             ]
     end subroutine collect_tests_parquet_random_omp
 
@@ -149,6 +150,97 @@ contains
         call check(error, all(serial >= 0.0_real64 .and. serial < 1.0_real64), &
             "a draw escaped [0, 1) -- the arms agree but on the wrong values")
     end subroutine test_schedule_independence
+
+    !> A `pf_random_stream` seeded per iteration reproduces under every schedule and thread count.
+    !!
+    !! This is the tier-1 analogue of the test above, and it is the case tier 1 exists for: each
+    !! iteration draws a **data-dependent** number of values, which is exactly what a coordinate
+    !! cannot express in advance. What makes it reproducible is the discipline the guide states --
+    !! seed from a run-invariant label at the top of the iteration -- not anything about the type.
+    !!
+    !! **The stream is declared in a `block`, never in a `private()` clause**, and that is
+    !! load-bearing rather than stylistic: it is the library-wide rule for a per-thread derived type
+    !! (`feature_risks.md` Risk-45). `pf_random_stream` is deliberately plain scalars with no
+    !! allocatable components and no `FINAL`, which is what keeps *both* shapes safe here -- but the
+    !! example a user copies must be the one that stays safe if the type ever gains either.
+    subroutine test_stream_schedule(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: serial(n), stat(n), dyn(n), many(n)
+        integer :: i, team_dynamic, want
+
+        team_dynamic = 1
+        want = 2
+#ifdef _OPENMP
+        want = max(2, omp_get_max_threads())
+#endif
+
+        do i = 1, n
+            serial(i) = stream_walk(i)
+        end do
+
+#ifdef _OPENMP
+        !$omp parallel do schedule(static) num_threads(want) default(shared) private(i)
+        do i = 1, n
+            stat(i) = stream_walk(i)
+        end do
+        !$omp end parallel do
+
+        !$omp parallel do schedule(dynamic, 1) num_threads(want) default(shared) private(i)
+        do i = 1, n
+            if (i == 1) team_dynamic = omp_get_num_threads()
+            dyn(i) = stream_walk(i)
+        end do
+        !$omp end parallel do
+
+        !$omp parallel do schedule(dynamic, 3) num_threads(7) default(shared) private(i)
+        do i = 1, n
+            many(i) = stream_walk(i)
+        end do
+        !$omp end parallel do
+
+        call check(error, team_dynamic > 1, &
+            "vacuity guard: the schedule(dynamic,1) region ran with a team of one, so nothing was varied")
+        if (allocated(error)) return
+#else
+        stat = serial
+        dyn = serial
+        many = serial
+#endif
+
+        call check(error, all(stat == serial), "a streamed schedule(static) run differed from the serial one")
+        if (allocated(error)) return
+        call check(error, all(dyn == serial), "a streamed schedule(dynamic,1) run differed from the serial one")
+        if (allocated(error)) return
+        call check(error, all(many == serial), "a streamed 7-thread run differed from the serial one")
+        if (allocated(error)) return
+        call check(error, all(serial >= 0.0_real64 .and. serial < 1.0_real64), &
+            "a streamed draw escaped [0, 1) -- the arms agree but on the wrong values")
+    end subroutine test_stream_schedule
+
+    !> One iteration's streamed work: seed from the iteration's own label, then draw until a
+    !! condition on the values themselves is met, and return the last value drawn.
+    !!
+    !! The loop count depends on the draws, so no coordinate names the result in advance -- which is
+    !! what makes this a tier-1 test rather than a tier-0 one wearing a different hat. The bound
+    !! keeps a pathological stream from running long; it is not the usual exit.
+    function stream_walk(i) result(last)
+        integer, intent(in) :: i                    !! the iteration's run-invariant label
+        real(real64) :: last                        !! the last value this iteration drew
+        block
+            type(pf_random_stream) :: rng           ! in a block, NOT in private() -- see Risk-45
+            real(real64) :: x
+            integer :: taken
+            call rng%seed(20260816_int64, i)
+            last = 0.0_real64
+            taken = 0
+            do
+                call rng%uniform(x)
+                last = x
+                taken = taken + 1
+                if (x < 0.2_real64 .or. taken >= 64) exit
+            end do
+        end block
+    end function stream_walk
 
     !> One draw plus an index-dependent amount of extra, stored work.
     !!

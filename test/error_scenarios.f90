@@ -542,6 +542,14 @@ program error_scenarios
         call scenario_sorting_column_no_kind()
     case ("sorting_merge_unsorted")
         call scenario_sorting_merge_unsorted()
+    case ("random_stream_exhausted")
+        call scenario_random_stream_exhausted()
+    case ("random_stream_jump_overflow")
+        call scenario_random_stream_jump_overflow()
+    case ("random_stream_jump_before_start")
+        call scenario_random_stream_jump_before_start()
+    case ("random_stream_rewind_below_one")
+        call scenario_random_stream_rewind_below_one()
     case ("sort_unknown_column")
         call scenario_sort_unknown_column()
     case ("sort_vector_column")
@@ -14730,6 +14738,59 @@ contains
         call pf_merge(a, b, m)   ! -> aborts (b is not sorted)
         print '(a,i0)', "unexpectedly merged an unsorted input, size=", size(m)
     end subroutine scenario_sorting_merge_unsorted
+
+    !> A stream addresses `2**63` words and no more, so a draw whose words would pass that bound
+    !! has nowhere to come from. The guard exists as much for the arithmetic as for the caller:
+    !! an unguarded `pos + 2` here would be a deliberate signed-overflow site on a hot path, and
+    !! Risk-94 records this module being caught with a compiler using exactly that kind of
+    !! undefinedness to delete a branch far away. The first draw is the control -- it must succeed
+    !! from a position one word below the ceiling.
+    subroutine scenario_random_stream_exhausted()
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%rewind(huge(1_int64) - 2_int64)
+        call rng%uniform(x)                       ! control: the last pair that still fits
+        print '(a,i0)', "drew the final pair, position now ", rng%position()
+        call rng%uniform(x)   ! -> aborts (no words left)
+        print '(a,f8.5)', "unexpectedly drew past the end of the stream: ", x
+    end subroutine scenario_random_stream_exhausted
+
+    !> `%jump` past the last addressable word is refused rather than wrapped, and the check is
+    !! written as a subtraction from the bound so that the check itself cannot overflow.
+    subroutine scenario_random_stream_jump_overflow()
+        type(pf_random_stream) :: rng
+        call rng%seed(1_int64, 1_int64)
+        call rng%jump(huge(1_int64) - 1_int64)    ! control: lands exactly on the last word
+        print '(a,i0)', "jumped to the last addressable word, position ", rng%position()
+        call rng%jump(8_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly jumped past the end, position ", rng%position()
+    end subroutine scenario_random_stream_jump_overflow
+
+    !> A backward `%jump` is legal -- it is how a caller re-reads what it just drew -- but not
+    !! past the start, where there is no position 0 to land on.
+    subroutine scenario_random_stream_jump_before_start()
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%uniform(x)
+        call rng%jump(-2_int64)                   ! control: back to the start, which is valid
+        print '(a,i0)', "seeked back to position ", rng%position()
+        call rng%jump(-1_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly seeked before the start, position ", rng%position()
+    end subroutine scenario_random_stream_jump_before_start
+
+    !> Positions are 1-based, so `%rewind` accepts exactly what `%position` gives and nothing
+    !! below it. Absorbing a 0 would silently answer from position 1 and hide a caller's
+    !! off-by-one in code whose whole purpose is reproducibility.
+    subroutine scenario_random_stream_rewind_below_one()
+        type(pf_random_stream) :: rng
+        call rng%seed(1_int64, 1_int64)
+        call rng%rewind(1_int64)                  ! control: the lowest valid position
+        print '(a,i0)', "rewound to position ", rng%position()
+        call rng%rewind(0_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly rewound below the start, position ", rng%position()
+    end subroutine scenario_random_stream_rewind_below_one
 
     !> A typed keyword makes the writer synthesize a "<KEY>.datatype" entry, so a caller's own
     !! entry of that name would be a second writer of the same key and the file would carry two,

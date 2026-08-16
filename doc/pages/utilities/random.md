@@ -150,6 +150,26 @@ Each fill has a precondition on the axis it walks: the last position it addresse
 representable in `integer(int64)` — `draw + size(v) - 1` for one, `i0 + size(v) - 1` for the other.
 Ordinary calls are nowhere near either.
 
+**Both fills also take an integer array**, with the range given as two further required arguments:
+
+```fortran
+integer :: dice(n), lots(n)
+
+call pf_random_fill_draws  (seed, 1, dice, 1, 6)   ! dice(k) == pf_random_int_at(seed, 1, 1, 6, k)
+call pf_random_fill_streams(seed, 1, lots, 1, 6)   ! lots(k) == pf_random_int_at(seed, k, 1, 6)
+```
+
+`lo` and `hi` share the array's kind (`integer(int32)` or `integer(int64)`), and a reversed range is
+swapped rather than refused, exactly as in `pf_random_int_at`. Each element is precisely the scalar
+integer draw at the same coordinate, so these are interchangeable with a loop in the same way the
+real-valued fills are.
+
+One asymmetry to expect: **the integer draw-axis fill saves the per-element call and nothing more.**
+An integer draw consumes a whole enciphering on its own — the exact-rejection rule needs a full
+64-bit candidate and takes its own block — so consecutive integer draws cannot share a block the way
+two consecutive `real64` values do. The stream-axis integer fill gives up nothing at all by
+comparison, since that axis already spent one enciphering per value.
+
 ### Filling several values at once
 
 `pf_random_fill_draws` fills `v` with the values at positions `draw .. draw+size(v)-1` of one stream —
@@ -189,6 +209,87 @@ It is total: `lo > hi` is swapped rather than rejected, and `lo == hi` returns t
 die   = pf_random_int_at(seed, i, 1, 6)
 index = pf_random_int_at(seed, i, 1_int64, huge(1_int64))    ! any width, still exact
 ```
+
+## When you don't know how many numbers you need: `pf_random_stream`
+
+Everything above answers "what is the value at this coordinate?". Some programs cannot ask that,
+because how many values they need depends on the data — a rejection sampler, a random walk, a
+resample of unknown length. `pf_random_stream` carries the position for you and hands out
+consecutive values of one stream:
+
+```fortran
+type(pf_random_stream) :: rng
+real(real64) :: x
+
+call rng%seed(seed, i)               ! stream i of this seed, at position 1
+do
+    call rng%uniform(x)              ! next value; keep going as long as you like
+    if (x < 0.01_real64) exit
+end do
+```
+
+**It is not a second generator, and it changes no value.** A freshly seeded stream's k-th
+`%uniform` is exactly `pf_random_at(seed, i, k)`. The stream is a different way of reaching the same
+grid, so a program can move between the two forms freely.
+
+The producers, with what each costs in words (positions are counted in 32-bit words, 1-based):
+
+| call | gives | words |
+|---|---|---|
+| `call rng%seed(seed [, stream])` | reseeds to position 1, in O(1) | — |
+| `call rng%uniform(x)` | `real64` in `[0, 1)` | 2 |
+| `call rng%uniform32(x)` | `real32` in `[0, 1)` | 1 |
+| `call rng%bits(b)` | 64 raw bits | 2 |
+| `call rng%int_range(lo, hi, r)` | exactly-unbiased integer in `[lo, hi]` | 4 |
+| `call rng%fill(v)` | the next `size(v)` values | 2, 1 or 4 each |
+| `call rng%fill(v, lo, hi)` | the next `size(v)` integers | 4 each |
+| `call rng%jump(n)` | seeks `n` words, in O(1); negative seeks back | — |
+| `call rng%rewind([pos])` | sets the position; no argument means 1 | — |
+| `rng%position()` | the current position | — |
+
+`%position` is the one that is a function, because it is the one that does not advance anything.
+Everything that produces a value is a subroutine — deliberately, since `rng%uniform() - rng%uniform()`
+as an expression would have a sign that depends on which the compiler evaluates first, and Fortran
+does not fix that order.
+
+`%int_range` starts on a block boundary — the generator produces four words at a time, and an
+integer draw needs a whole group of four — so from an unaligned position it first advances to the
+next boundary. That is what keeps `rng%int_range(lo, hi, r)` equal to the `pf_random_int_at` at the
+same coordinate rather than re-reading words an earlier `%uniform` already handed out. Positions
+above are exact for a stream that uses one producer throughout, which is the ordinary case.
+
+**Seed once per loop iteration, not once per program.** This is the discipline that keeps a stream
+reproducible:
+
+```fortran
+!$omp parallel do schedule(dynamic)
+do i = 1, n
+    block
+        type(pf_random_stream) :: rng     ! see the note below on why `block`, not `private`
+        real(real64) :: x
+        call rng%seed(seed, i)            ! O(1), no warm-up to pay for
+        ...
+    end block
+end do
+```
+
+What can never be reproducible is one long-lived stream consumed *across* the iterations of a
+dynamically scheduled loop: the value an iteration receives then depends on how many draws ran
+before it, which depends on the schedule and the thread count. That is true of every stateful
+generator, not just this one — and the answer to it here is that `%seed` costs nothing, so there is
+no reason to share a stream between iterations.
+
+**Declare a per-thread stream in a `block`, not in an OpenMP `private()` clause.** This is the
+library-wide rule for any derived type used per-thread, and it applies here.
+
+**For bulk work whose length you know in advance, use `pf_random_fill_draws` instead.** It walks
+blocks rather than values and is about 1.7× faster than even a stream loop, which is itself faster
+than a loop of scalar `pf_random_at` calls. The stream is for the case where the count is not known
+in advance, not a general replacement for the fills.
+
+A stream addresses 2⁶³ words and refuses to go past that, or before its first word — asking for a
+position that does not exist stops the program rather than silently wrapping. No ordinary program is
+anywhere near either bound.
 
 ## What is guaranteed, and what is not
 

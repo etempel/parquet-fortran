@@ -170,6 +170,9 @@ something a reader is expected to have.
 | [Risk-103](#risk-103--the-streams-high-counter-word-is-reached-by-no-ordinary-stream-index) | The stream's high counter word is reached by no ordinary stream index | 4 — covered |
 | [Risk-104](#risk-104--a-thread-team-opened-one-level-down-deadlocks-libgomp) | A thread team opened one level down deadlocks libgomp | 4 — covered |
 | [Risk-105](#risk-105--an-allocate-extent-from-a-default-kind-size-overflows-the-array-it-just-allocated) | An allocate extent from a default-kind `size()` overflows the array it just allocated | 4 — covered |
+| [Risk-106](#risk-106--a-stream-consumed-across-loop-iterations-is-irreproducible-and-nothing-fails) | A stream consumed across loop iterations is irreproducible, and nothing fails | 4 — covered |
+| [Risk-107](#risk-107--a-queue-shaped-stream-buffer-would-pull-the-buffer-state-into-the-contract) | A queue-shaped stream buffer would pull the buffer state into the contract | 4 — covered |
+| [Risk-108](#risk-108--an-integer-draw-taken-off-a-block-boundary-re-reads-words-already-handed-out) | An integer draw taken off a block boundary re-reads words already handed out | 4 — covered |
 
 ---
 
@@ -177,7 +180,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-106**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-109**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -888,6 +891,77 @@ asserting that a log is misleading would be asserting the bug rather than guardi
 Every entry here has a test behind it. What keeps it in the document is the second half: a rule for
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
+
+### Risk-106 — A stream consumed across loop iterations is irreproducible, and nothing fails
+
+`pf_random_stream` carries a position, so which value an iteration receives depends on how many
+draws ran before it. Seeded **once** and consumed **across** the iterations of a parallel loop, the
+program runs, produces plausible numbers, and gives a different answer at a different thread count
+or schedule — which is precisely the failure the whole module exists to remove, reintroduced by the
+one part of it that has state.
+
+**This is a misuse the API invites rather than a defect in it**, and no structural test can catch it:
+the values are in range, the distribution is right, and a single-threaded run is perfectly
+repeatable. Only comparing two *different* schedules reveals it, which is what
+`test_stream_schedule` (`test/test_random_omp.f90`) does — a per-iteration-seeded stream drawing a
+**data-dependent** number of values, run serially and under three schedules including a 7-thread
+`dynamic,3`, asserted bit-identical, with a vacuity guard that fails if the team was one thread.
+
+**Test:** `test_stream_schedule`. **What it still forbids:** any example, guide passage or
+doc-comment that seeds a stream outside a loop and draws inside it. The seeding call is O(1) with no
+warm-up specifically so that per-iteration seeding costs nothing, so there is no performance argument
+for the unsafe shape — and note the tier-0 form has no way to express it at all, which is why this
+risk arrives only with tier 1.
+
+### Risk-107 — A queue-shaped stream buffer would pull the buffer state into the contract
+
+`pf_random_stream` holds the block it last enciphered, **keyed by that block's index**. A future
+contributor optimising it will find the obvious alternative — a queue of undelivered values, drained
+one at a time and refilled when empty — in every generator textbook. It computes identical values and
+is a contract change:
+
+- `%position` would then have to describe how full the buffer is, not just which word is next;
+- a stream saved through `%position` and restored could not be exact, because the buffer is not
+  derivable from a word index;
+- `%rewind` and `%jump` would each have to invalidate or rebuild it explicitly, and forgetting either
+  returns **stale values that are still in range and still uniform**.
+
+The keyed form has none of those properties: the held block either matches the wanted block or is
+replaced, so it is derivable state that no part of the contract can see.
+
+**Test:** `test_stream_position` (`test/test_random.f90`) asserts the round trip — `%position` saved, four draws taken, `%rewind` to the saved value, the same
+four values returned — and `test_stream_values` asserts that a reseed drops the held block, which is
+the one place the cache *must* be invalidated (`blk` indexes the previous family's words). Mutation
+evidence for the shape: making the cache always miss **survives the whole suite**, which is the
+correct result and is the proof that the cache cannot change an answer; making it never refresh after
+the first block is caught.
+
+**What it still forbids:** replacing the block-index key with a fill/drain counter, however much
+faster it looks. The measured worth of the cache is 1.70x (gfortran) / 1.78x (ifx) on `real64` and
+2.88x / 3.35x on `real32`; a queue would not beat that by enough to buy a contract change, and
+`pf_random_fill_draws` already exists for callers who want the last 1.7x.
+
+### Risk-108 — An integer draw taken off a block boundary re-reads words already handed out
+
+The integer rule addresses a **block**, not a word pair: `int_at_impl` reads words 0 and 1 of block
+`draw-1`. A stream's `%int_range` therefore aligns to the next block boundary before taking one. Drop
+that alignment — it is three lines, and looks like padding — and an `%int_range` called at word 2
+re-reads words 0 and 1, which an earlier `%uniform` has already handed out to the caller.
+
+**The failure is silent and it is not merely a repeat.** The two draws are different *functions* of
+the same bits (one is a scaled top-53, the other Lemire's reduction), so nothing looks duplicated;
+the integers stay exactly uniform, and no containment or distribution test can see it. What is lost
+is independence between two values a caller has every reason to treat as independent — the same class
+of defect `int_at_impl`'s own doc-comment records for `pf_random_int_at` against `pf_random_at` at
+draw 1.
+
+**Test:** `test_stream_position` (`test/test_random.f90`) calls `%uniform32` (leaving position 2) then
+`%int_range`, and asserts both the resulting position (9, i.e. aligned then four words) and that the
+value equals `pf_random_int_at` at draw 2. Removing the alignment is caught.
+
+**What it still forbids:** "simplifying" `align_to_block` away, and adding any new block-addressed
+producer that does not call it. The same applies to the integer `%fill` specifics, which align once
+for the whole array.
 
 ### Risk-92 — The last radix pass leaves the row array STALE, and only the string exclusion makes that safe
 

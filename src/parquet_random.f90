@@ -672,6 +672,14 @@ contains
     !> `a - b` as a 64-bit pattern, computed on 32-bit halves so that nothing overflows.
     !!
     !! See `width_of` for why this exists rather than a plain `a - b`.
+    !!
+    !! **This and `add64` are called only from the `#else` arm of the route (e) fork, so on a
+    !! compiler that has a 128-bit kind they are compiled and never entered.** Coverage here is
+    !! measured under gfortran, which has one, so both will always report as uncovered -- and both
+    !! are live under ifx, where they are the fix for the branch-deletion defect `width_of`
+    !! describes. Neither is dead code; do not delete either on the strength of a coverage report.
+    !! What asserts them is the suite's cross-implementation agreement sweep, run by a compiler that
+    !! takes this arm.
     pure function sub64(a, b) result(r)
         integer(int64), intent(in) :: a             !! left operand, read as a bit pattern
         integer(int64), intent(in) :: b             !! right operand, read as a bit pattern
@@ -687,6 +695,9 @@ contains
     end function sub64
 
     !> `a + b` as a 64-bit pattern, computed on 32-bit halves so that nothing overflows.
+    !!
+    !! Reached only from the fork's `#else` arm, exactly as `sub64` is -- see its note on why this
+    !! reports as uncovered on every compiler this project measures coverage with.
     pure function add64(a, b) result(r)
         integer(int64), intent(in) :: a             !! left operand, read as a bit pattern
         integer(int64), intent(in) :: b             !! right operand, read as a bit pattern

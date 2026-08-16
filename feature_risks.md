@@ -164,6 +164,7 @@ something a reader is expected to have.
 | [Risk-97](#risk-97--a-wrongly-selected-route-e-fork-silently-ships-the-wrapping-kernel-on-a-capable-compiler) | A wrongly selected route (e) fork silently ships the wrapping kernel on a capable compiler | 4 — covered |
 | [Risk-98](#risk-98--a-schedule-dependent-draw-reintroduces-irreproducibility-and-every-structural-test-still-passes) | A schedule-dependent draw reintroduces irreproducibility, and every structural test still passes | 4 — covered |
 | [Risk-99](#risk-99--a-fatal-path-reached-by-several-threads-at-once-hangs-instead-of-terminating) | A fatal path reached by several threads at once hangs instead of terminating | 4 — covered |
+| [Risk-100](#risk-100--a-lazily-computed-rejection-threshold-is-untested-by-every-width-that-does-not-reject) | A lazily computed rejection threshold is untested by every width that does not reject | 4 — covered |
 
 ---
 
@@ -171,7 +172,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-100**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-101**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4041,6 +4042,9 @@ width's low limb borrows — a dropped borrow once survived an entire sweep beca
 division, a different route from the library's halve-reduce-double, so the two cannot share the
 signedness confusion the whole entry is about.
 
+**See also Risk-100**, which is the same function's other half: this entry is about the threshold
+being *wrong* at a wide width, that one about its arithmetic not being *executed* at a narrow one.
+
 ### Risk-97 — A wrongly selected route (e) fork silently ships the wrapping kernel on a capable compiler
 
 Which multiply `parquet_random` compiles is decided by a cpp allowlist of compiler predefines,
@@ -4137,3 +4141,46 @@ with `exit=137`; both sentinels were then verified by forcing a timeout in each 
 (a 1-second cap on a 30-second sleep for the shell runner, a 20 ms cap for the Fortran side, which
 turned 613 tests into explicit `TIMED OUT` failures). A guard that has never been made to fire is
 not a guard.
+
+### Risk-100 — A lazily computed rejection threshold is untested by every width that does not reject
+
+`pf_random_int_at` is unbiased because it rejects the last `2**64 mod s` candidates of a range, and
+`umod_2p64` computes that threshold. Risk-96 covers getting it wrong at a width at or above `2**63`.
+This entry is about the other half, which is a *coverage* property rather than an arithmetic one and
+is invisible for a different reason.
+
+**The threshold is computed lazily** — only when a candidate lands in the last partial block, which
+is Lemire's whole point and must not be hoisted. So a width that essentially never rejects never
+computes a threshold at all. Every ordinary narrow range is such a width: the suite's own grid spans
+`1..6`, `0..999999`, `-100..100` and `-3..4294967296`, whose rejection probabilities are
+**2.2e-19, 3.0e-14, 8.2e-18 and 8.7e-19** respectively. Every wide width returns from the `s < 0`
+arm before reaching any arithmetic. The result was that `umod_2p64`'s halve-reduce-double reduction
+— the part with no early return to hide behind, and the part most easily got wrong — was executed by
+**nothing in the suite**, while the module reported 87 % line coverage and every test passed.
+
+Confirmed by mutation, which is the only reason this is stated as fact rather than suspicion:
+replacing the modular fold `r = r - (s - r)` with a plain `r = r + r` was caught by **no assertion
+anywhere in the suite** — not the golden vectors, not the wide-width agreement grid, not
+containment, not chi-square — until the widths below were added.
+
+**The rule this forbids.** *Do not reduce the two narrow rejecting widths to one, and do not pick a
+replacement by eye.* The reduction has two arms and a correction, and which one a width takes is
+decided by `q = floor(2**64 / s)`: the doubling **folds** when `q` is even and does not when `q` is
+odd, and the trailing odd correction runs only when `s` is odd. One width cannot reach all of it.
+More generally: *whenever a new constant or predicate gates arithmetic on a condition that is rare
+by design, a test must force the rare side* — a probability of 1e-14 is zero for every practical
+purpose, including coverage.
+
+**Test.** Covered by the two narrow sweeps in `test_agreement_int` (`test/test_random.f90`), each
+with its own vacuity guard that the width actually rejected:
+
+- width `7378697629483820646` (0.4 · 2**64, even, `q = 2`) — the folding arm, rejects one draw in
+  five;
+- width `5534023222112865485` (0.3 · 2**64, odd, `q = 3`) — the non-folding arm and the odd
+  correction, one in ten.
+
+Both are load-bearing and were each verified by a mutation the *other* cannot catch. With them,
+every line of `src/parquet_random.f90` that gfortran compiles as reachable is covered; the only
+lines left uncovered are `sub64`/`add64`, which the route (e) fork compiles but never calls on a
+compiler that has a 128-bit kind (they are live under ifx, and both carry a doc-comment saying so —
+they are not dead code and must not be deleted on the strength of a coverage report).

@@ -75,8 +75,16 @@ contains
     !! Asserted against the strict reference rather than the library, because two of the three use
     !! counter words no draw index can produce -- `ctr1` would have to reach 2**32-1, which needs a
     !! block index no `draw` in `integer(int64)` can reach. KAT 1 IS reachable through the public
-    !! surface (seed 0, stream 0, block 0 is draws 1 and 2), so it is checked there as well, which
-    !! is what ties the reference and the library to the same cipher.
+    !! surface (seed 0 and stream 0 give an all-zero key and counter, so block 0 is that vector), so
+    !! it is checked there as well, which is what ties the reference and the library to the same
+    !! cipher. Both real surfaces reach it: `real64` takes two words per value, so block 0 is draws
+    !! 1 and 2, and `real32` takes one, so the same block is draws 1 to 4.
+    !!
+    !! **The `real32` half is the only assertion in this suite that pins a `real32` value to
+    !! something outside this project.** Its golden vectors and the strict reference's `real32` arm
+    !! both descend from one reading of the contract's word-to-value rule, so a misreading would be
+    !! consistent across generator, reference and library alike, with nothing to contradict it. This
+    !! is what contradicts it, and it costs nothing: the words are already here.
     !!
     !! What this test does NOT prove is more important than what it does: it cannot detect a
     !! miscompiled build. That is `test_agreement_*`'s job.
@@ -84,6 +92,7 @@ contains
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer :: k
         integer(int64) :: o0, o1, o2, o3, bits1, bits2
+        real(real32) :: want32, v32(4)
 
         do k = 1, n_kat
             call ref_philox_block(kat_ctr(4 * k - 3), kat_ctr(4 * k - 2), kat_ctr(4 * k - 1), kat_ctr(4 * k), &
@@ -114,6 +123,24 @@ contains
         if (allocated(error)) return
         call check(error, iand(ishft(bits2, -32), 4294967295_int64) == kat_out(4), &
             "library: KAT 1 word 3 is not the high half of draw 2")
+        if (allocated(error)) return
+
+        ! The same four words through the real32 surface: one word per draw, each read as its top
+        ! 24 bits scaled by 2**-24. Both sides are exact -- a 24-bit integer is exact in real32 and
+        ! the scale is a power of two -- so this is an equality, not a tolerance.
+        do k = 1, 4
+            want32 = real(ishft(kat_out(k), -8), real32) * 2.0_real32**(-24)
+            call check(error, pf_random32_at(0_int64, 0_int64, int(k, int64)) == want32, &
+                "library: pf_random32_at does not read KAT 1's words one per draw, top 24 bits each")
+            if (allocated(error)) return
+        end do
+
+        call pf_random_fill_at(0_int64, 0_int64, v32)
+        do k = 1, 4
+            want32 = real(ishft(kat_out(k), -8), real32) * 2.0_real32**(-24)
+            call check(error, v32(k) == want32, "library: a real32 fill does not reproduce KAT 1's four words")
+            if (allocated(error)) return
+        end do
     end subroutine test_kat_vectors
 
     ! ============================================================================================
@@ -125,11 +152,22 @@ contains
     !! Real values are compared as `transfer` bit patterns, which is exact and unambiguous; the
     !! decimal literals beside them are compared too, which is a genuine assertion that the
     !! compiler's decimal conversion agrees, and is the form a human can read.
+    !!
+    !! The first assertion is the identifier these vectors are the contract FOR. Nothing else in the
+    !! suite reads `pf_random_algorithm`, and a version identifier nothing asserts cannot do the job
+    !! it exists for: the string could be advanced while every value below stayed put, announcing a
+    !! break that did not happen, or the values could move while the string still promised the old
+    !! contract. Pinning it here means the two have to change together or not at all.
     subroutine test_golden_scalar(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer :: k
         real(real64) :: got64
         real(real32) :: got32
+
+        call check(error, pf_random_algorithm == "philox4x32-10/v1", &
+            "pf_random_algorithm no longer reads philox4x32-10/v1: the vectors in this suite are the contract for " // &
+            "that exact string, so they must be regenerated with it, or the identifier must go back")
+        if (allocated(error)) return
 
         do k = 1, n_scalar
             call check(error, pf_random_bits_at(scalar_seed(k), scalar_stream(k), scalar_draw(k)) == scalar_bits(k), &
@@ -293,13 +331,25 @@ contains
     end subroutine test_bits_identity
 
     !> The `int32` specifics must be bit-identical to the `int64` ones at equal argument values.
+    !!
+    !! All five generics are covered, `pf_random_fill_at` included -- nothing else in the suite
+    !! calls its two `int32`-stream specifics, so half of that generic would otherwise ship
+    !! untested. The integer specific is additionally driven across the FULL `int32` range, where
+    !! the width is 2**32: every other range tested here is small enough that a truncating narrowing
+    !! from the `int64` worker would still return the right answer, so only this one can tell that
+    !! the worker was handed the widened bounds.
     subroutine test_kind_specifics(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
-        integer :: mismatches
+        integer(int32), parameter :: lo32 = -huge(1_int32) - 1_int32, hi32 = huge(1_int32)
+        integer :: mismatches, bad_fill, bad_wide
         integer(int32) :: i32
         integer(int64) :: seed
+        real(real64) :: f64_a(4), f64_b(4)
+        real(real32) :: f32_a(4), f32_b(4)
 
         mismatches = 0
+        bad_fill = 0
+        bad_wide = 0
         seed = 12345_int64
         do i32 = -4_int32, 6_int32
             if (pf_random_bits_at(seed, i32) /= pf_random_bits_at(seed, int(i32, int64))) mismatches = mismatches + 1
@@ -308,17 +358,41 @@ contains
             if (int(pf_random_int_at(seed, i32, 1_int32, 1000_int32), int64) /= &
                 pf_random_int_at(seed, int(i32, int64), 1_int64, 1000_int64)) mismatches = mismatches + 1
             if (pf_random_key(seed, i32) /= pf_random_key(seed, int(i32, int64))) mismatches = mismatches + 1
+
+            ! The fill generic's int32-stream specifics, once with the default start draw and once
+            ! with an explicit one, so the argument is not merely defaulted past.
+            call pf_random_fill_at(seed, i32, f64_a)
+            call pf_random_fill_at(seed, int(i32, int64), f64_b)
+            if (any(f64_a /= f64_b)) bad_fill = bad_fill + 1
+            call pf_random_fill_at(seed, i32, f32_a, 3_int64)
+            call pf_random_fill_at(seed, int(i32, int64), f32_b, 3_int64)
+            if (any(f32_a /= f32_b)) bad_fill = bad_fill + 1
+
+            if (int(pf_random_int_at(seed, i32, lo32, hi32), int64) /= &
+                pf_random_int_at(seed, int(i32, int64), int(lo32, int64), int(hi32, int64))) bad_wide = bad_wide + 1
         end do
         call check(error, mismatches == 0, &
             "an int32 specific disagrees with its int64 twin -- an int32 stream or label must sign-extend")
+        if (allocated(error)) return
+        call check(error, bad_fill == 0, &
+            "an int32-stream pf_random_fill_at disagrees with its int64-stream twin")
+        if (allocated(error)) return
+        call check(error, bad_wide == 0, &
+            "the int32 pf_random_int_at disagrees with its int64 twin over the full int32 range, whose width is 2**32")
     end subroutine test_kind_specifics
 
     !> An elemental call over an array equals the scalar calls, elementwise, at rank 1 and rank 2.
+    !!
+    !! Swept over each of the three elemental arguments in turn, not just the stream index: every
+    !! dummy of every tier-0 procedure is elemental, and a specific that read its seed or its draw
+    !! from element 1 and reused it across the array would pass a stream-only sweep unchanged. Each
+    !! sweep carries a guard that the values actually vary, since a procedure ignoring the swept
+    !! argument altogether would otherwise agree with itself on every element.
     subroutine test_elemental(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer :: k, r, c
-        integer(int64) :: idx(6), grid(2, 3)
-        real(real64) :: vec(6), mat(2, 3)
+        integer(int64) :: idx(6), grid(2, 3), seeds(6), draws(6)
+        real(real64) :: vec(6), mat(2, 3), svec(6), dvec(6)
 
         idx = [(int(k, int64), k = 1, 6)]
         vec = pf_random_at(12345_int64, idx)
@@ -337,12 +411,33 @@ contains
                 if (allocated(error)) return
             end do
         end do
+
+        seeds = [(int(k, int64) * 1000_int64 + 7_int64, k = 1, 6)]
+        svec = pf_random_at(seeds, 1_int64)
+        do k = 1, 6
+            call check(error, svec(k) == pf_random_at(seeds(k), 1_int64), &
+                "an elemental call over seed disagrees with the scalar call for that element")
+            if (allocated(error)) return
+        end do
+        call check(error, any(svec /= svec(1)), &
+            "an elemental sweep over seed returned one repeated value, so the seed argument is not reaching the stream")
+        if (allocated(error)) return
+
+        draws = [(int(k, int64), k = 1, 6)]
+        dvec = pf_random_at(12345_int64, 1_int64, draws)
+        do k = 1, 6
+            call check(error, dvec(k) == pf_random_at(12345_int64, 1_int64, draws(k)), &
+                "an elemental call over draw disagrees with the scalar call for that element")
+            if (allocated(error)) return
+        end do
+        call check(error, any(dvec /= dvec(1)), &
+            "an elemental sweep over draw returned one repeated value, so the draw argument is not reaching the counter")
     end subroutine test_elemental
 
     !> The totality rules: `lo > hi` swaps, `draw < 1` clamps, degenerate and extreme arguments.
     subroutine test_edges(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
-        integer(int64) :: k
+        integer(int64) :: k, top
 
         call check(error, pf_random_int_at(12345_int64, 1_int64, 999999_int64, 0_int64) == &
                           pf_random_int_at(12345_int64, 1_int64, 0_int64, 999999_int64), &
@@ -381,6 +476,46 @@ contains
         if (allocated(error)) return
         call check(error, pf_random_bits_at(1_int64, 1_int64) /= pf_random_bits_at(1_int64, 2_int64), &
             "two streams must not give the same first value")
+        if (allocated(error)) return
+
+        ! Extreme DRAW indices, which the golden tables stop far short of. The library reaches its
+        ! block by (draw-1)/2 for a real64 pair and (draw-1)/4 for a real32 word, so no draw in
+        ! int64 overflows it. The strict reference reaches the same block through the WORD index,
+        ! 2*(draw-1)+1, which overflows int64 above draw 2**62 -- so the two are compared against
+        ! each other only up to that ceiling, and above it the assertions are structural.
+        ! DO NOT "complete" this by extending the reference sweep to huge(int64): those extra rows
+        ! would be signed overflow inside the reference, which is undefined and can be folded away,
+        ! so they would weaken the comparison rather than widen it.
+        do k = 0_int64, 3_int64
+            top = 4611686018427387904_int64 - k
+            call check(error, pf_random_bits_at(12345_int64, 1_int64, top) == ref_bits(12345_int64, 1_int64, top), &
+                "pf_random_bits_at disagrees with the strict reference at the highest draw the reference can address")
+            if (allocated(error)) return
+            call check(error, pf_random_at(12345_int64, 1_int64, top) == ref_at(12345_int64, 1_int64, top), &
+                "pf_random_at disagrees with the strict reference at the highest draw the reference can address")
+            if (allocated(error)) return
+        end do
+
+        ! real32 indexes words directly, so there the reference is usable at the very top.
+        do k = 0_int64, 3_int64
+            top = huge(1_int64) - k
+            call check(error, pf_random32_at(12345_int64, 1_int64, top) == ref_at32(12345_int64, 1_int64, top), &
+                "pf_random32_at disagrees with the strict reference at the very top of the draw range")
+            if (allocated(error)) return
+        end do
+
+        ! Above the reference's ceiling, what remains assertable: the bits-to-value identity, and
+        ! that the draw index is still reaching the counter at all.
+        do k = 0_int64, 3_int64
+            top = huge(1_int64) - k
+            call check(error, pf_random_at(12345_int64, 1_int64, top) == &
+                              real(ishft(pf_random_bits_at(12345_int64, 1_int64, top), -11), real64) * 2.0_real64**(-53), &
+                "pf_random_at is not the top 53 bits of pf_random_bits_at at the top of the draw range")
+            if (allocated(error)) return
+        end do
+        call check(error, pf_random_bits_at(12345_int64, 1_int64, huge(1_int64)) /= &
+                          pf_random_bits_at(12345_int64, 1_int64, huge(1_int64) - 1_int64), &
+            "the two topmost draws returned the same bits, so the draw index stopped reaching the counter")
     end subroutine test_edges
 
     !> A derived key is a seed, so derivations nest.
@@ -539,9 +674,14 @@ contains
     !! every returned value still inside the range and still uniform over the values that do occur,
     !! so neither containment nor chi-square can see it. Ranges placed away from zero are what
     !! exercise a borrow out of the width's low limb: a dropped borrow once survived an entire
-    !! sweep because every case had `lo = 0`. And the retry-exercising width carries its own
+    !! sweep because every case had `lo = 0`. And each retry-exercising width carries its own
     !! vacuity guard, because a rejection loop that is never entered passes every other assertion
     !! here.
+    !!
+    !! There are TWO such widths, one per branch of the rejection threshold, and the second is easy
+    !! to leave out: a width can be narrow and still never reject, which is what every ordinary
+    !! range in this grid is. See the comment on that sweep for why the threshold's own arithmetic
+    !! is otherwise unexecuted.
     subroutine test_agreement_int(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: los(9) = [ &
@@ -550,6 +690,9 @@ contains
         integer(int64), parameter :: his(9) = [ &
             999999_int64, 6_int64, 100_int64, 6148914691236517205_int64, huge(1_int64), &
             huge(1_int64), huge(1_int64), 7_int64, 4294967296_int64]
+        ! Upper ends of the two narrow widths that reject often; the sweep below gives the rule
+        ! that picks them. The widths are 7378697629483820646 and 5534023222112865485.
+        integer(int64), parameter :: narrow_hi(2) = [7378697629483820645_int64, 5534023222112865484_int64]
         integer :: g, bad
         integer(int64) :: i, value, refv, refr, retried
 
@@ -580,6 +723,38 @@ contains
         call check(error, retried > 0_int64, &
             "vacuity guard: no draw in the retry-heavy sweep actually rejected, so the rejection loop was never entered")
         if (allocated(error)) return
+
+        ! The same sweep on the OTHER side of `umod_2p64`'s branch, which is not reachable by
+        ! accident. Every width above is either wide -- at or above 2**63, where the threshold is
+        ! just 2**64 - s and the function returns before any arithmetic -- or narrow with a
+        ! rejection probability around 1e-14 or below. The threshold is computed LAZILY, only for a
+        ! candidate landing in the last partial block, so a width that never rejects never computes
+        ! one at all. That left the halve-reduce-double reduction -- the part of `umod_2p64` with no
+        ! early return to hide behind, and the part most easily got wrong -- executed by nothing.
+        !
+        ! TWO widths, because the reduction has two arms plus a correction and no single width
+        ! reaches all of it. Which arm a width takes is decided by `q = floor(2**64 / s)`: the
+        ! doubling FOLDS (`r = r - (s - r)`) when q is even and does not (`r = r + r`) when q is
+        ! odd, and the trailing correction runs only when s is odd. Keep both, and use that rule
+        ! rather than trial and error if either ever has to be replaced.
+        !     0.4 * 2**64, even, q = 2 -- the folding arm, no correction. Rejects one draw in five.
+        !     0.3 * 2**64, odd,  q = 3 -- the non-folding arm and the correction. One in ten.
+        do g = 1, 2
+            bad = 0
+            retried = 0_int64
+            do i = 1_int64, 300_int64
+                value = pf_random_int_at(12345_int64, i, 0_int64, narrow_hi(g))
+                call ref_int_at(12345_int64, i, 0_int64, narrow_hi(g), 1_int64, refv, refr)
+                if (value /= refv) bad = bad + 1
+                if (refr > 0_int64) retried = retried + 1_int64
+            end do
+            call check(error, bad == 0, &
+                "pf_random_int_at disagrees with the strict reference on a narrow width that rejects often")
+            if (allocated(error)) return
+            call check(error, retried > 0_int64, &
+                "vacuity guard: a narrow rejecting width produced no rejection, so umod_2p64's narrow branch never ran")
+            if (allocated(error)) return
+        end do
 
         ! The threshold itself, independently: the library's umod_2p64 is not public, so it is
         ! checked through the values it gates, but the reference's own twin is checked here against

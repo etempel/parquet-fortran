@@ -12,12 +12,26 @@
 !> against an independent implementation, over the shapes the library itself uses, has ever caught
 !> that class of fault.
 !>
-!> **Everything here runs on 16-bit limbs**, so no intermediate value ever exceeds 2**35 and
-!> nothing can overflow at any optimisation level on any compiler. That is not merely a safety
-!> measure, it is what makes the reference independent *on the axis the faults live on*: the
-!> library's three remaining signed-overflow sites, and the signed/unsigned confusion that makes
-!> the naive rejection threshold wrong above 2**63, simply have no counterpart in limb arithmetic,
-!> where every quantity is a small non-negative integer.
+!> **Every ARITHMETIC value here runs on 16-bit limbs**, so no intermediate product ever exceeds
+!> 2**35. That is not merely a safety measure, it is what makes the reference independent *on the
+!> axis the faults live on*: the library's remaining signed-overflow sites, and the signed/unsigned
+!> confusion that makes the naive rejection threshold wrong above 2**63, simply have no counterpart
+!> in limb arithmetic, where every quantity is a small non-negative integer.
+!>
+!> **The INDEX arithmetic is a second category, and it is overflow-free for a different reason:
+!> nothing here forms a word index by multiplying.** That distinction is not decoration. `ref_bits`
+!> once computed `2 * (draw - 1)`, which overflows above draw 2**62, and the consequence was worse
+!> than an ordinary bug -- the reference reported the *library* as wrong at high draws while the
+!> library was right, which is the one failure mode an independent oracle must never have. Keep any
+!> new index derivation in the divide-and-modulo form `ref_bits` now uses.
+!>
+!> One trap if you try to verify that claim by breaking it on purpose: writing the multiply and the
+!> divide in ONE expression, `(2*(d-1))/4`, changes nothing. The compiler folds it straight back to
+!> `(d-1)/2` -- it is entitled to, precisely because the overflow is undefined -- so it is a no-op at
+!> every optimisation level and no test fails. The form that actually breaks is the original one,
+!> where the product is passed as an ARGUMENT to a helper and so has to be materialised. Mutate that
+!> shape, not the inline one, or you will conclude the tests are weak when they are not; `test_edges`
+!> and `test_cross_form` both fail on the real form.
 !>
 !> `ref_umod_2p64` is deliberately derived by a DIFFERENT route from the library's -- bitwise long
 !> division rather than halve-reduce-double. A reference that reproduces the implementation's own
@@ -264,11 +278,21 @@ contains
         integer(int64), intent(in) :: stream        !! the stream index
         integer(int64), intent(in) :: draw          !! the 1-based value index; clamped here too
         integer(int64) :: b                         !! the 64-bit pattern
-        integer(int64) :: d, first, second
+        integer(int64) :: d, o(0:3)
+        integer(int32) :: slot
         d = max(draw, 1_int64)
-        first = ref_word(seed, stream, 2_int64 * (d - 1_int64))
-        second = ref_word(seed, stream, 2_int64 * (d - 1_int64) + 1_int64)
-        b = ior(ishft(second, 32), first)
+        ! Value d occupies words 2(d-1) and 2(d-1)+1 -- but that index is deliberately NOT formed.
+        ! It exceeds huge(int64) for d above 2**62, which made this the one place in a module whose
+        ! whole claim is to be overflow-free that could actually overflow. It did, silently, and
+        ! the symptom pointed the wrong way: the reference reported the LIBRARY as wrong at high
+        ! draws, when the library was right and this line was not.
+        !
+        ! The block and the slot within it each follow from d without multiplying anything: the
+        ! block is the word index over 4, which is (d-1)/2, and the slot is the word index modulo
+        ! 4, which is 0 when d is odd and 2 when d is even.
+        call ref_block(seed, stream, (d - 1_int64) / 2_int64, o(0), o(1), o(2), o(3))
+        slot = 2_int32 * int(modulo(d - 1_int64, 2_int64), int32)
+        b = ior(ishft(o(slot + 1), 32), o(slot))
     end function ref_bits
 
     !> `pf_random_at`'s value.

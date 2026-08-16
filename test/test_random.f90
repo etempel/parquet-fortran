@@ -269,8 +269,9 @@ contains
     subroutine test_cross_form(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer :: k
-        real(real64) :: one(1), three(3), six(6), tail(3)
-        real(real32) :: s_one(1), s_six(6)
+        integer(int64) :: base
+        real(real64) :: one(1), three(3), six(6), tail(3), top6(6)
+        real(real32) :: s_one(1), s_six(6), s_top6(6)
         real(real64) :: empty(0)
 
         call pf_random_fill_at(12345_int64, 1_int64, one)
@@ -308,6 +309,28 @@ contains
         ! A zero-sized fill is a defined no-op, not an error and not an out-of-bounds write.
         call pf_random_fill_at(12345_int64, 1_int64, empty)
         call check(error, size(empty) == 0, "a zero-sized fill must be a defined no-op")
+        if (allocated(error)) return
+
+        ! The documented ceiling of the draw axis: a fill whose LAST position is exactly
+        ! huge(int64). It must be exact, not merely non-crashing -- and it is the regression test
+        ! for `fill_r64`'s guard, because the unguarded form computed a position one PAST this
+        ! element, overflowing on a call every one of whose requested positions is representable.
+        ! Asserted against the reference AND against the scalar draws: the first says the values
+        ! are right, the second says the fill still agrees with the rest of the API up here.
+        base = huge(1_int64) - 6_int64
+        call pf_random_fill_at(12345_int64, 1_int64, top6, base + 1_int64)
+        call pf_random_fill_at(12345_int64, 1_int64, s_top6, base + 1_int64)
+        do k = 1, 6
+            call check(error, top6(k) == ref_at(12345_int64, 1_int64, base + int(k, int64)), &
+                "a real64 fill ending exactly at huge(int64) disagrees with the strict reference")
+            if (allocated(error)) return
+            call check(error, top6(k) == pf_random_at(12345_int64, 1_int64, base + int(k, int64)), &
+                "a real64 fill ending exactly at huge(int64) disagrees with the scalar draw at that position")
+            if (allocated(error)) return
+            call check(error, s_top6(k) == ref_at32(12345_int64, 1_int64, base + int(k, int64)), &
+                "a real32 fill ending exactly at huge(int64) disagrees with the strict reference")
+            if (allocated(error)) return
+        end do
     end subroutine test_cross_form
 
     !> `pf_random_at` is exactly the top 53 bits of `pf_random_bits_at`, over a sweep.
@@ -437,6 +460,9 @@ contains
     !> The totality rules: `lo > hi` swaps, `draw < 1` clamps, degenerate and extreme arguments.
     subroutine test_edges(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        ! 2**62 is the ceiling the reference used to overflow at; huge is the true top of the axis.
+        integer(int64), parameter :: draw_tops(2) = [4611686018427387904_int64, huge(1_int64)]
+        integer :: g
         integer(int64) :: k, top
 
         call check(error, pf_random_int_at(12345_int64, 1_int64, 999999_int64, 0_int64) == &
@@ -478,40 +504,38 @@ contains
             "two streams must not give the same first value")
         if (allocated(error)) return
 
-        ! Extreme DRAW indices, which the golden tables stop far short of. The library reaches its
-        ! block by (draw-1)/2 for a real64 pair and (draw-1)/4 for a real32 word, so no draw in
-        ! int64 overflows it. The strict reference reaches the same block through the WORD index,
-        ! 2*(draw-1)+1, which overflows int64 above draw 2**62 -- so the two are compared against
-        ! each other only up to that ceiling, and above it the assertions are structural.
-        ! DO NOT "complete" this by extending the reference sweep to huge(int64): those extra rows
-        ! would be signed overflow inside the reference, which is undefined and can be folded away,
-        ! so they would weaken the comparison rather than widen it.
-        do k = 0_int64, 3_int64
-            top = 4611686018427387904_int64 - k
-            call check(error, pf_random_bits_at(12345_int64, 1_int64, top) == ref_bits(12345_int64, 1_int64, top), &
-                "pf_random_bits_at disagrees with the strict reference at the highest draw the reference can address")
-            if (allocated(error)) return
-            call check(error, pf_random_at(12345_int64, 1_int64, top) == ref_at(12345_int64, 1_int64, top), &
-                "pf_random_at disagrees with the strict reference at the highest draw the reference can address")
-            if (allocated(error)) return
-        end do
-
-        ! real32 indexes words directly, so there the reference is usable at the very top.
-        do k = 0_int64, 3_int64
-            top = huge(1_int64) - k
-            call check(error, pf_random32_at(12345_int64, 1_int64, top) == ref_at32(12345_int64, 1_int64, top), &
-                "pf_random32_at disagrees with the strict reference at the very top of the draw range")
-            if (allocated(error)) return
-        end do
-
-        ! Above the reference's ceiling, what remains assertable: the bits-to-value identity, and
-        ! that the draw index is still reaching the counter at all.
-        do k = 0_int64, 3_int64
-            top = huge(1_int64) - k
-            call check(error, pf_random_at(12345_int64, 1_int64, top) == &
-                              real(ishft(pf_random_bits_at(12345_int64, 1_int64, top), -11), real64) * 2.0_real64**(-53), &
-                "pf_random_at is not the top 53 bits of pf_random_bits_at at the top of the draw range")
-            if (allocated(error)) return
+        ! Extreme DRAW indices, which the golden tables stop far short of. Both the library and the
+        ! reference derive the block index without ever forming a word index -- (draw-1)/2 with the
+        ! slot taken modulo -- so every draw representable in int64 is reachable by both, and the
+        ! two can be compared against each other right at the top.
+        !
+        ! That was not always true, and the way it failed is why this sweep spans two bases rather
+        ! than one. The reference used to reach its block through the word index 2*(draw-1)+1, which
+        ! overflows above draw 2**62; this sweep had to stop at that ceiling, and above it the
+        ! reference reported the LIBRARY as wrong when the library was right. 2**62 is kept as a
+        ! base precisely because it is where that used to break. If a future change reintroduces a
+        ! multiplied index on either side, this is the test that reports it -- as a disagreement at
+        ! the top of the range and nowhere else.
+        do g = 1, 2
+            do k = 0_int64, 3_int64
+                top = draw_tops(g) - k
+                call check(error, pf_random_bits_at(12345_int64, 1_int64, top) == ref_bits(12345_int64, 1_int64, top), &
+                    "pf_random_bits_at disagrees with the strict reference near the top of the draw range")
+                if (allocated(error)) return
+                call check(error, pf_random_at(12345_int64, 1_int64, top) == ref_at(12345_int64, 1_int64, top), &
+                    "pf_random_at disagrees with the strict reference near the top of the draw range")
+                if (allocated(error)) return
+                call check(error, pf_random32_at(12345_int64, 1_int64, top) == ref_at32(12345_int64, 1_int64, top), &
+                    "pf_random32_at disagrees with the strict reference near the top of the draw range")
+                if (allocated(error)) return
+                ! The bits-to-value identity has to survive up here too, independently of the
+                ! reference agreeing -- it is what would still catch a shared index mistake.
+                call check(error, pf_random_at(12345_int64, 1_int64, top) == &
+                                  real(ishft(pf_random_bits_at(12345_int64, 1_int64, top), -11), real64) &
+                                  * 2.0_real64**(-53), &
+                    "pf_random_at is not the top 53 bits of pf_random_bits_at near the top of the draw range")
+                if (allocated(error)) return
+            end do
         end do
         call check(error, pf_random_bits_at(12345_int64, 1_int64, huge(1_int64)) /= &
                           pf_random_bits_at(12345_int64, 1_int64, huge(1_int64) - 1_int64), &
@@ -615,7 +639,7 @@ contains
     subroutine test_agreement_scalar(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: seeds(5) = [0_int64, 1_int64, 12345_int64, -7_int64, huge(1_int64)]
-        integer :: bad_bits, bad_at, bad_at32
+        integer :: bad_bits, bad_at, bad_at32, bad_lit
         integer(int64) :: si, i, d
 
         bad_bits = 0
@@ -638,6 +662,35 @@ contains
         call check(error, bad_at == 0, "pf_random_at disagrees with the strict reference")
         if (allocated(error)) return
         call check(error, bad_at32 == 0, "pf_random32_at disagrees with the strict reference")
+        if (allocated(error)) return
+
+        ! The same comparison with the seed written as a LITERAL CONSTANT at the call site, and
+        ! with `draw` both present and absent. This is not redundant with the sweep above, and the
+        ! reason is a measured cross-machine finding rather than caution: a compiler clones and
+        ! specialises a procedure on whatever is constant at the call site, so the literal-seed and
+        ! all-variable forms are frequently DIFFERENT compiled code.
+        !
+        ! Neither shape is reliably the safe one. Building the wrapping kernel under LTO,
+        ! gfortran 15.2 returned wrong `pf_random32_at` values for literal-seed shapes while the
+        ! all-variable shape stayed correct, and gfortran 14.2.1 did the exact reverse on the same
+        ! source -- all-variable wrong, literal-seed clean. A suite that swept only one of them
+        ! would have passed on one of those two compilers. So both are swept, and a future reader
+        ! should resist merging them back together.
+        bad_lit = 0
+        do i = -8_int64, 8_int64
+            do d = 1_int64, 4_int64
+                if (pf_random_bits_at(12345_int64, i, d) /= ref_bits(12345_int64, i, d)) bad_lit = bad_lit + 1
+                if (pf_random_at(12345_int64, i, d) /= ref_at(12345_int64, i, d)) bad_lit = bad_lit + 1
+                if (pf_random32_at(12345_int64, i, d) /= ref_at32(12345_int64, i, d)) bad_lit = bad_lit + 1
+            end do
+            ! `draw` absent -- the documented loop idiom, and a distinct specialisation again.
+            if (pf_random_bits_at(12345_int64, i) /= ref_bits(12345_int64, i, 1_int64)) bad_lit = bad_lit + 1
+            if (pf_random_at(12345_int64, i) /= ref_at(12345_int64, i, 1_int64)) bad_lit = bad_lit + 1
+            if (pf_random32_at(12345_int64, i) /= ref_at32(12345_int64, i, 1_int64)) bad_lit = bad_lit + 1
+        end do
+        call check(error, bad_lit == 0, &
+            "a literal-constant-seed call disagrees with the strict reference: literal-seed and all-variable call " // &
+            "shapes are specialised separately by the compiler, and each has been caught while the other was clean")
     end subroutine test_agreement_scalar
 
     !> Fills against the strict reference, over several lengths and start offsets.
@@ -694,18 +747,26 @@ contains
         ! that picks them. The widths are 7378697629483820646 and 5534023222112865485.
         integer(int64), parameter :: narrow_hi(2) = [7378697629483820645_int64, 5534023222112865484_int64]
         integer :: g, bad
-        integer(int64) :: i, value, refv, refr, retried
+        integer(int64) :: i, d, value, refv, refr, retried
 
+        ! The grid is swept over a DRAW axis as well as a stream axis. Until this was added the
+        ! whole integer agreement layer ran at `draw = 1` and nothing else -- every call omitted
+        ! the argument -- so the one layer able to catch a miscompiled build never exercised the
+        ! integer path's counter arithmetic at any other draw, and the negative draws never
+        ! reached its clamp at all. The scalar and fill sweeps had varied the draw all along, which
+        ! is exactly what made the gap easy to miss.
         bad = 0
         do g = 1, 9
-            do i = 1_int64, 60_int64
-                value = pf_random_int_at(12345_int64, i, los(g), his(g))
-                call ref_int_at(12345_int64, i, los(g), his(g), 1_int64, refv, refr)
-                if (value /= refv) bad = bad + 1
+            do i = 1_int64, 20_int64
+                do d = -2_int64, 9_int64
+                    value = pf_random_int_at(12345_int64, i, los(g), his(g), d)
+                    call ref_int_at(12345_int64, i, los(g), his(g), d, refv, refr)
+                    if (value /= refv) bad = bad + 1
+                end do
             end do
         end do
         call check(error, bad == 0, &
-            "pf_random_int_at disagrees with the strict reference somewhere in the width grid")
+            "pf_random_int_at disagrees with the strict reference somewhere in the width x stream x draw grid")
         if (allocated(error)) return
 
         ! A width close to 2**64 * 2/3, where about a third of candidates are rejected, so the
@@ -856,8 +917,11 @@ contains
         counts = 0
         do k = 1, nsmall
             ! The stream index shares its kind with the bounds, so an int32 range takes an int32
-            ! stream -- one kind per call is the documented rule, not an oversight here.
-            b = pf_random_int_at(99_int64, k, 1_int32, 8_int32)
+            ! stream -- one kind per call is the documented rule, not an oversight here. The
+            ! conversion is explicit because a bare `k` is only int32 by default: under
+            ! `-fdefault-integer-8` it becomes int64, no specific matches, and this suite stops
+            ! building against a module that itself compiles fine under that flag.
+            b = pf_random_int_at(99_int64, int(k, int32), 1_int32, 8_int32)
             if (b < 1 .or. b > 8) then
                 call check(error, .false., "pf_random_int_at returned a value outside 1..8")
                 return

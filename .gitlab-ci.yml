@@ -159,6 +159,19 @@ test:
     # header comment) -- fpm test above already exercises every scenario via test_errors.f90, but
     # only this script checks that its independently-maintained list still names every one of them.
     - tools/run_error_scenarios.sh
+    # Standalone-compiles src/parquet_random.f90 across optimisation settings INCLUDING LTO, and
+    # checks the golden vectors and the strict reference in each. Two things make this worth a
+    # separate step rather than folding into `fpm test` above: nothing else in this pipeline builds
+    # anything with -flto (fpm's release profile is -O3 -funroll-loops), and this module carries
+    # deliberate signed-overflow sites whose whole risk is that an optimiser reasons from them.
+    #
+    # --shipped-only is deliberate and must not be dropped. The full run also builds the OTHER
+    # route (e) kernel by defeating the compiler allowlist, and on gfortran that half currently
+    # fails under LTO -- a real gfortran bug (feature_risks.md Risk-101) affecting a kernel
+    # gfortran never ships, so failing the pipeline on it would train people to ignore CI. It stays
+    # the default for a manual run, where the failure is information. The script refuses a gfortran
+    # below the project's floor rather than reporting its miscompilations as findings.
+    - tools/check_random_kernels.sh --shipped-only
     # --exclude-lines-by-pattern auto-excludes every standalone report_fatal_error(...) call
     # site in src/parquet_wrapper.cpp (present and future -- no per-call-site source comment
     # needed) without needing GCOVR_EXCL_LINE comments at each one: std::abort() there discards

@@ -190,6 +190,13 @@ module parquet_random
     !! exactly what the matching scalar draws would give at those positions, so a prefix is a
     !! prefix: `v(1:3)` filled alone equals the first three of `v(1:6)`. A zero-sized `v` is a
     !! defined no-op.
+    !!
+    !! **Precondition on the draw axis: `draw + size(v) - 1` must not exceed `huge(int64)`.** The
+    !! last element's position has to be representable, because there is no value at a position
+    !! that cannot be named -- a fill that runs past the end is asking for draws that do not exist,
+    !! and it silently receives wrapped ones. Everything up to and including the boundary is exact:
+    !! a fill whose final position is `huge(int64)` itself is correct, and is tested. The scalar
+    !! entry points have no such limit, since every representable `draw` is a valid one.
     interface pf_random_fill_at
         module procedure pf_random_fill_at_r64_i32
         module procedure pf_random_fill_at_r64_i64
@@ -563,7 +570,16 @@ contains
                 k = k + 1
                 v(k) = to_real64(ior(ishft(w3, 32), w2))
             end if
-            position = draw + int(k, int64)
+            ! The guard is what keeps this from being a THIRD unguarded signed-overflow site, and
+            ! it is not about invalid input. `k` has already reached `m` on the final pass, so an
+            ! unguarded `draw + k` computes the position one PAST the last element -- which is
+            ! `huge(int64) + 1` for a perfectly valid fill whose every requested position is
+            ! representable. The result is dead (the loop exits immediately), which is exactly why
+            ! the answers stayed right and why `-ftrapv` never trapped it; it is also exactly the
+            ! situation `width_of` documents, where a compiler used a dead overflow's undefinedness
+            ! to reason about live code elsewhere. `fill_r32` needs no such guard: it derives its
+            ! position at the TOP of the loop, so it never forms an index past the last element.
+            if (k < m) position = draw + int(k, int64)
         end do
     end subroutine fill_r64
 

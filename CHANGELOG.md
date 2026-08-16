@@ -644,7 +644,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contractually the top 53; `pf_random_int_at` is exactly unbiased at every width, including above
   2**63 where the obvious implementations silently make part of the range unreachable, and swaps
   `lo > hi` rather than failing; `pf_random_fill_at` fills a rank-1 `real64`/`real32` array with
-  consecutive draws, prefix-consistently and more cheaply than the equivalent scalar calls; and
+  consecutive draws, prefix-consistently and more cheaply than the equivalent scalar calls, its one
+  precondition being that the final position `draw + size(v) - 1` stays representable in `int64`
+  (a fill ending exactly at `huge(int64)` is exact); and
   `pf_random_key` derives independent seed families that compose by nesting. The generator is
   **not cryptographic** and is documented as such. See
   [Random numbers](doc/pages/utilities/random.md).

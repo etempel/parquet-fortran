@@ -165,6 +165,7 @@ something a reader is expected to have.
 | [Risk-98](#risk-98--a-schedule-dependent-draw-reintroduces-irreproducibility-and-every-structural-test-still-passes) | A schedule-dependent draw reintroduces irreproducibility, and every structural test still passes | 4 — covered |
 | [Risk-99](#risk-99--a-fatal-path-reached-by-several-threads-at-once-hangs-instead-of-terminating) | A fatal path reached by several threads at once hangs instead of terminating | 4 — covered |
 | [Risk-100](#risk-100--a-lazily-computed-rejection-threshold-is-untested-by-every-width-that-does-not-reject) | A lazily computed rejection threshold is untested by every width that does not reject | 4 — covered |
+| [Risk-101](#risk-101--the-wrapping-route-e-kernel-is-built-by-nothing-routine-and-is-miscompiled-under-lto) | The wrapping route (e) kernel is built by nothing routine, and is miscompiled under LTO | 4 — covered |
 
 ---
 
@@ -172,7 +173,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-101**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-102**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4184,3 +4185,65 @@ every line of `src/parquet_random.f90` that gfortran compiles as reachable is co
 lines left uncovered are `sub64`/`add64`, which the route (e) fork compiles but never calls on a
 compiler that has a 128-bit kind (they are live under ifx, and both carry a doc-comment saying so —
 they are not dead code and must not be deleted on the strength of a coverage report).
+
+### Risk-101 — The wrapping route (e) kernel is built by nothing routine, and is miscompiled under LTO
+
+`src/parquet_random.f90` forks on whether the compiler has a 128-bit integer kind. The `#ifdef`
+arm forms Philox's multiplies in that kind, where they provably cannot overflow; the `#else` arm
+ships the wrapping `int64` product and is what runs wherever no such kind exists — today, ifx.
+
+**Every compiler in the fleet except ifx takes the protected arm, so the wrapping arithmetic —
+`sub64`, `add64`, and `random_block`'s `#else` multiplies — was compiled by no routine check at all,
+and run by none.** Coverage cannot see it either: a gfortran-based coverage run reports those lines
+uncovered *because they are unreachable in that build*, which reads identically to dead code.
+
+**It is miscompiled, and the shape of the failure is the part worth carrying forward.** Building the
+wrapping kernel at `-O3 -flto` or `-Ofast -flto`, `pf_random32_at` returns values unrelated to the
+contract. Measured on gfortran 14.2.1 (Linux, Zen 4) and reported independently on gfortran 15.2
+(macOS, AVX2), which produce **byte-identical wrong values**. `-fwrapv` and `-fno-strict-overflow`
+each remove it; no LTO removes it; `-O2` does not exhibit it. ifx is clean on the kernel it actually
+ships, at `-O0` through `-O3 -xHost -ipo`.
+
+**What decides whether a call is affected is the stream index's VALUE RANGE, not the call shape.**
+This was measured directly, sweeping one call form and varying only the loop bounds:
+
+| stream range | wrong |
+|---|---|
+| `1..1`, `0..7`, `1..8`, `1..24`, `1..64` | **all of them** |
+| `-3..3`, `-8..8`, `-40..40` | none |
+
+A range the compiler can prove non-negative is miscompiled; a range spanning zero is not. Two
+consequences, and both are traps:
+
+- **`do i = 1, n` is the module's own documented idiom**, so the broken range is exactly the one a
+  user writes.
+- **A sweep centred on zero detects nothing.** `test_agreement_scalar` uses `-40..40` and would not
+  have caught this; a literal-seed sweep first written here used `-8..8` and did not catch it either
+  until the range was changed. "Cover the negatives too" is the natural instinct and it lands
+  squarely in the clean range.
+
+The earlier framing of this fault as being about *call shapes* (literal-constant seed versus
+all-variable arguments) is a symptom of the same mechanism — a literal argument is a range of one —
+and it is not reliable on its own: gfortran 15.2 broke literal-seed shapes while all-variable ones
+stayed correct, and 14.2.1 did the exact reverse on the same source.
+
+**The rule this forbids.** *Do not treat a green `fpm test` as evidence about the wrapping kernel,
+and do not narrow the kernel check's stream ranges to a symmetric sweep.* Also do not add a
+consumer-facing macro for selecting the fork: the module's header explains that the absence of one
+is deliberate, and `-U__GFORTRAN__` at a standalone compile already provides everything a test
+needs.
+
+**Test.** `tools/check_random_kernels.sh` plus its driver `tools/check_random_kernels.f90` build the
+module both ways across six optimisation settings including LTO, and check the golden vectors, the
+strict reference in both stream-sign ranges, and every integer width regime. It carries a vacuity
+guard that the two halves really did compile different kernels — without it, a `-U__GFORTRAN__` that
+stopped working would build one kernel twice and report green — and it refuses a gfortran below the
+project's floor, after a first version silently used the system 11.5.0 and produced a confident set
+of spurious failures.
+
+**CI runs `--shipped-only`**, which checks the kernel the compiler actually ships (the first LTO
+coverage this project has had) and skips the forced half. That half fails today, for a gfortran bug
+in a kernel gfortran never ships; a permanently red pipeline would be worse than none. Run the
+script with no arguments to see it. **If the forced half ever goes green on a newer gfortran, that
+is worth recording rather than assuming — and if `random_block`'s `#else` multiplies are ever made
+overflow-free, the `--shipped-only` restriction should be lifted in the same change.**

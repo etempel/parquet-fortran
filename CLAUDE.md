@@ -2803,6 +2803,25 @@ applied to the harness instead of the source.
   exactly that way: `pf_sort_threads` asks `omp_get_max_threads()`/`omp_in_parallel()` in Fortran and
   hands C++ a plain integer count, so `parquet_wrapper.cpp` receives a number and never a policy.
   Do not add an "auto" sentinel to a `bind(C)` signature for the C++ side to interpret — it cannot.
+- **`-ftrapv` cannot be used to build this project, and that is by design rather than a defect.**
+  `src/parquet_random.f90` carries two deliberate signed-overflow sites — `random_block`'s wrapping
+  multiplies on the non-`PF_INT128` arm, and `mulhilo64`'s partial products on both arms — documented
+  in its own header together with the measurement that ruled out the overflow-free spelling (1.31x on
+  gfortran, 2.05x on ifx for the whole integer path). `-ftrapv` traps exactly those, so such a build
+  aborts with SIGABRT (exit 134) inside `mulhilo64` on the first wide-range `pf_random_int_at` —
+  reached from the test suite's own golden integer table, so it needs no unusual input. Confirmed on
+  gfortran 14.2.1/Linux at `-O0`, `-O1` and `-O2`, and independently on gfortran 15.2/macOS.
+  **The sharper lesson is the converse, and it has already misled once here: a `-ftrapv` build that
+  does NOT abort is not evidence that a site is safe.** Whether a given overflow is instrumented
+  depends on optimisation level and inlining context, and a site whose result is *dead* — such as a
+  loop's final unused index update — is typically optimised away before instrumentation, so it traps
+  nothing while remaining fully available to the optimiser as a range assumption. Use the
+  cross-implementation agreement sweep to answer that question, never a trapping build.
+  **UBSan is the tool that would answer it properly and is not currently available on any machine in
+  the fleet**: MacPorts gcc15 ships no `libubsan` and flang rejects `-fsanitize` for Fortran
+  (machines A and C), while on machine B gcc-toolset-14 has only the 32-bit `libubsan` — the sole
+  x86-64 copy belongs to the system gcc 11.5, which is below this project's floor and miscompiles the
+  library. Installing the 64-bit `libubsan` for gcc-toolset-14 on machine B would close that gap.
 
 ### Arrow's own type singletons have thread-unsafe lazy state on first concurrent use
 

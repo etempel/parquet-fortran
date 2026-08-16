@@ -552,22 +552,31 @@ contains
         real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
         integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
         integer(int64) :: position, w0, w1, w2, w3
-        integer :: k, m
-        m = size(v)
-        if (m <= 0) return                          ! a zero-sized fill is a defined no-op
-        k = 0
+        ! Both counters and the length are int64, and `size` is asked for that kind EXPLICITLY.
+        ! `size(v)` defaults to a default-kind result, which wraps for an array of 2**31 elements
+        ! or more -- and this fails silently rather than loudly: a wrapped negative length returns
+        ! through the guard below having written nothing, and a wrapped small positive length
+        ! (2**32 + 8 elements yields 8) fills a short prefix and leaves the rest of the caller's
+        ! `intent(out)` array undefined. Neither raises anything. A 2**31-element `real64` array is
+        ! 17 GB, which is ordinary for the data this library exists to handle, and no unit test can
+        ! reach it -- `check_fill_size_kind` in tools/check_source_conventions.py is what keeps this
+        ! from regressing, with tools/test_random_large_fill.sh as the end-to-end proof.
+        integer(int64) :: k, m
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        k = 0_int64
         position = draw
         do while (k < m)
             call random_block(seed, stream, (position - 1_int64) / 2_int64, w0, w1, w2, w3)
             if (modulo(position - 1_int64, 2_int64) == 0_int64) then
-                k = k + 1
+                k = k + 1_int64
                 v(k) = to_real64(ior(ishft(w1, 32), w0))
                 if (k < m) then
-                    k = k + 1
+                    k = k + 1_int64
                     v(k) = to_real64(ior(ishft(w3, 32), w2))
                 end if
             else
-                k = k + 1
+                k = k + 1_int64
                 v(k) = to_real64(ior(ishft(w3, 32), w2))
             end if
             ! The guard is what keeps this from being a THIRD unguarded signed-overflow site, and
@@ -579,7 +588,7 @@ contains
             ! situation `width_of` documents, where a compiler used a dead overflow's undefinedness
             ! to reason about live code elsewhere. `fill_r32` needs no such guard: it derives its
             ! position at the TOP of the loop, so it never forms an index past the last element.
-            if (k < m) position = draw + int(k, int64)
+            if (k < m) position = draw + k
         end do
     end subroutine fill_r64
 
@@ -593,16 +602,20 @@ contains
         real(real32), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
         integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
         integer(int64) :: position, c(0:3)
-        integer :: k, m, slot
-        m = size(v)
-        if (m <= 0) return                          ! a zero-sized fill is a defined no-op
-        k = 0
+        ! int64 counters and an explicit `kind=` on `size`, for the reason spelled out in
+        ! `fill_r64`: a default-kind length wraps above 2**31 elements and fails silently, either
+        ! writing nothing or writing a short prefix of the caller's `intent(out)` array.
+        integer(int64) :: k, m
+        integer :: slot                             ! 0..3 within one block; default kind is ample
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        k = 0_int64
         do while (k < m)
-            position = draw + int(k, int64) - 1_int64        ! 0-based word index
+            position = draw + k - 1_int64                    ! 0-based word index
             call random_block(seed, stream, position / 4_int64, c(0), c(1), c(2), c(3))
             slot = int(modulo(position, 4_int64), int32)
             do while (slot <= 3 .and. k < m)
-                k = k + 1
+                k = k + 1_int64
                 v(k) = to_real32(c(slot))
                 slot = slot + 1
             end do

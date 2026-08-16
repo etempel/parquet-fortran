@@ -126,6 +126,13 @@ Prefixes are prefixes: filling three values gives the first three of a six-value
 equivalent scalar calls because one enciphering yields two `real64` values (or four `real32`), and
 a fill can use both where a scalar call uses one.
 
+There is no limit on how many values you may ask for — `v` can hold billions of elements. The one
+precondition is on the draw axis rather than the array: **the last position, `draw + size(v) - 1`,
+has to be representable in `integer(int64)`.** A fill whose final position is `huge(int64)` exactly
+is fine and is tested; asking past that is asking for draws that cannot be named, and the values
+you get back are not the ones the contract describes. Since `draw` defaults to 1, an ordinary call
+is nowhere near this — it matters only if you are addressing the far end of a stream deliberately.
+
 ### Integers are exactly uniform
 
 `pf_random_int_at` is **exactly** unbiased at every width, not "unbiased to within 2⁻⁶⁴". It uses a

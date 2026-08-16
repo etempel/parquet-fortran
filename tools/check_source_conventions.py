@@ -1859,6 +1859,53 @@ def check_build_tree_names_carry_the_compiler():
     return []
 
 
+
+def check_fill_size_kind():
+    """`parquet_random`'s bulk routines must take an array length as `size(v, kind=int64)`.
+
+    `size(v)` without `kind=` returns a DEFAULT-kind integer, which wraps for an array of 2**31
+    elements or more. In a fill loop that failure is silent, and it came in two flavours -- both
+    measured on this module before the fix:
+
+      * 2**31 elements exactly gave a length of -2147483648, which tripped the zero-size guard, so
+        the routine returned having written NOTHING and the caller's `intent(out)` array was left
+        undefined;
+      * 2**32 + 8 elements gave a length of 8, so eight values were written and the remaining
+        4.29 billion were left undefined.
+
+    Neither raises anything, and neither is reachable from `fpm test`: the smallest array that gets
+    there is 2**31 `real32` values, about 8.6 GB. That size is ordinary for the data this library
+    exists to handle -- one draw per row of a three-billion-row table lands squarely in it. Coverage
+    cannot see it either, because the line executes normally, just with a wrapped value. So this
+    static check is the cheap guard, and `tools/test_random_large_fill.sh` is the end-to-end proof
+    that has to be run by hand.
+
+    **Scoped to `src/parquet_random.f90` on purpose.** Within that file the match is by SHAPE -- any
+    bare `size(x)` at all -- so a bulk routine added later is covered without editing this check.
+    It is NOT repo-wide: `src/` carries about 200 other bare `size(...)` calls, nearly all of them
+    on arrays whose length is bounded by construction (a column's width, a field count, a schema's
+    size). Those have not been audited, and asserting a 200-entry debt this check has not verified
+    would be worse than leaving them alone. Whether any of them takes an unbounded caller array is
+    a separate question worth its own pass.
+    """
+    path = SRC / "parquet_random.f90"
+    if not path.is_file():
+        return ["tools/check_source_conventions.py: src/parquet_random.f90 not found -- this check "
+                "has gone stale and is silently testing nothing"]
+    problems = []
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for lineno, line in enumerate(text.splitlines(), 1):
+        code = line.split("!", 1)[0]
+        for m in re.finditer(r"\bsize\s*\(\s*([A-Za-z_]\w*)\s*\)", code):
+            problems.append("%s:%d: size(%s) has no kind= -- a default-kind length wraps above "
+                            "2**31 elements" % (path.relative_to(REPO_ROOT), lineno, m.group(1)))
+    if problems:
+        return ["a bulk array length in parquet_random must be taken as size(v, kind=int64): a",
+                "default-kind result wraps above 2**31 elements and fails SILENTLY, writing nothing",
+                "or writing a short prefix of the caller's intent(out) array:"] + problems
+    return []
+
+
 CHECKS = (
     ("benchmark build-tree names carry the compiler", check_build_tree_names_carry_the_compiler),
     ("parquet_table has no allocatable component", check_no_allocatable_component),
@@ -1883,6 +1930,7 @@ CHECKS = (
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
+    ("parquet_random takes array lengths as int64", check_fill_size_kind),
 )
 
 

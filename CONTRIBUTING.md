@@ -85,6 +85,7 @@ To generate the executables:
 | `benchmark_strings` | `app/benchmark_strings.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_string_threads` | `app/benchmark_string_threads.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `test_large_scale` | `app/test_large_scale.f90` | Driven by `tools/test_large_scale.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `test_random_large_fill` | `app/test_random_large_fill.f90` | Driven by `tools/test_random_large_fill.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `check_arrow_release` | `app/check_arrow_release.f90` | Driven by `tools/check_arrow_release.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `playground` | `app/playground.f90` | Maintainer scratch file for trying out Fortran code; no fixed purpose. |
 | `demo_print_schema_info` | `app/demo_print_schema_info.f90` | Maintainer demo for reviewing `schema%print_schema_info`'s output. |
@@ -764,6 +765,16 @@ tools/test_large_scale.sh
 # (NROWS * NELEM = 6 billion) still round-trip fine via row-group auto-sizing:
 NROWS=3000000000 MAX_SIZE_GB=120 tools/test_large_scale.sh
 ```
+
+`tools/test_random_large_fill.sh` is a manual, user-runnable check (never run by `fpm test`/CI) that `pf_random_fill_at` is still correct past 2³¹ array elements. Both fill routines take their length from `size(v)`, and a `size` asked without an explicit `kind=` returns a **default-kind** integer, which wraps there. The wrap fails silently in two different ways, both measured on this module before they were fixed: 2³¹ elements exactly gave a length of −2147483648, which tripped the zero-size guard so the routine returned having written *nothing* and left the caller's `intent(out)` array undefined; and 2³² + 8 elements gave a length of 8, so eight values were written and the remaining 4.29 billion were left undefined. Neither raises anything, and no test `fpm test` could run is large enough to reach the boundary — the smallest array that does is 2³¹ `real32` values, about 8.6 GB. `check_fill_size_kind` in `tools/check_source_conventions.py` is the cheap always-on guard against the declarations regressing; this is the end-to-end proof, and it verifies *correctness* (each probed element against `pf_random32_at`/`pf_random_at` at the same position) rather than merely that something was written:
+
+```bash
+tools/test_random_large_fill.sh                    # 2**31 real32 elements, about 8.6 GB
+RKIND=64 tools/test_random_large_fill.sh           # the same count as real64, about 17.2 GB
+ELEMENTS=4294967304 tools/test_random_large_fill.sh  # 2**32 + 8: the partial-fill variant
+```
+
+`ELEMENTS` below 2³¹ still exercises the fill but **cannot** detect the bug this tool exists for, and the script says so on stderr rather than passing quietly.
 
 `tools/check_doc_anchors.py` validates every `#anchor` link in this repository's `*.md` files — same-file and cross-file — against the anchors GitHub would actually generate for each file's headings (using GitHub's real slugging rules, including the `-1`/`-2` suffixing for repeated headings), and exits nonzero if any link doesn't resolve. Run it after editing headings or anchor links in README.md/CONTRIBUTING.md:
 

@@ -166,6 +166,7 @@ something a reader is expected to have.
 | [Risk-99](#risk-99--a-fatal-path-reached-by-several-threads-at-once-hangs-instead-of-terminating) | A fatal path reached by several threads at once hangs instead of terminating | 4 — covered |
 | [Risk-100](#risk-100--a-lazily-computed-rejection-threshold-is-untested-by-every-width-that-does-not-reject) | A lazily computed rejection threshold is untested by every width that does not reject | 4 — covered |
 | [Risk-101](#risk-101--the-wrapping-route-e-kernel-is-built-by-nothing-routine-and-is-miscompiled-under-lto) | The wrapping route (e) kernel is built by nothing routine, and is miscompiled under LTO | 4 — covered |
+| [Risk-102](#risk-102--a-default-kind-size-wraps-above-231-elements-and-the-fill-fails-silently) | A default-kind `size()` wraps above 2**31 elements, and the fill fails silently | 4 — covered |
 
 ---
 
@@ -173,7 +174,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-102**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-103**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4247,3 +4248,47 @@ in a kernel gfortran never ships; a permanently red pipeline would be worse than
 script with no arguments to see it. **If the forced half ever goes green on a newer gfortran, that
 is worth recording rather than assuming — and if `random_block`'s `#else` multiplies are ever made
 overflow-free, the `--shipped-only` restriction should be lifted in the same change.**
+
+### Risk-102 — A default-kind `size()` wraps above 2**31 elements, and the fill fails silently
+
+`size(v)` asked without an explicit `kind=` returns a **default-kind** integer. For an array of
+2**31 elements or more that value wraps, and in a bulk loop the wrap does not fail loudly — it
+produces a length the loop then obeys. Both `pf_random_fill_at` routines held their length that way,
+and both failure modes were measured on the shipped module:
+
+| array size | `size(v)` | what happened |
+|---|---|---|
+| 2**31 exactly | **−2147483648** | tripped the zero-size guard; **nothing written**, the caller's `intent(out)` array left undefined |
+| 2**32 + 8 | **8** | **eight elements written**, the remaining 4.29 billion left undefined |
+
+No error, no warning, no abort, and — because `v` is `intent(out)` — the caller reads whatever the
+allocator left there, which is worse than reading zeros. A section of the *same* allocation filled
+correctly, so the length is the whole story.
+
+**Why nothing caught it.** Every fill test in the suite uses sixteen elements or fewer, and the
+smallest array that reaches the boundary is 2**31 `real32` values, about 8.6 GB — far past what
+`fpm test` or CI should attempt. Coverage is blind to it as well: the line executes normally, just
+with a wrapped value. And it disappears entirely under `-fdefault-integer-8`, so a compiler flag can
+mask it. The size is not exotic for this library: one draw per row of a three-billion-row table
+lands squarely in it, and `parquet_table` handles exactly that.
+
+**The rule this forbids.** *A length taken from a caller's array must be `size(v, kind=int64)`, and
+the counters that walk it must be `integer(int64)`.* More generally: **a bulk routine's own loop
+counters are part of its contract**, not an implementation detail, and the default integer kind is
+the wrong choice in any routine whose input size the caller controls. The guard has to be static or
+large-scale, because nothing in between can see the difference.
+
+**Test.** `check_fill_size_kind` (`tools/check_source_conventions.py`) is the cheap always-on half:
+it flags any bare `size(x)` in `src/parquet_random.f90`, matched by shape so a bulk routine added
+later is covered without editing the check. It is deliberately scoped to that one file — `src/`
+carries about 200 other bare `size(...)` calls, nearly all on arrays bounded by construction, and
+asserting a 200-entry debt this check has not verified would be worse than leaving them; **whether
+any of those takes an unbounded caller array is an open question worth its own pass.**
+
+`tools/test_random_large_fill.sh` plus `app/test_random_large_fill.f90` are the end-to-end proof,
+run by hand. Two properties of its design are load-bearing rather than incidental: it compares each
+probed element against `pf_random32_at`/`pf_random_at` **at the same position**, so it verifies the
+contract rather than merely that something was written; and it warns on stderr when `ELEMENTS` is
+below 2**31, because a smaller run exercises the fill and **cannot detect this bug at all** — a
+green run at the default size is the only one that means anything. Both failure modes were
+reproduced against the unfixed module through this exact tool before the fix was accepted.

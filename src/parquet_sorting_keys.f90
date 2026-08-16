@@ -1832,10 +1832,11 @@ contains
             ! untouched: that is the whole reason this clamp tests the ACTIVE level rather than
             ! simply refusing every nested request.
             !
-            ! **This costs the Fortran paths only.** The C++ engine threads with `std::thread`,
-            ! not OpenMP, so an explicit `threads=` inside such a region still reaches it and
-            ! `parquet_debug_get_sort_threads_used` still reports it -- which is why
-            ! `test_threads_auto_in_parallel` keeps asserting 3 and is not weakened by this.
+            ! **This clamps BOTH engines, and that is not a detail to get wrong.** The count
+            ! resolved here is the one `drive_engine` hands to `sort_build_permutation_threaded`
+            ! (Fortran) and to `parquet_sort_builder_build` (C++) alike, so the C++ engine is not
+            ! exempt merely because it threads with `std::thread` rather than OpenMP. Only the
+            ! ENCLOSING region's active level decides, never which engine is selected.
             if (omp_get_level() > 0 .and. omp_get_active_level() == 0) count = 1_int64
 #endif
         else

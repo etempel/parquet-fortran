@@ -4469,6 +4469,13 @@ parallel caller keep the documented promise that an explicit request is honoured
 all nesting would also have silently disabled threading for the whole test suite, for the reason in
 the next rule.
 
+*Do not assume the C++ engine is exempt.* The count `resolve_thread_count` produces is the one
+`drive_engine` hands to `sort_build_permutation_threaded` **and** to `parquet_sort_builder_build`,
+so the clamp reaches both engines even though only the Fortran one threads with OpenMP. An earlier
+draft of this fix claimed the opposite in a code comment; the tell is
+`test_threads_auto_in_parallel`, which pins the C++ engine and still observes the clamp when its
+enclosing region is inactive (as it is under `OMP_NUM_THREADS=1`).
+
 *Do not run an excluded suite through `run_testsuite(..., parallel=.false.)`.* That argument keeps
 test-drive's `!$omp parallel do` and disables it with an `if` clause, which still **opens** an
 inactive region — so every test in every excluded suite sat at `omp_get_level() == 1`, which is

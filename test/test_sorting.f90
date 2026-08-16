@@ -32,7 +32,12 @@ module test_sorting
     use parquet
     use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan, ieee_positive_inf, ieee_negative_inf
-    use testdrive, only : new_unittest, unittest_type, error_type, check
+    use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
+#ifdef _OPENMP
+    ! Only `test_nested_team_guard` needs this, to state its own precondition: the guard it checks
+    ! is about teams, and a build or a machine that can never open one has nothing to prove.
+    use omp_lib, only : omp_get_max_threads, omp_in_parallel
+#endif
     ! For the Stage 1 conformance oracle only: it builds a C++ key set of its own so that both
     ! engines can be asked about the same rows. These are ordinary library bindings, not debug
     ! hooks -- the two debug hooks are declared locally in `sweep_pairs`, per convention.
@@ -4502,6 +4507,22 @@ contains
         integer(int64), allocatable :: v(:), perm(:)
         integer(int64) :: auto_top, auto_inactive, used_top, used_inactive, st, i
         !
+        ! **Preconditions, declared rather than assumed.** This test is about a team that must not
+        ! be opened; where no team can be opened at all the property holds trivially and, worse,
+        ! the level-0 negative controls below -- the only thing keeping the assertions honest --
+        ! cannot be established. Skipping says so out loud, which a silent pass would not.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it no sort ever opens a team, so the guard " // &
+            "under test is satisfied trivially and its negative controls cannot be established")
+        return
+#else
+        if (omp_get_max_threads() < 2) then
+            call skip_test(error, "needs at least two OpenMP threads: with one available no sort " // &
+                "opens a team anywhere, so the negative controls below cannot be established")
+            return
+        end if
+#endif
+        !
         allocate(v(40000))
         st = 88172645463325252_int64
         do i = 1_int64, 40000_int64
@@ -4549,6 +4570,7 @@ contains
         real(real64) :: v(2000)
         integer(int32), allocatable :: perm(:)
         integer(int64) :: auto_outside, auto_inside, explicit_inside
+        logical :: active_inside
 
         call ties_fixture(v)
         call force_parallel_threshold(4_int64)
@@ -4556,6 +4578,7 @@ contains
         auto_outside = threads_used()
         auto_inside = -1_int64
         explicit_inside = -1_int64
+        active_inside = .false.
         !$omp parallel
         !$omp single
         block
@@ -4564,6 +4587,12 @@ contains
             auto_inside = threads_used()
             call pf_argsort(v, p2, threads=3)
             explicit_inside = threads_used()
+#ifdef _OPENMP
+            ! Whether this region is ACTIVE decides which contract applies below. It is not a
+            ! constant: `!$omp parallel` yields a team of one under `OMP_NUM_THREADS=1`, and an
+            ! inactive region is where an explicit `threads=` is clamped rather than honoured.
+            active_inside = omp_in_parallel()
+#endif
         end block
         !$omp end single
         !$omp end parallel
@@ -4571,8 +4600,20 @@ contains
         call check(error, auto_inside == 1_int64, &
             "auto must resolve to serial inside an OpenMP parallel region")
         if (allocated(error)) return
+#ifdef _OPENMP
+        if (active_inside) then
+            call check(error, explicit_inside == 3_int64, &
+                "an explicit threads= must still be honoured inside an ACTIVE parallel region")
+        else
+            ! A team of one: the region exists but runs serially, which is the shape that deadlocks
+            ! libgomp when a team is opened inside it. See feature_risks.md Risk-104.
+            call check(error, explicit_inside == 1_int64, &
+                "inside a region running on a single thread an explicit threads= must clamp to serial")
+        end if
+#else
         call check(error, explicit_inside == 3_int64, &
-            "an explicit threads= must still be honoured inside a parallel region")
+            "without OpenMP no region exists at all, so an explicit threads= is honoured unconditionally")
+#endif
         if (allocated(error)) return
         ! Guards the test itself: if auto were serial everywhere, the assertion above would pass
         ! while proving nothing about the parallel-region rule.

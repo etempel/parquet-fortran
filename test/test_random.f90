@@ -681,7 +681,7 @@ contains
     subroutine test_agreement_scalar(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: seeds(5) = [0_int64, 1_int64, 12345_int64, -7_int64, huge(1_int64)]
-        integer :: bad_bits, bad_at, bad_at32, bad_lit
+        integer :: bad_bits, bad_at, bad_at32, bad_lit, bad_pos, bad_neg
         integer(int64) :: si, i, d
 
         bad_bits = 0
@@ -733,12 +733,71 @@ contains
         call check(error, bad_lit == 0, &
             "a literal-constant-seed call disagrees with the strict reference: literal-seed and all-variable call " // &
             "shapes are specialised separately by the compiler, and each has been caught while the other was clean")
+        if (allocated(error)) return
+
+        ! ONE-SIDED stream ranges, each as its own loop. This axis is what decides whether either
+        ! sweep above can see the fault class they exist for, and both of them are written with
+        ! bounds that SPAN ZERO -- which is the shape measured NOT to detect it. Against the
+        ! wrapping kernel under LTO, where gfortran returns wrong `pf_random32_at` values, these
+        ! two loops report 200 and 520 mismatches while the `-40..40` and `-8..8` sweeps above
+        ! report none, and the shipped kernel reports none anywhere. The bounds of the loop, not
+        ! the values it visits, are what the optimiser reasons from: `-40..40` already visits
+        ! 1..40 and still sees nothing.
+        !
+        ! **Both signs are swept because both were measured to fire, and that is wider than
+        ! feature_risks.md Risk-101 records.** Its table lists the broken ranges as the
+        ! non-negative ones (`1..1`, `0..7`, `1..8`, `1..24`, `1..64`) against zero-spanning ones
+        ! that are clean; it never tried a strictly negative range. `-40..-1` fires here, harder
+        ! than `1..40` does. So the rule is one-sided-versus-spanning-zero rather than anything
+        ! about the sign itself, and a sweep that covered only the non-negative half on the
+        ! strength of that table would be resting on an untested asymmetry.
+        !
+        ! Two things a future reader must not undo. `do i = 1, n` is the module's own documented
+        ! idiom, so a broken range is one users actually write; and "cover the negatives too" is
+        ! the natural instinct, which -- written as one symmetric loop -- lands squarely in the
+        ! clean shape. Keep these as two loops with their own literal bounds and never merge them.
+        !
+        ! One caveat, so the numbers above are not read as more than they are: whether a given
+        ! loop is miscompiled depends on the compiled form as a whole, not on its bounds alone.
+        ! The same comparison written with the bounds passed in as dummy arguments detects nothing
+        ! at all, on either kernel. These loops keep literal bounds for that reason.
+        bad_pos = 0
+        bad_neg = 0
+        do i = 1_int64, 40_int64                        ! provably non-negative, as its own loop
+            do d = 1_int64, 4_int64
+                if (pf_random_bits_at(12345_int64, i, d) /= ref_bits(12345_int64, i, d)) bad_pos = bad_pos + 1
+                if (pf_random_at(12345_int64, i, d) /= ref_at(12345_int64, i, d)) bad_pos = bad_pos + 1
+                if (pf_random32_at(12345_int64, i, d) /= ref_at32(12345_int64, i, d)) bad_pos = bad_pos + 1
+            end do
+            ! `draw` absent as well: the loop idiom in full, and a distinct specialisation again.
+            if (pf_random_bits_at(12345_int64, i) /= ref_bits(12345_int64, i, 1_int64)) bad_pos = bad_pos + 1
+            if (pf_random_at(12345_int64, i) /= ref_at(12345_int64, i, 1_int64)) bad_pos = bad_pos + 1
+            if (pf_random32_at(12345_int64, i) /= ref_at32(12345_int64, i, 1_int64)) bad_pos = bad_pos + 1
+        end do
+        do i = -40_int64, -1_int64                      ! strictly negative, as its own loop
+            do d = 1_int64, 4_int64
+                if (pf_random_bits_at(12345_int64, i, d) /= ref_bits(12345_int64, i, d)) bad_neg = bad_neg + 1
+                if (pf_random_at(12345_int64, i, d) /= ref_at(12345_int64, i, d)) bad_neg = bad_neg + 1
+                if (pf_random32_at(12345_int64, i, d) /= ref_at32(12345_int64, i, d)) bad_neg = bad_neg + 1
+            end do
+            if (pf_random_bits_at(12345_int64, i) /= ref_bits(12345_int64, i, 1_int64)) bad_neg = bad_neg + 1
+            if (pf_random_at(12345_int64, i) /= ref_at(12345_int64, i, 1_int64)) bad_neg = bad_neg + 1
+            if (pf_random32_at(12345_int64, i) /= ref_at32(12345_int64, i, 1_int64)) bad_neg = bad_neg + 1
+        end do
+        call check(error, bad_pos == 0, &
+            "a PROVABLY NON-NEGATIVE stream range disagrees with the strict reference -- this is the range an " // &
+            "optimiser can reason about and the one `do i = 1, n` produces, and it is the range the sweeps above " // &
+            "cannot see, because their bounds span zero (feature_risks.md Risk-101)")
+        if (allocated(error)) return
+        call check(error, bad_neg == 0, &
+            "a strictly negative stream range disagrees with the strict reference: it is swept as its own loop " // &
+            "because a range spanning zero is compiled differently from either one-sided range")
     end subroutine test_agreement_scalar
 
     !> Fills against the strict reference, over several lengths and start offsets.
     subroutine test_agreement_fill(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
-        integer :: bad64, bad32, m, k
+        integer :: bad64, bad32, m, k, bad_pos, bad_neg
         integer(int64) :: start, i
         real(real64) :: v64(9)
         real(real32) :: v32(9)
@@ -760,6 +819,50 @@ contains
         call check(error, bad64 == 0, "a real64 fill disagrees with the strict reference")
         if (allocated(error)) return
         call check(error, bad32 == 0, "a real32 fill disagrees with the strict reference")
+        if (allocated(error)) return
+
+        ! The same one-sided stream ranges `test_agreement_scalar` closes with, for the same
+        ! reason: the sweep above runs `-3..3`, whose bounds span zero, and that is the shape the
+        ! Risk-101 fault class is invisible in. Both fills reach the same cipher the scalar draws
+        ! do, so a miscompiled `random_block` can reach them too.
+        !
+        ! **Precautionary rather than demonstrated, and the distinction is the honest one to keep
+        ! here.** Unlike its counterpart in `test_agreement_scalar` -- which fires 200 and 520
+        ! times against the known instance -- these two loops detect NOTHING against it: that
+        ! instance lands on `pf_random32_at`'s own path and leaves `fill_r32`/`fill_r64`, which
+        ! are separate procedures with their own specialisation, correct. So this has no negative
+        ! control and must not be described as though it had one. It is kept because the shape is
+        ! one line either way and the next instance need not pick the same procedure; if it is
+        ! ever removed, remove it for that reason and not on the belief that it was covering
+        ! something.
+        bad_pos = 0
+        bad_neg = 0
+        do i = 1_int64, 6_int64                         ! provably non-negative, as its own loop
+            do m = 1, 9
+                call pf_random_fill_at(12345_int64, i, v64(1:m))
+                call pf_random_fill_at(12345_int64, i, v32(1:m))
+                do k = 1, m
+                    if (v64(k) /= ref_at(12345_int64, i, int(k, int64))) bad_pos = bad_pos + 1
+                    if (v32(k) /= ref_at32(12345_int64, i, int(k, int64))) bad_pos = bad_pos + 1
+                end do
+            end do
+        end do
+        do i = -6_int64, -1_int64                       ! strictly negative, as its own loop
+            do m = 1, 9
+                call pf_random_fill_at(12345_int64, i, v64(1:m))
+                call pf_random_fill_at(12345_int64, i, v32(1:m))
+                do k = 1, m
+                    if (v64(k) /= ref_at(12345_int64, i, int(k, int64))) bad_neg = bad_neg + 1
+                    if (v32(k) /= ref_at32(12345_int64, i, int(k, int64))) bad_neg = bad_neg + 1
+                end do
+            end do
+        end do
+        call check(error, bad_pos == 0, &
+            "a fill over a provably non-negative stream range disagrees with the strict reference -- the sweep " // &
+            "above cannot see this, because its bounds span zero (feature_risks.md Risk-101)")
+        if (allocated(error)) return
+        call check(error, bad_neg == 0, &
+            "a fill over a strictly negative stream range disagrees with the strict reference")
     end subroutine test_agreement_fill
 
     !> Integer draws against the strict reference, graded by width regime.
@@ -858,6 +961,25 @@ contains
                 "vacuity guard: a narrow rejecting width produced no rejection, so umod_2p64's narrow branch never ran")
             if (allocated(error)) return
         end do
+
+        ! A STRICTLY NEGATIVE stream range, as its own loop. This sweep has the opposite half of
+        ! the gap `test_agreement_scalar` closes: every stream loop above is non-negative, so until
+        ! this existed the integer agreement layer never asked for a negative stream at all -- one
+        ! golden row carries stream -1 and nothing else did. The sign matters for the same reason
+        ! it does there (feature_risks.md Risk-101): the two one-sided ranges and the range that
+        ! spans zero are three different compilations, so covering one says nothing about another.
+        bad = 0
+        do g = 1, 9
+            do i = -20_int64, -1_int64
+                value = pf_random_int_at(12345_int64, i, los(g), his(g))
+                call ref_int_at(12345_int64, i, los(g), his(g), 1_int64, refv, refr)
+                if (value /= refv) bad = bad + 1
+            end do
+        end do
+        call check(error, bad == 0, &
+            "pf_random_int_at disagrees with the strict reference over a strictly negative stream range, which " // &
+            "every other loop in this test leaves unswept")
+        if (allocated(error)) return
 
         ! The threshold itself, independently: the library's umod_2p64 is not public, so it is
         ! checked through the values it gates, but the reference's own twin is checked here against

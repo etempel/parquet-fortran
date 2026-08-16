@@ -4213,10 +4213,25 @@ This was measured directly, sweeping one call form and varying only the loop bou
 | stream range | wrong |
 |---|---|
 | `1..1`, `0..7`, `1..8`, `1..24`, `1..64` | **all of them** |
+| `-40..-1`, `-64..-1` | **both** — added later, see below |
 | `-3..3`, `-8..8`, `-40..40` | none |
 
-A range the compiler can prove non-negative is miscompiled; a range spanning zero is not. Two
-consequences, and both are traps:
+**The rule is ONE-SIDED versus SPANNING ZERO, not "non-negative".** The first version of this table
+carried only the non-negative half and concluded that a provably non-negative range is the broken
+one — a strictly negative range had simply never been tried. It was, on gfortran 15.2/macOS while
+adding the in-suite sweep below, and it is broken too: `-40..-1` reports **520** mismatches against
+`1..40`'s 200, deterministically across three rebuilds, with the shipped kernel clean on both. So a
+sweep that covered only the non-negative half on the strength of the old table would have been
+resting on an untested asymmetry.
+
+**And the bounds are not the whole story, which bounds how far any of this generalises.** The same
+comparison written with the loop bounds passed in as *dummy arguments* rather than written
+literally detects nothing at all, on either kernel — the bounds stop being a compile-time range and
+the specialisation goes away. What is reliable is the negative direction: a zero-spanning literal
+range has never detected this. Treat the positive direction as evidence about the forms actually
+measured, not as a property that can be reasoned about from source.
+
+Two consequences, and both are traps:
 
 - **`do i = 1, n` is the module's own documented idiom**, so the broken range is exactly the one a
   user writes.
@@ -4243,6 +4258,17 @@ guard that the two halves really did compile different kernels — without it, a
 stopped working would build one kernel twice and report green — and it refuses a gfortran below the
 project's floor, after a first version silently used the system 11.5.0 and produced a confident set
 of spurious failures.
+
+**The in-suite half is `test_agreement_scalar`'s closing block** (`test/test_random.f90`), which
+sweeps `1..40` and `-40..-1` as two loops with their own literal bounds, and
+`test_agreement_int`'s, which adds `-20..-1` to stream loops that were otherwise non-negative
+throughout. These exist because everything else in that suite spans zero and so cannot see this
+class at all; they were verified to fire — 200 and 520 mismatches against the wrapping kernel under
+LTO, none on the shipped kernel — rather than merely added. **Never merge either pair back into one
+symmetric range**, which is the one edit that switches them off while leaving every verdict
+unchanged. `test_agreement_fill` carries the same pair for shape symmetry, but with **no** negative
+control: the known instance leaves the fill procedures correct, and its comment says so rather than
+implying coverage it does not have.
 
 **CI runs `--shipped-only`**, which checks the kernel the compiler actually ships (the first LTO
 coverage this project has had) and skips the forced half. That half fails today, for a gfortran bug

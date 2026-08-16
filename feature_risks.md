@@ -33,7 +33,7 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-104` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-106` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
@@ -169,7 +169,7 @@ something a reader is expected to have.
 | [Risk-102](#risk-102--a-default-kind-size-wraps-above-231-elements-and-the-fill-fails-silently) | A default-kind `size()` wraps above 2**31 elements, and the fill fails silently | 4 — covered |
 | [Risk-103](#risk-103--the-streams-high-counter-word-is-reached-by-no-ordinary-stream-index) | The stream's high counter word is reached by no ordinary stream index | 4 — covered |
 | [Risk-104](#risk-104--a-thread-team-opened-one-level-down-deadlocks-libgomp) | A thread team opened one level down deadlocks libgomp | 4 — covered |
-| [Risk-104](#risk-104--an-allocate-extent-from-a-default-kind-size-overflows-the-array-it-just-allocated) | An allocate extent from a default-kind `size()` overflows the array it just allocated | 4 — covered |
+| [Risk-105](#risk-105--an-allocate-extent-from-a-default-kind-size-overflows-the-array-it-just-allocated) | An allocate extent from a default-kind `size()` overflows the array it just allocated | 4 — covered |
 
 ---
 
@@ -177,7 +177,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-104**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-106**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4202,11 +4202,19 @@ and run by none.** Coverage cannot see it either: a gfortran-based coverage run 
 uncovered *because they are unreachable in that build*, which reads identically to dead code.
 
 **It is miscompiled, and the shape of the failure is the part worth carrying forward.** Building the
-wrapping kernel at `-O3 -flto` or `-Ofast -flto`, `pf_random32_at` returns values unrelated to the
+wrapping kernel at `-O3 -flto` or `-Ofast -flto`, the scalar draws return values unrelated to the
 contract. Measured on gfortran 14.2.1 (Linux, Zen 4) and reported independently on gfortran 15.2
 (macOS, AVX2), which produce **byte-identical wrong values**. `-fwrapv` and `-fno-strict-overflow`
 each remove it; no LTO removes it; `-O2` does not exhibit it. ifx is clean on the kernel it actually
 ships, at `-O0` through `-O3 -xHost -ipo`.
+
+**Which draws break depends on the range, and "it is a `pf_random32_at` bug" is the non-negative
+half of the answer only.** Uncapped per-label counts from the driver at `-O3 -flto`, forced
+wrapping: over `1..24` only `pf_random32_at` comes back wrong (144 failures), while over `-24..-1`
+**all three scalar draws do** — `pf_random_bits_at`, `pf_random_at` and `pf_random32_at`, 96 each
+with an explicit `draw` (336 failures). So the damage on the negative range reaches
+`pf_random_bits_at`, which is the rawest form the module exposes and the one every other value is
+derived from. Any future summary of this fault that names one procedure is describing one range.
 
 **What decides whether a call is affected is the stream index's VALUE RANGE, not the call shape.**
 This was measured directly, sweeping one call form and varying only the loop bounds:
@@ -4225,17 +4233,42 @@ adding the in-suite sweep below, and it is broken too: `-40..-1` reports **520**
 sweep that covered only the non-negative half on the strength of the old table would have been
 resting on an untested asymmetry.
 
-**And the bounds are not the whole story, which bounds how far any of this generalises.** The same
-comparison written with the loop bounds passed in as *dummy arguments* rather than written
-literally detects nothing at all, on either kernel — the bounds stop being a compile-time range and
-the specialisation goes away. What is reliable is the negative direction: a zero-spanning literal
-range has never detected this. Treat the positive direction as evidence about the forms actually
-measured, not as a property that can be reasoned about from source.
+**On gfortran 14.2.1 the trigger is narrower still: BOTH bounds must be compile-time known, and the
+documented idiom is clean.** Sweeping the loop bounds alone, wrapping kernel, `-O3 -flto`, body
+written out inline:
+
+| loop bounds | wrong |
+|---|---|
+| `1..40` — both literal, non-negative | 40 |
+| `-40..-1` — both literal, negative | 40 |
+| `-40..40` — both literal, spans zero | none |
+| **`1..n`, `n` opaque — `do i = 1, n`, the documented idiom** | **none** |
+| `lo..hi`, both opaque | none |
+| `n..-1`, opaque lower and literal `-1` | none |
+
+A literal lower bound is **not** sufficient on its own: `do i = 1, n` over a runtime `n` measured
+clean while the literal `1..40` beside it measured 40. That shape had been tested on no machine
+before — the two previously measured, both-literal and both-dummy, bracket it without covering it —
+and it is the shape `doc/pages/utilities/random.md` and the module's own doc-comment tell users to
+write. **This is a reason to keep sweeping it, not a reason to stop:** clean on the two releases
+tried is not a property of the next one.
+
+**Two traps make a re-measurement of this silently vacuous, and both were walked into here.** The
+comparison body must stay written out **inline** in each loop: factoring several shapes' shared body
+into one helper, so that they "differ only in their bounds", reported **zero for every shape** on a
+build that simultaneously failed at 240 — routing the body through a helper is itself a change of
+compiled form. And an opaque bound must be **genuinely** opaque: an `intent(in)` dummy handed a
+literal actual argument is restored to a literal by interprocedural constant propagation under
+`-flto` and fires at full strength (40 mismatches), so the earlier note that dummy-argument bounds
+"detect nothing at all" holds only when the actual arguments are themselves opaque. Neither the
+bounds nor the body can be varied independently of the other; treat every entry above as evidence
+about the exact form measured, never as a property that can be reasoned about from source.
 
 Two consequences, and both are traps:
 
-- **`do i = 1, n` is the module's own documented idiom**, so the broken range is exactly the one a
-  user writes.
+- **`do i = 1, n` is the module's own documented idiom**, so a broken range would be exactly the one
+  a user writes. That shape is clean on both releases measured — but only because the upper bound is
+  opaque, which is a property of the caller and not of the library.
 - **A sweep centred on zero detects nothing.** `test_agreement_scalar` uses `-40..40` and would not
   have caught this; a literal-seed sweep first written here used `-8..8` and did not catch it either
   until the range was changed. "Cover the negatives too" is the natural instinct and it lands
@@ -4243,8 +4276,17 @@ Two consequences, and both are traps:
 
 The earlier framing of this fault as being about *call shapes* (literal-constant seed versus
 all-variable arguments) is a symptom of the same mechanism — a literal argument is a range of one —
-and it is not reliable on its own: gfortran 15.2 broke literal-seed shapes while all-variable ones
-stayed correct, and 14.2.1 did the exact reverse on the same source.
+and it is not reliable on its own. What is measured: gfortran 15.2 breaks literal-seed shapes while
+all-variable ones stay correct, and **14.2.1 does the same**, not the reverse — at `-O3 -flto` all
+480 of its failures are literal-seed ones, with `variable-shape`, `golden` and the integer width
+regimes appearing zero times. (Verified with the driver's ten-failure print cap lifted. The cap
+means grepping its ordinary output tells you which arm fires *first*, never which arms fire, and
+reasoning from the printed lines is how the mistaken "did the reverse" claim survived.)
+An earlier version of this paragraph, and a matching comment in the driver, claimed 14.2.1 "did the
+exact reverse"; that is contradicted by a direct measurement on the machine it describes, and has
+been removed rather than corrected, since it is not known which source state it was taken against.
+The all-variable arm therefore has **no positive result behind it on either release** — it is swept
+because the two shapes really are compiled separately, not because it has ever failed.
 
 **The rule this forbids.** *Do not treat a green `fpm test` as evidence about the wrapping kernel,
 and do not narrow the kernel check's stream ranges to a symmetric sweep.* Also do not add a
@@ -4254,11 +4296,29 @@ needs.
 
 **Test.** `tools/check_random_kernels.sh` plus its driver `tools/check_random_kernels.f90` build the
 module both ways across six optimisation settings including LTO, and check the golden vectors, the
-strict reference in both stream-sign ranges, and every integer width regime. It carries a vacuity
-guard that the two halves really did compile different kernels — without it, a `-U__GFORTRAN__` that
-stopped working would build one kernel twice and report green — and it refuses a gfortran below the
-project's floor, after a first version silently used the system 11.5.0 and produced a confident set
-of spurious failures.
+strict reference over three separately-compiled stream-range shapes — both-literal non-negative,
+both-literal negative, and `do i = 1, rt_n` against a `volatile` bound — and every integer width
+regime. It carries a vacuity guard that the two halves really did compile different kernels —
+without it, a `-U__GFORTRAN__` that stopped working would build one kernel twice and report green —
+and it refuses a gfortran below the project's floor, after a first version silently used the system
+11.5.0 and produced a confident set of spurious failures.
+
+**The driver's negative arm must keep its inner `draw` loop, and this is not symmetry for its own
+sake.** Written with only the three no-draw calls, that arm reported **zero** on gfortran 14.2.1
+while the identical range *with* the draw loop reported 40 and the in-suite counterpart reported 520
+on 15.2 — i.e. the standalone driver was not merely weaker than the suite on that arm, it was blind
+to the class entirely. Do not trim it back to save three lines.
+
+**ifx has been re-cleared against the widened trigger set**, which matters because ifx is the one
+compiler that actually *ships* the wrapping kernel, so a gfortran-only finding about it is a finding
+about ifx's production path. All six configurations pass including `-O3 -ipo` and `-O3 -xHost -ipo`,
+and a dedicated eight-shape sweep — every row of both tables above — is clean at five ifx settings.
+That clearance is not vacuous: mutating one reference constant by 1 makes the same probe report
+600/600 wrong on every shape. Note also that ifx **cannot** be made to build the int128 kernel for
+comparison — `selected_int_kind(38)` is `-1` there, which is exactly what the module's
+`pf_int128_assert` capability assertion exists to turn into a compile error — so on ifx the strict
+reference and the golden vectors are the only available oracles, and there is no second kernel to
+cross-check against.
 
 **The in-suite half is `test_agreement_scalar`'s closing block** (`test/test_random.f90`), which
 sweeps `1..40` and `-40..-1` as two loops with their own literal bounds, and
@@ -4425,7 +4485,7 @@ region, and an explicit `threads=4` reaching the Fortran engine must resolve to 
 carry a level-0 negative control taken first, and both were verified by reverting their guard
 independently — each mutation fails its own assertion and no other.
 
-### Risk-104 — An allocate extent from a default-kind `size()` overflows the array it just allocated
+### Risk-105 — An allocate extent from a default-kind `size()` overflows the array it just allocated
 
 `size(x)` without `kind=` returns a DEFAULT-kind integer and wraps above 2**31 elements
 (Risk-102). In an allocate extent that is worse than the silent short fill Risk-102 describes,

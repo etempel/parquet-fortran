@@ -29,7 +29,15 @@ program check_random_kernels
     integer :: failed
     character(len=8) :: kernel
 
+    !> Loop bound for the runtime-bound sweep in `check_literal_seed_shapes`. `volatile` so no
+    !! amount of interprocedural constant propagation can turn it back into a literal -- which is
+    !! the entire point of that arm, and is not hypothetical: an ordinary `intent(in)` dummy
+    !! carrying a literal actual argument IS restored to a literal under `-flto`, measured at 40
+    !! mismatches where the same loop with a genuinely opaque bound reports none.
+    integer(int64), volatile :: rt_n
+
     failed = 0
+    rt_n = 24_int64
     if (parquet_debug_random_uses_int128()) then
         kernel = "int128"
     else
@@ -114,23 +122,72 @@ contains
         end do
     end subroutine check_golden_fill
 
-    !> Literal-constant seed at the call site, over a NON-NEGATIVE stream range.
+    !> Literal-constant seed at the call site, over three stream-range shapes that are compiled
+    !> differently from one another.
     !!
-    !! **The stream range is the load-bearing part of this sweep, and it was measured, not
-    !! guessed.** Building the wrapping kernel at `-O3 -flto` on gfortran 14.2.1, every stream range
-    !! that the compiler can prove non-negative returns wrong `pf_random32_at` values -- `1..1`,
-    !! `0..7`, `1..8`, `1..24` and `1..64` were each 100 % wrong -- while every range spanning zero
-    !! was 100 % correct: `-3..3`, `-8..8` and `-40..40` all clean. Value-range propagation over the
-    !! stream is what decides it.
+    !! **The stream range is the load-bearing part of this sweep, and every claim below is a
+    !! measurement rather than a deduction.** Building the wrapping kernel at `-O3 -flto` on
+    !! gfortran 14.2.1, with the comparison body written out inline exactly as it is here (counts
+    !! from a standalone 40-iteration sweep, so read them as fires/does-not rather than as this
+    !! subroutine's own totals, which are given further down):
     !!
-    !! Two consequences a future reader must not undo. `do i = 1, n` is the module's own documented
-    !! idiom, so the broken range is the one users actually write. And a sweep centred on zero --
-    !! the natural way to write "cover negatives too", and what `test_agreement_scalar` does with
-    !! `-40..40` -- lands squarely in the clean range and detects nothing. Sweep both signs, in
-    !! separate loops, and never merge them into one symmetric range.
+    !! | loop bounds | wrong |
+    !! |---|---|
+    !! | `1..40` -- both literal, non-negative | 40 |
+    !! | `-40..-1` -- both literal, negative | 40 |
+    !! | `-40..40` -- both literal, spans zero | none |
+    !! | `1..rt_n` -- literal lower, opaque upper | none |
+    !! | `rt_lo..rt_hi` -- both opaque | none |
+    !!
+    !! **So the trigger is BOTH bounds being compile-time known AND the range not spanning zero --
+    !! which is narrower than the rule feature_risks.md Risk-101 states**, and narrower in the
+    !! direction that matters: `do i = 1, n` over a runtime `n`, which is the module's own
+    !! documented idiom and the shape a user actually writes, measured clean. That shape had never
+    !! been tested on any machine before this sweep existed -- the two shapes previously measured,
+    !! both-literal and both-dummy, bracket it without covering it. It is swept here anyway,
+    !! because "clean on the two releases tried" is not a property of the next release.
+    !!
+    !! **Two traps that make a re-measurement of this silently vacuous.** The comparison body must
+    !! stay written out inline in each loop: factoring the three shapes' shared body into one
+    !! helper so that they "differ only in their bounds" reports ZERO for every shape on a build
+    !! that fails at 240 here, because routing the body through a helper is itself a change of
+    !! compiled form. And an opaque bound must be genuinely opaque -- an `intent(in)` dummy handed
+    !! a literal actual argument is restored to a literal by interprocedural constant propagation
+    !! under `-flto` and fires at full strength, so `rt_n` is `volatile`.
+    !!
+    !! One consequence a future reader must not undo: a sweep centred on zero -- the natural way to
+    !! write "cover negatives too", and what `test_agreement_scalar` does with `-40..40` -- lands
+    !! squarely in the clean range and detects nothing. Sweep both signs, in separate loops, and
+    !! never merge them into one symmetric range.
+    !!
+    !! **The negative arm carries the same inner `draw` loop as the positive one, and that is not
+    !! symmetry for its own sake: without it the arm was measurably blind.** Written with only its
+    !! three no-draw calls it contributed ZERO on gfortran 14.2.1; with the draw loop the same range
+    !! contributes **336** of this subroutine's 480, against the positive arm's 144. Do not trim it
+    !! back to save three lines.
+    !!
+    !! **And the negative arm is not merely bigger, it is BROADER: it breaks all three scalar draws
+    !! where the positive arm breaks only one.** Uncapped per-label counts at `-O3 -flto`, forced
+    !! wrapping:
+    !!
+    !! | arm | which draws come back wrong |
+    !! |---|---|
+    !! | `1..24` | `pf_random32_at` only -- 96 with `draw`, 24 without, plus 24 `pf_random_at` without |
+    !! | `-24..-1` | **`pf_random_bits_at`, `pf_random_at` AND `pf_random32_at`** -- 96 each with `draw` |
+    !! | `1..rt_n` | none |
+    !!
+    !! So a summary of this fault as "`pf_random32_at` returns wrong values" describes the
+    !! non-negative range only. On the negative range every scalar draw is wrong, which means the
+    !! damage reaches `pf_random_bits_at` -- the rawest form the module has, and the one every other
+    !! value is derived from.
+    !!
+    !! Note the driver caps printed failures at 10 (`bad`), so grepping its output tells you which
+    !! arm fires FIRST, never which arms fire. The per-label counts above were taken by lifting that
+    !! cap in a scratch copy; do that rather than reasoning from the printed lines, which is how an
+    !! earlier version of this comment came to assert something it had not actually measured.
     subroutine check_literal_seed_shapes()
         integer(int64) :: i, d
-        do i = 1_int64, 24_int64                       ! non-negative: the range that has failed
+        do i = 1_int64, 24_int64                       ! both bounds literal, non-negative
             do d = 1_int64, 4_int64
                 if (pf_random_bits_at(12345_int64, i, d) /= ref_bits(12345_int64, i, d)) call bad("literal-seed bits")
                 if (pf_random_at(12345_int64, i, d) /= ref_at(12345_int64, i, d)) call bad("literal-seed at")
@@ -140,19 +197,42 @@ contains
             if (pf_random_at(12345_int64, i) /= ref_at(12345_int64, i, 1_int64)) call bad("literal-seed at, no draw")
             if (pf_random32_at(12345_int64, i) /= ref_at32(12345_int64, i, 1_int64)) call bad("literal-seed at32, no draw")
         end do
-        do i = -24_int64, -1_int64                     ! strictly negative, as its own range
-            if (pf_random_bits_at(12345_int64, i) /= ref_bits(12345_int64, i, 1_int64)) call bad("literal-seed bits, neg")
-            if (pf_random_at(12345_int64, i) /= ref_at(12345_int64, i, 1_int64)) call bad("literal-seed at, neg")
-            if (pf_random32_at(12345_int64, i) /= ref_at32(12345_int64, i, 1_int64)) call bad("literal-seed at32, neg")
+        do i = -24_int64, -1_int64                     ! both bounds literal, strictly negative
+            do d = 1_int64, 4_int64
+                if (pf_random_bits_at(12345_int64, i, d) /= ref_bits(12345_int64, i, d)) call bad("literal-seed bits, neg")
+                if (pf_random_at(12345_int64, i, d) /= ref_at(12345_int64, i, d)) call bad("literal-seed at, neg")
+                if (pf_random32_at(12345_int64, i, d) /= ref_at32(12345_int64, i, d)) call bad("literal-seed at32, neg")
+            end do
+            if (pf_random_bits_at(12345_int64, i) /= ref_bits(12345_int64, i, 1_int64)) call bad("literal-seed bits, neg, no draw")
+            if (pf_random_at(12345_int64, i) /= ref_at(12345_int64, i, 1_int64)) call bad("literal-seed at, neg, no draw")
+            if (pf_random32_at(12345_int64, i) /= ref_at32(12345_int64, i, 1_int64)) call bad("literal-seed at32, neg, no draw")
+        end do
+        do i = 1_int64, rt_n                           ! `do i = 1, n`: the documented idiom
+            do d = 1_int64, 4_int64
+                if (pf_random_bits_at(12345_int64, i, d) /= ref_bits(12345_int64, i, d)) call bad("literal-seed bits, rt")
+                if (pf_random_at(12345_int64, i, d) /= ref_at(12345_int64, i, d)) call bad("literal-seed at, rt")
+                if (pf_random32_at(12345_int64, i, d) /= ref_at32(12345_int64, i, d)) call bad("literal-seed at32, rt")
+            end do
+            if (pf_random_bits_at(12345_int64, i) /= ref_bits(12345_int64, i, 1_int64)) call bad("literal-seed bits, rt, no draw")
+            if (pf_random_at(12345_int64, i) /= ref_at(12345_int64, i, 1_int64)) call bad("literal-seed at, rt, no draw")
+            if (pf_random32_at(12345_int64, i) /= ref_at32(12345_int64, i, 1_int64)) call bad("literal-seed at32, rt, no draw")
         end do
     end subroutine check_literal_seed_shapes
 
     !> Seed, stream and draw all variables -- again with the stream range kept non-negative.
     !!
-    !! Separate from the sweep above because the two are separately specialised by the compiler:
-    !! gfortran 15.2 was reported miscompiling literal-seed shapes while all-variable shapes stayed
-    !! correct, and 14.2.1 was measured doing the reverse on the same source. Neither is the safe
-    !! one, so both are swept.
+    !! Separate from the sweep above because the two are separately specialised by the compiler, and
+    !! swept because neither has been shown safe rather than because both have been shown to fail.
+    !! What is measured: gfortran 15.2 miscompiles literal-seed shapes, and on 14.2.1 at `-O3 -flto`
+    !! every one of the 240 failures is a literal-seed one -- `variable-shape` appears zero times,
+    !! and so does `golden`. An earlier version of this comment claimed 14.2.1 "was measured doing
+    !! the reverse", i.e. breaking all-variable shapes while literal-seed ones stayed correct; that
+    !! is contradicted by a direct measurement on the machine it describes, so it has been removed
+    !! rather than corrected -- it is not known which source state it was taken against.
+    !!
+    !! This arm is therefore currently a sweep with no positive result behind it on either release.
+    !! Keep it: it costs one loop, the two shapes really are compiled separately, and a shape that
+    !! has never failed is not a shape that cannot.
     subroutine check_variable_shapes()
         integer(int64) :: s, i, d
         do s = -3_int64, 3_int64

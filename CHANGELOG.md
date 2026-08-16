@@ -629,6 +629,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidecars are unchanged. The VOTable sidecar declares the same types (`int`, `long`, `float`,
   `double`, `boolean`) for those keywords instead of calling every scalar a `char`. Nothing on the
   read side changes: a Fortran reader still selects its parse from the declared type of `value`.
+
+- **A counter-based random number generator, `parquet_random`** (`pf_random_at`, `pf_random32_at`,
+  `pf_random_bits_at`, `pf_random_int_at`, `pf_random_fill_at`, `pf_random_seed`, `pf_random_key`,
+  `pf_random_algorithm`), re-exported by `use parquet` and usable on its own as
+  `use parquet_random`. Every value is a pure function of `(seed, i [, draw])` rather than of call
+  order, so a parallel loop returns the same numbers under `schedule(static)`,
+  `schedule(dynamic)`, one thread or three hundred — something no stateful generator can offer at
+  any speed, and which locking does not fix. The generator is Philox4x32-10; `pf_random_algorithm`
+  names the frozen bit contract (`philox4x32-10/v1`) and changes only if some value the module can
+  produce changes. `pf_random_at`/`pf_random32_at` give `real64`/`real32` in `[0, 1)` with 1.0
+  unreachable by construction, and the `real32` sequence is deliberately its own rather than a
+  narrowing of the `real64` one; `pf_random_bits_at` gives 64 raw bits, of which `pf_random_at` is
+  contractually the top 53; `pf_random_int_at` is exactly unbiased at every width, including above
+  2**63 where the obvious implementations silently make part of the range unreachable, and swaps
+  `lo > hi` rather than failing; `pf_random_fill_at` fills a rank-1 `real64`/`real32` array with
+  consecutive draws, prefix-consistently and more cheaply than the equivalent scalar calls; and
+  `pf_random_key` derives independent seed families that compose by nesting. The generator is
+  **not cryptographic** and is documented as such. See
+  [Random numbers](doc/pages/utilities/random.md).
   See [A typed value records its own
   type](doc/pages/schema/building-schema-in-code.md#a-typed-value-records-its-own-type).
 

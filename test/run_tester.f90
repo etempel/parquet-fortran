@@ -33,6 +33,8 @@ program tester
     use test_table_codegen, only : collect_tests_table_codegen
     use test_settings, only : collect_tests_parquet_settings
     use test_diagnostics, only : collect_tests_diagnostics
+    use test_random, only : collect_tests_parquet_random
+    use test_random_omp, only : collect_tests_parquet_random_omp
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
@@ -85,7 +87,9 @@ program tester
         new_testsuite("string_parallel", collect_tests_string_parallel), &
         new_testsuite("table_codegen", collect_tests_table_codegen), &
         new_testsuite("settings", collect_tests_parquet_settings), &
-        new_testsuite("diagnostics", collect_tests_diagnostics) &
+        new_testsuite("diagnostics", collect_tests_diagnostics), &
+        new_testsuite("random", collect_tests_parquet_random), &
+        new_testsuite("random_omp", collect_tests_parquet_random_omp) &
         ]
     !
     ! command line argument for a specific testsuite and test
@@ -202,6 +206,18 @@ contains
     !> The suite is pure in-memory work and runs in milliseconds, so the lost parallelism costs
     !> nothing.
     !>
+    !> "random_omp" is excluded for exactly the same reason as "table_parallel" below, and it is
+    !> the clearest case of it: the suite exists to prove that parquet_random gives identical
+    !> values under schedule(static), schedule(dynamic,1) and several thread counts. Run inside
+    !> test-drive's own `!$omp parallel do`, each of those regions is NESTED, and with nesting
+    !> disabled by default a nested region gets a team of ONE -- so every arm would really be the
+    !> serial arm and every comparison would pass without two threads ever having run. The test
+    !> carries its own vacuity guard on the team size, so that failure is loud rather than silent,
+    !> but the guard reports a broken setup; this exclusion is what makes the setup right. Enabling
+    !> nested parallelism instead is not an option: it is process-global OpenMP state, and it would
+    !> be changed underneath every concurrently running sibling suite. The suite is two in-memory
+    !> tests and costs a fraction of a second.
+    !>
     !> "table_parallel" is excluded for a reason that is not about shared state at all, and it
     !> cannot work any other way. Its tests compare a table mutated on several threads against an
     !> independent clone mutated with parquet_set_table_threads(1) -- and a table mutation resolves
@@ -235,7 +251,8 @@ contains
         character(len=*), intent(in) :: name
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sort" .or. name == "settings" &
-            .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics")
+            .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
+            .or. name == "random_omp")
     end function suite_is_safe_to_parallelize
 
     !> Whether running just this suite is worth pre-running the whole scenario set for. Purely a

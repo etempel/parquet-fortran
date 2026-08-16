@@ -269,6 +269,14 @@ transform at all is a no-op, so there is no need to ask first.
 already share one transform across their internal readers, and you write no OpenMP at all. This
 procedure is for the case where you are managing the readers yourself.
 
+## Random numbers need no rules at all
+
+`parquet_random` is the one part of this library with nothing to say in this page's terms. It has no shared state to protect, so there is nothing to lock, nothing to give one instance per thread, and no ordering to preserve: every value is a pure function of `(seed, i [, draw])`, computed from those arguments and nothing else. Call it from any number of threads at once, on any schedule.
+
+That is stronger than thread *safety*, and the difference matters. A conventional generator can be made safe with a lock and still be useless in a parallel loop, because which value an iteration receives depends on how many draws happened first — and a lock does not decide that, the schedule does. Here a draw is **reproducible**, and being reproducible it is automatically safe. See [Random numbers](../utilities/random.html).
+
+The single exception is `pf_random_seed()`, which by design is not a pure function — it exists to produce a value that has never been produced before. It increments a process-wide counter inside a named critical region, so concurrent calls return different seeds; that is its only interaction with other threads, and it is handled internally.
+
 ## Practical cases
 
 - Safe: many threads, each opening/writing/closing its own `parquet_writer` to a different file.

@@ -76,6 +76,7 @@ All 22 pages, in reading order. (This list, each group's own page list and the
 **Utilities and code generation**
 
 - [Sorting arrays and columns with `pf_sort`/`pf_argsort`](utilities/sorting.html)
+- [Random numbers with `pf_random_at`](utilities/random.html)
 - [Generated table types: named accessors from a MAML schema](utilities/generated-tables.html)
 - [Embedding your own MAML schemas in your own project](utilities/embedding-maml-schemas.html)
 

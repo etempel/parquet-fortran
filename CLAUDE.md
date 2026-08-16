@@ -2421,6 +2421,26 @@ applied to the harness instead of the source.
   string, and only then let `read` do the conversion. `env_int64` (`src/parquet_settings.f90`) is
   the worked example, and `settings_env_two_numbers` (`test/error_scenarios.f90`) is the regression
   test that stops the lax form coming back.
+- **A compiler that WRAPS an overflowing integer expression may still use the overflow's
+  undefinedness to delete a branch somewhere else — "it wraps" is not "it is safe".** These are two
+  different claims and this project conflated them once, at the cost of a silent wrong answer.
+  `parquet_random`'s integer draw needed `hi - lo + 1` as an unsigned 64-bit pattern; that overflows
+  above `2**63`, and ifx 2026.1.1 was measured wrapping it faithfully, so it shipped as a documented
+  wrapping site. ifx does wrap it — and, because `hi >= lo` holds by construction, also concludes
+  that absent overflow the result must be positive, and therefore **deletes the `if (s < 0)` branch
+  two functions away** that handles exactly the wide-width case. The draw then took the narrow-width
+  path and returned a plausible, uniform-looking, wrong value still inside `[lo, hi]`. Reproduced at
+  `-O2` on the default profile; invisible to the golden vectors on the other compiler, to
+  containment and to chi-square.
+
+  **So: a wrapping measurement is evidence about one expression's result, never about an inference
+  the optimiser may draw wherever that value flows** — and a branch on the result's *sign* is the
+  most inviting target there is. Fix at the root rather than at the branch: compute the pattern
+  without overflowing (32-bit halves cost nothing off a hot path — see `sub64`/`add64` in
+  `src/parquet_random.f90`), which leaves no undefinedness to reason from. Where an overflowing site
+  is genuinely kept for speed, it must be guarded by a comparison against an independent
+  overflow-free implementation, because nothing else will notice. See `feature_risks.md` Risk-94.
+
 - **`-128_int8` trips gfortran's range check** (it parses `128` then negates). Build the high bit
   with `ibset(0_int8, 7)` in constant expressions. Also: an array-constructor implied-do index
   (`[(f(b), b=0,7)]`) has no implicit type under `implicit none` — list the elements explicitly.

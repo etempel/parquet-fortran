@@ -158,6 +158,11 @@ something a reader is expected to have.
 | [Risk-91](#risk-91--sort_radix_refine_strings-reads-one-array-while-permuting-another-and-nothing-diagnoses-passing-the-same-one) | `sort_radix_refine_strings` reads one array while permuting another, and nothing diagnoses passing the same one | 3 — not testable |
 | [Risk-92](#risk-92--the-last-radix-pass-leaves-the-row-array-stale-and-only-the-string-exclusion-makes-that-safe) | The last radix pass leaves the row array STALE, and only the string exclusion makes that safe | 4 — covered |
 | [Risk-93](#risk-93--the-test-log-names-a-different-test-from-the-one-that-is-stuck) | The test log names a DIFFERENT test from the one that is stuck | 3 — not testable |
+| [Risk-94](#risk-94--a-compiler-may-use-an-overflowing-expressions-undefinedness-to-delete-a-branch-somewhere-else) | A compiler may use an overflowing expression's undefinedness to delete a branch somewhere else | 4 — covered |
+| [Risk-95](#risk-95--parquet_randoms-remaining-wrapping-sites-rest-on-one-test-and-nothing-else) | `parquet_random`'s remaining wrapping sites rest on one test and nothing else | 4 — covered |
+| [Risk-96](#risk-96--a-wide-width-integer-draw-can-be-silently-non-uniform-while-every-obvious-test-passes) | A wide-width integer draw can be silently non-uniform while every obvious test passes | 4 — covered |
+| [Risk-97](#risk-97--a-wrongly-selected-route-e-fork-silently-ships-the-wrapping-kernel-on-a-capable-compiler) | A wrongly selected route (e) fork silently ships the wrapping kernel on a capable compiler | 4 — covered |
+| [Risk-98](#risk-98--a-schedule-dependent-draw-reintroduces-irreproducibility-and-every-structural-test-still-passes) | A schedule-dependent draw reintroduces irreproducibility, and every structural test still passes | 4 — covered |
 
 ---
 
@@ -165,7 +170,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-94**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-99**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -3946,3 +3951,142 @@ extremes, all-null, one-valid) across all four `descending`/`nulls_first` combin
 the negative control for both: it asserts via the insertion-shift tracker that the radix path
 actually ran above the floor and did not below it, without which every other radix test would pass
 just as happily against a radix path that never executed.
+
+### Risk-94 — A compiler may use an overflowing expression's undefinedness to delete a branch somewhere else
+
+`parquet_random`'s integer draw needs the width `hi - lo + 1` as an **unsigned** 64-bit pattern.
+Written that way it overflows for every width above `2**63`, and the wrapped pattern is exactly what
+is wanted — which is why the design carried it as a documented, accepted wrapping site on the one
+compiler with no 128-bit kind, on the strength of a Stage 0 measurement that ifx "wraps faithfully".
+
+**It does wrap faithfully. That was never the question.** ifx 2026.1.1 computes the width correctly
+and then uses the *undefinedness* of the same expression to reason about the result: `hi >= lo` holds
+by construction, so absent overflow the width is positive, so `umod_2p64`'s `if (s < 0)` test — the
+branch that handles every width at or above `2**63` — is provably dead and is deleted. A wide-range
+draw then takes the narrow-width path, computes a wrong rejection threshold, and returns a value that
+is still inside `[lo, hi]` and still looks random. Reproduced on machine B at `-O2` on the default
+profile; the wrong threshold was `-6148914691236517206` where `6148914691236517205` was required, and
+the affected draw retried three times before returning a plausible wrong answer.
+
+**The rule this forbids, and it is the general one:** *never conclude that an overflowing expression
+is safe because the compiler was measured to wrap it.* Wrapping is a property of one expression's
+result; undefined behaviour licenses inferences **anywhere the value flows**, arbitrarily far from
+the arithmetic, and a branch on the result's sign is the most inviting target there is. A wrapping
+measurement is evidence about the multiply; it is not evidence about the `if` two functions away.
+
+Fixed at the root rather than at the branch: `width_of` and `offset_by` (`src/parquet_random.f90`)
+now compute on 32-bit halves, so no signed overflow occurs and no inference is available. The values
+are unchanged — the golden vectors did not move — so this was a defect in how the pattern was
+*obtained*, never in what it should be.
+
+**Test.** Covered, and it is what found this: `test_agreement_int` (`test/test_random.f90`) compares
+the library against `test_random_reference`'s strictly overflow-free twin across a width grid graded
+by regime. Only the grid row at a width near `2**64 * 2/3` failed — the one width where the rejection
+test fires often enough for a wrong threshold to change an answer — which is precisely why the grid
+is graded rather than sampled. Note what did NOT catch it: the golden vectors passed on gfortran,
+every containment and chi-square test passed on both compilers, and the module's own known-answer
+vectors passed on both.
+
+### Risk-95 — `parquet_random`'s remaining wrapping sites rest on one test and nothing else
+
+Two signed-overflow sites remain in `src/parquet_random.f90` after Risk-94's fix, both deliberate:
+the Philox round multiply where there is no 128-bit kind (`random_block`'s `#else` arm, ifx only),
+and `mulhilo64`'s four 32x32 partial products, which are carried on **both** sides of the route (e)
+fork. Both are recorded in the module's own comments, and a strictly overflow-free `mulhilo64` was
+measured at 1.31x on gfortran and 2.05x on ifx for the whole integer path, which is why it is not
+simply written that way.
+
+**What Risk-94 changes about them is not their status but their EVIDENCE.** Each was carried partly
+on the reasoning that the compilers in use had been observed to wrap. That reasoning is now known to
+be answering a different question than the one being asked. Neither site is more dangerous than it
+was yesterday; the justification for calling them safe is simply gone, and only the agreement sweep
+stands behind them.
+
+**The rules this forbids.** Do not add a third wrapping site on the strength of a wrapping
+measurement. Do not delete or weaken the strict reference in `test/test_random_reference.f90`, which
+is the only independent implementation these sites are checked against. Do not put a `write`, a
+recorded first mismatch or a running checksum inside any comparison loop in `test_random.f90` —
+three such instruments have each been observed making a real fault vanish. And do not claim anywhere
+in the documentation that this module is free of undefined behaviour.
+
+**Test.** Covered by `test_agreement_scalar`, `test_agreement_fill` and `test_agreement_int`
+(`test/test_random.f90`), which are the only checks that would notice a compiler beginning to exploit
+either site. A future failure in one of them is a compiler finding to be reported, not a defect to be
+worked around.
+
+### Risk-96 — A wide-width integer draw can be silently non-uniform while every obvious test passes
+
+`pf_random_int_at` is exactly unbiased because it rejects the last `2**64 mod s` candidates of the
+range. Get that threshold wrong at a width at or above `2**63` — which the natural spelling of
+`umod_2p64` does, for two thirds of such widths — and up to **half the requested range becomes
+unreachable**.
+
+The reason this needs an entry of its own is what the failure looks like from outside: every returned
+value is still inside `[lo, hi]`, and the values that do occur are still uniform over themselves. A
+containment test passes. A chi-square test passes, because it is binning a genuinely uniform
+distribution over the reachable half. A mean/variance check passes. The exhaustive small-range count
+passes, because it exercises a narrow width where the threshold is right. Nothing short of comparing
+against an independent implementation over wide widths can see it.
+
+**The rule this forbids.** *A new statistical test is not a substitute for the wide-width agreement
+grid, and neither is a wider one.* If the reduction is ever re-derived, re-optimised, or ported to
+another kind, the grid must be re-run — and any new width regime must be added to it rather than
+assumed to behave like the ones already there.
+
+**Test.** Covered by `test_agreement_int`'s width grid (`test/test_random.f90`), which deliberately
+spans below `2**63`, exactly `2**63`, `2**64 - 1`, width 0, and ranges placed away from zero so the
+width's low limb borrows — a dropped borrow once survived an entire sweep because every case had
+`lo = 0`. `ref_umod_2p64` (`test/test_random_reference.f90`) derives the threshold by bitwise long
+division, a different route from the library's halve-reduce-double, so the two cannot share the
+signedness confusion the whole entry is about.
+
+### Risk-97 — A wrongly selected route (e) fork silently ships the wrapping kernel on a capable compiler
+
+Which multiply `parquet_random` compiles is decided by a cpp allowlist of compiler predefines,
+because cpp cannot evaluate `selected_int_kind(38)`. An allowlist has a silent direction: a compiler
+that *has* a 128-bit integer kind but is not named in it quietly gets the wrapping kernel — the exact
+kernel route (e) exists to avoid, on a compiler that never needed it. Nothing about the build says
+so, every value is still correct on that compiler until the day it is not, and the failure mode when
+it arrives is a miscompilation, not an error.
+
+The opposite direction is closed by cpp itself: `pf_int128_assert` divides by zero in a constant
+expression if the fork is selected where `selected_int_kind(38)` is negative, so that mistake is a
+compile error naming the line.
+
+**The rule this forbids.** *Do not add a consumer-facing macro or escape hatch to select the fork.*
+An override would reintroduce precisely this hazard with a second mechanism, and route (e) exists to
+close it. Adding a compiler to the allowlist is fine; adding a way for a build to disagree with the
+allowlist is not.
+
+**Test.** Covered by `test_fork_selection` (`test/test_random.f90`), one assertion evaluated with the
+consuming compiler at the moment the suite builds:
+`parquet_debug_random_uses_int128() .eqv. (selected_int_kind(38) > 0)`. Verified to hold in both
+directions on machine B — gfortran 14.2.1 takes the fork, ifx 2026.1.1 reports
+`selected_int_kind(38) = -1` and does not.
+
+### Risk-98 — A schedule-dependent draw reintroduces irreproducibility, and every structural test still passes
+
+`parquet_random` exists for one property: the value at `(seed, i, draw)` does not depend on how many
+draws came before it, so a parallel loop reproduces under any schedule. Every other test in the suite
+would pass against an implementation that had quietly lost it — golden vectors, agreement sweeps,
+statistics and containment are all evaluated on one thread, where there is no schedule to vary.
+
+The realistic way to lose it is not a rewrite of the cipher but a plausible-looking optimisation: a
+cached block shared between calls, a thread-local buffer, a bulk path that carries state from one
+call to the next, or a future tier that derives a stream key from anything a thread can observe. Each
+of those returns correct-looking numbers and breaks the only promise the module makes.
+
+**The rule this forbids.** *No procedure in `parquet_random` may read any state that a caller did not
+pass in* — not a thread number, not a cached previous block, not a saved position. The one exception
+is `pf_random_seed`, which is not a draw and is documented as nondeterministic. A future tier-1
+`pf_rng` will carry state by design; it must not be reachable from any tier-0 procedure.
+
+**Test.** Covered by `test_schedule_independence` (`test/test_random_omp.f90`), which fills the same
+array serially, under `schedule(static)`, under `schedule(dynamic,1)`, at 2 threads and at 7, and
+requires every value to be bit-identical. Three parts of it are load-bearing and must not be
+simplified away: **variable per-iteration work**, without which one thread can claim the whole loop
+and the comparison is empty; a **vacuity guard** asserting the team size exceeded 1, which caught a
+faulty capture during development and is the only thing standing between this test and a silent
+pass; and the suite's **exclusion from test-drive's own per-test parallelism**
+(`suite_is_safe_to_parallelize`, `test/run_tester.f90`), without which each region here is nested,
+gets a team of one, and tests nothing.

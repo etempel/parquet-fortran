@@ -981,7 +981,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT32)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p)))
+            allocate(arr(size(p, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1006,11 +1006,11 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT64)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p)))
+            allocate(arr(size(p, kind=int64)))
             arr = p
         case (PK_INT32)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p_i32)
-            allocate(arr(size(p_i32)))
+            allocate(arr(size(p_i32, kind=int64)))
             arr = p_i32
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1034,7 +1034,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT32)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p)))
+            allocate(arr(size(p, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1059,11 +1059,11 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT64)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p)))
+            allocate(arr(size(p, kind=int64)))
             arr = p
         case (PK_FLOAT32)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p_f32)
-            allocate(arr(size(p_f32)))
+            allocate(arr(size(p_f32, kind=int64)))
             arr = p_f32
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1087,7 +1087,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_LOGICAL)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p)))
+            allocate(arr(size(p, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1111,7 +1111,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_DATE)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p)))
+            allocate(arr(size(p, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1135,7 +1135,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIME)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p)))
+            allocate(arr(size(p, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1159,7 +1159,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIMESTAMP)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p)))
+            allocate(arr(size(p, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1183,7 +1183,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT32_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p,1), size(p,2)))
+            allocate(arr(size(p, 1, kind=int64), size(p, 2, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1208,11 +1208,11 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_INT64_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p,1), size(p,2)))
+            allocate(arr(size(p, 1, kind=int64), size(p, 2, kind=int64)))
             arr = p
         case (PK_INT32_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p_i32v)
-            allocate(arr(size(p_i32v,1), size(p_i32v,2)))
+            allocate(arr(size(p_i32v, 1, kind=int64), size(p_i32v, 2, kind=int64)))
             arr = p_i32v
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1236,7 +1236,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT32_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p,1), size(p,2)))
+            allocate(arr(size(p, 1, kind=int64), size(p, 2, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1261,11 +1261,11 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_FLOAT64_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p,1), size(p,2)))
+            allocate(arr(size(p, 1, kind=int64), size(p, 2, kind=int64)))
             arr = p
         case (PK_FLOAT32_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p_f32v)
-            allocate(arr(size(p_f32v,1), size(p_f32v,2)))
+            allocate(arr(size(p_f32v, 1, kind=int64), size(p_f32v, 2, kind=int64)))
             arr = p_f32v
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1289,7 +1289,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_LOGICAL_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p,1), size(p,2)))
+            allocate(arr(size(p, 1, kind=int64), size(p, 2, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1313,7 +1313,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_DATE_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p,1), size(p,2)))
+            allocate(arr(size(p, 1, kind=int64), size(p, 2, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1337,7 +1337,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIME_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p,1), size(p,2)))
+            allocate(arr(size(p, 1, kind=int64), size(p, 2, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -1361,7 +1361,7 @@ contains
         select case (self%cache%cols(idx)%values%kindof())
         case (PK_TIMESTAMP_VEC)
             call parquet_column_data_ptr(self%cache%cols(idx)%values, p)
-            allocate(arr(size(p,1), size(p,2)))
+            allocate(arr(size(p, 1, kind=int64), size(p, 2, kind=int64)))
             arr = p
         case default
             call table_context_suffix(self%cache, name, sfx)
@@ -3040,7 +3040,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT32)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
@@ -3065,12 +3065,12 @@ contains
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT64)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case (PK_INT32)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_i32)
                 arr(k) = v_i32
@@ -3095,7 +3095,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT32)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
@@ -3120,12 +3120,12 @@ contains
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT64)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
         case (PK_FLOAT32)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_f32)
                 arr(k) = v_f32
@@ -3150,7 +3150,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_LOGICAL)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
@@ -3174,7 +3174,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_DATE)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
@@ -3198,7 +3198,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIME)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
@@ -3222,7 +3222,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIMESTAMP)
-            allocate(arr(size(rows)))
+            allocate(arr(size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))
             end do
@@ -3246,7 +3246,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT32_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
@@ -3271,12 +3271,12 @@ contains
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_INT64_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case (PK_INT32_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             allocate(v_i32v(self%cache%cols(idx)%width))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_i32v)
@@ -3302,7 +3302,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT32_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
@@ -3327,12 +3327,12 @@ contains
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_FLOAT64_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
         case (PK_FLOAT32_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             allocate(v_f32v(self%cache%cols(idx)%width))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_f32v)
@@ -3358,7 +3358,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_LOGICAL_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
@@ -3382,7 +3382,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_DATE_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
@@ -3406,7 +3406,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIME_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
@@ -3430,7 +3430,7 @@ contains
         if (present(is_valid)) call table_valid_mask_rows_elem(self%cache, idx, rows, is_valid)
         select case (self%cache%cols(idx)%declared_kind)
         case (PK_TIMESTAMP_VEC)
-            allocate(arr(self%cache%cols(idx)%width, size(rows)))
+            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))
             do k = 1, size(rows, kind=int64)
                 call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))
             end do
@@ -3485,7 +3485,7 @@ contains
         do k = 1, size(rows, kind=int64)
             if (int(store%length(rows(k))) > maxlen) maxlen = int(store%length(rows(k)))
         end do
-        allocate(character(len=maxlen) :: arr(size(rows)))
+        allocate(character(len=maxlen) :: arr(size(rows, kind=int64)))
         do k = 1, size(rows, kind=int64)
             call store%copy_to(rows(k), arr(k), allow_null=.true.)
         end do
@@ -3517,7 +3517,7 @@ contains
                 if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
             end do
         end do
-        allocate(character(len=maxlen) :: arr(wdt, size(rows)))
+        allocate(character(len=maxlen) :: arr(wdt, size(rows, kind=int64)))
         do k = 1, size(rows, kind=int64)
             do e = 1, wdt
                 flat = (rows(k) - 1) * int(wdt, int64) + int(e, int64)

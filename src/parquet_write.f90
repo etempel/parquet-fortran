@@ -643,9 +643,9 @@ contains
             end if
             if (allocated(eff_schema%maml%name)) writer%maml_name = eff_schema%maml%name
 
-            allocate(writer%all_columns(size(eff_schema%cinfo%col)))
+            allocate(writer%all_columns(size(eff_schema%cinfo%col, kind=int64)))
             writer%all_columns = eff_schema%cinfo%col
-            allocate(writer%observed_string_len(size(eff_schema%cinfo%col)))
+            allocate(writer%observed_string_len(size(eff_schema%cinfo%col, kind=int64)))
             writer%observed_string_len = 0
 
             n_enabled = 0

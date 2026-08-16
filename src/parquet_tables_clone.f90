@@ -86,7 +86,7 @@ contains
         ! automatic reallocation entirely, the same way this project already does for other
         ! confirmed compiler-codegen quirks, rather than relying on it.
         if (allocated(self%cache%rg_bounds)) then
-            allocate(out%cache%rg_bounds(size(self%cache%rg_bounds, 1), size(self%cache%rg_bounds, 2)))
+            allocate(out%cache%rg_bounds(size(self%cache%rg_bounds, 1, kind=int64), size(self%cache%rg_bounds, 2, kind=int64)))
             out%cache%rg_bounds(:, :) = self%cache%rg_bounds(:, :)
         end if
         ! The slice's own file-row range and the physical geometry it was resolved against. Both
@@ -107,7 +107,7 @@ contains
             ! The `allocate` below is excluded because gcov credits its CONTINUATION line and the
             ! copy after it while attributing nothing to the statement's own first line -- the
             ! Fortran line-attribution quirk CLAUDE.md documents. The statement plainly runs.
-            allocate(out%cache%rg_bounds_physical(size(self%cache%rg_bounds_physical, 1), & ! GCOVR_EXCL_LINE
+            allocate(out%cache%rg_bounds_physical(size(self%cache%rg_bounds_physical, 1, kind=int64), & ! GCOVR_EXCL_LINE
                 size(self%cache%rg_bounds_physical, 2)))
             out%cache%rg_bounds_physical(:, :) = self%cache%rg_bounds_physical(:, :)
         end if
@@ -234,13 +234,13 @@ contains
         ! removes the reallocation from the picture entirely. Element-wise, not `dst = src`, per
         ! the whole-array-assignment hazard in CLAUDE.md's "Compiler & language gotchas".
         if (allocated(self%cache%meta_keys)) then
-            allocate(character(len=len(self%cache%meta_keys)) :: out%cache%meta_keys(size(self%cache%meta_keys)))
+            allocate(character(len=len(self%cache%meta_keys)) :: out%cache%meta_keys(size(self%cache%meta_keys, kind=int64)))
             do i = 1, size(self%cache%meta_keys)
                 out%cache%meta_keys(i) = self%cache%meta_keys(i)
             end do
         end if
         if (allocated(self%cache%meta_values)) then
-            allocate(character(len=len(self%cache%meta_values)) :: out%cache%meta_values(size(self%cache%meta_values)))
+            allocate(character(len=len(self%cache%meta_values)) :: out%cache%meta_values(size(self%cache%meta_values, kind=int64)))
             do i = 1, size(self%cache%meta_values)
                 out%cache%meta_values(i) = self%cache%meta_values(i)
             end do

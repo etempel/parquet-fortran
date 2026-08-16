@@ -1906,6 +1906,50 @@ def check_fill_size_kind():
     return []
 
 
+def check_allocate_extent_kind():
+    """An `allocate` extent taken from `size(...)` must ask for an `int64` result.
+
+    `size(x)` without `kind=` returns a DEFAULT-kind integer, which wraps above 2**31 elements. In
+    an allocate extent that is worse than the silent short-fill it causes elsewhere, because the
+    loop that follows usually gets its bound RIGHT:
+
+        allocate(arr(size(rows)))                 ! wraps: negative -> zero-length array
+        do k = 1, size(rows, kind=int64)          ! correct: runs the full count
+            call parquet_column_get_at(..., arr(k))   ! writes past the end
+
+    That is a heap overflow on a valid call, not a wrong answer. It was found in exactly this
+    shape at ten sites in the generated table accessors plus both `table_valid_mask_rows` variants,
+    where the loop bound on the very next line already carried `kind=int64` -- so the hazard was
+    understood and the allocate was simply missed. Element assignment does not reallocate, which
+    is what makes this class worse than the sibling `arr = p` shape, where intrinsic assignment to
+    an allocatable resizes and hides the mistake.
+
+    Matched by SHAPE across all of `src/`, not from a list of files: any `size(` inside an
+    `allocate(` without a `kind=`. Writing `kind=int64` costs nothing even where the extent is
+    provably small, so there is no exemption list to go stale -- and a check with no exemptions is
+    one nobody has to maintain. Deliberately narrower than "every `size()` call": `src/` carries
+    roughly 200 of those, nearly all on arrays bounded by construction, and only the allocate
+    shape turns a wrapped length into an out-of-bounds write.
+    """
+    problems = []
+    for path in sorted(SRC.glob("*.f90")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            code = line.split("!", 1)[0]
+            if "allocate(" not in code:
+                continue
+            tail = code[code.index("allocate("):]
+            for m in re.finditer(r"\bsize\s*\(([^()]*(?:\([^()]*\))?[^()]*)\)", tail):
+                if "kind=" not in m.group(1):
+                    problems.append("%s:%d: allocate extent uses size(%s) with no kind="
+                                    % (path.relative_to(REPO_ROOT), lineno, m.group(1).strip()))
+    if problems:
+        return ["an allocate extent taken from size(...) must use kind=int64: a default-kind result",
+                "wraps above 2**31 elements, and the loop that fills the array usually does NOT --",
+                "which makes the write go past the end rather than merely stop short:"] + problems
+    return []
+
+
 CHECKS = (
     ("benchmark build-tree names carry the compiler", check_build_tree_names_carry_the_compiler),
     ("parquet_table has no allocatable component", check_no_allocatable_component),
@@ -1931,6 +1975,7 @@ CHECKS = (
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
     ("parquet_random takes array lengths as int64", check_fill_size_kind),
+    ("allocate extents from size() use int64", check_allocate_extent_kind),
 )
 
 

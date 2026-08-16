@@ -1267,7 +1267,7 @@ contains
         ! Grown exactly, not geometrically: a key list is a handful of entries, and each entry
         ! holds only allocatable descriptors (the value buffers themselves are moved, not copied).
         if (.not. allocated(self%keys)) allocate(self%keys(0))
-        allocate(bigger(self%nkeys + size(buf)))
+        allocate(bigger(self%nkeys + size(buf, kind=int64)))
         do ik = 1, self%nkeys
             call move_key(self%keys(ik), bigger(ik))
         end do
@@ -1279,7 +1279,7 @@ contains
         ! both read. Recorded here rather than in each %add specific so a new key type cannot
         ! forget it.
         if (.not. allocated(self%add_ekeys)) allocate(self%add_ekeys(0))
-        allocate(more_ekeys(size(self%add_ekeys) + 1))
+        allocate(more_ekeys(size(self%add_ekeys, kind=int64) + 1))
         more_ekeys(1:size(self%add_ekeys)) = self%add_ekeys
         more_ekeys(size(more_ekeys)) = size(buf)
         call move_alloc(more_ekeys, self%add_ekeys)
@@ -1978,7 +1978,7 @@ contains
                 "group offsets do not fit int32; declare group_offsets as integer(int64)"
             ! GCOVR_EXCL_STOP
         end if
-        allocate(offsets32(size(offsets64)))
+        allocate(offsets32(size(offsets64, kind=int64)))
         offsets32 = int(offsets64, int32)
     end procedure narrow_offsets
     !

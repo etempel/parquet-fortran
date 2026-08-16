@@ -98,8 +98,8 @@ contains
             call table_context_suffix(self%cache, "", sfx)
             error stop EP // trim(proc) // ": no sort key was given" // sfx
         end if
-        allocate(character(len=len(toks)) :: names(size(toks)))
-        allocate(parsed(size(toks)))
+        allocate(character(len=len(toks)) :: names(size(toks, kind=int64)))
+        allocate(parsed(size(toks, kind=int64)))
         any_explicit = .false.
         do i = 1, size(toks)
             ! parquet_core's own sort-key parser, the same one a read-time parquet_sortkey key

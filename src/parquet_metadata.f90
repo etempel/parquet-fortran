@@ -226,7 +226,7 @@ contains
                     call parquet_maml_lock()
                     n_old = 0
                     if (allocated(schema%cinfo%col)) n_old = size(schema%cinfo%col)
-                    allocate(merged(n_old + size(sub_cinfo%col)))
+                    allocate(merged(n_old + size(sub_cinfo%col, kind=int64)))
                     if (n_old > 0) merged(1:n_old) = schema%cinfo%col
                     merged(n_old+1:) = sub_cinfo%col
                     call move_alloc(merged, schema%cinfo%col)
@@ -391,7 +391,7 @@ contains
         call parquet_maml_lock()
         n_old = 0
         if (allocated(metadata%items)) n_old = size(metadata%items)
-        allocate(merged(n_old + size(items)))
+        allocate(merged(n_old + size(items, kind=int64)))
         if (n_old > 0) merged(1:n_old) = metadata%items
         merged(n_old+1:) = items
         call move_alloc(merged, metadata%items)

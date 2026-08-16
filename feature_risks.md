@@ -33,7 +33,7 @@ Four sections, and **a risk keeps its number when it moves between them**:
 the whole document; moving one between sections (a proposal getting written, a covered property
 regressing) **never** renumbers it, so a reference from `CLAUDE.md`, `feature_table.md`,
 `tools/check_source_conventions.py` or a code comment stays valid for good. **A new risk takes the
-next unused number — `Risk-93` today — and goes in "1. New risks"** until it has been triaged.
+next unused number — `Risk-104` today — and goes in "1. New risks"** until it has been triaged.
 Numbers of deleted entries are not reused, so a stale reference resolves to nothing rather than to
 the wrong risk.
 
@@ -168,6 +168,7 @@ something a reader is expected to have.
 | [Risk-101](#risk-101--the-wrapping-route-e-kernel-is-built-by-nothing-routine-and-is-miscompiled-under-lto) | The wrapping route (e) kernel is built by nothing routine, and is miscompiled under LTO | 4 — covered |
 | [Risk-102](#risk-102--a-default-kind-size-wraps-above-231-elements-and-the-fill-fails-silently) | A default-kind `size()` wraps above 2**31 elements, and the fill fails silently | 4 — covered |
 | [Risk-103](#risk-103--the-streams-high-counter-word-is-reached-by-no-ordinary-stream-index) | The stream's high counter word is reached by no ordinary stream index | 4 — covered |
+| [Risk-104](#risk-104--an-allocate-extent-from-a-default-kind-size-overflows-the-array-it-just-allocated) | An allocate extent from a default-kind `size()` overflows the array it just allocated | 4 — covered |
 
 ---
 
@@ -175,7 +176,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-103**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-104**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4331,3 +4332,48 @@ stream and they fail for different reasons — do not reduce it to one:
   with an identical fault applied to both the library and `test_random_reference` and confined to
   streams above 2**32 — so that no pre-existing assertion sees it — the agreement half passes and
   this inequality is the only thing in the suite that fails.
+
+### Risk-104 — An allocate extent from a default-kind `size()` overflows the array it just allocated
+
+`size(x)` without `kind=` returns a DEFAULT-kind integer and wraps above 2**31 elements
+(Risk-102). In an allocate extent that is worse than the silent short fill Risk-102 describes,
+because the loop that fills the array usually gets its bound **right**:
+
+```fortran
+allocate(arr(size(rows)))                       ! wraps: negative extent -> zero-length array
+do k = 1, size(rows, kind=int64)                ! correct: runs the full count
+    call parquet_column_get_at(..., arr(k))     ! writes past the end
+end do
+```
+
+Element assignment does **not** reallocate, so this is an out-of-bounds heap write on a valid call
+rather than a wrong answer. Its sibling shape is benign for a reason worth knowing: where the code
+reads `allocate(arr(size(p)))` followed by the whole-array `arr = p`, intrinsic assignment to an
+allocatable resizes the destination and hides the mistake entirely — so the two shapes look
+identical in review and only one of them is a bug.
+
+**Where it was.** Ten sites in `src/parquet_tables_access.f90` (`%get_slice` for every kind and
+both ranks, plus the widening variants) and both `table_valid_mask_rows` variants in
+`src/parquet_tables_query.f90`. In every one, the `kind=int64` on the very next line shows the
+hazard was understood and the allocate was simply missed. Reachable through ordinary public API —
+`%get_slice` over a slice of more than 2**31 rows — which is an unremarkable request for a library
+whose tables are addressed with `int64` row counts throughout.
+
+**Why nothing found it.** No test allocates anything near 2**31 elements, and none can: the output
+array alone would be 17 GB. Coverage is blind, because the line executes normally with a wrapped
+value. The generated file made it ten sites instead of one, and made it invisible to anyone reading
+the generator's template, where the two lines sit in different string literals.
+
+**The rule this forbids.** *An allocate extent taken from `size(...)` must use `kind=int64`,
+everywhere, with no exemption for an array that is "obviously" small.* The uniform rule is what
+makes the check maintenance-free: `kind=int64` costs nothing at a bounded extent, so there is no
+list of blessed sites to go stale. The wider question — the roughly 200 other bare `size(...)` calls
+in `src/`, which an audit found to be on arrays bounded by construction (column counts, MAML lines,
+row-group counts, sort-key lists) — is deliberately **not** covered by this rule, because only the
+allocate shape turns a wrapped length into an out-of-bounds write.
+
+**Test.** `check_allocate_extent_kind` (`tools/check_source_conventions.py`), matched by shape
+across all of `src/` and verified to fire by reverting one site. Two of the fixes are in generators
+(`tools/generate_parquet_tables.py`, `tools/generate_parquet_sorting.py`) rather than in the emitted
+files — a hand-edit to `src/parquet_sorting_keys.f90` was silently reverted by the next
+regeneration during this very fix, and the check is what caught it.

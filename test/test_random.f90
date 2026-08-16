@@ -67,7 +67,8 @@ contains
             new_unittest("agreement with the strict reference: fills", test_agreement_fill), &
             new_unittest("agreement with the strict reference: integers, graded by width regime", test_agreement_int), &
             new_unittest("no aliasing between seeds that differ by a small offset", test_aliasing), &
-            new_unittest("uniformity: chi-square, moments, small-range counts, serial correlation", test_statistics) &
+            new_unittest("uniformity: chi-square, moments, small-range counts, serial correlation", test_statistics), &
+            new_unittest("uniformity on the draw, derived-key, real32 and wide-integer axes", test_statistics_axes) &
             ]
     end subroutine collect_tests_parquet_random
 
@@ -977,5 +978,100 @@ contains
         ! 7 degrees of freedom; the 99.9 % critical value is about 24.3.
         call check(error, chi < 24.3_real64, "pf_random_int_at over 1..8 fails a chi-square test")
     end subroutine test_statistics
+
+    !> Uniformity on the axes `test_statistics` does not sweep, plus the wide-integer path.
+    !!
+    !! `test_statistics` above varies only the STREAM index. That is the module's primary idiom --
+    !! `x(i) = pf_random_at(seed, i)` draws one value from each of n consecutive streams -- and so
+    !! the most important axis, but it is not the only one a program uses. These four are the rest
+    !! of the surface:
+    !!
+    !!  * the **draw axis**, one stream read repeatedly, which is what every fill walks;
+    !!  * the **derived-key axis**, one draw from each of many `pf_random_key` families;
+    !!  * the **`real32` sequence**, which enumerates its own words rather than narrowing `real64`;
+    !!  * the **low bits of a wide-width integer draw** -- alone among the four in exercising
+    !!    `mulhilo64`'s high half and the rejection loop, so it fails for reasons the others cannot.
+    !!
+    !! Fixed seeds throughout, so every figure here is deterministic: these pass every time or fail
+    !! every time, and can never become flaky. The measured statistics are 56.4, 72.3, 79.0 and
+    !! 69.1 against the 112.7 threshold, so the tightest margin is about 1.4x -- wide enough to be
+    !! stable, narrow enough to notice a real distributional change.
+    !!
+    !! What this is NOT is a quality battery. The cipher's quality is established by the literature
+    !! and its known-answer vectors; what a chi-square adds is the ability to catch a transcription
+    !! error that leaves values plausible. No BigCrush-style suite belongs here.
+    subroutine test_statistics_axes(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: nbins = 64, nsamp = 64000
+        ! 63 degrees of freedom; the 99.9 % critical value is about 112.7, as in test_statistics.
+        real(real64), parameter :: critical = 112.7_real64
+        integer :: bins(nbins), k, b
+        integer(int64) :: v
+        real(real32) :: y
+
+        bins = 0
+        do k = 1, nsamp
+            call tally(bins, pf_random_at(4242_int64, 1_int64, int(k, int64)))
+        end do
+        call check(error, chisq(bins) < critical, &
+            "the draw axis (one stream read repeatedly) fails a chi-square test over 64 bins")
+        if (allocated(error)) return
+
+        bins = 0
+        do k = 1, nsamp
+            call tally(bins, pf_random_at(pf_random_key(4242_int64, int(k, int64)), 1_int64))
+        end do
+        call check(error, chisq(bins) < critical, &
+            "the derived-key axis (one draw from each of 64000 pf_random_key families) fails a chi-square test")
+        if (allocated(error)) return
+
+        bins = 0
+        do k = 1, nsamp
+            y = pf_random32_at(4242_int64, int(k, int64))
+            call tally(bins, real(y, real64))
+        end do
+        call check(error, chisq(bins) < critical, &
+            "the real32 sequence fails a chi-square test over 64 bins")
+        if (allocated(error)) return
+
+        ! The low bits of a wide-width draw, which is where the rejection loop and mulhilo64's high
+        ! half actually run. Binning the low 6 bits rather than the value's magnitude is deliberate:
+        ! the reduction maps a uniform 64-bit pattern onto the range through a multiply, so a fault
+        ! in the high half shows up in the low bits of the result before it shows up in its scale.
+        bins = 0
+        do k = 1, nsamp
+            v = pf_random_int_at(20260816_int64, int(k, int64), &
+                                 -huge(1_int64) - 1_int64, 3172839980678043647_int64)
+            b = int(iand(v, 63_int64), int32) + 1
+            bins(b) = bins(b) + 1
+        end do
+        call check(error, chisq(bins) < critical, &
+            "the low bits of a wide-width pf_random_int_at draw fail a chi-square test over 64 bins")
+
+    contains
+
+        !> Files one `[0, 1)` value into its bin.
+        subroutine tally(b, x)
+            integer, intent(inout) :: b(nbins)      !! the bin counts, updated in place
+            real(real64), intent(in) :: x           !! a draw in `[0, 1)`
+            integer :: idx
+            idx = min(nbins, int(x * real(nbins, real64)) + 1)
+            b(idx) = b(idx) + 1
+        end subroutine tally
+
+        !> Pearson's statistic for `nsamp` samples spread over `nbins` equal bins.
+        function chisq(b) result(c)
+            integer, intent(in) :: b(nbins)         !! the bin counts
+            real(real64) :: c                       !! the chi-square statistic
+            real(real64) :: expect
+            integer :: j
+            expect = real(nsamp, real64) / real(nbins, real64)
+            c = 0.0_real64
+            do j = 1, nbins
+                c = c + (real(b(j), real64) - expect)**2 / expect
+            end do
+        end function chisq
+
+    end subroutine test_statistics_axes
 
 end module test_random

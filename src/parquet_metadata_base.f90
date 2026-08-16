@@ -501,7 +501,7 @@ contains
             allocate(columns(1))
             n = 1
         else
-            allocate(tmp(size(columns) + 1))
+            allocate(tmp(size(columns, kind=int64) + 1))
             if (size(columns) > 0) tmp(1:size(columns)) = columns
             call move_alloc(tmp, columns)
             n = size(columns)

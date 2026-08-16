@@ -4433,25 +4433,25 @@ def getslice_impl(k):
               "        select case (self%cache%cols(idx)%declared_kind)",
               f"        case ({pk})"]
     if rank == 1:
-        lines += ["            allocate(arr(size(rows)))",
+        lines += ["            allocate(arr(size(rows, kind=int64)))",
                   "            do k = 1, size(rows, kind=int64)",
                   "                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(k))",
                   "            end do"]
     else:
-        lines += ["            allocate(arr(self%cache%cols(idx)%width, size(rows)))",
+        lines += ["            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))",
                   "            do k = 1, size(rows, kind=int64)",
                   "                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), arr(:, k))",
                   "            end do"]
     for srcpk, src in WIDEN.get(tag, []):
         lines.append(f"        case ({srcpk})")
         if rank == 1:
-            lines += ["            allocate(arr(size(rows)))",
+            lines += ["            allocate(arr(size(rows, kind=int64)))",
                       "            do k = 1, size(rows, kind=int64)",
                       f"                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_{src})",
                       f"                arr(k) = v_{src}",
                       "            end do"]
         else:
-            lines += ["            allocate(arr(self%cache%cols(idx)%width, size(rows)))",
+            lines += ["            allocate(arr(self%cache%cols(idx)%width, size(rows, kind=int64)))",
                       f"            allocate(v_{src}(self%cache%cols(idx)%width))",
                       "            do k = 1, size(rows, kind=int64)",
                       f"                call parquet_column_get_at(self%cache%cols(idx)%values, rows(k), v_{src})",
@@ -4567,7 +4567,7 @@ def getslice_str_impl():
         do k = 1, size(rows, kind=int64)
             if (int(store%length(rows(k))) > maxlen) maxlen = int(store%length(rows(k)))
         end do
-        allocate(character(len=maxlen) :: arr(size(rows)))
+        allocate(character(len=maxlen) :: arr(size(rows, kind=int64)))
         do k = 1, size(rows, kind=int64)
             call store%copy_to(rows(k), arr(k), allow_null=.true.)
         end do
@@ -4599,7 +4599,7 @@ def getslice_str_impl():
                 if (int(store%length(flat)) > maxlen) maxlen = int(store%length(flat))
             end do
         end do
-        allocate(character(len=maxlen) :: arr(wdt, size(rows)))
+        allocate(character(len=maxlen) :: arr(wdt, size(rows, kind=int64)))
         do k = 1, size(rows, kind=int64)
             do e = 1, wdt
                 flat = (rows(k) - 1) * int(wdt, int64) + int(e, int64)
@@ -5131,12 +5131,12 @@ def get_impl(k):
               "        select case (self%cache%cols(idx)%values%kindof())",
               f"        case ({pk})",
               "            call parquet_column_data_ptr(self%cache%cols(idx)%values, p)",
-              f"            allocate(arr{'(size(p))' if rank == 1 else '(size(p,1), size(p,2))'})",
+              f"            allocate(arr{'(size(p, kind=int64))' if rank == 1 else '(size(p, 1, kind=int64), size(p, 2, kind=int64))'})",
               "            arr = p"]
     for srcpk, src in WIDEN.get(tag, []):
         lines += [f"        case ({srcpk})",
                   f"            call parquet_column_data_ptr(self%cache%cols(idx)%values, p_{src})",
-                  f"            allocate(arr{f'(size(p_{src}))' if rank == 1 else f'(size(p_{src},1), size(p_{src},2))'})",
+                  f"            allocate(arr{f'(size(p_{src}, kind=int64))' if rank == 1 else f'(size(p_{src}, 1, kind=int64), size(p_{src}, 2, kind=int64))'})",
                   f"            arr = p_{src}"]
     lines += ["        case default",
               "            call table_context_suffix(self%cache, name, sfx)",

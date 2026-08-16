@@ -533,7 +533,7 @@ contains
             allocate(maml%missing_columns(1))
             n = 1
         else
-            allocate(tmp(size(maml%missing_columns) + 1))
+            allocate(tmp(size(maml%missing_columns, kind=int64) + 1))
             tmp(1:size(maml%missing_columns)) = maml%missing_columns
             call move_alloc(tmp, maml%missing_columns)
             n = size(maml%missing_columns)
@@ -1179,7 +1179,7 @@ contains
         integer :: i, j, start, stop_at
         logical :: in_fields, has_qc
 
-        allocate(lo(max(size(src), 1)), hi(max(size(src), 1)))
+        allocate(lo(max(size(src, kind=int64), 1)), hi(max(size(src, kind=int64), 1)))
         nentry = 0
         in_fields = .false.
         i = 0

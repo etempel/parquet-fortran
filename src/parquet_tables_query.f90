@@ -1089,7 +1089,7 @@ contains
     module procedure table_valid_mask_rows
         integer(int64) :: k
         !
-        allocate(mask(size(rows)))
+        allocate(mask(size(rows, kind=int64)))
         do k = 1_int64, size(rows, kind=int64)
             mask(k) = .not. parquet_column_is_null(cache%cols(idx)%values, rows(k))
         end do
@@ -1140,7 +1140,7 @@ contains
         integer :: wdt
         !
         wdt = cache%cols(idx)%values%colwidth()
-        allocate(mask(wdt, size(rows)))
+        allocate(mask(wdt, size(rows, kind=int64)))
         do k = 1_int64, size(rows, kind=int64)
             do e = 1_int64, int(wdt, int64)
                 mask(e, k) = .not. parquet_column_is_null(cache%cols(idx)%values, rows(k), e)

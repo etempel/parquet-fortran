@@ -164,18 +164,30 @@ build_and_run () {
         fail=1
         return
     fi
-    local res rc
+    local res rc verdict
     res=$(cd "$d" && ./drv 2>&1) ; rc=$?
-    printf "  %-38s %s\n" "$label" "$(echo "$res" | tail -1)"
+    # Find the driver's verdict by its MARKER, never by position. It is not the last line when the
+    # run fails: gfortran's `stop 1` prints "STOP 1" after it, and a `tail -1` therefore reported
+    # "STOP 1" in place of "KERNEL=wrapping RESULT=FAIL FAILED=240" -- hiding the failure count on
+    # every failing configuration, and, worse, leaving the kernel name below empty. That made
+    # `--quick` on gfortran exit 2 with "the forced half produced no kernel name -- the check proves
+    # nothing" on a run that had worked perfectly and found the real bug, because --quick's single
+    # configuration is the failing one. The full run escaped only because its first configuration
+    # succeeds and sets the name.
+    verdict=$(echo "$res" | grep '^KERNEL=' | tail -1)
+    [ -n "$verdict" ] || verdict=$(echo "$res" | tail -1)
+    printf "  %-38s %s\n" "$label" "$verdict"
     if [ $rc -ne 0 ]; then
         echo "$res" | grep '\[FAIL\]' | head -5 | sed 's/^/        /'
         fail=1
     fi
     # Record which kernel this build actually compiled, for the vacuity guard below. Only the
     # first configuration of each half is kept: every configuration in a half compiles the same
-    # kernel, so one name per half is what the guard compares.
+    # kernel, so one name per half is what the guard compares. Taken from the marker line above, so
+    # a FAILING build still reports which kernel it was -- which is exactly the case the guard has
+    # to be able to tell apart from "the flag stopped working".
     local k
-    k=$(echo "$res" | tail -1 | sed -n 's/^KERNEL=\([a-z0-9]*\).*/\1/p')
+    k=$(echo "$verdict" | sed -n 's/^KERNEL=\([a-z0-9]*\).*/\1/p')
     case "$label" in
         shipped\ *) [ -z "$shipped_kernel" ] && shipped_kernel="$k" ;;
         forced\ *)  [ -z "$forced_kernel" ]  && forced_kernel="$k" ;;

@@ -36,7 +36,7 @@ module pf_probe_weighted
 
     use iso_fortran_env, only: int32, int64, real64
     use parquet, only: pf_random_at, pf_random_int_at, pf_random_fill_streams, &
-                       pf_partial_argsort, pf_argsort
+                       pf_partial_argsort, pf_argsort, parquet_set_sort_threads
 
     implicit none
 
@@ -292,6 +292,88 @@ contains
         end do
     end subroutine st_next
 
+    !> One draw, with ancestors **recomputed from their children** instead of decremented.
+    !!
+    !! `st_next` maintains each ancestor by `st(p) = st(p) - w`, so every draw folds one more
+    !! rounding error into a running value and the error compounds. This variant sets
+    !! `st(p) = st(2p) + st(2p+1)` on the way back up: the same `O(log M)` work, the same memory
+    !! traffic, but each node is a FRESH sum of its two children, so nothing accumulates. When every
+    !! leaf is zero every ancestor recomputes to exactly zero, which also removes the phantom-draw
+    !! failure `st_next` has.
+    subroutine st_next_rc(seed, stream, kdraw, st, sz, item, lg_w)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(in) :: kdraw         !! 1-based draw number
+        real(real64), intent(inout) :: st(:)        !! the tree, mutated here
+        integer(int64), intent(in) :: sz            !! padded leaf count
+        integer(int64), intent(out) :: item         !! the drawn item, or 0 when exhausted
+        real(real64), intent(out) :: lg_w           !! undo log: the weight removed
+        real(real64) :: u
+        integer(int64) :: v, p
+        if (st(1) <= 0.0_real64) then
+            item = 0_int64
+            lg_w = 0.0_real64
+            return
+        end if
+        u = pf_random_at(seed, stream, kdraw) * st(1)
+        v = 1_int64
+        do while (v < sz)
+            v = 2_int64 * v
+            if (u >= st(v)) then
+                u = u - st(v)
+                v = v + 1_int64
+            end if
+        end do
+        item = v - sz + 1_int64
+        lg_w = st(v)
+        st(v) = 0.0_real64
+        p = v
+        do while (p > 1_int64)
+            p = p / 2_int64
+            st(p) = st(2_int64 * p) + st(2_int64 * p + 1_int64)
+        end do
+    end subroutine st_next_rc
+
+    !> `m` weights from one of five distributions, to ask whether the tree's error is a property
+    !! of the ALGORITHM or of the weight distribution it is given.
+    !!
+    !! The last two are the case the question is really about: weights spanning many decades, where
+    !! a small weight added to a large partial sum is lost entirely because it falls below that
+    !! sum's unit in the last place.
+    subroutine make_weights_dist(seed, m, kind, w)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer(int64), intent(in) :: m             !! how many items
+        integer, intent(in) :: kind                 !! 1 uniform, 2 exponential, 3 Pareto,
+                                                    !! 4 log-uniform 6 decades, 5 log-uniform 18
+        real(real64), intent(out) :: w(:)           !! the weights
+        integer(int64) :: i
+        real(real64) :: u
+        do i = 1_int64, m
+            u = pf_random_at(seed, i)
+            if (u >= 1.0_real64) u = 1.0_real64 - epsilon(1.0_real64)
+            select case (kind)
+            case (2);      w(i) = -log(1.0_real64 - u)
+            case (3);      w(i) = (1.0_real64 - u) ** (-1.0_real64 / 1.2_real64)
+            case (4);      w(i) = 10.0_real64 ** (6.0_real64 * u)
+            case (5);      w(i) = 10.0_real64 ** (18.0_real64 * u)
+            case default;  w(i) = u
+            end select
+        end do
+    end subroutine make_weights_dist
+
+    !> Name of a weight distribution, for the report tables.
+    pure function dist_name(kind) result(nm)
+        integer, intent(in) :: kind                 !! the distribution selector
+        character(len=22) :: nm                     !! padded name
+        select case (kind)
+        case (2);      nm = 'exponential           '
+        case (3);      nm = 'Pareto(1.2)           '
+        case (4);      nm = 'log-uniform 1e0..1e6  '
+        case (5);      nm = 'log-uniform 1e0..1e18 '
+        case default;  nm = 'uniform(0,1)          '
+        end select
+    end function dist_name
+
     !> Undoes `ndrawn` draws in reverse: put each weight back on its leaf and its ancestors.
     !!
     !! `O(k log M)`, the segment tree's counterpart to `cb_restore`. Note the restore is itself a
@@ -361,6 +443,129 @@ contains
         deallocate(keys, perm)
     end subroutine race_select
 
+    !> The race with the key loop threaded and the sort allowed `nthreads`.
+    !!
+    !! The keys are coordinate-addressed -- `key_i` depends on `i` alone -- so the loop parallelises
+    !! with no ordering question at all and the result is **bit-identical** to the serial arm at any
+    !! thread count, which `run_par` asserts rather than assumes. That is the property the segment
+    !! tree cannot have: its draw `k+1` depends on which items draws `1..k` removed.
+    subroutine race_select_par(seed, stream, w, kdraw, out, nthreads)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer(int64), intent(in) :: stream        !! stream index
+        real(real64), intent(in) :: w(:)            !! the weights
+        integer(int64), intent(in) :: kdraw         !! how many to select
+        integer(int64), intent(out) :: out(:)       !! the selected items
+        integer, intent(in) :: nthreads             !! threads for the key loop and the sort
+        real(real64), allocatable :: keys(:)
+        integer(int64), allocatable :: perm(:)
+        real(real64) :: u, uu, e
+        integer(int64) :: i, m
+        m = size(w, kind=int64)
+        allocate(keys(m))
+        call parquet_set_sort_threads(nthreads)
+#ifdef _OPENMP
+        !$omp parallel do num_threads(nthreads) default(shared) private(i, u, uu, e) &
+        !$omp     schedule(static)
+#endif
+        do i = 1_int64, m
+            u = pf_random_at(seed, stream + i - 1_int64)
+            uu = 1.0_real64 - u
+            if (uu >= 1.0_real64) uu = 1.0_real64 - epsilon(1.0_real64)
+            e = -log(uu)
+            if (w(i) > 0.0_real64) then
+                keys(i) = e / w(i)
+            else
+                keys(i) = huge(1.0_real64)
+            end if
+        end do
+#ifdef _OPENMP
+        !$omp end parallel do
+#endif
+        if (4_int64 * kdraw >= m) then
+            call pf_argsort(keys, perm)
+        else
+            call pf_partial_argsort(keys, perm, int(kdraw, int32))
+        end if
+        out(1:kdraw) = perm(1:kdraw)
+        call parquet_set_sort_threads(1)
+        deallocate(keys, perm)
+    end subroutine race_select_par
+
+    ! ================================================================================
+    ! Option B -- the race backed by a min-heap, for an incremental draw of unknown length
+    ! ================================================================================
+
+    !> Sifts `start` down until the min-heap property holds below it.
+    pure subroutine heap_sift(key, idx, start, n)
+        real(real64), intent(inout) :: key(:)       !! heap keys
+        integer(int64), intent(inout) :: idx(:)     !! item indices, moved with their keys
+        integer(int64), intent(in) :: start         !! node to sift
+        integer(int64), intent(in) :: n             !! live heap size
+        integer(int64) :: r, c, ti
+        real(real64) :: tk
+        r = start
+        do
+            c = 2_int64 * r
+            if (c > n) exit
+            ! Ties break by item index, so the heap order and a sorted order agree exactly.
+            if (c < n) then
+                if (key(c + 1_int64) < key(c) .or. &
+                    (key(c + 1_int64) == key(c) .and. idx(c + 1_int64) < idx(c))) c = c + 1_int64
+            end if
+            if (key(r) < key(c) .or. (key(r) == key(c) .and. idx(r) < idx(c))) exit
+            tk = key(r); key(r) = key(c); key(c) = tk
+            ti = idx(r); idx(r) = idx(c); idx(c) = ti
+            r = c
+        end do
+    end subroutine heap_sift
+
+    !> Builds the race keys and heapifies them in `O(n)` -- Floyd's algorithm, not a sort.
+    !!
+    !! This is option B's whole setup. Heapifying is `O(n)`; sorting the same array would be
+    !! `O(n log n)` and is only worth it when nearly every item will be drawn.
+    subroutine race_heap_prepare(seed, stream, w, key, idx, n)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer(int64), intent(in) :: stream        !! stream index
+        real(real64), intent(in) :: w(:)            !! the weights
+        real(real64), intent(out) :: key(:)         !! heap keys, filled 1..n
+        integer(int64), intent(out) :: idx(:)       !! item indices, filled 1..n
+        integer(int64), intent(in) :: n             !! population size
+        real(real64) :: u, uu, e
+        integer(int64) :: i
+        do i = 1_int64, n
+            u = pf_random_at(seed, stream + i - 1_int64)
+            uu = 1.0_real64 - u                     ! (0, 1]; u = 0 would give E = 0 exactly
+            if (uu >= 1.0_real64) uu = 1.0_real64 - epsilon(1.0_real64)
+            e = -log(uu)
+            if (w(i) > 0.0_real64) then
+                key(i) = e / w(i)
+            else
+                key(i) = huge(1.0_real64)           ! a zero weight is never drawn
+            end if
+            idx(i) = i
+        end do
+        do i = n / 2_int64, 1_int64, -1_int64
+            call heap_sift(key, idx, i, n)
+        end do
+    end subroutine race_heap_prepare
+
+    !> Pops the smallest remaining key: one draw, `O(log n)`. `n` is decremented.
+    pure subroutine race_heap_pop(key, idx, n, item)
+        real(real64), intent(inout) :: key(:)       !! heap keys
+        integer(int64), intent(inout) :: idx(:)     !! item indices
+        integer(int64), intent(inout) :: n          !! live heap size, decremented here
+        integer(int64), intent(out) :: item         !! the drawn item, or 0 when exhausted
+        if (n <= 0_int64) then
+            item = 0_int64
+            return
+        end if
+        item = idx(1)
+        key(1) = key(n)
+        idx(1) = idx(n)
+        n = n - 1_int64
+        if (n > 1_int64) call heap_sift(key, idx, 1_int64, n)
+    end subroutine race_heap_pop
+
 end module pf_probe_weighted
 
 
@@ -399,6 +604,9 @@ program probe_random_weighted
     if (mode == 'setup' .or. mode == 'all') call run_setup()
     if (mode == 'cost' .or. mode == 'all') call run_cost()
     if (mode == 'repeat' .or. mode == 'all') call run_repeat()
+    if (mode == 'range' .or. mode == 'all') call run_range()
+    if (mode == 'par' .or. mode == 'all') call run_par()
+    if (mode == 'serial' .or. mode == 'all') call run_serial()
 
 contains
 
@@ -836,5 +1044,278 @@ contains
         write(output_unit, '(a)') ''
         flush(output_unit)
     end subroutine run_repeat
+
+    ! ================================================================================
+    ! Dynamic range -- does the tree's accuracy depend on the weight DISTRIBUTION?
+    ! ================================================================================
+
+    !> Drains the tree under five weight distributions and two ancestor-update rules.
+    !!
+    !! The reference is a `real128` running remainder: the exact sum of the weights not yet drawn,
+    !! maintained by subtracting each removed weight in 113-bit precision. Comparing the `real64`
+    !! tree root against it isolates the error the tree itself introduces.
+    !!
+    !! `unreachable` counts items whose weight is below the unit in the last place of the TOTAL, so
+    !! that adding them to it changes nothing. Those are lost to `real64` no matter how the tree is
+    !! updated -- an inherent limit of the representation, not of the algorithm, and the reason this
+    !! sweep separates the two columns.
+    subroutine run_range()
+        integer, parameter :: RK = selected_real_kind(30)
+        integer(int64), parameter :: MR = 200000_int64
+        integer :: dk, rule, unreach
+        integer(int64) :: sz, i, item, ndrawn, dup, zeroleaf
+        real(real64), allocatable :: w(:), st(:)
+        logical, allocatable :: seen(:)
+        real(real64) :: wv, maxrel, rel, tot
+        real(RK) :: ref
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'DYNAMIC RANGE -- does tree accuracy depend on the weights?'
+        write(output_unit, '(a,i0,a)') 'm = ', MR, ', full drain, reference in real128'
+        write(output_unit, '(a)') 'rule: subtract = st(p) -= w   |   recompute = st(p) = st(2p)' // &
+            ' + st(2p+1)'
+        write(output_unit, '(a)') 'unreachable = items with w < ulp(total): lost to real64' // &
+            ' whatever the rule'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') '   distribution           rule        drawn    dup  zero-leaf' // &
+            '     max rel err  unreachable'
+        flush(output_unit)
+
+        sz = pow2_ceil(MR)
+        allocate(w(MR), st(2 * sz), seen(MR))
+        do dk = 1, 5
+            call make_weights_dist(SEED, MR, dk, w)
+            tot = sum(w)
+            unreach = 0
+            do i = 1_int64, MR
+                if (tot + w(i) == tot) unreach = unreach + 1
+            end do
+            do rule = 1, 2
+                call st_build(w, st, sz)
+                ref = 0.0_RK
+                do i = 1_int64, MR
+                    ref = ref + real(w(i), RK)
+                end do
+                seen = .false.
+                ndrawn = 0_int64
+                dup = 0_int64
+                zeroleaf = 0_int64
+                maxrel = 0.0_real64
+                do
+                    if (rule == 1) then
+                        call st_next(SEED, 3_int64, ndrawn + 1_int64, st, sz, item, wv)
+                    else
+                        call st_next_rc(SEED, 3_int64, ndrawn + 1_int64, st, sz, item, wv)
+                    end if
+                    if (item == 0_int64) exit
+                    ndrawn = ndrawn + 1_int64
+                    if (seen(item)) dup = dup + 1_int64
+                    seen(item) = .true.
+                    if (wv <= 0.0_real64) zeroleaf = zeroleaf + 1_int64
+                    ref = ref - real(wv, RK)
+                    if (ref > 0.0_RK) then
+                        rel = abs(real(st(1), RK) - ref) / ref
+                        maxrel = max(maxrel, rel)
+                    end if
+                    if (ndrawn > MR + 100_int64) exit
+                end do
+                write(output_unit, '(a,a,a,a,i9,i7,i11,es16.3,i13)') '   ', dist_name(dk), &
+                    merge('subtract ', 'recompute', rule == 1), '  ', ndrawn, dup, zeroleaf, &
+                    maxrel, unreach
+                flush(output_unit)
+            end do
+        end do
+        deallocate(w, st, seen)
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+    end subroutine run_range
+
+    ! ================================================================================
+    ! Parallelism -- the FULL weighted shuffle
+    ! ================================================================================
+
+    !> The full weighted permutation: segment tree (serial by nature) against the threaded race.
+    subroutine run_par()
+        integer :: tlist(4) = [1, 2, 4, 8]
+        integer :: ti, rd, nt
+        integer(int64) :: m, sz, item, p
+        real(real64), allocatable :: w(:), st(:)
+        integer(int64), allocatable :: out(:), ref(:)
+        real(real64) :: t0, bst, brace(4), junk
+        logical :: same
+
+        m = g_m
+        sz = pow2_ceil(m)
+        allocate(w(m), st(2 * sz), out(m), ref(m))
+        call make_weights(m, g_c, w)
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'PARALLELISM -- the FULL weighted shuffle (all m drawn)'
+        write(output_unit, '(a,i0,a,i0)') 'm = ', m, ', C = ', g_c
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+
+        bst = huge(1.0_real64)
+        do rd = 1, max(1, g_rounds / 2)
+            t0 = wall()
+            call st_build(w, st, sz)
+            do p = 1_int64, m
+                call st_next_rc(SEED, 1_int64, p, st, sz, item, junk)
+            end do
+            bst = min(bst, wall() - t0)
+        end do
+        write(output_unit, '(a,f12.1,a)') '   segment tree (serial, cannot thread)  ', &
+            bst * 1000.0_real64, ' ms'
+        flush(output_unit)
+
+        do ti = 1, size(tlist)
+            nt = tlist(ti)
+            brace(ti) = huge(1.0_real64)
+            do rd = 1, max(1, g_rounds / 2)
+                t0 = wall()
+                call race_select_par(SEED, 1_int64, w, m, out, nt)
+                brace(ti) = min(brace(ti), wall() - t0)
+            end do
+            if (ti == 1) then
+                ref(1:m) = out(1:m)
+                same = .true.
+            else
+                same = all(ref(1:m) == out(1:m))
+            end if
+            write(output_unit, '(a,i3,a,f12.1,a,f7.2,a,f7.2,a,a)') '   race, threads =', nt, &
+                '                  ', brace(ti) * 1000.0_real64, ' ms   vs tree x', &
+                bst / brace(ti), '   scaling x', brace(1) / brace(ti), '   ', &
+                merge('bit-identical to 1 thread', 'DIFFERS FROM 1 THREAD !!!', same)
+            flush(output_unit)
+            if (.not. same) error stop "run_par: the threaded race is not reproducible"
+        end do
+        deallocate(w, st, out, ref)
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+    end subroutine run_par
+
+    !> Option B's load-bearing claim: popping the heap gives exactly the order a full sort of the
+    !! same keys gives, so `%next`, the subset and the shuffle are all prefixes of ONE order.
+    !!
+    !! Checked rather than assumed, because it is the entire justification for option B over a
+    !! two-algorithm split -- and because tie handling is the obvious way to break it. A third of
+    !! the weights here are set to zero, which gives their keys the identical value `huge`, so the
+    !! fixture carries a large block of exact ties: a tie-blind heap and a sort would diverge on it.
+    subroutine heap_matches_sort()
+        integer(int64), parameter :: NC = 50000_int64
+        real(real64), allocatable :: w(:), key(:), key2(:)
+        integer(int64), allocatable :: idx(:), perm(:)
+        integer(int64) :: i, live, item, bad
+        real(real64) :: u, uu, e
+        allocate(w(NC), key(NC), key2(NC), idx(NC))
+        call make_weights_dist(SEED, NC, 1, w)
+        do i = 1_int64, NC, 3_int64
+            w(i) = 0.0_real64
+        end do
+
+        call race_heap_prepare(SEED, 1_int64, w, key, idx, NC)      ! heap side
+
+        do i = 1_int64, NC                                          ! sort side: same key formula
+            u = pf_random_at(SEED, i)                               ! prepare uses stream + i - 1
+            uu = 1.0_real64 - u
+            if (uu >= 1.0_real64) uu = 1.0_real64 - epsilon(1.0_real64)
+            e = -log(uu)
+            if (w(i) > 0.0_real64) then
+                key2(i) = e / w(i)
+            else
+                key2(i) = huge(1.0_real64)
+            end if
+        end do
+        call pf_argsort(key2, perm)                                 ! pf_argsort allocates perm
+
+        live = NC
+        bad = 0_int64
+        do i = 1_int64, NC
+            call race_heap_pop(key, idx, live, item)
+            if (item /= perm(i)) bad = bad + 1_int64
+        end do
+        write(output_unit, '(a,i0,a,i0,a)') '   heap order vs pf_argsort order: ', bad, &
+            ' of ', NC, ' positions differ'
+        if (bad /= 0_int64) error stop "heap_matches_sort: option B's single-order claim is false"
+        deallocate(w, key, key2, idx, perm)
+    end subroutine heap_matches_sort
+
+    ! ================================================================================
+    ! Option B in serial: tree against race+heap, small k, random weights
+    ! ================================================================================
+
+    !> Serial cost of drawing k of n, for the two constructions that support unknown k.
+    !!
+    !! Weights are uniform(0,1) -- "random weights" in the plainest reading, and §5.6 showed the
+    !! distribution barely matters once ancestors are recomputed rather than decremented. The tree
+    !! uses `st_next_rc`, i.e. the fixed rule; the race uses an `O(n)` heapify plus `k` pops, which
+    !! is option B's incremental form and NOT the partial-argsort arm measured elsewhere.
+    !!
+    !! Both arms are timed over the FULL operation -- setup plus k draws -- because with `k`
+    !! unknown in advance the setup cannot be amortised over anything.
+    subroutine run_serial()
+        integer(int64) :: nlist(6) = [100_int64, 1000_int64, 10000_int64, 100000_int64, &
+                                      1000000_int64, 10000000_int64]
+        integer(int64) :: klist(3) = [1_int64, 10_int64, 100_int64]
+        integer(int64) :: n, k, sz, reps, r, item, live, p
+        integer :: ni, ki, rd
+        real(real64), allocatable :: w(:), st(:), key(:)
+        integer(int64), allocatable :: idx(:)
+        real(real64) :: t0, btree, brace, junk
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'SERIAL -- draw k of n, setup INCLUDED, random uniform weights'
+        write(output_unit, '(a)') 'tree  = segment tree, recompute rule (the fixed one)'
+        write(output_unit, '(a)') 'race  = option B: n keys + O(n) heapify + k pops'
+        write(output_unit, '(a)') 'times are ms for ONE complete operation (setup + k draws)'
+        write(output_unit, '(a)') ''
+        call heap_matches_sort()
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') '           n     k     tree(ms)     race(ms)   race/tree'
+        flush(output_unit)
+
+        do ni = 1, size(nlist)
+            n = nlist(ni)
+            sz = pow2_ceil(n)
+            allocate(w(n), st(2 * sz), key(n), idx(n))
+            call make_weights_dist(SEED, n, 1, w)
+            st = 0.0_real64                          ! warm every destination before timing
+            key = 0.0_real64
+            idx = 0_int64
+            reps = max(1_int64, 2000000_int64 / n)
+            do ki = 1, size(klist)
+                k = klist(ki)
+                if (k > n) cycle
+                btree = huge(1.0_real64)
+                brace = huge(1.0_real64)
+                do rd = 1, g_rounds
+                    t0 = wall()
+                    do r = 1_int64, reps
+                        call st_build(w, st, sz)
+                        do p = 1_int64, k
+                            call st_next_rc(SEED, 1_int64, p, st, sz, item, junk)
+                        end do
+                    end do
+                    btree = min(btree, (wall() - t0) / real(reps, real64))
+
+                    t0 = wall()
+                    do r = 1_int64, reps
+                        call race_heap_prepare(SEED, 1_int64, w, key, idx, n)
+                        live = n
+                        do p = 1_int64, k
+                            call race_heap_pop(key, idx, live, item)
+                        end do
+                    end do
+                    brace = min(brace, (wall() - t0) / real(reps, real64))
+                end do
+                write(output_unit, '(i12,i6,2f13.5,f12.2)') n, k, btree * 1000.0_real64, &
+                    brace * 1000.0_real64, brace / btree
+                flush(output_unit)
+            end do
+            write(output_unit, '(a)') ''
+            deallocate(w, st, key, idx)
+        end do
+        flush(output_unit)
+    end subroutine run_serial
 
 end program probe_random_weighted

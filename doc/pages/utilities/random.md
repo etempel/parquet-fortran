@@ -351,7 +351,7 @@ cap, the work floor and the measured scaling.
 The third member of the family, and the one whose construction is not a construction at all:
 
 ```fortran
-call pf_random_resample(idx, m, seed [, stream])   ! size(idx) draws from 1..m, with replacement
+call pf_random_resample(idx, m, seed [, stream [, threads]])   ! draws from 1..m, with replacement
 ```
 
 Drawing with replacement means `size(idx)` independent uniform integers in `[1, m]` — no dedup, no
@@ -389,6 +389,24 @@ this differs from `pf_random_subset`. Drawing 4000 values from a population of 4
 bootstrap, and drawing more than `m` is perfectly meaningful. Two preconditions do apply, and both
 abort rather than truncating: `m >= 1`, and — for an `integer(int32)` array — `m <= huge(int32)`.
 A zero-sized array is a defined no-op and is not validated.
+
+**`threads=` works here too, and it is bit-identical at every thread count** — same default from
+`parquet_set_random_threads`, same work floor from `parquet_set_random_parallel_min_elements`, and
+the floor applies to an explicit request as well, so a small resample stays serial however many
+workers you ask for. Threading splits the draws between workers, and element `k` depends only on
+`(seed, stream, k)`, so which worker produced it cannot matter:
+
+```fortran
+call pf_random_resample(idx, nrows, seed, b, threads=8)   ! same values as threads=1
+```
+
+**One wart, and it is a language constraint rather than a choice: `threads=` requires an explicit
+`stream`.** Both are integers in the same argument position, so a generic offering them as
+alternatives there does not compile at all. Pass `stream = 1` if you only want the default
+replicate — `call pf_random_resample(idx, m, seed, 1, threads=8)`. Omitting it gives a "no specific
+subroutine matches" error that does not explain itself. The siblings are unaffected:
+`pf_random_permutation` and `pf_random_subset` have no `stream`, so `threads=` is their fourth
+argument.
 
 Because it draws with replacement, expect duplicates: drawing `m` values from `1 .. m` leaves about
 `m(1 - 1/e)`, roughly 63%, of the population represented. If you want distinct rows, you want

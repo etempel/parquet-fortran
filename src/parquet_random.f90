@@ -506,6 +506,25 @@ module parquet_random
     !! draw axis, which carries a stream coordinate already, so it costs a caller one integer rather
     !! than a key derivation. Both routes are available here: `stream = b` and
     !! `seed = pf_random_key(seed, b)` are equally independent.
+    !!
+    !! **`threads` behaves exactly as it does on `pf_random_permutation` and `pf_random_subset`** --
+    !! same `parquet_set_random_threads` default, same `parquet_set_random_parallel_min_elements`
+    !! work floor, and the floor applies to an explicit request too, so a small resample stays serial
+    !! however many workers are asked for. The result is **bit-identical at every thread count**, and
+    !! by construction rather than by care: element `k` is a pure function of `(seed, stream, k)`, so
+    !! a thread filling elements `lo .. hi` is the serial fill started at draw `lo`. That is asserted
+    !! rather than argued.
+    !!
+    !! **`threads` requires an explicit `stream`, and that is a language constraint rather than a
+    !! choice.** `threads` and `stream` are both integers in argument position 4, so a generic
+    !! offering `(idx, m, seed [, threads])` beside `(idx, m, seed, stream)` is **rejected by the
+    !! compiler** -- "Ambiguous interfaces in generic interface 'pf_random_resample'" -- and giving
+    !! the two dummies different keyword names does not rescue it, because keyword names do not make
+    !! specifics distinguishable. Both spellings were compiled to confirm it. So write
+    !! `call pf_random_resample(idx, m, seed, 1, threads=8)` for the default replicate; omitting
+    !! `stream` produces a "no specific subroutine matches" error that does not explain itself. This
+    !! is the same constraint the `parquet_open_reader` split answers one level along, where an
+    !! optional argument differing only by *kind* could not disambiguate either.
     interface pf_random_resample
         module procedure pf_random_resample_i32_i32
         module procedure pf_random_resample_i32_i64
@@ -1569,6 +1588,25 @@ contains
     !! Unlike `fill_draws_i64` this gives up nothing at all against the real-valued form on the same
     !! axis: that one already enciphered a block per value, because each element belongs to a
     !! different stream.
+    !!
+    !! **Do not "fix" this to hoist the loop-invariant setup out of the loop -- it was implemented,
+    !! measured and reverted.** The body below re-derives, per element, the range normalisation
+    !! `min(lo,hi)`/`width_of(...)` inside `int_at_impl`, and the block index and pair parity inside
+    !! `bits_of`, all of which are constant across the loop; both `real64` siblings hoist exactly
+    !! these and say so, so the asymmetry reads as an oversight. It is not, because **GCC already
+    !! does it**: these private workers inline into the public specific (there is no
+    !! `__parquet_random_MOD_fill_streams_i64` symbol at all), after which loop-invariant code motion
+    !! lifts the whole setup. Hoisting by hand took a 373-instruction loop body to 364 -- neither
+    !! version has a 128-bit subtract or a division inside the loop -- and measured 17.63 -> 17.54 ns
+    !! per value on machine B (**1.005x**), with `fill_streams_i32` unchanged at 17.52 -> 17.53 and an
+    !! untouched `fill_streams_r64` control flat at 14.71 across the two builds.
+    !!
+    !! The probe arms that predicted 1.04x-1.29x were comparing a *hoisted probe* arm against this
+    !! *unhoisted library* one across the wrapper boundary, with no unhoisted probe arm to subtract;
+    !! one added afterwards to settle it measures 25.12 against the hoisted 25.23, i.e. zero there
+    !! too. See `feature_random_resample.md` stage 3 for both routes. A compiler that does NOT inline
+    !! these workers would change the verdict, so this is a finding about the build and not about the
+    !! source -- re-measure rather than assuming either answer.
     pure subroutine fill_streams_i64(seed, i0, v, lo, hi, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: i0            !! first stream index
@@ -2361,14 +2399,34 @@ contains
     !! zero-sized `v` before it reads `hi` at all. The whole suite passes without it, including under
     !! `--profile debug`. Keep it anyway -- it costs one comparison on a path that then returns --
     !! but do not expect a test to defend it, and do not add one that pins a wrapped value.
-    subroutine resample_i32(idx, m, seed, stream)
+    subroutine resample_i32(idx, m, seed, stream, threads)
         integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int64), intent(in) :: m             !! population size, widened
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! replicate index, already defaulted
-        call resample_check(size(idx, kind=int64), m, .true.)
-        if (size(idx, kind=int64) <= 0_int64) return
-        call fill_draws_i32(seed, stream, idx, 1_int32, int(m, int32), 1_int64)
+        integer, intent(in), optional :: threads    !! caller's request; absent means automatic
+        integer(int64) :: n, chunk, lo, hi
+        integer :: nth, t
+        n = size(idx, kind=int64)
+        call resample_check(n, m, .true.)
+        if (n <= 0_int64) return
+        nth = random_threads(n, threads)
+        if (nth <= 1) then
+            call fill_draws_i32(seed, stream, idx, 1_int32, int(m, int32), 1_int64)
+            return
+        end if
+        chunk = (n + int(nth, int64) - 1_int64) / int(nth, int64)
+#ifdef _OPENMP
+        !$omp parallel do default(shared) private(t, lo, hi) schedule(static) num_threads(nth)
+#endif
+        do t = 0, nth - 1
+            lo = int(t, int64) * chunk + 1_int64
+            hi = min(n, lo + chunk - 1_int64)
+            if (lo <= hi) call fill_draws_i32(seed, stream, idx(lo:hi), 1_int32, int(m, int32), lo)
+        end do
+#ifdef _OPENMP
+        !$omp end parallel do
+#endif
     end subroutine resample_i32
 
     !> The resample worker, `integer(int64)` result.
@@ -2379,14 +2437,47 @@ contains
     !! already frozen by `pf_random_algorithm`, which is why this procedure needs no golden vectors of
     !! its own -- what the suite asserts instead is the identity with the fill and with the scalar
     !! draw, which is what would break if a future optimisation moved one of the three.
-    subroutine resample_i64(idx, m, seed, stream)
+    !!
+    !! **Threading splits the DRAW axis, and that is what makes it bit-identical rather than merely
+    !! equivalent.** Element `k` is a pure function of `(seed, stream, k)`, so a chunk covering
+    !! elements `lo .. hi` is exactly `fill_draws_i64` started at draw `lo` -- no per-thread state, no
+    !! reduction, nothing to order. Chunk boundaries land anywhere, including in the middle of a
+    !! block, which the fill's alignment head already handles; before the stage-2 restructure gave it
+    !! one, an arbitrary starting draw would have needed a special case here. `num_threads(nth)` is
+    !! load-bearing for the reason `perm_fill_i32` records at length: without it OpenMP opens the
+    !! default team, 192 on machine B, on every call whatever the caller asked for.
+    !!
+    !! The work floor inside `random_threads` applies to an explicit `threads=` as well as to the
+    !! automatic answer, so a small resample stays serial even when threading is requested -- a
+    !! property of the work rather than of the caller's intent.
+    subroutine resample_i64(idx, m, seed, stream, threads)
         integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int64), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! replicate index, already defaulted
-        call resample_check(size(idx, kind=int64), m, .false.)
-        if (size(idx, kind=int64) <= 0_int64) return
-        call fill_draws_i64(seed, stream, idx, 1_int64, m, 1_int64)
+        integer, intent(in), optional :: threads    !! caller's request; absent means automatic
+        integer(int64) :: n, chunk, lo, hi
+        integer :: nth, t
+        n = size(idx, kind=int64)
+        call resample_check(n, m, .false.)
+        if (n <= 0_int64) return
+        nth = random_threads(n, threads)
+        if (nth <= 1) then
+            call fill_draws_i64(seed, stream, idx, 1_int64, m, 1_int64)
+            return
+        end if
+        chunk = (n + int(nth, int64) - 1_int64) / int(nth, int64)
+#ifdef _OPENMP
+        !$omp parallel do default(shared) private(t, lo, hi) schedule(static) num_threads(nth)
+#endif
+        do t = 0, nth - 1
+            lo = int(t, int64) * chunk + 1_int64
+            hi = min(n, lo + chunk - 1_int64)
+            if (lo <= hi) call fill_draws_i64(seed, stream, idx(lo:hi), 1_int64, m, lo)
+        end do
+#ifdef _OPENMP
+        !$omp end parallel do
+#endif
     end subroutine resample_i64
 
     !> `pf_random_resample`, `integer(int32)` result and `integer(int32)` population, stream 1.
@@ -2427,75 +2518,83 @@ contains
     !! dummy**, because an optional argument that differs only by kind cannot be the sole
     !! disambiguator in a generic interface -- a call omitting it would match both. This is the split
     !! CLAUDE.md's "Public numeric arguments" note prescribes and `parquet_open_reader` already uses.
-    subroutine pf_random_resample_i32_i32_s32(idx, m, seed, stream)
+    subroutine pf_random_resample_i32_i32_s32(idx, m, seed, stream, threads)
         integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int32), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int32), intent(in) :: stream        !! replicate index
-        call resample_i32(idx, int(m, int64), seed, int(stream, int64))
+        integer, intent(in), optional :: threads    !! worker count; absent means automatic
+        call resample_i32(idx, int(m, int64), seed, int(stream, int64), threads)
     end subroutine pf_random_resample_i32_i32_s32
 
     !> `pf_random_resample` with an `integer(int32)` stream; `int32` result, `int64` population.
-    subroutine pf_random_resample_i32_i64_s32(idx, m, seed, stream)
+    subroutine pf_random_resample_i32_i64_s32(idx, m, seed, stream, threads)
         integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int64), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int32), intent(in) :: stream        !! replicate index
-        call resample_i32(idx, m, seed, int(stream, int64))
+        integer, intent(in), optional :: threads    !! worker count; absent means automatic
+        call resample_i32(idx, m, seed, int(stream, int64), threads)
     end subroutine pf_random_resample_i32_i64_s32
 
     !> `pf_random_resample` with an `integer(int32)` stream; `int64` result, `int32` population.
-    subroutine pf_random_resample_i64_i32_s32(idx, m, seed, stream)
+    subroutine pf_random_resample_i64_i32_s32(idx, m, seed, stream, threads)
         integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int32), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int32), intent(in) :: stream        !! replicate index
-        call resample_i64(idx, int(m, int64), seed, int(stream, int64))
+        integer, intent(in), optional :: threads    !! worker count; absent means automatic
+        call resample_i64(idx, int(m, int64), seed, int(stream, int64), threads)
     end subroutine pf_random_resample_i64_i32_s32
 
     !> `pf_random_resample` with an `integer(int32)` stream; `int64` result and population.
-    subroutine pf_random_resample_i64_i64_s32(idx, m, seed, stream)
+    subroutine pf_random_resample_i64_i64_s32(idx, m, seed, stream, threads)
         integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int64), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int32), intent(in) :: stream        !! replicate index
-        call resample_i64(idx, m, seed, int(stream, int64))
+        integer, intent(in), optional :: threads    !! worker count; absent means automatic
+        call resample_i64(idx, m, seed, int(stream, int64), threads)
     end subroutine pf_random_resample_i64_i64_s32
 
     !> `pf_random_resample` with an `integer(int64)` stream; `int32` result and population.
-    subroutine pf_random_resample_i32_i32_s64(idx, m, seed, stream)
+    subroutine pf_random_resample_i32_i32_s64(idx, m, seed, stream, threads)
         integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int32), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! replicate index
-        call resample_i32(idx, int(m, int64), seed, stream)
+        integer, intent(in), optional :: threads    !! worker count; absent means automatic
+        call resample_i32(idx, int(m, int64), seed, stream, threads)
     end subroutine pf_random_resample_i32_i32_s64
 
     !> `pf_random_resample` with an `integer(int64)` stream; `int32` result, `int64` population.
-    subroutine pf_random_resample_i32_i64_s64(idx, m, seed, stream)
+    subroutine pf_random_resample_i32_i64_s64(idx, m, seed, stream, threads)
         integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int64), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! replicate index
-        call resample_i32(idx, m, seed, stream)
+        integer, intent(in), optional :: threads    !! worker count; absent means automatic
+        call resample_i32(idx, m, seed, stream, threads)
     end subroutine pf_random_resample_i32_i64_s64
 
     !> `pf_random_resample` with an `integer(int64)` stream; `int64` result, `int32` population.
-    subroutine pf_random_resample_i64_i32_s64(idx, m, seed, stream)
+    subroutine pf_random_resample_i64_i32_s64(idx, m, seed, stream, threads)
         integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int32), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! replicate index
-        call resample_i64(idx, int(m, int64), seed, stream)
+        integer, intent(in), optional :: threads    !! worker count; absent means automatic
+        call resample_i64(idx, int(m, int64), seed, stream, threads)
     end subroutine pf_random_resample_i64_i32_s64
 
     !> `pf_random_resample` with an `integer(int64)` stream; `int64` result and population.
-    subroutine pf_random_resample_i64_i64_s64(idx, m, seed, stream)
+    subroutine pf_random_resample_i64_i64_s64(idx, m, seed, stream, threads)
         integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
         integer(int64), intent(in) :: m             !! population size
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! replicate index
-        call resample_i64(idx, m, seed, stream)
+        integer, intent(in), optional :: threads    !! worker count; absent means automatic
+        call resample_i64(idx, m, seed, stream, threads)
     end subroutine pf_random_resample_i64_i64_s64
 
     !> How many threads a bulk permutation of `n` elements should use.

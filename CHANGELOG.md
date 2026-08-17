@@ -675,14 +675,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It is not uniform over all `m!` permutations and nothing with a 64-bit seed could be; what is
   measured is that it is indistinguishable from uniform under fixed-point, cycle-structure,
   position-uniformity, subset-membership and structural tests.
-  **`pf_random_resample(idx, m, seed [, stream])` is the third of the family and draws WITH
-  replacement** — the bootstrap's sample. It has no construction of its own: it *is*
+  **`pf_random_resample(idx, m, seed [, stream [, threads]])` is the third of the family and draws
+  WITH replacement** — the bootstrap's sample. It has no construction of its own: it *is*
   `pf_random_fill_draws(seed, stream, idx, 1, m)`, an identity the suite asserts, and what the name
   buys is the 1.4x-1.6x a caller loses by writing the obvious loop of `pf_random_int_at`, which
   re-enciphers a Philox block per value where the bulk form serves two draws from each one. The
   optional `stream=` names the replicate, so replicate `b` is reproducible from `(seed, b)` alone
   whatever order the replicates ran in — the siblings have no such argument and use
-  `pf_random_key(seed, b)` instead. It requires `m >= 1`, and `m <= huge(int32)` for an
+  `pf_random_key(seed, b)` instead. `threads=` follows it and is bit-identical at every thread count,
+  honouring the same `parquet_set_random_threads` default and
+  `parquet_set_random_parallel_min_elements` work floor as the sibling bulk forms; it must be written
+  *after* an explicit `stream`, because the two occupy one argument position and a generic offering
+  both there does not compile. It requires `m >= 1`, and `m <= huge(int32)` for an
   `integer(int32)` array, but deliberately **not** `size(idx) <= m`: that bound belongs to drawing
   without replacement, and `size(idx) == m` is the ordinary bootstrap.
   **One property to know before mixing generics on a single stream**: a `(seed, i)` pair names one

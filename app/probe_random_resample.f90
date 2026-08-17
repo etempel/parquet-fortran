@@ -73,6 +73,8 @@ program probe_random_resample
 #endif
     use iso_fortran_env, only: int32, int64, real64, output_unit, compiler_version, compiler_options
     use parquet, only: pf_random_int_at, pf_random_fill_draws, pf_random_fill_streams, pf_random_key, &
+                       pf_random_resample, parquet_set_random_parallel_min_elements, &
+                       parquet_reset_settings, &
                        parquet_debug_random_block, parquet_debug_random_uses_int128
 
     implicit none
@@ -188,7 +190,7 @@ program probe_random_resample
 
     write (output_unit, '(a)') '---- STREAM axis, ns per value (best of rounds); m = 10**6 ----'
     write (output_unit, '(a)') &
-        '                 shipped     hoisted   hoisted x2   shipped r64'
+        '                 shipped     hoisted   hoisted x2   shipped r64  shipped i32  probe plain'
     call streams_row(1000000_int64)
     write (output_unit, '(a)') ''
 
@@ -212,7 +214,7 @@ program probe_random_resample
     ! arm approaches what the machine can sustain, and the int32 specifics halve it exactly.
     write (output_unit, '(a)') '---- threaded STORE WIDTH: shipped fill, int64 vs int32 output ----'
     write (output_unit, '(a)') &
-        '     threads       int64       int32    int64 GB/s   ratio'
+        '     threads       int64       int32    resample    int64 GB/s   ratio'
     call store_width_rows(1000000_int64, th_list(1:n_th))
     write (output_unit, '(a)') ''
 #else
@@ -233,8 +235,9 @@ contains
         integer(int64), intent(in) :: mm            !! a representative population size
         integer(int64) :: ng, k, mg
         integer(int64), allocatable :: g1(:), g2(:), g3(:), g4(:)
+        integer(int32), allocatable :: g5(:)
         ng = min(n, 200000_int64)
-        allocate (g1(ng), g2(ng), g3(ng), g4(ng))
+        allocate (g1(ng), g2(ng), g3(ng), g4(ng), g5(ng))
 
         ! G1: the shipped fill agrees with the shipped scalar draw. A sanity check on the probe's
         !     understanding of the contract, not on the library.
@@ -275,13 +278,24 @@ contains
         call must_match(g1, g3, 'G7a streams hoisted == shipped fill_streams')
         call streams_i64_hoisted2(SEED, 1_int64, g4, 1_int64, mm, 1_int64)
         call must_match(g1, g4, 'G7b streams hoisted x2 == shipped fill_streams')
+        call streams_i64_plain(SEED, 1_int64, g4, 1_int64, mm, 1_int64)
+        call must_match(g1, g4, 'G7f streams plain == shipped fill_streams')
         ! And again at a draw index that lands in a block's SECOND pair, which is the branch the
         ! hoisted `second` flag replaces -- an arm that only ever tested draw 1 would not reach it.
         call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm, 4_int64)
         call streams_i64_hoisted(SEED, 1_int64, g3, 1_int64, mm, 4_int64)
         call must_match(g1, g3, 'G7c streams hoisted == shipped, draw = 4')
+        ! G7d pins `fill_streams_i32` against its `int64` sibling, at both pair parities. The two
+        ! are edited together and only the `int64` one is timed above, so without this the narrow
+        ! specific could be broken by the same change that the `int64` gates certify as correct.
+        call pf_random_fill_streams(SEED, 1_int64, g5, 1_int32, int(mm, int32))
+        call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm)
+        call must_match(int(g5, int64), g1, 'G7d fill_streams int32 == int64 narrowed')
+        call pf_random_fill_streams(SEED, 1_int64, g5, 1_int32, int(mm, int32), 4_int64)
+        call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm, 4_int64)
+        call must_match(int(g5, int64), g1, 'G7e fill_streams int32 == int64, draw = 4')
 
-        deallocate (g1, g2, g3, g4)
+        deallocate (g1, g2, g3, g4, g5)
         write (output_unit, '(a)') 'all gates passed'
         write (output_unit, '(a)') ''
         flush (output_unit)
@@ -769,6 +783,45 @@ contains
         end do
     end subroutine streams_i64_hoisted2
 
+    !> `streams_i64_hoisted` with the hoist UNDONE -- the shipped per-element shape, but reaching
+    !! the cipher through this probe's out-of-line wrapper like every other arm here.
+    !!
+    !! **This arm exists to answer why the hoist measured nothing in the library.** A library-side
+    !! A/B of the real hoist moved `fill_streams_i64` 17.63 -> 17.54 ns per value (1.005x) and
+    !! `fill_streams_i32` not at all, against a control that did not move -- while these probe arms
+    !! had predicted 1.04x-1.29x. `plain` against `hoisted`, both in this binary and both through
+    !! the wrapper, separates the two candidate explanations: if they agree, the earlier probe-side
+    !! gain was never real; if `plain` is materially slower, then reaching the cipher through an
+    !! opaque call is what CREATES the hoisting opportunity, and no arm shaped like this one can
+    !! measure a loop-invariant hoist in code where the cipher inlines.
+    !!
+    !! It re-derives per element exactly what the shipped worker re-derives: the width, and the
+    !! block index and pair parity that `bits_of` recomputes from a constant `draw`.
+    subroutine streams_i64_plain(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index
+        integer(int64), intent(inout) :: v(:)       !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end
+        integer(int64), intent(in) :: draw          !! 1-based value index
+        integer(int64) :: k, mm, blk, w0, w1, w2, w3, s, x, e, stream
+        mm = size(v, kind=int64)
+        if (mm <= 0_int64) return
+        do k = 1_int64, mm
+            stream = i0 + (k - 1_int64)
+            s = hi - lo + 1_int64                   ! per element, as `int_at_impl` re-derives it
+            e = max(draw, 1_int64) - 1_int64        ! per element, as `bits_of` re-derives it
+            blk = ishft(e, -1)
+            call parquet_debug_random_block(seed, stream, blk, w0, w1, w2, w3)
+            if (iand(e, 1_int64) == 0_int64) then
+                x = ior(ishft(w1, 32), w0)
+            else
+                x = ior(ishft(w3, 32), w2)
+            end if
+            v(k) = reduce64_at(x, s, seed, stream, draw, lo)
+        end do
+    end subroutine streams_i64_plain
+
     !> `reduce64` with an explicit range base, for the stream-axis arms.
     pure function reduce64_at(x, s, seed, stream, draw, base) result(r)
         integer(int64), intent(in) :: x             !! the 64-bit candidate
@@ -1096,41 +1149,62 @@ contains
     end function timed_par_fill32
 
     !> The store-width rows: the same shipped fill into an `int64` and an `int32` array.
+    !!
+    !! The `resample` column times **`pf_random_resample(..., threads=)` itself** rather than the
+    !! hand-rolled chunking beside it, which is the whole point of having both: the two do the same
+    !! thing, so the library column is what the user actually gets and the replica column is the
+    !! control. Stage 3 is the reason this is spelled out -- a probe arm standing in for library code
+    !! predicted a 1.04x-1.29x gain that the library measured at 1.005x, because nothing compared
+    !! like with like. The work floor is cleared first, or an explicit `threads=` at a high count is
+    !! silently cut down by `random_threads` and the column reads as a scaling failure.
     subroutine store_width_rows(mm, ths)
         integer(int64), intent(in) :: mm            !! population size
         integer, intent(in) :: ths(:)               !! thread counts to try
-        real(real64) :: t1, t2
+        real(real64) :: t1, t2, t3, t0
         integer :: i2, r
         integer(int64) :: k
+        call parquet_set_random_parallel_min_elements(0)
         do i2 = 1, size(ths)
             t1 = huge(1.0_real64)
             t2 = huge(1.0_real64)
+            t3 = huge(1.0_real64)
             do r = 1, rounds
                 t1 = min(t1, timed_par_fill64(mm, ths(i2)))
                 t2 = min(t2, timed_par_fill32(mm, ths(i2)))
+                t0 = now()
+                call pf_random_resample(c, mm, SEED, STREAM, threads=ths(i2))
+                t3 = min(t3, now() - t0)
             end do
-            ! Both outputs must equal the serial fill, and each other -- a threaded chunking bug
-            ! would otherwise show up as a speedup.
+            ! Every output must equal the serial fill -- a threaded chunking bug would otherwise
+            ! show up as a speedup. `c` is the library's own threaded resample.
             call pf_random_fill_draws(SEED, STREAM, a, 1_int64, mm)
             call must_match(a, b, 'threaded int64 fill == serial fill')
+            call must_match(a, c, 'threaded pf_random_resample == serial fill')
             do k = 1_int64, n
                 if (int(e32(k), int64) /= a(k)) then
                     write (output_unit, '(a,i0)') 'GATE FAILED int32 fill == int64 fill at k = ', k
                     error stop 1
                 end if
             end do
-            write (output_unit, '(i12,2f12.2,f14.1,f8.2)') ths(i2), &
+            write (output_unit, '(i12,3f12.2,f12.1,f8.2)') ths(i2), &
                 t1 * 1.0e9_real64 / real(n, real64), t2 * 1.0e9_real64 / real(n, real64), &
+                t3 * 1.0e9_real64 / real(n, real64), &
                 8.0_real64 * real(n, real64) / (t1 * 1.0e9_real64), t2 / t1
             flush (output_unit)
         end do
+        call parquet_reset_settings()
     end subroutine store_width_rows
 
     !> Times the stream-axis arms. The `real64` stream fill is the control: it is one block per
     !! value with no reduction, so it is the floor this axis cannot go below.
+    !!
+    !! The `int32` column exists because section 23 records "the `int32` output arm, on every axis"
+    !! as unmeasured on either machine, and `fill_streams_i32` is changed by the same edit as its
+    !! `int64` sibling -- so a hoist adopted on the strength of the `int64` column alone would be
+    !! adopted for a procedure nothing here times.
     subroutine streams_row(mm)
         integer(int64), intent(in) :: mm            !! population size
-        real(real64) :: t(4), t0
+        real(real64) :: t(6), t0
         integer :: r
         real(real64), allocatable :: vr(:)
         allocate (vr(n))
@@ -1145,8 +1219,13 @@ contains
             t(3) = min(t(3), now() - t0)
             t0 = now(); call pf_random_fill_streams(SEED, 1_int64, vr)
             t(4) = min(t(4), now() - t0)
+            t0 = now()
+            call pf_random_fill_streams(SEED, 1_int64, e32, 1_int32, int(mm, int32))
+            t(5) = min(t(5), now() - t0)
+            t0 = now(); call streams_i64_plain(SEED, 1_int64, c, 1_int64, mm, 1_int64)
+            t(6) = min(t(6), now() - t0)
         end do
-        write (output_unit, '(a12,4f12.2)') 'ns/value', (t(r) * 1.0e9_real64 / real(n, real64), r=1, 4)
+        write (output_unit, '(a12,6f12.2)') 'ns/value', (t(r) * 1.0e9_real64 / real(n, real64), r=1, 6)
         deallocate (vr)
         flush (output_unit)
     end subroutine streams_row

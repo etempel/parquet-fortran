@@ -45,7 +45,8 @@ contains
             new_unittest("draws are identical under every schedule and thread count", test_schedule_independence), &
             new_unittest("pf_random_seed differs across concurrent threads", test_seed_across_threads), &
             new_unittest("a per-iteration stream reproduces under every schedule", test_stream_schedule), &
-            new_unittest("a bulk permutation is bit-identical at every thread count", test_perm_threads) &
+            new_unittest("a bulk permutation is bit-identical at every thread count", test_perm_threads), &
+            new_unittest("a resample is bit-identical at every thread count", test_resample_threads) &
             ]
     end subroutine collect_tests_parquet_random_omp
 
@@ -408,5 +409,129 @@ contains
         call pf_random_permutation(got, SD)
         call check(error, all(got == ref), "the automatic bulk permutation differs from the scalar form")
     end subroutine test_perm_threads
+
+    !> **The same claim for `pf_random_resample`: the thread count changes the time and nothing
+    !! else** -- asserted against the SCALAR draw, not against a 1-thread bulk run.
+    !!
+    !! A resample splits the DRAW axis, which is a different construction from the permutation's and
+    !! deserves its own assertion rather than an appeal to the sibling: a chunk covering elements
+    !! `lo .. hi` is the serial fill restarted at draw `lo`, so a chunk boundary can land in the
+    !! middle of a Philox block and the fill's alignment head is what makes that come out right.
+    !! **The thread counts are chosen so that some boundaries are odd**: with `n = 5000`, `threads=3`
+    !! gives a chunk of 1667 and `threads=7` one of 715, both odd, so the second and later chunks
+    !! start on a block's second pair. An all-even set of chunk sizes would exercise only the aligned
+    !! path and would pass against a fill that mishandled the other one.
+    !!
+    !! Three things are asserted, and the last two are negative controls without which the first is
+    !! weak:
+    !!
+    !!  * every thread count, both result kinds, reproduces the scalar draw exactly;
+    !!  * the **work floor is honoured against an explicit request** -- restored to its factory value,
+    !!    a 5000-element resample must resolve `threads=64` to fewer than 64. Without this the first
+    !!    assertion could pass against an implementation that silently ignored `threads` entirely;
+    !!  * what a **parallel region** does to the count, which is two different rules and not one:
+    !!    the *automatic* form goes serial inside any region, while an *explicit* request is honoured
+    !!    in full inside an active one and clamped to a single worker only when the enclosing team has
+    !!    one thread (Risk-104). And the values must still be right when called from in there.
+    subroutine test_resample_threads(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: SD = 4242_int64
+        integer(int64), parameter :: M = 900_int64
+        integer(int64), parameter :: N = 5000_int64
+        integer(int64), parameter :: ST = 11_int64
+        integer, parameter :: teams(*) = [1, 2, 3, 5, 7, 8, 16, 64]
+        integer(int64) :: ref(N), got(N), k
+        integer(int32) :: got32(N)
+        integer :: ti, floored, inside
+        character(len=80) :: msg
+
+        do k = 1_int64, N
+            ref(k) = pf_random_int_at(SD, ST, 1_int64, M, k)
+        end do
+
+        call parquet_set_random_parallel_min_elements(0)
+        do ti = 1, size(teams)
+            got = -1_int64
+            call pf_random_resample(got, M, SD, ST, threads=teams(ti))
+            if (any(got /= ref)) then
+                write (msg, '(a,i0,a)') "a resample at threads=", teams(ti), &
+                    " differs from the scalar integer draw"
+                call check(error, .false., trim(msg))
+                call parquet_reset_settings()
+                return
+            end if
+            got32 = -1_int32
+            call pf_random_resample(got32, int(M, int32), SD, ST, threads=teams(ti))
+            if (any(int(got32, int64) /= ref)) then
+                write (msg, '(a,i0,a)') "the int32 resample at threads=", teams(ti), &
+                    " differs from the scalar integer draw"
+                call check(error, .false., trim(msg))
+                call parquet_reset_settings()
+                return
+            end if
+        end do
+        call parquet_reset_settings()
+
+        ! Negative control 1: with the floor back at its factory value, an explicit request above
+        ! what the work can feed must be cut down. If this reported 64 the sweep above would have
+        ! been comparing the serial path against itself eight times over.
+        floored = parquet_debug_random_bulk_threads(N, 64)
+        call check(error, floored < 64, &
+            "the work floor did not bite on an explicit threads=64 for a 5000-element resample, so the " // &
+            "thread sweep above may never have run more than one worker")
+        if (allocated(error)) return
+
+        ! Negative control 2: what a parallel region does to the thread count, and the two cases
+        ! are deliberately DIFFERENT -- an early version of this test asserted one rule for both and
+        ! failed against correct code. The AUTOMATIC form goes serial inside any region, because
+        ! `parquet_auto_thread_count` will not nest by default. An EXPLICIT request is honoured in
+        ! full inside an ACTIVE region -- CLAUDE.md's auto-threading note is precisely that
+        ! `omp_in_parallel()` picks a default and does not veto a request -- and is clamped to 1 only
+        ! when the enclosing team has ONE thread, which is the shape libgomp deadlocks on
+        ! (`parquet_nested_team_unsafe`, Risk-104).
+        inside = 0
+#ifdef _OPENMP
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        inside = parquet_debug_random_bulk_threads(N)          ! automatic, active region
+        !$omp end single
+        !$omp end parallel
+        call check(error, inside == 1, &
+            "an automatic resample inside a parallel region did not resolve to a single worker")
+        if (allocated(error)) return
+
+        inside = 0
+        !$omp parallel num_threads(1) default(shared)
+        !$omp single
+        inside = parquet_debug_random_bulk_threads(N, 8)       ! explicit, INACTIVE region
+        !$omp end single
+        !$omp end parallel
+        call check(error, inside == 1, &
+            "an explicit threads= inside an inactive region was not clamped to one worker, which is " // &
+            "the nested-team shape libgomp deadlocks on -- see feature_risks.md Risk-104")
+        if (allocated(error)) return
+#endif
+
+        ! And it still answers correctly from in there -- with a real team, so this exercises the
+        ! honoured-request path rather than the clamped one, which the count checks alone do not say.
+        got = -1_int64
+#ifdef _OPENMP
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        call pf_random_resample(got, M, SD, ST, threads=8)
+        !$omp end single
+        !$omp end parallel
+#else
+        call pf_random_resample(got, M, SD, ST, threads=8)
+#endif
+        call check(error, all(got == ref), &
+            "a resample called from inside a parallel region returned different values")
+        if (allocated(error)) return
+
+        ! The automatic form, which is the one nobody passes an argument to.
+        got = -1_int64
+        call pf_random_resample(got, M, SD, ST)
+        call check(error, all(got == ref), "the automatic resample differs from the scalar integer draw")
+    end subroutine test_resample_threads
 
 end module test_random_omp

@@ -175,7 +175,7 @@ something a reader is expected to have.
 | [Risk-108](#risk-108--an-integer-draw-taken-off-a-pair-boundary-re-reads-a-word-already-handed-out) | An integer draw taken off a pair boundary re-reads a word already handed out | 4 — covered |
 | [Risk-109](#risk-109--the-bulk-permutation-and-the-scalar-entry-point-compute-the-same-function-by-different-routes) | The bulk permutation and the scalar entry point compute the same function by different routes | 4 — covered |
 | [Risk-110](#risk-110--the-permutations-round-count-round-function-and-width-rule-are-frozen-and-three-rounds-looks-free) | The permutation's round count, round function and width rule are frozen, and three rounds looks free | 4 — covered |
-| [Risk-111](#risk-111--a-bulk-permutation-that-silently-stopped-threading-would-fail-no-test) | A bulk permutation that silently stopped threading would fail no test | 3 — not testable |
+| [Risk-111](#risk-111--a-bulk-fill-that-silently-stopped-threading-would-fail-no-test) | A bulk fill that silently stopped threading would fail no test | 3 — not testable |
 | [Risk-112](#risk-112--a-fills-position-arithmetic-overflows-at-the-boundary-the-suite-tests-and-still-answers-correctly) | A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly | 4 — covered |
 | [Risk-113](#risk-113--the-coordinate-addressed-generics-read-one-word-sequence-and-real32-walks-a-finer-grid) | The coordinate-addressed generics read one word sequence, and `real32` walks a finer grid | 4 — covered |
 | [Risk-114](#risk-114--a-bulk-fills-loop-shape-can-silently-de-optimise-the-scalar-draw-that-shares-its-reduction) | A bulk fill's loop shape can silently de-optimise the SCALAR draw that shares its reduction | 4 — covered |
@@ -892,14 +892,19 @@ starts paying for itself.
 asserting that a log is misleading would be asserting the bug rather than guarding against it.
 
 
-### Risk-111 — A bulk permutation that silently stopped threading would fail no test
+### Risk-111 — A bulk fill that silently stopped threading would fail no test
 
-`pf_random_permutation`/`pf_random_subset` resolve a thread count in `random_threads` and then branch
-on it: `nth <= 1` takes a serial call, anything else opens a team. **Change that branch to always
-take the serial arm and every assertion in the suite still passes** — the answer is identical by
-construction, because element `k` depends only on `(seed, m, k)`, so a wholly serial implementation
-is *correct*. The only symptom is that a 10**8-element permutation takes 9.6 seconds instead of
-0.11.
+`pf_random_permutation`/`pf_random_subset`/`pf_random_resample` resolve a thread count in
+`random_threads` and then branch on it: `nth <= 1` takes a serial call, anything else opens a team.
+**Change that branch to always take the serial arm and every assertion in the suite still passes** —
+the answer is identical by construction, because element `k` depends only on `(seed, m, k)` (or
+`(seed, stream, k)` for the resample), so a wholly serial implementation is *correct*. The only
+symptom is that a 10**8-element permutation takes 9.6 seconds instead of 0.11.
+
+**The resample joined this entry when `threads=` was added to it, and it is the same risk rather than
+a new one** — same resolver, same branch, same silent failure. It splits the *draw* axis rather than
+the element axis, so its chunks start at arbitrary draws and rely on `fill_draws_i64`'s alignment
+head, but nothing about that changes the shape of the risk.
 
 **The near-miss that motivates this entry was exactly that shape and did ship into the working
 tree.** The `!$omp parallel do` was first written without a `num_threads(nth)` clause, so OpenMP
@@ -916,12 +921,23 @@ redundant. And a timing claim about this path is checked with `app/probe_random_
 
 **Test.** None in the suite, deliberately: the observable is wall time, and a timing assertion is the
 one kind this project has consistently found to be worse than no assertion. What the suite *does*
-carry is the pair that bounds the damage — `test_perm_threads` (`test/test_random_omp.f90`) asserts
-the result is bit-identical at 1, 2, 3, 5, 8, 16 and 64 threads, so a threading defect can only ever
-cost time; and `test_random_parallel_min_effect` (`test/test_settings.f90`) asserts the resolver
-returns what the settings say, with a negative control in both directions. Neither can see whether
-the fill went on to honour the count. `parquet_debug_random_bulk_threads` re-computes the rule rather
-than reporting what a call did, and that limitation is stated on the hook itself.
+carry is the pair that bounds the damage — `test_perm_threads` and `test_resample_threads`
+(`test/test_random_omp.f90`) assert the result is bit-identical at 1, 2, 3, 5, 7, 8, 16 and 64
+threads, so a threading defect can only ever cost time; and `test_random_parallel_min_effect`
+(`test/test_settings.f90`) asserts the resolver returns what the settings say, with a negative control
+in both directions. Neither can see whether the fill went on to honour the count.
+`parquet_debug_random_bulk_threads` re-computes the rule rather than reporting what a call did, and
+that limitation is stated on the hook itself.
+
+**One thing a MUTATION can see that the suite cannot, and it is worth reaching for before accepting
+the "not testable" verdict on a future threaded form.** Break the *chunking* rather than the
+threading — drop the per-chunk starting offset, or move a chunk boundary by one — and the bit-identity
+test fails **at `threads=2`**. That is only possible if the threaded branch was entered, so it
+converts "the values are right" into "the values are right *and* more than one chunk was produced".
+It still says nothing about how many threads ran them, which is why this entry stays in section 3;
+but it does rule out the silently-serial implementation, which is the failure actually feared here.
+Confirmed on `pf_random_resample` with three such mutations; `pf_random_permutation` has not had the
+same treatment and would repay it.
 
 
 ## 4. Risks already covered, kept for what they still forbid

@@ -184,9 +184,9 @@ smaller ones on the same hardware. The result is byte-identical at every thread 
 
 ## Threads for a bulk permutation
 
-`parquet_set_random_threads(n)` caps the threads one `pf_random_permutation` or `pf_random_subset`
-call may use. Like the sort, prefetch and table caps it is a cap rather than a request, read per
-call, with `0` meaning automatic and `1` forcing serial.
+`parquet_set_random_threads(n)` caps the threads one `pf_random_permutation`, `pf_random_subset` or
+`pf_random_resample` call may use. Like the sort, prefetch and table caps it is a cap rather than a
+request, read per call, with `0` meaning automatic and `1` forcing serial.
 
 **This is the one thread setting whose answer-invariance is provable rather than intended, and it is
 worth knowing why.** `pf_random_perm_at(seed, m, k)` is a pure function of its coordinates: element
@@ -194,7 +194,9 @@ worth knowing why.** `pf_random_perm_at(seed, m, k)` is a pure function of its c
 writes. Splitting the array into contiguous chunks therefore cannot change a single value, and the
 one-thread and sixty-four-thread results are **bit-identical** — so you can switch thread counts
 while debugging, or run the same program on two differently-sized machines, and get the same
-permutation. That is what makes threading admissible here as a setting at all.
+permutation. That is what makes threading admissible here as a setting at all. The same argument
+covers `pf_random_resample`, whose element `k` is a pure function of `(seed, stream, k)`; it splits
+the draw axis rather than the element axis, and is equally bit-identical.
 
 Measured on a 192-core dual-socket server, wall nanoseconds per element:
 
@@ -202,6 +204,11 @@ Measured on a 192-core dual-socket server, wall nanoseconds per element:
 |---|---|---|---|---|---|---|---|
 | `m` = 10 000 | 9.53 | 5.01 | 2.79 | 1.58 | 1.17 | 1.09 | 1.60 |
 | `m` = 1 000 000 | 9.55 | 4.78 | 2.39 | 1.20 | 0.60 | 0.31 | 0.17 |
+| `pf_random_resample`, 10**7 draws | 12.04 | 6.02 | 3.01 | 1.51 | 0.75 | 0.38 | 0.19 |
+
+The resample row scales almost perfectly to 64 threads (63×) and then flattens: 128 threads buys only
+0.16 ns, and asking for one thread per core on this machine is *slower in absolute terms* than asking
+for 64. Treat a very high thread count as something to measure rather than assume, on any machine.
 
 `parquet_set_random_parallel_min_elements(n)` is the **work floor**: the fewest elements a thread
 must be given before a team is opened at all. Below `threads * n` elements the call runs serially,

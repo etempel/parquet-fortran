@@ -175,9 +175,11 @@ something a reader is expected to have.
 | [Risk-108](#risk-108--an-integer-draw-taken-off-a-pair-boundary-re-reads-a-word-already-handed-out) | An integer draw taken off a pair boundary re-reads a word already handed out | 4 — covered |
 | [Risk-109](#risk-109--the-bulk-permutation-and-the-scalar-entry-point-compute-the-same-function-by-different-routes) | The bulk permutation and the scalar entry point compute the same function by different routes | 4 — covered |
 | [Risk-110](#risk-110--the-permutations-round-count-round-function-and-width-rule-are-frozen-and-three-rounds-looks-free) | The permutation's round count, round function and width rule are frozen, and three rounds looks free | 4 — covered |
-| [Risk-111](#risk-111--a-bulk-permutation-that-silently-stopped-threading-would-fail-no-test) | A bulk permutation that silently stopped threading would fail no test | 3 — not testable |
+| [Risk-111](#risk-111--a-bulk-fill-that-silently-stopped-threading-would-fail-no-test) | A bulk fill that silently stopped threading would fail no test | 3 — not testable |
 | [Risk-112](#risk-112--a-fills-position-arithmetic-overflows-at-the-boundary-the-suite-tests-and-still-answers-correctly) | A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly | 4 — covered |
 | [Risk-113](#risk-113--the-coordinate-addressed-generics-read-one-word-sequence-and-real32-walks-a-finer-grid) | The coordinate-addressed generics read one word sequence, and `real32` walks a finer grid | 4 — covered |
+| [Risk-114](#risk-114--a-bulk-fills-loop-shape-can-silently-de-optimise-the-scalar-draw-that-shares-its-reduction) | A bulk fill's loop shape can silently de-optimise the SCALAR draw that shares its reduction | 4 — covered |
+| [Risk-115](#risk-115--the-integer-rules-two-grids-are-one-contract-and-its-inlining-shape-is-load-bearing) | The integer rule's two grids are one contract, and its inlining shape is load-bearing | 4 — covered |
 
 ---
 
@@ -185,7 +187,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-114**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-116**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -891,14 +893,19 @@ starts paying for itself.
 asserting that a log is misleading would be asserting the bug rather than guarding against it.
 
 
-### Risk-111 — A bulk permutation that silently stopped threading would fail no test
+### Risk-111 — A bulk fill that silently stopped threading would fail no test
 
-`pf_random_permutation`/`pf_random_subset` resolve a thread count in `random_threads` and then branch
-on it: `nth <= 1` takes a serial call, anything else opens a team. **Change that branch to always
-take the serial arm and every assertion in the suite still passes** — the answer is identical by
-construction, because element `k` depends only on `(seed, m, k)`, so a wholly serial implementation
-is *correct*. The only symptom is that a 10**8-element permutation takes 9.6 seconds instead of
-0.11.
+`pf_random_permutation`/`pf_random_subset`/`pf_random_resample` resolve a thread count in
+`random_threads` and then branch on it: `nth <= 1` takes a serial call, anything else opens a team.
+**Change that branch to always take the serial arm and every assertion in the suite still passes** —
+the answer is identical by construction, because element `k` depends only on `(seed, m, k)` (or
+`(seed, stream, k)` for the resample), so a wholly serial implementation is *correct*. The only
+symptom is that a 10**8-element permutation takes 9.6 seconds instead of 0.11.
+
+**The resample joined this entry when `threads=` was added to it, and it is the same risk rather than
+a new one** — same resolver, same branch, same silent failure. It splits the *draw* axis rather than
+the element axis, so its chunks start at arbitrary draws and rely on `fill_draws_i64`'s alignment
+head, but nothing about that changes the shape of the risk.
 
 **The near-miss that motivates this entry was exactly that shape and did ship into the working
 tree.** The `!$omp parallel do` was first written without a `num_threads(nth)` clause, so OpenMP
@@ -915,12 +922,23 @@ redundant. And a timing claim about this path is checked with `app/probe_random_
 
 **Test.** None in the suite, deliberately: the observable is wall time, and a timing assertion is the
 one kind this project has consistently found to be worse than no assertion. What the suite *does*
-carry is the pair that bounds the damage — `test_perm_threads` (`test/test_random_omp.f90`) asserts
-the result is bit-identical at 1, 2, 3, 5, 8, 16 and 64 threads, so a threading defect can only ever
-cost time; and `test_random_parallel_min_effect` (`test/test_settings.f90`) asserts the resolver
-returns what the settings say, with a negative control in both directions. Neither can see whether
-the fill went on to honour the count. `parquet_debug_random_bulk_threads` re-computes the rule rather
-than reporting what a call did, and that limitation is stated on the hook itself.
+carry is the pair that bounds the damage — `test_perm_threads` and `test_resample_threads`
+(`test/test_random_omp.f90`) assert the result is bit-identical at 1, 2, 3, 5, 7, 8, 16 and 64
+threads, so a threading defect can only ever cost time; and `test_random_parallel_min_effect`
+(`test/test_settings.f90`) asserts the resolver returns what the settings say, with a negative control
+in both directions. Neither can see whether the fill went on to honour the count.
+`parquet_debug_random_bulk_threads` re-computes the rule rather than reporting what a call did, and
+that limitation is stated on the hook itself.
+
+**One thing a MUTATION can see that the suite cannot, and it is worth reaching for before accepting
+the "not testable" verdict on a future threaded form.** Break the *chunking* rather than the
+threading — drop the per-chunk starting offset, or move a chunk boundary by one — and the bit-identity
+test fails **at `threads=2`**. That is only possible if the threaded branch was entered, so it
+converts "the values are right" into "the values are right *and* more than one chunk was produced".
+It still says nothing about how many threads ran them, which is why this entry stays in section 3;
+but it does rule out the silently-serial implementation, which is the failure actually feared here.
+Confirmed on `pf_random_resample` with three such mutations; `pf_random_permutation` has not had the
+same treatment and would repay it.
 
 
 ## 4. Risks already covered, kept for what they still forbid
@@ -4809,6 +4827,21 @@ three deliberately bad pairs — *why* a large odd multiplier is required: the w
 top `log2(p)` bits of the round function, so a small multiplier never carries the input's low bits up
 to where they are read, and the network degenerates.
 
+**And the construction itself may not be replaced by a SHUFFLE, which is the shape a future
+contributor is most likely to reach for.** Fisher-Yates is in every textbook, is shorter than this,
+and would pass every structural test in the suite — it produces a genuine uniform permutation, so
+bijectivity, position-uniformity, cycle structure and subset membership all come back clean. What it
+destroys is invisible to all of them: a shuffle is **order-dependent**, so element `k` stops being a
+function of `(seed, m, k)` alone. Three things go with it, none of which any existing assertion is
+phrased to catch — `pf_random_perm_at` could no longer answer for a single `k` without materialising
+the whole population (which is what makes a subset from a trillion-row population possible at all),
+prefix consistency would hold only by accident, and `threads=` would stop being bit-identical and
+become a value-changing argument, which CLAUDE.md's settings rule forbids outright. Fisher-Yates
+appears in this entry's own measurements **only as a control**, and that is the only role it may
+have. The same applies to key-and-argsort, which is reproducible but costs `O(m)` draws and `O(m)`
+memory whatever `size(idx)` is; `feature_random_phase2.md` §11 item 2 measured both and the shipped
+form is 1.9x-7.2x cheaper than either, serially, before any threading.
+
 ### Risk-112 — A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly
 
 Six sites in `src/parquet_random.f90`'s bulk fills computed a position as `base + k - 1_int64`, which
@@ -4889,3 +4922,105 @@ carries the same pair of checks against its arbitrary-precision oracle, and
 rows that fix the retry path's own addressing, which nothing else reaches. **If the generics are ever
 domain-separated, this test should fail** — its doc-comment says what to rewrite it into, and which
 two documents must change with it.
+
+### Risk-114 — A bulk fill's loop shape can silently de-optimise the SCALAR draw that shares its reduction
+
+**What breaks.** `pf_random_int_at` and `pf_random_fill_draws` share one reduction, `int_reduce`,
+whose body contains the retry loop and therefore a whole Philox enciphering (`bits_of`). While each
+caller has ONE hot reduction site, GCC inlines it everywhere and both are fast. Restructuring
+`fill_draws_i64`/`fill_draws_i32` into a two-values-per-block body took the module from three
+reduction sites to nine, GCC's inline budget gave out, and it emitted an out-of-line
+`int_reduce.isra.0` — which the *scalar* entry point then had to call, once per draw.
+
+**Why it is quiet.** Every value is unchanged, so the golden vectors, the reference agreement and
+every statistical test pass. The regression is entirely in a procedure the change never touched, and
+it is a **cross-procedure** effect of an inlining decision, so reading either procedure's source
+shows nothing. Measured on machine B (gfortran 15.2.1, `--profile release`): `pf_random_int_at` in a
+loop went 25.6 → 28.0 ns per value, a 9 % regression on public API, while the change that caused it
+made the bulk fill 1.2x faster and looked like an unambiguous win.
+
+**What it forbids.** Adding a reduction site — anywhere in `parquet_random` — without re-checking the
+scalar draw. The cold half of the rejection rule now lives in `int_reduce_retry`, marked
+`!GCC$ ATTRIBUTES noinline` / `!DIR$ ATTRIBUTES NOINLINE` so that an optimiser cannot fold it back in
+and re-inflate `int_reduce`; those two directives are load-bearing and are not decoration. Note the
+generalisation, which is what makes this worth keeping: **a shared helper that inlines is a shared
+budget, and enlarging one caller can evict it from another.**
+
+**Test.** Not an assertion — a one-command disassembly check, recorded on `int_reduce_retry`'s own
+doc-comment, which must print nothing:
+
+```bash
+objdump -d --no-show-raw-insn build/gfortran_*/parquet-fortran/src_parquet_random.f90.o \
+  | awk '/<__parquet_random_MOD_pf_random_int_at_i64>:/{p=1} p&&/^$/{exit} p' | grep call
+```
+
+It is deliberately not a `tools/check_source_conventions.py` check: the failure is a performance
+regression rather than a wrong answer, and it is compiler- and version-specific, so a static check
+would either go stale or fail on a toolchain that inlines differently for good reasons.
+
+**Its neighbour, and the reason this entry is in section 4 rather than section 3.** The same
+restructure carried a genuine silent-corruption risk of the Risk-109 shape: the steady state advances
+two values per iteration, so an off-by-one in its bound (`k + 2 <= m` → `k + 1 <= m`) writes ONE
+ELEMENT PAST THE END of the caller's array on any odd-length request, while leaving every value it
+did write correct. Nothing sees that — a plain `fpm test` has no bounds checking (CLAUDE.md), and an
+equality assertion compares only the elements that exist. **The canary is what catches it**: hand the
+fill a SLICE of a longer array and assert the remainder is untouched. `test_resample_identity`
+(`test/test_random.f90`) does this at lengths 1, 3, 7, 15 and 31, and for an unaligned start at
+lengths 1-6; the mutation survives every other test in the suite and fails this one immediately.
+Copy the canary, not just the assertion, for any future fill that advances by more than one element.
+
+### Risk-115 — The integer rule's two grids are one contract, and its inlining shape is load-bearing
+
+`pf_random_int_at` reads **one of two grids, chosen by the range's WIDTH**: a width of `1 ..
+NARROW32_CAP` (`2**24`) takes a single 32-bit candidate at word `d-1`, the grid `pf_random32_at`
+walks; anything wider takes the 64-bit pair at words `2d-2, 2d-1`. Two separate things can break
+here silently, and they fail in different ways.
+
+**1. The grids are contract, and three implementations must agree.** The value at a coordinate is
+frozen by `pf_random_algorithm`, and it is pinned by three independently written models: the library
+(`src/parquet_random.f90`), the arbitrary-precision Python oracle
+(`tools/generate_random_golden_vectors.py`), and the limb-based Fortran reference
+(`test/test_random_reference.f90`). **A change to one of the three that is not made in the other two
+produces a test failure that looks like a bug in the library and is not** — and, worse, changing all
+three the same wrong way passes everything. The cap in particular is a **frozen contract value, never
+a setting**: it is a function of an argument the caller passes, identical on every machine and at
+every thread count, and making it adjustable would make the same call return different values in
+different programs. It appears in all three models and must be changed in all three or none.
+
+Two properties are easy to get wrong and cost nothing to state: the cap is on the **width**
+`hi - lo + 1`, never on how many values are drawn (they coincide for a resample and differ for
+everything else); and the rejection rate at a narrow width is `(2**32 mod s)/2**32`, which peaks at
+**33.3 %** just above `2**32/3` — the cap exists to bound it at 0.389 %, and raising it re-opens a
+case that measured **2.5x slower than doing nothing**.
+
+**2. The inlining shape is load-bearing, and every spelling of it was measured.** Three procedures
+are deliberately out of line — `int_reduce_retry`, `int_reduce32_retry`, `int_at_narrow32` — each
+carrying a matched pair of `!GCC$`/`!DIR$` directives. Removing one spelling silently de-optimises one
+compiler; restructuring the fork silently de-optimises something else. Measured, while adopting the
+narrow grid:
+
+| change | cost, and to what |
+|---|---|
+| eager `modulo(2**32, s)` instead of a lazy threshold | −6 % on the SCALAR draw at *every* width |
+| narrow arm inlined into `int_at_impl` | −5 % scalar; `int_at_impl` pushed out of line entirely |
+| one `random_block` site, no call (sounds strictly better) | −13 % on gfortran's wide scalar, +4 % on ifx's |
+| `noinline` narrow helper, but stream fills reaching it | **−60 %** on `pf_random_fill_streams` |
+| `bits32_of` left as the stream loops' word source | −50 % on the same, one call per element |
+
+**None of these fails a test.** Every value stays identical; only a benchmark notices. The shipped
+shape costs the wide scalar draw 3.6 % on gfortran and 11.7 % on ifx, which is the best worst case of
+the three structures tried, and that residual is itself unexplained — `int_at_impl` grows 14
+instructions and executes about two of them on that path.
+
+**Test.** The value contract is covered three ways and needs no new test: the golden vectors
+(`test/test_random_vectors.f90`, regenerated from the Python oracle and never from a Fortran run),
+`test_agreement_int` against the limb-based reference across the width regimes, and
+`test_int_shares_block`, which asserts *where the small-range collision moved to* — a narrow integer
+draw is now a deterministic function of `pf_random32_at`, not of `pf_random_at`, and that test carries
+both the new identity and a negative control that the old one is gone.
+
+The inlining half is **not testable** and is guarded two other ways: statically by
+`check_noinline_directives_are_paired` (`tools/check_source_conventions.py`), which matches by shape
+so a fourth out-of-line procedure is covered the day it is added, and by `objdump` — the one command
+is on `int_reduce_retry`'s doc-comment. **Grep it for `call`, not `\bcall\b`**: the latter does not
+match `callq`, which is how a 16-instruction thunk was once read as "fully inlined".

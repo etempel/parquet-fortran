@@ -94,6 +94,15 @@ MIX_B = 0x94D049BB133111EB
 #: a documented user idiom -- without it 100 % of retried draws share that family's block.
 RETRY_TAG = 0x5A17000000000000
 
+#: The widest range served by the 32-bit candidate grid.  **Frozen contract, never a setting.**
+#: A block is four 32-bit words, so a narrow integer draw costs a quarter of an enciphering
+#: instead of a half.  The price is a rejection rate of `(2**32 mod s)/2**32`, which rises with
+#: `s` and peaks at 33.3 % just above `2**32/3`; capping the WIDTH at `2**24` bounds the worst
+#: case over every admitted `s` at 0.389 %, attained at `s = 16711936`.  The cap is on the width
+#: `hi - lo + 1`, never on how many values are drawn -- the two coincide for a resample and differ
+#: for everything else.
+NARROW32_CAP = 1 << 24
+
 
 def u64(x):
     """The unsigned 64-bit pattern of `x`."""
@@ -190,21 +199,43 @@ def umod_2p64(s):
 
 
 def int_at(seed, stream, lo, hi, draw=1):
-    """`pf_random_int_at`: exact rejection over the SAME 64 bits `bits_at` returns.
+    """`pf_random_int_at`: exact rejection, on ONE OF TWO GRIDS chosen by the range's WIDTH.
 
-    Stride 2, the same grid as `pf_random_at`/`pf_random_bits_at` -- draw `d` is words `2d-2` and
-    `2d-1`, i.e. block `(d-1)//2` pair `(d-1)%2`.  Under `pf_random_algorithm` `/v1` this generic
-    had stride 4 (`index = d - 1`, first pair only), which made it collide with `bits_at` at draw
-    `2d-1`; `/v2` aligns them.  Draw 1 is identical under both, which is why every published anchor
-    below is unaffected by the change.  Returns (value, retries).
+    **Narrow (`1 <= s <= NARROW32_CAP`): stride 1, a single 32-bit candidate.**  Draw `d` is word
+    `d - 1` -- exactly the grid `pf_random32_at` walks -- so one enciphering serves four draws
+    instead of two.  `x < 2**32` and `s <= 2**24` make `x * s` fit an ordinary signed 64-bit
+    integer, so the reduction needs no 128-bit product.  The rejection test is the exact 32-bit
+    analogue, accept iff `low32(x*s) >= 2**32 mod s`, so the result is exactly uniform rather than
+    uniform to within `2**-32`.
+
+    **Wide (everything else): stride 2, the same grid as `pf_random_at`/`pf_random_bits_at`** --
+    draw `d` is words `2d-2` and `2d-1`, i.e. block `(d-1)//2` pair `(d-1)%2`.
+
+    So the documented "the three 64-bit generics are one grid at one coordinate" property is now
+    RANGE-DEPENDENT: it holds for a wide range, and for a narrow one the integer draw shares its
+    grid with `pf_random32_at` instead.  The advice that follows is unchanged -- take two generics
+    at different draws, or on different streams -- but which generic a narrow integer draw collides
+    with has moved.  Under `/v1` this generic had stride 4; `/v2` aligned it to stride 2 and then
+    admitted this narrow rule.  Returns (value, retries).
     """
     if lo > hi:
         lo, hi = hi, lo
     a, s = lo, u64(hi - lo + 1)
     d = clamp_draw(draw)
-    blk, pair = (d - 1) // 2, (d - 1) % 2
     if s == 0:                                    # the full int64 range: nothing to reduce
         return signed64(bits_at(seed, stream, d)), 0
+    if 1 <= s <= NARROW32_CAP:                    # the 32-bit grid
+        threshold = (1 << 32) % s
+        blk, slot = (d - 1) // 4, (d - 1) % 4
+        attempt = 0
+        while True:                               # uncapped: a cap would reintroduce bias
+            key = None if attempt == 0 else retry_key(seed, attempt)
+            x = block(seed, stream, blk, key=key)[slot]
+            product = x * s
+            if (product & M32) >= threshold:
+                return a + (product >> 32), attempt
+            attempt += 1
+    blk, pair = (d - 1) // 2, (d - 1) % 2
     threshold = umod_2p64(s)
     attempt = 0
     while True:                                   # uncapped: a cap would reintroduce bias
@@ -260,20 +291,61 @@ ANCHOR_SCALAR = [
 
 #: Reference Table 2, restricted to the rows that do not retry (the retrying ones predate
 #: RETRY_TAG).  (seed, stream, lo, hi, value).
+#:
+#: **Six rows were RE-BASELINED when the narrow 32-bit grid was admitted, and their provenance is
+#: therefore weaker than the rest of this list.** Every row whose width is `<= NARROW32_CAP` moved,
+#: because a narrow draw now reads one 32-bit word where it used to read a 64-bit pair. Those rows
+#: no longer match `feature_random_reference.md` §3 Table 2, which documents the superseded rule --
+#: they are marked `narrow` below, and that document's Table 2 should be read as historical for
+#: them. The rows marked `wide` are untouched and remain independent evidence about this oracle,
+#: as do the KATs, `MIX64_CHECKSUM`, `WIDE_WIDTH_ANCHOR` and every scalar/key anchor.
+#:
+#: `check_narrow_from_spec()` below is what keeps the re-baselined rows from being circular: it
+#: recomputes them from the written specification rather than by calling `int_at`.
 ANCHOR_INT = [
-    (12345, 1, 0, 999999, 928153),
-    (12345, 1, 0, 3999999999999, 3712615530458),
-    (12345, 1, 1, 6, 6),
-    (12345, 1, 999999, 0, 928153),
-    (12345, 1, 7, 7, 7),
-    (12345, 1, -10, 10, 9),
-    (12345, 1, 0, INT64_MAX, 8560708566805553027),
-    (12345, 1, -INT64_MAX, INT64_MAX, 7898045096756330246),
-    (12345, 1, INT64_MIN, INT64_MAX, -1325326940098445562),
-    (0, 1, 0, 999999, 939658),
-    (-7, 3, -100, 100, -16),
-    (INT64_MAX, 1, 0, 4294967296, 1636308124),
+    (12345, 1, 0, 999999, 485065),                # narrow, re-baselined
+    (12345, 1, 0, 3999999999999, 3712615530458),  # wide
+    (12345, 1, 1, 6, 3),                          # narrow, re-baselined
+    (12345, 1, 999999, 0, 485065),                # narrow, re-baselined
+    (12345, 1, 7, 7, 7),                          # narrow, degenerate: any rule gives 7
+    (12345, 1, -10, 10, 0),                       # narrow, re-baselined
+    (12345, 1, 0, INT64_MAX, 8560708566805553027),        # wide
+    (12345, 1, -INT64_MAX, INT64_MAX, 7898045096756330246),  # wide
+    (12345, 1, INT64_MIN, INT64_MAX, -1325326940098445562),  # wide, full range
+    (0, 1, 0, 999999, 516679),                    # narrow, re-baselined
+    (-7, 3, -100, 100, -10),                      # narrow, re-baselined
+    (INT64_MAX, 1, 0, 4294967296, 1636308124),    # wide (width 2**32+1 > NARROW32_CAP)
 ]
+
+
+def check_narrow_from_spec(seed, stream, lo, hi, draw=1):
+    """Recompute a narrow integer draw FROM THE WRITTEN SPECIFICATION, not by calling `int_at`.
+
+    Deliberately spelled out rather than factored: this exists so the re-baselined anchors above
+    are checked by a second, independently written path.  If this and `int_at` are ever refactored
+    into calling one another, the check silently becomes worthless.
+    """
+    if lo > hi:
+        lo, hi = hi, lo
+    width = hi - lo + 1
+    assert 1 <= width <= NARROW32_CAP, "not a narrow range"
+    d = draw if draw >= 1 else 1
+    # The candidate is word `d-1` of the stream -- block `(d-1)//4`, word `(d-1)%4`.
+    c0, c1, c2, c3 = philox4x32_10((d - 1) // 4 & M32, ((d - 1) // 4 >> 32) & M32,
+                                   u64(stream) & M32, (u64(stream) >> 32) & M32,
+                                   u64(seed) & M32, (u64(seed) >> 32) & M32)
+    candidate = [c0, c1, c2, c3][(d - 1) % 4]
+    attempt = 0
+    while True:
+        product = candidate * width
+        if (product % (1 << 32)) >= ((1 << 32) % width):
+            return lo + product // (1 << 32)
+        attempt += 1
+        k = retry_key(seed, attempt)
+        c0, c1, c2, c3 = philox4x32_10((d - 1) // 4 & M32, ((d - 1) // 4 >> 32) & M32,
+                                       u64(stream) & M32, (u64(stream) >> 32) & M32,
+                                       u64(k) & M32, (u64(k) >> 32) & M32)
+        candidate = [c0, c1, c2, c3][(d - 1) % 4]
 
 #: Reference Table 3, entire.  (seed, label, value).
 ANCHOR_KEY = [
@@ -317,6 +389,13 @@ def self_test():
     for seed, stream, lo, hi, want in ANCHOR_INT:
         value, retries = int_at(seed, stream, lo, hi)
         eq("int_at(%d,%d,%d,%d)" % (seed, stream, lo, hi), value, want)
+        # For a narrow range, check the SAME value a second time from the written specification.
+        # Six of these anchors were re-baselined when the narrow grid was admitted, so without an
+        # independently written path they would only be checking the oracle against itself.
+        w = (max(lo, hi) - min(lo, hi)) + 1
+        if 1 <= w <= NARROW32_CAP:
+            eq("int_at(%d,%d,%d,%d) from spec" % (seed, stream, lo, hi),
+               check_narrow_from_spec(seed, stream, lo, hi), want)
         if retries:
             bad.append("int_at(%d,%d,%d,%d) retried %d times -- it is not a stable anchor and "
                        "must be removed from ANCHOR_INT" % (seed, stream, lo, hi, retries))

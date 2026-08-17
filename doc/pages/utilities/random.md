@@ -342,9 +342,103 @@ has no way to avoid.
 `integer(int32)` array additionally requires `m <= huge(int32)`, since an element may be any value in
 `[1, m]`. A zero-sized array is a defined no-op and is not validated.
 
+**What a subset costs, since it is easy to expect the wrong thing in either direction.** The work is
+proportional to `size(idx)` and is **independent of `m`** — ten rows out of a trillion cost ten
+elements' work, which is the whole point of the construction and is what a shuffle cannot do. But it
+is also a *floor*: `size(idx)` elements cost `size(idx)` elements' work no matter how small the
+fraction `size(idx)/m` is, so there is no regime in which asking for a subset gets cheaper per
+element. Two smaller effects sit on top and neither is worth planning around: the permutation is
+built on a Feistel network over a rectangle slightly larger than `m`, so a value landing outside
+`[1, m]` is re-enciphered until it lands inside — bounded, averaging well under one extra round, and
+invisible unless `m` is a near-worst-case shape — and the first element of a call pays a one-off key
+schedule the rest of the call reuses. In practice a subset runs at a flat few nanoseconds per element
+at every `m` from thousands to 10¹⁵, which is why the tables here quote one figure rather than a
+curve.
+
 `threads=` changes only how fast the array is filled. See
 [Threads for a bulk permutation](../operating/settings.html#threads-for-a-bulk-permutation) for the
 cap, the work floor and the measured scaling.
+
+### Drawing WITH replacement: `pf_random_resample`
+
+The third member of the family, and the one whose construction is not a construction at all:
+
+```fortran
+call pf_random_resample(idx, m, seed [, stream [, threads]])   ! draws from 1..m, with replacement
+```
+
+Drawing with replacement means `size(idx)` independent uniform integers in `[1, m]` — no dedup, no
+permutation, no sort — so this **is** the draw-axis integer fill under a name that says what it is
+for:
+
+```fortran
+call pf_random_resample(idx, m, seed, stream)
+call pf_random_fill_draws(seed, stream, idx, 1_int64, m)   ! the same values, guaranteed
+```
+
+That identity is part of the contract and is asserted by the test suite. What the name buys is
+speed a caller otherwise leaves on the table: without it the obvious code is a loop of
+`pf_random_int_at`, which re-enciphers a block for every value where the bulk form serves two draws
+from each one — measured at 1.4x–1.6x, depending on the machine, for identical values.
+
+`idx` is a rank-1 `integer(int32)` or `integer(int64)` array and `m` takes either kind. `stream` is
+optional and defaults to 1; it selects **which replicate** this is, so replicate `b` is reproducible
+from `(seed, b)` alone, whatever order the replicates ran in:
+
+```fortran
+do b = 1, n_replicates
+    call pf_random_resample(idx, nrows, seed, b)    ! replicate b, reproducible on its own
+    ! ... recompute your statistic over rows idx(:) ...
+end do
+```
+
+Note the siblings have **no** `stream` argument: `pf_random_permutation` and `pf_random_subset` are
+keyed by `(seed, m)` alone, so independent replicates of those come from `pf_random_key(seed, b)`
+instead. A resample is built on the draw axis, which carries a stream coordinate already. Both
+routes work here — `stream = b` and `seed = pf_random_key(seed, b)` are equally independent.
+
+**A narrow population is drawn on a cheaper grid, and that is part of the frozen contract.** When
+the range spans 2²⁴ values or fewer — which covers essentially every resample a table-oriented
+program does — an integer draw takes a single 32-bit word rather than a 64-bit pair, so one
+enciphering serves four values instead of two. It is still *exactly* unbiased: the rejection test is
+the 32-bit analogue of the same rule, not an approximation. Measured 2.2×–2.45× on the bulk fill,
+depending on the compiler, and it applies to `pf_random_int_at` and both integer fills alike, so
+every form still agrees value for value. Above 2²⁴ the 64-bit grid is used exactly as before. The
+switch is a function of `m`, which you pass, so it is deterministic and identical on every machine —
+it is **not** a setting and can never become one.
+
+One consequence worth knowing if you mix generics on one stream: at a *narrow* range the integer
+draw shares its word with `pf_random32_at` at the same coordinate, where a *wide* one shares its
+pair with `pf_random_at`/`pf_random_bits_at`. The advice is unchanged — take two generics at
+different draws, or on different streams — but which one a narrow integer collides with has moved.
+
+**There is deliberately no `size(idx) <= m` requirement**, which is the clearest statement of how
+this differs from `pf_random_subset`. Drawing 4000 values from a population of 4000 is the ordinary
+bootstrap, and drawing more than `m` is perfectly meaningful. Two preconditions do apply, and both
+abort rather than truncating: `m >= 1`, and — for an `integer(int32)` array — `m <= huge(int32)`.
+A zero-sized array is a defined no-op and is not validated.
+
+**`threads=` works here too, and it is bit-identical at every thread count** — same default from
+`parquet_set_random_threads`, same work floor from `parquet_set_random_parallel_min_elements`, and
+the floor applies to an explicit request as well, so a small resample stays serial however many
+workers you ask for. Threading splits the draws between workers, and element `k` depends only on
+`(seed, stream, k)`, so which worker produced it cannot matter:
+
+```fortran
+call pf_random_resample(idx, nrows, seed, b, threads=8)   ! same values as threads=1
+```
+
+**One wart, and it is a language constraint rather than a choice: `threads=` requires an explicit
+`stream`.** Both are integers in the same argument position, so a generic offering them as
+alternatives there does not compile at all. Pass `stream = 1` if you only want the default
+replicate — `call pf_random_resample(idx, m, seed, 1, threads=8)`. Omitting it gives a "no specific
+subroutine matches" error that does not explain itself. The siblings are unaffected:
+`pf_random_permutation` and `pf_random_subset` have no `stream`, so `threads=` is their fourth
+argument.
+
+Because it draws with replacement, expect duplicates: drawing `m` values from `1 .. m` leaves about
+`m(1 - 1/e)`, roughly 63%, of the population represented. If you want distinct rows, you want
+`pf_random_subset`.
 
 ### What the permutation is, and what it is not
 

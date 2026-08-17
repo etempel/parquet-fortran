@@ -66,6 +66,9 @@ contains
             new_unittest("permutation contract: prefixes, subsets, kinds, clamping, determinism", &
                          test_perm_contract), &
             new_unittest("the bulk permutation and subset forms are the scalar form", test_perm_bulk), &
+            new_unittest("pf_random_resample IS the draw-axis integer fill, on every specific", &
+                         test_resample_identity), &
+            new_unittest("pf_random_resample draws WITH replacement, uniformly", test_resample_statistics), &
             new_unittest("the permutation carries no modular-domain structure a uniform one lacks", &
                 test_perm_structural), &
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
@@ -1205,6 +1208,222 @@ contains
     !! enter the cycle-walk; `1000` stops mid-inner-loop. The subset sizes include `n == m`, `n == 1`
     !! and an `n` that is an exact multiple of `b`, because "exit after storing" and "exit before
     !! storing" differ by one element at exactly those points.
+    !> `pf_random_resample` is `pf_random_fill_draws` over `1 .. m` from draw 1, and nothing else.
+    !!
+    !! **This identity is the primary test, not a nicety.** The procedure adds no arithmetic of its
+    !! own -- every value it can return is already frozen by `pf_random_algorithm` -- so it needs no
+    !! golden vectors, and what has to be asserted instead is that the three forms have not drifted
+    !! apart: the resample, the bulk fill, and a loop of the scalar draw. A future optimisation to
+    !! any one of them that changed a value would show up here and nowhere else.
+    !!
+    !! Also covers, because each is a way the wiring can be silently wrong: all four `idx`/`m` kind
+    !! pairings, all three stream forms (absent, `integer(int32)`, `integer(int64)`), a zero-sized
+    !! request as a defined no-op, `size(idx) > m` -- which its sibling `pf_random_subset` forbids
+    !! and which is this procedure's main use -- and a width that actually reaches the rejection
+    !! path, which every realistic width misses with probability about `1 - 2**-40`.
+    subroutine test_resample_identity(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: SD = 20260817_int64
+        ! 6148914691236517206 is just above 2**64/3, where `2**64 mod s` -- and so the 64-bit
+        ! rejection rate -- is at its maximum of about 1/3. Nothing else in this suite reaches the
+        ! rejection branch of `int_reduce` through the resample at all.
+        integer(int64), parameter :: WIDE = 6148914691236517206_int64
+        integer(int64), parameter :: ms(*) = [1_int64, 2_int64, 7_int64, 1000_int64, 65536_int64]
+        integer(int64) :: r64(400), f64(400), w64(300)
+        integer(int32) :: r32(400), f32(400)
+        integer(int64) :: m, k
+        integer :: si
+        character(len=90) :: msg
+
+        do si = 1, size(ms)
+            m = ms(si)
+
+            ! (1) The three forms agree, element for element.
+            call pf_random_resample(r64, m, SD)
+            call pf_random_fill_draws(SD, 1_int64, f64, 1_int64, m)
+            do k = 1_int64, size(r64, kind=int64)
+                if (r64(k) /= f64(k)) then
+                    write (msg, '(a,i0,a,i0)') "resample /= pf_random_fill_draws at m=", m, " k=", k
+                    call check(error, .false., trim(msg)); return
+                end if
+                if (r64(k) /= pf_random_int_at(SD, 1_int64, 1_int64, m, k)) then
+                    write (msg, '(a,i0,a,i0)') "resample /= pf_random_int_at at m=", m, " k=", k
+                    call check(error, .false., trim(msg)); return
+                end if
+            end do
+
+            ! (2) Every idx/m kind pairing produces the same values. `m` fits int32 for all of `ms`,
+            !     so all four are exercised at every width here.
+            call pf_random_resample(r32, int(m, int32), SD)
+            call pf_random_resample(f32, m, SD)
+            do k = 1_int64, size(r64, kind=int64)
+                if (int(r32(k), int64) /= r64(k) .or. int(f32(k), int64) /= r64(k)) then
+                    write (msg, '(a,i0,a,i0)') "an int32-result specific disagrees at m=", m, " k=", k
+                    call check(error, .false., trim(msg)); return
+                end if
+            end do
+            call pf_random_resample(f64, int(m, int32), SD)
+            call check(error, all(f64 == r64), "the int32-population specific disagrees with int64")
+            if (allocated(error)) return
+
+            ! (3) An explicit `stream = 1` in either kind is the default, and a different stream is a
+            !     different replicate that still equals the fill on that stream. Without the second
+            !     half, a specific that silently ignored `stream` would pass the first.
+            call pf_random_resample(f64, m, SD, 1_int32)
+            call check(error, all(f64 == r64), "stream=1 (int32) is not the default")
+            if (allocated(error)) return
+            call pf_random_resample(f64, m, SD, 1_int64)
+            call check(error, all(f64 == r64), "stream=1 (int64) is not the default")
+            if (allocated(error)) return
+            call pf_random_resample(f64, m, SD, 5_int32)
+            call pf_random_fill_draws(SD, 5_int64, r64, 1_int64, m)
+            call check(error, all(f64 == r64), "stream=5 is not the fill on stream 5")
+            if (allocated(error)) return
+            if (m > 2_int64) then
+                call pf_random_resample(r64, m, SD)
+                call check(error, .not. all(f64 == r64), "stream 5 returned the same values as stream 1")
+                if (allocated(error)) return
+            end if
+        end do
+
+        ! (4) `size(idx) > m` is legal here and is the ordinary bootstrap. A guard copied from
+        !     `pf_random_subset` would abort on this call rather than fail an assertion.
+        call pf_random_resample(r64, 7_int64, SD)
+        call check(error, all(r64 >= 1_int64 .and. r64 <= 7_int64), &
+                   "drawing 400 values from a population of 7 escaped [1, m]")
+        if (allocated(error)) return
+
+        ! (5) A width that reaches the rejection path about a third of the time. The identity has to
+        !     hold there too, and it is the only assertion in the suite that exercises the resample's
+        !     retry-and-re-key branch at all.
+        call pf_random_resample(w64, WIDE, SD, 3_int64)
+        do k = 1_int64, size(w64, kind=int64)
+            if (w64(k) /= pf_random_int_at(SD, 3_int64, 1_int64, WIDE, k)) then
+                write (msg, '(a,i0)') "resample /= pf_random_int_at on the rejection-heavy width at k=", k
+                call check(error, .false., trim(msg)); return
+            end if
+        end do
+
+        ! (6) ODD lengths, with a CANARY. The bulk fill walks blocks two values at a time, so an
+        !     off-by-one in its steady-state bound writes one element PAST the end on an odd-length
+        !     request and leaves every value it did write correct -- invisible to an equality
+        !     assertion, and invisible to a plain `fpm test`, which has no bounds checking. Handing
+        !     the call a SLICE of a larger array and asserting the remainder is untouched is what
+        !     catches it: mutating `k + 2 <= m` to `k + 1 <= m` survives every other test here.
+        block
+            integer(int64) :: buf(64), lens(5)
+            integer(int64) :: j, nn
+            lens = [1_int64, 3_int64, 7_int64, 15_int64, 31_int64]
+            do j = 1_int64, size(lens, kind=int64)
+                nn = lens(j)
+                buf = -777_int64
+                call pf_random_resample(buf(1:nn), 1000_int64, SD, 4_int64)
+                do k = nn + 1_int64, size(buf, kind=int64)
+                    if (buf(k) /= -777_int64) then
+                        write (msg, '(a,i0,a,i0)') "resample of length ", nn, " wrote past the end at ", k
+                        call check(error, .false., trim(msg)); return
+                    end if
+                end do
+                do k = 1_int64, nn
+                    if (buf(k) /= pf_random_int_at(SD, 4_int64, 1_int64, 1000_int64, k)) then
+                        write (msg, '(a,i0,a,i0)') "odd-length resample disagrees at len=", nn, " k=", k
+                        call check(error, .false., trim(msg)); return
+                    end if
+                end do
+            end do
+        end block
+
+        ! (7) The same canary for a fill that starts on a block's SECOND pair, which is the
+        !     alignment head. Head and steady state must hand over to each other exactly.
+        block
+            integer(int64) :: buf(64)
+            integer(int64) :: j
+            do j = 1_int64, 6_int64
+                buf = -888_int64
+                call pf_random_fill_draws(SD, 9_int64, buf(1:j), 1_int64, 1000_int64, 2_int64)
+                do k = j + 1_int64, size(buf, kind=int64)
+                    if (buf(k) /= -888_int64) then
+                        write (msg, '(a,i0)') "an unaligned fill wrote past the end, length ", j
+                        call check(error, .false., trim(msg)); return
+                    end if
+                end do
+                do k = 1_int64, j
+                    if (buf(k) /= pf_random_int_at(SD, 9_int64, 1_int64, 1000_int64, &
+                                                   1_int64 + k)) then
+                        write (msg, '(a,i0,a,i0)') "unaligned fill disagrees at length ", j, " k=", k
+                        call check(error, .false., trim(msg)); return
+                    end if
+                end do
+            end do
+        end block
+
+        ! (8) A zero-sized request is a defined no-op, and is NOT validated -- so it must survive
+        !     both an `m` that would otherwise abort and one too large for an int32 element.
+        block
+            integer(int64) :: empty64(0)
+            integer(int32) :: empty32(0)
+            call pf_random_resample(empty64, 0_int64, SD)
+            call pf_random_resample(empty64, -5_int64, SD, 2_int64)
+            call pf_random_resample(empty32, 5000000000_int64, SD)
+            call check(error, .true., "a zero-sized resample is a defined no-op")
+        end block
+    end subroutine test_resample_identity
+
+    !> `pf_random_resample` draws WITH replacement, and the distinction is measurable.
+    !!
+    !! Containment and uniformity are the easy half. The half that matters is the **duplicate rate**:
+    !! a subset drawn without replacement has none, and drawing `m` values from `1 .. m` with
+    !! replacement leaves an expected `m(1 - 1/e)` distinct values, about 63.2 %. So this is the
+    !! assertion that would fail if the resample were ever quietly rewired to its sibling -- which is
+    !! exactly the confusion the two names exist to prevent, and which containment and chi-square
+    !! would both pass through untouched.
+    subroutine test_resample_statistics(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: SD = 20260817_int64
+        integer(int64), parameter :: M = 4000_int64
+        integer(int64) :: v(4000), w(4000)
+        integer(int64) :: counts(4000)
+        integer(int64) :: k, distinct
+        real(real64) :: chi, expect, frac
+        character(len=90) :: msg
+
+        call pf_random_resample(v, M, SD)
+        call check(error, all(v >= 1_int64 .and. v <= M), "a resampled value escaped [1, m]")
+        if (allocated(error)) return
+
+        counts = 0_int64
+        do k = 1_int64, M
+            counts(v(k)) = counts(v(k)) + 1_int64
+        end do
+
+        ! Duplicates: n == m with replacement leaves about m(1 - 1/e) distinct values. Without
+        ! replacement it would be exactly m, so the band below is nowhere near a permutation.
+        distinct = count(counts > 0_int64, kind=int64)
+        frac = real(distinct, real64) / real(M, real64)
+        write (msg, '(a,f6.4,a)') "distinct fraction ", frac, " is outside [0.60, 0.66] for n == m"
+        call check(error, frac > 0.60_real64 .and. frac < 0.66_real64, trim(msg))
+        if (allocated(error)) return
+
+        ! Uniformity over the population, five sigma. df = M - 1, so the band is generous.
+        expect = 1.0_real64
+        chi = 0.0_real64
+        do k = 1_int64, M
+            chi = chi + (real(counts(k), real64) - expect)**2 / expect
+        end do
+        write (msg, '(a,f10.2,a,i0)') "chi-square ", chi, " is implausible for df = ", M - 1_int64
+        call check(error, chi > real(M, real64) - 5.0_real64 * sqrt(2.0_real64 * real(M, real64)) &
+                   .and. chi < real(M, real64) + 5.0_real64 * sqrt(2.0_real64 * real(M, real64)), trim(msg))
+        if (allocated(error)) return
+
+        ! Two replicates of the same size are different draws, and the second is reproducible from
+        ! its own (seed, stream) alone -- which is what makes a bootstrap replicate addressable.
+        call pf_random_resample(w, M, SD, 2_int64)
+        call check(error, .not. all(v == w), "replicates 1 and 2 returned identical samples")
+        if (allocated(error)) return
+        call pf_random_resample(v, M, SD, 2_int64)
+        call check(error, all(v == w), "replicate 2 is not reproducible from (seed, stream)")
+    end subroutine test_resample_statistics
+
     subroutine test_perm_bulk(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: SD = 20260817_int64

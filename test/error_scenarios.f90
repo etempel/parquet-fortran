@@ -550,6 +550,10 @@ program error_scenarios
         call scenario_random_stream_jump_before_start()
     case ("random_stream_rewind_below_one")
         call scenario_random_stream_rewind_below_one()
+    case ("random_resample_empty_population")
+        call scenario_random_resample_empty_population()
+    case ("random_resample_int32_too_narrow")
+        call scenario_random_resample_int32_too_narrow()
     case ("random_subset_larger_than_population")
         call scenario_random_subset_larger_than_population()
     case ("random_subset_empty_population")
@@ -14797,6 +14801,33 @@ contains
         call rng%rewind(0_int64)   ! -> aborts
         print '(a,i0)', "unexpectedly rewound below the start, position ", rng%position()
     end subroutine scenario_random_stream_rewind_below_one
+
+    !> `m < 1` names no population to draw from. The control is `m == 1`, the smallest that exists.
+    !!
+    !! **The control also carries this procedure's own distinguishing case**: it draws four values
+    !! from a population of one, which is `size(idx) > m` -- legal here and refused by
+    !! `pf_random_subset`. So a guard copied across from `subset_check`, which is the most likely way
+    !! for this one to go wrong, aborts on the control line and fails the scenario rather than
+    !! passing it vacuously.
+    subroutine scenario_random_resample_empty_population()
+        integer(int64) :: idx(4)
+        call pf_random_resample(idx, 1_int64, 1_int64)   ! control: n > m is legal WITH replacement
+        print '(a,i0)', "resampled 4 values from a population of 1, first ", idx(1)
+        call pf_random_resample(idx, 0_int64, 1_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly resampled from an empty population: ", idx(1)
+    end subroutine scenario_random_resample_empty_population
+
+    !> A resampled value may be anything in `[1, m]`, so an `integer(int32)` array cannot serve an
+    !! `m` above `huge(int32)` -- the failure would otherwise be a silent narrowing wrap, a plausible
+    !! negative index that containment downstream would not catch. The control is `m == huge(int32)`
+    !! exactly, the largest that still fits.
+    subroutine scenario_random_resample_int32_too_narrow()
+        integer(int32) :: idx(4)
+        call pf_random_resample(idx, int(huge(1_int32), int64), 1_int64)   ! control: the largest that fits
+        print '(a,i0)', "resampled from a population of huge(int32), first element ", idx(1)
+        call pf_random_resample(idx, int(huge(1_int32), int64) + 1_int64, 1_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly resampled int32 values from a wider population: ", idx(1)
+    end subroutine scenario_random_resample_int32_too_narrow
 
     !> A subset is drawn without replacement, so it cannot be larger than its population. Clamping
     !! to `m` would be the tempting alternative and is the wrong one: it silently hands back fewer

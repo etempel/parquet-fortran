@@ -377,6 +377,10 @@ contains
                 test_random_stream_jump_before_start_aborts), &
             new_unittest("a stream refuses a rewind below position 1", &
                 test_random_stream_rewind_below_one_aborts), &
+            new_unittest("a resample of an empty population aborts", &
+                test_random_resample_empty_population_aborts), &
+            new_unittest("an int32 resample of a wider-than-int32 population aborts", &
+                test_random_resample_int32_too_narrow_aborts), &
             new_unittest("a subset larger than its population aborts", &
                 test_random_subset_larger_than_population_aborts), &
             new_unittest("a subset of an empty population aborts", &
@@ -4066,6 +4070,30 @@ contains
             failure_message="rewinding below position 1 was expected to abort", &
             required_stderr="position must be at least 1")
     end subroutine test_random_stream_rewind_below_one_aborts
+
+    !> `m < 1` on a resample: see scenario_random_resample_empty_population. The control draws
+    !> FOUR values from a population of one -- `size(idx) > m`, which this procedure allows and its
+    !> sibling forbids -- so a guard copied from `subset_check` aborts on the control instead.
+    subroutine test_random_resample_empty_population_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_resample_empty_population", &
+            expect_abort=.true., &
+            failure_message="a resample of an empty population was expected to abort", &
+            required_stderr="population size m must be at least 1")
+    end subroutine test_random_resample_empty_population_aborts
+
+    !> An `integer(int32)` result array with `m` above `huge(int32)`: see
+    !> scenario_random_resample_int32_too_narrow. Without the guard the failure is a silent
+    !> narrowing wrap rather than anything a caller could notice.
+    subroutine test_random_resample_int32_too_narrow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_resample_int32_too_narrow", &
+            expect_abort=.true., &
+            failure_message="an int32 resample of a wider population was expected to abort", &
+            required_stderr="exceeds huge(int32)")
+    end subroutine test_random_resample_int32_too_narrow_aborts
 
     !> A subset larger than its population: see scenario_random_subset_larger_than_population.
     !> The scenario draws a legal `n == m` subset first, so a guard that fired on every call --

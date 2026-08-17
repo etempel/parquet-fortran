@@ -178,6 +178,7 @@ something a reader is expected to have.
 | [Risk-111](#risk-111--a-bulk-permutation-that-silently-stopped-threading-would-fail-no-test) | A bulk permutation that silently stopped threading would fail no test | 3 — not testable |
 | [Risk-112](#risk-112--a-fills-position-arithmetic-overflows-at-the-boundary-the-suite-tests-and-still-answers-correctly) | A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly | 4 — covered |
 | [Risk-113](#risk-113--the-coordinate-addressed-generics-read-one-word-sequence-and-real32-walks-a-finer-grid) | The coordinate-addressed generics read one word sequence, and `real32` walks a finer grid | 4 — covered |
+| [Risk-114](#risk-114--a-bulk-fills-loop-shape-can-silently-de-optimise-the-scalar-draw-that-shares-its-reduction) | A bulk fill's loop shape can silently de-optimise the SCALAR draw that shares its reduction | 4 — covered |
 
 ---
 
@@ -185,7 +186,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-114**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-115**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4889,3 +4890,49 @@ carries the same pair of checks against its arbitrary-precision oracle, and
 rows that fix the retry path's own addressing, which nothing else reaches. **If the generics are ever
 domain-separated, this test should fail** — its doc-comment says what to rewrite it into, and which
 two documents must change with it.
+
+### Risk-114 — A bulk fill's loop shape can silently de-optimise the SCALAR draw that shares its reduction
+
+**What breaks.** `pf_random_int_at` and `pf_random_fill_draws` share one reduction, `int_reduce`,
+whose body contains the retry loop and therefore a whole Philox enciphering (`bits_of`). While each
+caller has ONE hot reduction site, GCC inlines it everywhere and both are fast. Restructuring
+`fill_draws_i64`/`fill_draws_i32` into a two-values-per-block body took the module from three
+reduction sites to nine, GCC's inline budget gave out, and it emitted an out-of-line
+`int_reduce.isra.0` — which the *scalar* entry point then had to call, once per draw.
+
+**Why it is quiet.** Every value is unchanged, so the golden vectors, the reference agreement and
+every statistical test pass. The regression is entirely in a procedure the change never touched, and
+it is a **cross-procedure** effect of an inlining decision, so reading either procedure's source
+shows nothing. Measured on machine B (gfortran 15.2.1, `--profile release`): `pf_random_int_at` in a
+loop went 25.6 → 28.0 ns per value, a 9 % regression on public API, while the change that caused it
+made the bulk fill 1.2x faster and looked like an unambiguous win.
+
+**What it forbids.** Adding a reduction site — anywhere in `parquet_random` — without re-checking the
+scalar draw. The cold half of the rejection rule now lives in `int_reduce_retry`, marked
+`!GCC$ ATTRIBUTES noinline` / `!DIR$ ATTRIBUTES NOINLINE` so that an optimiser cannot fold it back in
+and re-inflate `int_reduce`; those two directives are load-bearing and are not decoration. Note the
+generalisation, which is what makes this worth keeping: **a shared helper that inlines is a shared
+budget, and enlarging one caller can evict it from another.**
+
+**Test.** Not an assertion — a one-command disassembly check, recorded on `int_reduce_retry`'s own
+doc-comment, which must print nothing:
+
+```bash
+objdump -d --no-show-raw-insn build/gfortran_*/parquet-fortran/src_parquet_random.f90.o \
+  | awk '/<__parquet_random_MOD_pf_random_int_at_i64>:/{p=1} p&&/^$/{exit} p' | grep call
+```
+
+It is deliberately not a `tools/check_source_conventions.py` check: the failure is a performance
+regression rather than a wrong answer, and it is compiler- and version-specific, so a static check
+would either go stale or fail on a toolchain that inlines differently for good reasons.
+
+**Its neighbour, and the reason this entry is in section 4 rather than section 3.** The same
+restructure carried a genuine silent-corruption risk of the Risk-109 shape: the steady state advances
+two values per iteration, so an off-by-one in its bound (`k + 2 <= m` → `k + 1 <= m`) writes ONE
+ELEMENT PAST THE END of the caller's array on any odd-length request, while leaving every value it
+did write correct. Nothing sees that — a plain `fpm test` has no bounds checking (CLAUDE.md), and an
+equality assertion compares only the elements that exist. **The canary is what catches it**: hand the
+fill a SLICE of a longer array and assert the remainder is untouched. `test_resample_identity`
+(`test/test_random.f90`) does this at lengths 1, 3, 7, 15 and 31, and for an unaligned start at
+lengths 1-6; the mutation survives every other test in the suite and fails this one immediately.
+Copy the canary, not just the assertion, for any future fill that advances by more than one element.

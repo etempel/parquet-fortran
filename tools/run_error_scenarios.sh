@@ -629,6 +629,8 @@ scenarios=(
     "random_stream_jump_overflow:1"
     "random_stream_jump_before_start:1"
     "random_stream_rewind_below_one:1"
+    "random_resample_empty_population:1"
+    "random_resample_int32_too_narrow:1"
     "random_subset_larger_than_population:1"
     "random_subset_empty_population:1"
     "random_subset_int32_too_narrow:1"

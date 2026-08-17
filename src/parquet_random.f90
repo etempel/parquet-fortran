@@ -88,6 +88,7 @@ module parquet_random
     public :: pf_random_perm_at
     public :: pf_random_permutation
     public :: pf_random_subset
+    public :: pf_random_resample
 
     !> Identifies the algorithm together with every mapping this module freezes -- the cipher, the
     !! key and counter layout, the word order, the integer rule and its retry key. Its value changes
@@ -460,6 +461,65 @@ module parquet_random
         module procedure pf_random_subset_i64_i32
         module procedure pf_random_subset_i64_i64
     end interface pf_random_subset
+
+    !> Fills `idx` with `size(idx)` values drawn from `1 .. m` **with replacement**.
+    !!
+    !! The third member of the resampling trio, and the one whose construction is not a construction
+    !! at all: drawing with replacement means `size(idx)` independent uniform integers in `[1, m]`,
+    !! with no dedup structure, no permutation and no sort. So this is the draw-axis integer bulk
+    !! fill under another name, and the identity is exact and is asserted by the suite:
+    !!
+    !! ```fortran
+    !! call pf_random_resample(idx, m, seed, stream)
+    !! call pf_random_fill_draws(seed, stream, idx, 1_int64, m)   ! the SAME values
+    !! ```
+    !!
+    !! **What the name buys is the 1.4x-1.6x a caller loses by writing the obvious loop.** Without
+    !! it the natural code is `do k = 1, n; idx(k) = pf_random_int_at(seed, i, 1, m, k); end do`,
+    !! which re-enciphers a Philox block for every value where the bulk form serves two draws from
+    !! each one -- measured at 25.7 against 15.7 ns per value on machine B (gfortran 15.2.1,
+    !! `--profile release`, 10M values) and 16.1 against 10.1 on machine A. The values are identical
+    !! either way; only the route to them differs.
+    !!
+    !! `idx` is a rank-1 `integer(int32)` or `integer(int64)` array, `intent(out)`; `m` is
+    !! `integer(int32)` or `integer(int64)`; `seed` is `integer(int64)`. `stream` is optional,
+    !! `integer(int32)` or `integer(int64)`, and defaults to 1 -- it selects which replicate this is,
+    !! so replicate `b` is reproducible from `(seed, b)` alone, independent of how many replicates
+    !! were asked for or in what order they ran. A zero-sized `idx` is a defined no-op and is not
+    !! validated: it asks for nothing, so no precondition applies to it.
+    !!
+    !! **Two preconditions, both aborting rather than truncating or wrapping**, and only when `idx`
+    !! is non-empty: `m >= 1`; and -- for an `integer(int32)` `idx` only -- `m <= huge(int32)`, since
+    !! an element may be any value in `[1, m]` and one above `huge(int32)` has nowhere to go. The
+    !! second is why the `integer(int32)`-array/`integer(int64)`-`m` pairing is accepted at compile
+    !! time and rejected at run time, exactly as on `pf_random_subset`.
+    !!
+    !! **There is deliberately NO `size(idx) <= m` precondition**, and its absence is the clearest
+    !! statement of how this differs from its sibling. That bound belongs to a subset drawn *without*
+    !! replacement; here `size(idx) == m` is the most ordinary bootstrap there is, and `size(idx)`
+    !! far beyond `m` is perfectly meaningful. A guard copied across from `pf_random_subset` would
+    !! refuse the procedure's main use.
+    !!
+    !! **`stream` is this procedure's replicate axis, and the siblings do not have one.**
+    !! `pf_random_permutation` and `pf_random_subset` are keyed by `(seed, m)` alone, so independent
+    !! replicates of those come from `pf_random_key(seed, b)` instead. A resample is built on the
+    !! draw axis, which carries a stream coordinate already, so it costs a caller one integer rather
+    !! than a key derivation. Both routes are available here: `stream = b` and
+    !! `seed = pf_random_key(seed, b)` are equally independent.
+    interface pf_random_resample
+        module procedure pf_random_resample_i32_i32
+        module procedure pf_random_resample_i32_i64
+        module procedure pf_random_resample_i64_i32
+        module procedure pf_random_resample_i64_i64
+        module procedure pf_random_resample_i32_i32_s32
+        module procedure pf_random_resample_i32_i64_s32
+        module procedure pf_random_resample_i64_i32_s32
+        module procedure pf_random_resample_i64_i64_s32
+        module procedure pf_random_resample_i32_i32_s64
+        module procedure pf_random_resample_i32_i64_s64
+        module procedure pf_random_resample_i64_i32_s64
+        module procedure pf_random_resample_i64_i64_s64
+    end interface pf_random_resample
 
     !> Derives an independent seed from a seed and a label, so one seed can fan out into families.
     !!
@@ -1379,18 +1439,47 @@ contains
     !> Fills `v` with consecutive `integer(int64)` draws of one stream, starting at `draw`.
     !!
     !! **One enciphering serves two draws.** An integer draw has stride 2, exactly like its `real64`
-    !! sibling, so draws `d` and `d+1` for odd `d` are the two pairs of one block. The loop holds the
-    !! block it last enciphered and reuses it whenever the next draw falls in the same one, which
-    !! halves the cipher work against a loop of `int_at_impl`. The values are identical to that loop
-    !! by construction -- the cache is *keyed* by block index and reaches nothing in the contract.
+    !! sibling, so draws `d` and `d+1` for odd `d` are the two pairs of one block. The values are
+    !! identical to a loop of `int_at_impl` by construction -- the same blocks in the same order --
+    !! and the `lo`/`hi` normalisation is done once per call rather than once per element.
     !!
-    !! A rejection is never served from the held block: it re-keys, so `int_reduce` goes back to
-    !! `bits_of` under a derived key, exactly as the scalar entry point does. The `lo`/`hi`
-    !! normalisation is also done once per call rather than once per element.
+    !! **Shape: an alignment head, a ONE-BLOCK steady state, then a one-value tail** -- the
+    !! `fill_r64` shape, minus its two-block interleave. Aligning once is what removes the whole of
+    !! the per-element index arithmetic this loop used to carry: a signed division `(d-1)/2`, a
+    !! `modulo(d-1, 2)`, and a `blk /= held` test whose real cost was not the compare but the
+    !! loop-carried dependency it put on the block state, which stops the compiler overlapping one
+    !! iteration's enciphering with the next.
     !!
-    !! An earlier revision could not do any of this, because the integer generic then had stride 4
-    !! and consumed a whole block per value; that comment said so and said a block-walking form
-    !! "returns different values" -- true then, and no longer true now that the strides agree.
+    !! **Measured in the library, before and after, on machine B (gfortran 15.2.1, `--profile
+    !! release`, 10M values, best of 5): 15.72 -> 12.04 ns per value, 1.31x**, with every untouched
+    !! arm flat across the two builds (`fill_r64` 8.67/8.68, the cipher floors 12.04/12.06 and
+    !! 6.05/6.05) so the cross-build noise floor is about 0.5 % and the gain is 30 times it. Probe
+    !! arms predicted 1.47x-1.67x; the library form does not reach that, and the difference is the
+    !! usual one between a contained procedure the compiler may specialise freely and a module
+    !! procedure it may not. **Quote 1.31x, not the prediction.**
+    !!
+    !! **A second measurement is load-bearing and must be repeated after any change here: the SCALAR
+    !! draw.** `pf_random_int_at` shares `int_reduce` with this loop, and the first version of this
+    !! restructure made it 9 % slower without touching it -- see `int_reduce_retry` for the mechanism
+    !! and the one-command check. It now sits within 1.2 % (25.6 -> 25.9), which is the cost of the
+    !! cold retry call and is the price of the 31 % here.
+    !!
+    !! **The interleave is deliberately NOT ported, and this is the one place the `real64` sibling
+    !! must not be copied wholesale.** Two blocks per body is worth 1.23x there and is a *regression*
+    !! here: measured 9.79 against 10.09 ns per value on machine B under gfortran, reproducibly and
+    !! far above that machine's 0.5 % floor. The reason is visible in the arithmetic -- the interleave
+    !! exists to fill issue slots one 10-round Philox chain leaves idle, and on the `real64` path the
+    !! only post-cipher work is a single multiply, so they really are idle; here the Lemire reduction
+    !! is already the second instruction stream. Machine A measures the same change +4 %, so its
+    !! *sign* differs by architecture, which is on its own a reason not to carry it.
+    !!
+    !! A rejection is never served from the block in hand: `int_reduce` re-keys and goes back to
+    !! `bits_of` under a derived key, exactly as the scalar entry point does. There is still exactly
+    !! one copy of the rejection rule, which is what that split is for.
+    !!
+    !! An earlier revision could do none of this, because the integer generic then had stride 4 and
+    !! consumed a whole block per value; that comment said a block-walking form "returns different
+    !! values" -- true then, and no longer true now that the strides agree.
     pure subroutine fill_draws_i64(seed, stream, v, lo, hi, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
@@ -1398,41 +1487,43 @@ contains
         integer(int64), intent(in) :: lo            !! one end of the closed range
         integer(int64), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
-        integer(int64) :: k, m, a, s, d, blk, held, x
+        integer(int64) :: k, m, a, s, position, blk
         integer(int64) :: w0, w1, w2, w3
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         a = min(lo, hi)
         s = width_of(a, max(lo, hi))
-        held = -1_int64                             ! nothing held; a block index is never negative
-        w0 = 0_int64; w1 = 0_int64; w2 = 0_int64; w3 = 0_int64
-        do k = 1_int64, m
-            ! `draw + (k - 1)` parenthesised, for the reason `fill_streams_r64` spells out at
-            ! length: the unbracketed form overflows at the documented boundary. Risk-112.
-            d = draw + (k - 1_int64)
-            ! `/` and `modulo` here, NOT the `ishft`/`iand` pair `bits_of` uses -- measured, and
-            ! the verdict is the opposite way round on this loop: 15.71-15.75 ns per value against
-            ! 15.97-16.03 for the shift spelling, over four alternating rounds with the `real64`
-            ! fill flat at 8.66-8.69 in both builds. The safer spelling is also the faster one here,
-            ! so there is nothing to trade. See `bits_of` for why the same substitution wins there.
-            blk = (d - 1_int64) / 2_int64
-            if (blk /= held) then
-                call random_block(seed, stream, blk, w0, w1, w2, w3)
-                held = blk
-            end if
-            if (modulo(d - 1_int64, 2_int64) == 0_int64) then
-                x = ior(ishft(w1, 32), w0)
-            else
-                x = ior(ishft(w3, 32), w2)
-            end if
-            v(k) = int_reduce(x, a, s, seed, stream, d)
+        k = 0_int64
+        position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
+        ! Head: one value when `draw` lands on a block's SECOND pair, after which we are aligned.
+        if (iand(position, 1_int64) /= 0_int64) then
+            call random_block(seed, stream, ishft(position, -1), w0, w1, w2, w3)
+            k = 1_int64
+            v(1) = int_reduce(ior(ishft(w3, 32), w2), a, s, seed, stream, draw)
+            position = position + 1_int64
+        end if
+        blk = ishft(position, -1)
+        ! Every draw index below is `draw + (something <= m - 1)`, with the inner sum parenthesised,
+        ! so none can form `huge + 1` even when the fill ends exactly at the representable boundary
+        ! -- the hazard `fill_streams_r64` spells out at length. Risk-112.
+        do while (k + 2_int64 <= m)                 ! steady state: one block, two values
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(k + 1_int64) = int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, draw + k)
+            v(k + 2_int64) = int_reduce(ior(ishft(w3, 32), w2), a, s, seed, stream, &
+                                        draw + (k + 1_int64))
+            k = k + 2_int64
+            blk = blk + 1_int64
         end do
+        if (k < m) then                             ! tail: a final half-block
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(m) = int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, draw + (m - 1_int64))
+        end if
     end subroutine fill_draws_i64
 
     !> `fill_draws_i64` narrowed to `integer(int32)`.
     !!
     !! The result is inside `[min(lo,hi), max(lo,hi)]` by construction, so the narrowing is exact --
-    !! the same argument `pf_random_int_at_i32` rests on. The block cache is the same one
+    !! the same argument `pf_random_int_at_i32` rests on. The head/steady-state/tail shape is the one
     !! `fill_draws_i64` documents, written out again rather than shared, because sharing it would
     !! mean materialising an `integer(int64)` temporary the size of `v`.
     pure subroutine fill_draws_i32(seed, stream, v, lo, hi, draw)
@@ -1442,28 +1533,35 @@ contains
         integer(int32), intent(in) :: lo            !! one end of the closed range
         integer(int32), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
-        integer(int64) :: k, m, a, s, d, blk, held, x
+        integer(int64) :: k, m, a, s, position, blk
         integer(int64) :: w0, w1, w2, w3
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         a = int(min(lo, hi), int64)
         s = width_of(a, int(max(lo, hi), int64))
-        held = -1_int64                             ! nothing held; a block index is never negative
-        w0 = 0_int64; w1 = 0_int64; w2 = 0_int64; w3 = 0_int64
-        do k = 1_int64, m
-            d = draw + (k - 1_int64)                ! parenthesised: see `fill_draws_i64`
-            blk = (d - 1_int64) / 2_int64           ! `/` and `modulo`: see `fill_draws_i64`
-            if (blk /= held) then
-                call random_block(seed, stream, blk, w0, w1, w2, w3)
-                held = blk
-            end if
-            if (modulo(d - 1_int64, 2_int64) == 0_int64) then
-                x = ior(ishft(w1, 32), w0)
-            else
-                x = ior(ishft(w3, 32), w2)
-            end if
-            v(k) = int(int_reduce(x, a, s, seed, stream, d), int32)
+        k = 0_int64
+        position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
+        if (iand(position, 1_int64) /= 0_int64) then            ! head: see `fill_draws_i64`
+            call random_block(seed, stream, ishft(position, -1), w0, w1, w2, w3)
+            k = 1_int64
+            v(1) = int(int_reduce(ior(ishft(w3, 32), w2), a, s, seed, stream, draw), int32)
+            position = position + 1_int64
+        end if
+        blk = ishft(position, -1)
+        do while (k + 2_int64 <= m)                 ! steady state: one block, two values
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(k + 1_int64) = int(int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, &
+                                            draw + k), int32)
+            v(k + 2_int64) = int(int_reduce(ior(ishft(w3, 32), w2), a, s, seed, stream, &
+                                            draw + (k + 1_int64)), int32)
+            k = k + 2_int64
+            blk = blk + 1_int64
         end do
+        if (k < m) then                             ! tail: a final half-block
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(m) = int(int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, &
+                                  draw + (m - 1_int64)), int32)
+        end if
     end subroutine fill_draws_i32
 
     !> Fills `v` with one `integer(int64)` draw of each of `size(v)` consecutive streams.
@@ -1581,7 +1679,7 @@ contains
         integer(int64), intent(in) :: stream        !! stream index
         integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
         integer(int64) :: r                         !! a uniform integer in the closed range
-        integer(int64) :: x, low, high, threshold, attempt
+        integer(int64) :: low, high
 
         if (s == 0_int64) then
             ! The whole int64 range: every pattern is in range, so there is nothing to reduce and
@@ -1590,21 +1688,70 @@ contains
             return
         end if
 
-        attempt = 0_int64
-        x = x0
-        call mulhilo64(x, s, low, high)
+        call mulhilo64(x0, s, low, high)
         if (ult(low, s)) then
-            ! Lemire's lazy threshold: the division is reached only when the candidate falls in the
-            ! last partial block, which at a realistic range is about never. Do not hoist it.
-            threshold = umod_2p64(s)
-            do while (ult(low, threshold))
-                attempt = attempt + 1_int64
-                x = bits_of(retry_key_of(seed, attempt), stream, draw)
-                call mulhilo64(x, s, low, high)
-            end do
+            ! Lemire's LAZY GUARD, and it is deliberately conservative: it fires whenever the
+            ! candidate *might* be in the last partial block, and `int_reduce_retry` then computes
+            ! the real threshold and decides. Being too eager costs a cold call; it cannot bias the
+            ! result, because nothing here accepts or rejects anything.
+            r = int_reduce_retry(x0, a, s, seed, stream, draw)
+            return
         end if
         r = offset_by(a, high)
     end function int_reduce
+
+    !> The rejection rule: the threshold, the retry loop, and the only copy of either.
+    !!
+    !! **Split out of `int_reduce` for a codegen reason, and the split is load-bearing.** This body
+    !! contains `bits_of`, i.e. a whole Philox enciphering, so inlining it is cheap while a caller
+    !! has one hot reduction site and ruinous when it has four. When `fill_draws_i64` was
+    !! restructured into a two-values-per-block body, GCC's inline budget gave out and it emitted an
+    !! out-of-line `int_reduce.isra.0` that the *scalar* entry point then had to call: measured
+    !! 25.6 -> 28.0 ns per value for `pf_random_int_at` in a loop, a 9 % regression on public API
+    !! caused by a change that touched only the bulk fill. With the cold half behind its own
+    !! procedure, `int_reduce` is a multiply, a compare and an add, and inlines at every site again.
+    !!
+    !! **Check it after any change here** -- this must print nothing:
+    !!
+    !! ```bash
+    !! objdump -d --no-show-raw-insn build/gfortran_*/parquet-fortran/src_parquet_random.f90.o \
+    !!   | awk '/<__parquet_random_MOD_pf_random_int_at_i64>:/{p=1} p&&/^$/{exit} p' | grep call
+    !! ```
+    !!
+    !! A rejection re-keys and re-enciphers the same counter, so it is `bits_of` under a derived key
+    !! -- consumption stays fixed in counter positions, and the answer is still a pure function of
+    !! `(seed, stream, draw)`. The loop is deliberately uncapped: accepting a candidate at a cap
+    !! would reintroduce the bias the whole scheme exists to remove. It terminates with probability
+    !! 1, and the worst chain measured is 7.
+    pure function int_reduce_retry(x0, a, s, seed, stream, draw) result(r)
+        integer(int64), intent(in) :: x0            !! the first candidate's 64-bit pattern
+        integer(int64), intent(in) :: a             !! the low end of the normalised range
+        integer(int64), intent(in) :: s             !! the width, as an unsigned pattern; non-zero
+        integer(int64), intent(in) :: seed          !! the stream family's seed, for a re-key
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: r                         !! a uniform integer in the closed range
+        integer(int64) :: x, low, high, threshold, attempt
+        ! Keeping this OUT of line is the whole point of the split; with one call site an optimiser
+        ! will otherwise inline it straight back into `int_reduce` and undo it. Both directives are
+        ! ordinary comments to a compiler that does not know them, so neither is a portability
+        ! hazard, and a compiler that ignores both is merely back to the slower shape.
+!GCC$ ATTRIBUTES noinline :: int_reduce_retry
+!DIR$ ATTRIBUTES NOINLINE :: int_reduce_retry
+
+        attempt = 0_int64
+        x = x0
+        call mulhilo64(x, s, low, high)
+        ! The division is reached only when the caller's lazy guard fired, which at a realistic
+        ! width happens with probability about 2**-40. Do not hoist it into `int_reduce`.
+        threshold = umod_2p64(s)
+        do while (ult(low, threshold))
+            attempt = attempt + 1_int64
+            x = bits_of(retry_key_of(seed, attempt), stream, draw)
+            call mulhilo64(x, s, low, high)
+        end do
+        r = offset_by(a, high)
+    end function int_reduce_retry
 
     !> The retry key for attempt `n` (1-based): a re-key, never a tweak.
     !!
@@ -2175,6 +2322,181 @@ contains
                        " exceeds huge(int32); the elements need an integer(int64) array"
         end if
     end subroutine subset_check
+
+    ! ---- pf_random_resample: draw with replacement -------------------------------------------
+
+    !> The `pf_random_resample` preconditions, in one place so all twelve specifics state them alike.
+    !!
+    !! A zero-sized request returns without checking anything: it asks for no element, so neither `m`
+    !! nor the representability of an element is a question about it.
+    !!
+    !! **The absent `n > m` test is the one line separating this from `subset_check`**, and it is
+    !! absent on purpose: drawing with replacement has no such bound, and `n == m` is the most
+    !! ordinary bootstrap there is. See the `pf_random_resample` interface.
+    subroutine resample_check(n, m, narrow)
+        integer(int64), intent(in) :: n             !! requested sample size, `size(idx)`
+        integer(int64), intent(in) :: m             !! population size, widened
+        logical, intent(in) :: narrow               !! `.true.` when `idx` is `integer(int32)`
+        character(len=32) :: t1
+        if (n <= 0_int64) return
+        if (m < 1_int64) then
+            write (t1, '(i0)') m
+            error stop "pf_random_resample: population size m must be at least 1, got " // trim(t1)
+        end if
+        if (narrow .and. m > int(huge(1_int32), int64)) then
+            write (t1, '(i0)') m
+            error stop "pf_random_resample: population size " // trim(t1) // &
+                       " exceeds huge(int32); the elements need an integer(int64) array"
+        end if
+    end subroutine resample_check
+
+    !> The resample worker, `integer(int32)` result. `resample_i64` carries the design note.
+    !!
+    !! The early return after the check keeps `int(m, int32)` from being evaluated for a zero-sized
+    !! request, which is not validated at all and so may still carry an `m` above `huge(int32)` --
+    !! an out-of-range conversion, and a standard violation whatever a given compiler does with it.
+    !!
+    !! **It is defensive, not load-bearing, and that was established by mutation rather than
+    !! assumed**: deleting it changes no observable behaviour, because `fill_draws_i32` returns on a
+    !! zero-sized `v` before it reads `hi` at all. The whole suite passes without it, including under
+    !! `--profile debug`. Keep it anyway -- it costs one comparison on a path that then returns --
+    !! but do not expect a test to defend it, and do not add one that pins a wrapped value.
+    subroutine resample_i32(idx, m, seed, stream)
+        integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int64), intent(in) :: m             !! population size, widened
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! replicate index, already defaulted
+        call resample_check(size(idx, kind=int64), m, .true.)
+        if (size(idx, kind=int64) <= 0_int64) return
+        call fill_draws_i32(seed, stream, idx, 1_int32, int(m, int32), 1_int64)
+    end subroutine resample_i32
+
+    !> The resample worker, `integer(int64)` result.
+    !!
+    !! **There is no resample-specific arithmetic here, and that is the design.** `pf_random_resample`
+    !! is `pf_random_fill_draws` over `1 .. m` starting at draw 1, so it delegates rather than
+    !! reimplementing: one integer rule, one rejection test, one grid. Every value it can return is
+    !! already frozen by `pf_random_algorithm`, which is why this procedure needs no golden vectors of
+    !! its own -- what the suite asserts instead is the identity with the fill and with the scalar
+    !! draw, which is what would break if a future optimisation moved one of the three.
+    subroutine resample_i64(idx, m, seed, stream)
+        integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! replicate index, already defaulted
+        call resample_check(size(idx, kind=int64), m, .false.)
+        if (size(idx, kind=int64) <= 0_int64) return
+        call fill_draws_i64(seed, stream, idx, 1_int64, m, 1_int64)
+    end subroutine resample_i64
+
+    !> `pf_random_resample`, `integer(int32)` result and `integer(int32)` population, stream 1.
+    subroutine pf_random_resample_i32_i32(idx, m, seed)
+        integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int32), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        call resample_i32(idx, int(m, int64), seed, 1_int64)
+    end subroutine pf_random_resample_i32_i32
+
+    !> `pf_random_resample`, `integer(int32)` result and `integer(int64)` population, stream 1.
+    subroutine pf_random_resample_i32_i64(idx, m, seed)
+        integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        call resample_i32(idx, m, seed, 1_int64)
+    end subroutine pf_random_resample_i32_i64
+
+    !> `pf_random_resample`, `integer(int64)` result and `integer(int32)` population, stream 1.
+    subroutine pf_random_resample_i64_i32(idx, m, seed)
+        integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int32), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        call resample_i64(idx, int(m, int64), seed, 1_int64)
+    end subroutine pf_random_resample_i64_i32
+
+    !> `pf_random_resample`, `integer(int64)` result and `integer(int64)` population, stream 1.
+    subroutine pf_random_resample_i64_i64(idx, m, seed)
+        integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        call resample_i64(idx, m, seed, 1_int64)
+    end subroutine pf_random_resample_i64_i64
+
+    !> `pf_random_resample` with an `integer(int32)` stream; `integer(int32)` result and population.
+    !!
+    !! **The stream-carrying specifics are separate procedures rather than one with an optional
+    !! dummy**, because an optional argument that differs only by kind cannot be the sole
+    !! disambiguator in a generic interface -- a call omitting it would match both. This is the split
+    !! CLAUDE.md's "Public numeric arguments" note prescribes and `parquet_open_reader` already uses.
+    subroutine pf_random_resample_i32_i32_s32(idx, m, seed, stream)
+        integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int32), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: stream        !! replicate index
+        call resample_i32(idx, int(m, int64), seed, int(stream, int64))
+    end subroutine pf_random_resample_i32_i32_s32
+
+    !> `pf_random_resample` with an `integer(int32)` stream; `int32` result, `int64` population.
+    subroutine pf_random_resample_i32_i64_s32(idx, m, seed, stream)
+        integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: stream        !! replicate index
+        call resample_i32(idx, m, seed, int(stream, int64))
+    end subroutine pf_random_resample_i32_i64_s32
+
+    !> `pf_random_resample` with an `integer(int32)` stream; `int64` result, `int32` population.
+    subroutine pf_random_resample_i64_i32_s32(idx, m, seed, stream)
+        integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int32), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: stream        !! replicate index
+        call resample_i64(idx, int(m, int64), seed, int(stream, int64))
+    end subroutine pf_random_resample_i64_i32_s32
+
+    !> `pf_random_resample` with an `integer(int32)` stream; `int64` result and population.
+    subroutine pf_random_resample_i64_i64_s32(idx, m, seed, stream)
+        integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: stream        !! replicate index
+        call resample_i64(idx, m, seed, int(stream, int64))
+    end subroutine pf_random_resample_i64_i64_s32
+
+    !> `pf_random_resample` with an `integer(int64)` stream; `int32` result and population.
+    subroutine pf_random_resample_i32_i32_s64(idx, m, seed, stream)
+        integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int32), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! replicate index
+        call resample_i32(idx, int(m, int64), seed, stream)
+    end subroutine pf_random_resample_i32_i32_s64
+
+    !> `pf_random_resample` with an `integer(int64)` stream; `int32` result, `int64` population.
+    subroutine pf_random_resample_i32_i64_s64(idx, m, seed, stream)
+        integer(int32), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! replicate index
+        call resample_i32(idx, m, seed, stream)
+    end subroutine pf_random_resample_i32_i64_s64
+
+    !> `pf_random_resample` with an `integer(int64)` stream; `int64` result, `int32` population.
+    subroutine pf_random_resample_i64_i32_s64(idx, m, seed, stream)
+        integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int32), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! replicate index
+        call resample_i64(idx, int(m, int64), seed, stream)
+    end subroutine pf_random_resample_i64_i32_s64
+
+    !> `pf_random_resample` with an `integer(int64)` stream; `int64` result and population.
+    subroutine pf_random_resample_i64_i64_s64(idx, m, seed, stream)
+        integer(int64), intent(out) :: idx(:)       !! filled with `size(idx)` draws from `1 .. m`
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! replicate index
+        call resample_i64(idx, m, seed, stream)
+    end subroutine pf_random_resample_i64_i64_s64
 
     !> How many threads a bulk permutation of `n` elements should use.
     !!

@@ -346,6 +346,54 @@ has no way to avoid.
 [Threads for a bulk permutation](../operating/settings.html#threads-for-a-bulk-permutation) for the
 cap, the work floor and the measured scaling.
 
+### Drawing WITH replacement: `pf_random_resample`
+
+The third member of the family, and the one whose construction is not a construction at all:
+
+```fortran
+call pf_random_resample(idx, m, seed [, stream])   ! size(idx) draws from 1..m, with replacement
+```
+
+Drawing with replacement means `size(idx)` independent uniform integers in `[1, m]` — no dedup, no
+permutation, no sort — so this **is** the draw-axis integer fill under a name that says what it is
+for:
+
+```fortran
+call pf_random_resample(idx, m, seed, stream)
+call pf_random_fill_draws(seed, stream, idx, 1_int64, m)   ! the same values, guaranteed
+```
+
+That identity is part of the contract and is asserted by the test suite. What the name buys is
+speed a caller otherwise leaves on the table: without it the obvious code is a loop of
+`pf_random_int_at`, which re-enciphers a block for every value where the bulk form serves two draws
+from each one — measured at 1.4x–1.6x, depending on the machine, for identical values.
+
+`idx` is a rank-1 `integer(int32)` or `integer(int64)` array and `m` takes either kind. `stream` is
+optional and defaults to 1; it selects **which replicate** this is, so replicate `b` is reproducible
+from `(seed, b)` alone, whatever order the replicates ran in:
+
+```fortran
+do b = 1, n_replicates
+    call pf_random_resample(idx, nrows, seed, b)    ! replicate b, reproducible on its own
+    ! ... recompute your statistic over rows idx(:) ...
+end do
+```
+
+Note the siblings have **no** `stream` argument: `pf_random_permutation` and `pf_random_subset` are
+keyed by `(seed, m)` alone, so independent replicates of those come from `pf_random_key(seed, b)`
+instead. A resample is built on the draw axis, which carries a stream coordinate already. Both
+routes work here — `stream = b` and `seed = pf_random_key(seed, b)` are equally independent.
+
+**There is deliberately no `size(idx) <= m` requirement**, which is the clearest statement of how
+this differs from `pf_random_subset`. Drawing 4000 values from a population of 4000 is the ordinary
+bootstrap, and drawing more than `m` is perfectly meaningful. Two preconditions do apply, and both
+abort rather than truncating: `m >= 1`, and — for an `integer(int32)` array — `m <= huge(int32)`.
+A zero-sized array is a defined no-op and is not validated.
+
+Because it draws with replacement, expect duplicates: drawing `m` values from `1 .. m` leaves about
+`m(1 - 1/e)`, roughly 63%, of the population represented. If you want distinct rows, you want
+`pf_random_subset`.
+
 ### What the permutation is, and what it is not
 
 The construction is a four-round Feistel network over `Z_a × Z_b` with cycle-walking, where

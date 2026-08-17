@@ -52,29 +52,49 @@
 !! ```bash
 !! fpm run --profile release probe_random_resample -- --n=10000000 --rounds=5
 !! ```
+
+! Route (e) fork selection, transcribed from `app/probe_random_int_rule.f90`.  cpp cannot evaluate
+! `selected_int_kind(38)`, so the macro must come from a compiler predefine.  Without this the probe
+! declares `integer(k128)` unconditionally and does not compile under ifx at all -- `selected_int_kind
+! (38)` is -1 there and the build stops at `error #6684`, which is what kept every ifx column of
+! `feature_random_resample*.md` empty.  The probe's own `reduce64` must therefore fork exactly as
+! `src/parquet_random.f90`'s `int_reduce` does, or the arm would preview a kernel the library does
+! not use on that compiler.
+#if !defined(PF_NO_INT128)
+#  if defined(__GFORTRAN__) || defined(__flang__) || defined(__FLANG)
+#    define PF_INT128 1
+#  endif
+#endif
+
 program probe_random_resample
 
 #ifdef _OPENMP
     use omp_lib, only: omp_get_wtime, omp_get_max_threads
 #endif
-    use iso_fortran_env, only: int32, int64, real64, output_unit
+    use iso_fortran_env, only: int32, int64, real64, output_unit, compiler_version, compiler_options
     use parquet, only: pf_random_int_at, pf_random_fill_draws, pf_random_fill_streams, pf_random_key, &
                        parquet_debug_random_block, parquet_debug_random_uses_int128
 
     implicit none
 
-    !> The 128-bit kind, used only by the probe's own copy of the 64-bit reduction.
-    integer, parameter :: k128 = selected_int_kind(38)
     !> Low 32 bits set.
     integer(int64), parameter :: M32 = 4294967295_int64
     !> The sign bit, for the unsigned comparison `ult`.
     integer(int64), parameter :: SIGN_BIT = ishft(1_int64, 63)
+#ifdef PF_INT128
+    !> The 128-bit kind, used only by the probe's own copy of the 64-bit reduction.
+    integer, parameter :: k128 = selected_int_kind(38)
+    !> Compile-time assertion that the predefine above was telling the truth: a division by zero in
+    !! a constant expression, so a compiler without a 128-bit kind fails here by name rather than
+    !! silently taking the wrapping arm. Same guard as `app/probe_random_int_rule.f90`.
+    integer, parameter :: pf_int128_present = 1 / merge(1, 0, k128 > 0)
     !> `2**63` as a 128-bit value.
     integer(k128), parameter :: TWO63_128 = int(huge(1_int64), k128) + 1_k128
     !> `2**64` as a 128-bit value.
     integer(k128), parameter :: TWO64_128 = 2_k128 * TWO63_128
     !> Low 64 bits set, as a 128-bit mask.
     integer(k128), parameter :: MASK64_128 = TWO64_128 - 1_k128
+#endif
     !> The largest width the 32-bit candidate rule accepts: `x32 * s` must stay below `2**63`.
     integer(int64), parameter :: W32_MAX = 2147483648_int64
 
@@ -82,38 +102,74 @@ program probe_random_resample
     integer(int64), parameter :: STREAM = 7_int64
 
     integer(int64) :: n, m
-    integer :: rounds, i
+    integer :: rounds, i, nth_max, n_th
     integer(int64), allocatable :: a(:), b(:), c(:), d(:)
-    integer(int64) :: m_list(8)
-    integer :: th_list(4)
+    integer(int32), allocatable :: e32(:)
+    integer(int64) :: m_list(8), sz_list(6)
+    integer :: th_list(12)
 
     n = read_arg_int('--n=', 10000000_int64)
     m = read_arg_int('--m=', 1000000_int64)
     rounds = int(read_arg_int('--rounds=', 5_int64), int32)
+    call assert_optimised()
     ! 1431655766 is just above 2**32/3, where `2**32 mod m` -- and so the 32-bit rejection rate --
     ! is at its maximum of about 1/3. It is the worst case for the narrow rule and is measured
     ! deliberately rather than left to be discovered by a user.
     m_list = [1000_int64, 1000000_int64, 16711936_int64, 100000000_int64, 1000000000_int64, &
               1431655766_int64, 2147483648_int64, 100000000000_int64]
-    th_list = [1, 2, 4, 8]
+    ! The size sweep exists to reconcile the serial table (one call over `n`) with the bootstrap
+    ! table (many calls over a small slice), which disagreed by 21 % on `fill` under LTO on machine B
+    ! while agreeing exactly without it. It is the same procedure over the same array at eight
+    ! decades of length, so any residual gap is array size and nothing else.
+    sz_list = [100_int64, 10000_int64, 100000_int64, 1000000_int64, 10000000_int64, 100000000_int64]
 
     write (output_unit, '(a)') 'probe_random_resample: n uniform draws from 1..m, WITH replacement'
     write (output_unit, '(a,i0,a,i0)') 'n = ', n, ', rounds = ', rounds
     write (output_unit, '(a,l1)') 'int128 kernel arm: ', parquet_debug_random_uses_int128()
+    write (output_unit, '(a,a)') 'compiler         : ', trim(compiler_version())
+    write (output_unit, '(a,a)') 'compile options  : ', trim(compiler_options())
 #ifdef _OPENMP
     write (output_unit, '(a,i0)') 'OpenMP max threads: ', omp_get_max_threads()
+    nth_max = omp_get_max_threads()
 #else
-    write (output_unit, '(a)') 'OpenMP: NOT compiled in -- threaded arms are skipped'
+    write (output_unit, '(a)') 'OpenMP: NOT compiled in -- threaded arms are SKIPPED'
+    nth_max = 1
 #endif
+    ! The ladder is derived from what the machine actually offers rather than hardcoded at 8, which
+    ! is machine A's core count and told machine B (192 threads) nothing about its own ceiling.
+    n_th = 0
+    i = 1
+    do while (i <= nth_max .and. n_th < size(th_list))
+        n_th = n_th + 1
+        th_list(n_th) = i
+        i = i * 2
+    end do
+    if (n_th > 0 .and. th_list(n_th) /= nth_max .and. n_th < size(th_list)) then
+        n_th = n_th + 1
+        th_list(n_th) = nth_max                 ! always finish on the full machine
+    end if
     write (output_unit, '(a)') ''
     flush (output_unit)
 
-    allocate (a(n), b(n), c(n), d(n))
+    allocate (a(n), b(n), c(n), d(n), e32(n))
     a = 0_int64; b = 0_int64; c = 0_int64; d = 0_int64   ! first-touch every page before timing
+    e32 = 0_int32
 
     call gate_all(m)
 
+    ! The tax is measured and printed FIRST, because every probe-side column below carries it and a
+    ! reader cannot tell a corrected figure from an uncorrected one by looking at the table.
+    write (output_unit, '(a)') '---- WRAPPER TAX: same algorithm, library vs this probe ----'
+    write (output_unit, '(a)') &
+        '            library     replica          tax'
+    call wrapper_tax_row()
+    write (output_unit, '(a)') ''
+
     write (output_unit, '(a)') '---- serial, ns per value (best of rounds) ----'
+    write (output_unit, '(a)') &
+        'AS MEASURED, NOT tax-corrected. Library columns (scalar, fill) carry no tax; probe columns'
+    write (output_unit, '(a)') &
+        '(pair1, pair, w32, w32x2, cipher64, cipher32) carry the tax above, per block enciphered.'
     write (output_unit, '(a)') &
         '           m      scalar        fill       pair1        pair         w32       w32x2'// &
         '    cipher64    cipher32    rej32%'
@@ -122,10 +178,12 @@ program probe_random_resample
     end do
     write (output_unit, '(a)') ''
 
-    write (output_unit, '(a)') '---- WRAPPER TAX: same algorithm, library vs this probe ----'
+    write (output_unit, '(a)') '---- SIZE SWEEP: the shipped fill alone, one call, by array length ----'
     write (output_unit, '(a)') &
-        '            library     replica          tax'
-    call wrapper_tax_row()
+        '        size        fill    fill_r64   fill(int32)'
+    do i = 1, size(sz_list)
+        if (sz_list(i) <= n) call size_row(1000000_int64, sz_list(i))
+    end do
     write (output_unit, '(a)') ''
 
     write (output_unit, '(a)') '---- STREAM axis, ns per value (best of rounds); m = 10**6 ----'
@@ -146,11 +204,23 @@ program probe_random_resample
     write (output_unit, '(a)') '---- threaded, ns per value (best of rounds); m = 10**6 ----'
     write (output_unit, '(a)') &
         '     threads        pair       w32x2   pair speedup  w32x2 speedup'
-    call threaded_rows(1000000_int64, th_list)
+    call threaded_rows(1000000_int64, th_list(1:n_th))
+    write (output_unit, '(a)') ''
+
+    ! `int64` against `int32` on the same arm: the only difference is 8 bytes stored per value
+    ! against 4. Serially that is invisible; at a high thread count the store traffic of the narrow
+    ! arm approaches what the machine can sustain, and the int32 specifics halve it exactly.
+    write (output_unit, '(a)') '---- threaded STORE WIDTH: shipped fill, int64 vs int32 output ----'
+    write (output_unit, '(a)') &
+        '     threads       int64       int32    int64 GB/s   ratio'
+    call store_width_rows(1000000_int64, th_list(1:n_th))
+    write (output_unit, '(a)') ''
+#else
+    write (output_unit, '(a)') '---- threaded arms SKIPPED: this build has no OpenMP ----'
     write (output_unit, '(a)') ''
 #endif
 
-    deallocate (a, b, c, d)
+    deallocate (a, b, c, d, e32)
 
 contains
 
@@ -341,6 +411,11 @@ contains
     !! threshold is computed lazily, exactly as there: at a realistic width the branch is entered
     !! with probability around `2**-40`, so the rejection path never runs and is delegated to the
     !! shipped scalar draw rather than reimplemented.
+    !!
+    !! **Forked on `PF_INT128`, exactly as `int_reduce` is**, so that the arm previews the kernel the
+    !! library actually uses on this compiler rather than a kernel it does not have. Gate G2 -- the
+    !! restructured arm equalling the shipped fill element for element -- is what validates the
+    !! wrapping arm below, and it is the same guard the library's own wrapping sites rest on.
     pure function reduce64(x, s, seed, stream, draw) result(r)
         integer(int64), intent(in) :: x             !! the 64-bit candidate
         integer(int64), intent(in) :: s             !! the width, `m`
@@ -349,12 +424,16 @@ contains
         integer(int64), intent(in) :: draw          !! 1-based draw index
         integer(int64) :: r                         !! a uniform value in `[1, s]`
         integer(int64) :: low, high
+#ifdef PF_INT128
         integer(k128) :: p
         p = iand(int(x, k128), MASK64_128) * int(s, k128)
         high = int(ishft(p, -64), int64)
         low = fold64(iand(p, MASK64_128))
+#else
+        call mulhilo64_probe(x, s, low, high)
+#endif
         if (ult(low, s)) then
-            if (ult(low, int(mod(TWO64_128, int(s, k128)), int64))) then
+            if (ult(low, umod_2p64_probe(s))) then
                 r = pf_random_int_at(seed, stream, 1_int64, s, draw)     ! rejection: essentially never
                 return
             end if
@@ -362,6 +441,7 @@ contains
         r = 1_int64 + high
     end function reduce64
 
+#ifdef PF_INT128
     !> Folds a 128-bit value below `2**64` into the `integer(int64)` pattern representing it.
     pure function fold64(w) result(r)
         integer(k128), intent(in) :: w              !! a value in `[0, 2**64)`
@@ -372,6 +452,48 @@ contains
             r = int(w, int64)
         end if
     end function fold64
+#endif
+
+    !> `2**64 mod s`, for `0 < s < 2**62`, which is every width this probe uses.
+    !!
+    !! The library's `umod_2p64` also handles `s >= 2**63`, where the natural spelling is wrong; the
+    !! probe never reaches those widths (`m_list` tops out at `10**11`), so the restricted form is
+    !! written out rather than the general one, and the restriction is asserted by the caller's own
+    !! gates rather than assumed.
+    pure function umod_2p64_probe(s) result(t)
+        integer(int64), intent(in) :: s             !! the width, `0 < s < 2**62`
+        integer(int64) :: t                         !! `2**64 mod s`
+        integer(int64) :: a, h
+        a = -s                                      ! the unsigned pattern for `2**64 - s`
+        h = ishft(a, -1)                            ! logical shift, so `(2**64 - s)/2` and >= 0
+        t = 2_int64 * mod(h, s) + iand(a, 1_int64)  ! `2*r + bit` is below `2*s`, hence below 2**63
+        if (t >= s) t = t - s
+    end function umod_2p64_probe
+
+#ifndef PF_INT128
+    !> The full 128-bit product of two 64-bit patterns, from four 32-bit partial products.
+    !!
+    !! **A deliberate wrapping site, and the only one in this file.** Each 32x32 partial product is
+    !! below `2**64` but may exceed `2**63`, so the signed multiply wraps; the resulting bit pattern
+    !! is the correct unsigned one, and the shifts below are logical, so the limbs come out right.
+    !! This mirrors `src/parquet_random.f90`'s own `mulhilo64` on the same arm, which
+    !! `feature_risks.md` Risk-94 covers -- and here it is additionally checked every run by gate G2,
+    !! since a wrong product would make the restructured arm disagree with the shipped fill.
+    pure subroutine mulhilo64_probe(x, y, low, high)
+        integer(int64), intent(in) :: x             !! left operand, an unsigned 64-bit pattern
+        integer(int64), intent(in) :: y             !! right operand, an unsigned 64-bit pattern
+        integer(int64), intent(out) :: low          !! low 64 bits of the product
+        integer(int64), intent(out) :: high         !! high 64 bits of the product
+        integer(int64) :: x0, x1, y0, y1, p00, p01, p10, p11, mid
+        x0 = iand(x, M32); x1 = iand(ishft(x, -32), M32)
+        y0 = iand(y, M32); y1 = iand(ishft(y, -32), M32)
+        p00 = x0 * y0; p01 = x0 * y1; p10 = x1 * y0; p11 = x1 * y1
+        ! Below `3 * 2**32`, so this sum cannot overflow whatever the products did.
+        mid = iand(ishft(p00, -32), M32) + iand(p01, M32) + iand(p10, M32)
+        low = ior(ishft(iand(mid, M32), 32), iand(p00, M32))
+        high = p11 + iand(ishft(p01, -32), M32) + iand(ishft(p10, -32), M32) + ishft(mid, -32)
+    end subroutine mulhilo64_probe
+#endif
 
     !> `a < b` comparing both as unsigned 64-bit patterns.
     pure function ult(x, y) result(r)
@@ -657,12 +779,16 @@ contains
         integer(int64), intent(in) :: base          !! the range's low end
         integer(int64) :: r                         !! a uniform value in `[base, base+s-1]`
         integer(int64) :: low, high
+#ifdef PF_INT128
         integer(k128) :: p
         p = iand(int(x, k128), MASK64_128) * int(s, k128)
         high = int(ishft(p, -64), int64)
         low = fold64(iand(p, MASK64_128))
+#else
+        call mulhilo64_probe(x, s, low, high)
+#endif
         if (ult(low, s)) then
-            if (ult(low, int(mod(TWO64_128, int(s, k128)), int64))) then
+            if (ult(low, umod_2p64_probe(s))) then
                 r = pf_random_int_at(seed, stream, base, base + s - 1_int64, draw)
                 return
             end if
@@ -865,6 +991,140 @@ contains
         deallocate (vr, vs)
         flush (output_unit)
     end subroutine wrapper_tax_row
+
+    !> Refuses to print anything if the build cannot possibly be optimised.
+    !!
+    !! CLAUDE.md's benchmarking rules require this and also warn about the trap in it: "no `-O` in the
+    !! flags" means `-O0` for gfortran and flang, and means **the compiler's own `-O2` default** for
+    !! ifx, so a check that does not know the difference blocks a perfectly valid arm. The list of
+    !! compilers whose default is optimised is therefore kept short and evidence-based, and the flags
+    !! are read from `compiler_options()` rather than guessed.
+    subroutine assert_optimised()
+        character(len=:), allocatable :: opts, ver
+        opts = trim(compiler_options())
+        ver = trim(compiler_version())
+        if (index(opts, '-O') > 0) return           ! an explicit -O of any level
+        if (index(ver, 'Intel') > 0) return         ! ifx/icx default to -O2 with no flag
+        write (output_unit, '(a)') 'REFUSING TO RUN: no -O in the compile options and this compiler'
+        write (output_unit, '(a)') 'does not optimise by default, so every figure would be an -O0'
+        write (output_unit, '(a)') 'figure. Build with --profile release, or append -O3 to FPM_FFLAGS'
+        write (output_unit, '(a)') '(append, never assign -- it carries include paths).'
+        write (output_unit, '(a,a)') 'compiler       : ', ver
+        write (output_unit, '(a,a)') 'compile options: ', opts
+        error stop 1
+    end subroutine assert_optimised
+
+    !> The shipped fill alone, one call, at one array length -- the size-sweep row.
+    !!
+    !! Exists to reconcile the serial and bootstrap tables, which disagreed by 21 % on `fill` under
+    !! LTO on machine B and agreed exactly without it. Every arm here is library code called once per
+    !! replicate, so the only variable is how much memory the call touches.
+    subroutine size_row(mm, nn)
+        integer(int64), intent(in) :: mm            !! population size
+        integer(int64), intent(in) :: nn            !! array length for this row
+        real(real64) :: t(3), t0
+        integer :: r
+        integer(int64) :: reps, q
+        real(real64), allocatable :: vr(:)
+        allocate (vr(nn))
+        vr = 0.0_real64
+        reps = max(1_int64, n / nn)                 ! same total work in every row
+        t = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            do q = 1_int64, reps
+                call pf_random_fill_draws(SEED, q, b(1:nn), 1_int64, mm)
+            end do
+            t(1) = min(t(1), now() - t0)
+            t0 = now()
+            do q = 1_int64, reps
+                call pf_random_fill_draws(SEED, q, vr)
+            end do
+            t(2) = min(t(2), now() - t0)
+            t0 = now()
+            do q = 1_int64, reps
+                call pf_random_fill_draws(SEED, q, e32(1:nn), 1_int32, int(mm, int32))
+            end do
+            t(3) = min(t(3), now() - t0)
+        end do
+        write (output_unit, '(i12,3f12.2)') nn, &
+            (t(r) * 1.0e9_real64 / real(nn * reps, real64), r=1, 3)
+        deallocate (vr)
+        flush (output_unit)
+    end subroutine size_row
+
+    !> One timed threaded fill into an `integer(int64)` output.
+    !!
+    !! Each thread fills its own contiguous chunk and passes `draw = lo`, so the result is identical
+    !! to the single serial call element for element -- which is asserted, not assumed.
+    function timed_par_fill64(mm, nth) result(dt)
+        integer(int64), intent(in) :: mm            !! population size
+        integer, intent(in) :: nth                  !! thread count
+        real(real64) :: dt                          !! seconds
+        integer(int64) :: chunk, lo, hi
+        integer :: t
+        chunk = (n + int(nth, int64) - 1_int64) / int(nth, int64)
+        dt = now()
+        !$omp parallel do default(shared) private(t, lo, hi) schedule(static) num_threads(nth)
+        do t = 0, nth - 1
+            lo = int(t, int64) * chunk + 1_int64
+            hi = min(n, lo + chunk - 1_int64)
+            if (lo <= hi) call pf_random_fill_draws(SEED, STREAM, b(lo:hi), 1_int64, mm, lo)
+        end do
+        !$omp end parallel do
+        dt = now() - dt
+    end function timed_par_fill64
+
+    !> `timed_par_fill64` into an `integer(int32)` output: half the bytes stored, same values.
+    function timed_par_fill32(mm, nth) result(dt)
+        integer(int64), intent(in) :: mm            !! population size
+        integer, intent(in) :: nth                  !! thread count
+        real(real64) :: dt                          !! seconds
+        integer(int64) :: chunk, lo, hi
+        integer :: t
+        chunk = (n + int(nth, int64) - 1_int64) / int(nth, int64)
+        dt = now()
+        !$omp parallel do default(shared) private(t, lo, hi) schedule(static) num_threads(nth)
+        do t = 0, nth - 1
+            lo = int(t, int64) * chunk + 1_int64
+            hi = min(n, lo + chunk - 1_int64)
+            if (lo <= hi) call pf_random_fill_draws(SEED, STREAM, e32(lo:hi), 1_int32, &
+                                                    int(mm, int32), lo)
+        end do
+        !$omp end parallel do
+        dt = now() - dt
+    end function timed_par_fill32
+
+    !> The store-width rows: the same shipped fill into an `int64` and an `int32` array.
+    subroutine store_width_rows(mm, ths)
+        integer(int64), intent(in) :: mm            !! population size
+        integer, intent(in) :: ths(:)               !! thread counts to try
+        real(real64) :: t1, t2
+        integer :: i2, r
+        integer(int64) :: k
+        do i2 = 1, size(ths)
+            t1 = huge(1.0_real64)
+            t2 = huge(1.0_real64)
+            do r = 1, rounds
+                t1 = min(t1, timed_par_fill64(mm, ths(i2)))
+                t2 = min(t2, timed_par_fill32(mm, ths(i2)))
+            end do
+            ! Both outputs must equal the serial fill, and each other -- a threaded chunking bug
+            ! would otherwise show up as a speedup.
+            call pf_random_fill_draws(SEED, STREAM, a, 1_int64, mm)
+            call must_match(a, b, 'threaded int64 fill == serial fill')
+            do k = 1_int64, n
+                if (int(e32(k), int64) /= a(k)) then
+                    write (output_unit, '(a,i0)') 'GATE FAILED int32 fill == int64 fill at k = ', k
+                    error stop 1
+                end if
+            end do
+            write (output_unit, '(i12,2f12.2,f14.1,f8.2)') ths(i2), &
+                t1 * 1.0e9_real64 / real(n, real64), t2 * 1.0e9_real64 / real(n, real64), &
+                8.0_real64 * real(n, real64) / (t1 * 1.0e9_real64), t2 / t1
+            flush (output_unit)
+        end do
+    end subroutine store_width_rows
 
     !> Times the stream-axis arms. The `real64` stream fill is the control: it is one block per
     !! value with no reduction, so it is the floor this axis cannot go below.

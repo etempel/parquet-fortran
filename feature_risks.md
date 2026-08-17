@@ -4827,6 +4827,21 @@ three deliberately bad pairs — *why* a large odd multiplier is required: the w
 top `log2(p)` bits of the round function, so a small multiplier never carries the input's low bits up
 to where they are read, and the network degenerates.
 
+**And the construction itself may not be replaced by a SHUFFLE, which is the shape a future
+contributor is most likely to reach for.** Fisher-Yates is in every textbook, is shorter than this,
+and would pass every structural test in the suite — it produces a genuine uniform permutation, so
+bijectivity, position-uniformity, cycle structure and subset membership all come back clean. What it
+destroys is invisible to all of them: a shuffle is **order-dependent**, so element `k` stops being a
+function of `(seed, m, k)` alone. Three things go with it, none of which any existing assertion is
+phrased to catch — `pf_random_perm_at` could no longer answer for a single `k` without materialising
+the whole population (which is what makes a subset from a trillion-row population possible at all),
+prefix consistency would hold only by accident, and `threads=` would stop being bit-identical and
+become a value-changing argument, which CLAUDE.md's settings rule forbids outright. Fisher-Yates
+appears in this entry's own measurements **only as a control**, and that is the only role it may
+have. The same applies to key-and-argsort, which is reproducible but costs `O(m)` draws and `O(m)`
+memory whatever `size(idx)` is; `feature_random_phase2.md` §11 item 2 measured both and the shipped
+form is 1.9x-7.2x cheaper than either, serially, before any threading.
+
 ### Risk-112 — A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly
 
 Six sites in `src/parquet_random.f90`'s bulk fills computed a position as `base + k - 1_int64`, which

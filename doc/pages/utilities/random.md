@@ -342,6 +342,19 @@ has no way to avoid.
 `integer(int32)` array additionally requires `m <= huge(int32)`, since an element may be any value in
 `[1, m]`. A zero-sized array is a defined no-op and is not validated.
 
+**What a subset costs, since it is easy to expect the wrong thing in either direction.** The work is
+proportional to `size(idx)` and is **independent of `m`** — ten rows out of a trillion cost ten
+elements' work, which is the whole point of the construction and is what a shuffle cannot do. But it
+is also a *floor*: `size(idx)` elements cost `size(idx)` elements' work no matter how small the
+fraction `size(idx)/m` is, so there is no regime in which asking for a subset gets cheaper per
+element. Two smaller effects sit on top and neither is worth planning around: the permutation is
+built on a Feistel network over a rectangle slightly larger than `m`, so a value landing outside
+`[1, m]` is re-enciphered until it lands inside — bounded, averaging well under one extra round, and
+invisible unless `m` is a near-worst-case shape — and the first element of a call pays a one-off key
+schedule the rest of the call reuses. In practice a subset runs at a flat few nanoseconds per element
+at every `m` from thousands to 10¹⁵, which is why the tables here quote one figure rather than a
+curve.
+
 `threads=` changes only how fast the array is filled. See
 [Threads for a bulk permutation](../operating/settings.html#threads-for-a-bulk-permutation) for the
 cap, the work floor and the measured scaling.

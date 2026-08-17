@@ -173,6 +173,9 @@ something a reader is expected to have.
 | [Risk-106](#risk-106--a-stream-consumed-across-loop-iterations-is-irreproducible-and-nothing-fails) | A stream consumed across loop iterations is irreproducible, and nothing fails | 4 — covered |
 | [Risk-107](#risk-107--a-queue-shaped-stream-buffer-would-pull-the-buffer-state-into-the-contract) | A queue-shaped stream buffer would pull the buffer state into the contract | 4 — covered |
 | [Risk-108](#risk-108--an-integer-draw-taken-off-a-block-boundary-re-reads-words-already-handed-out) | An integer draw taken off a block boundary re-reads words already handed out | 4 — covered |
+| [Risk-109](#risk-109--the-bulk-permutation-and-the-scalar-entry-point-compute-the-same-function-by-different-routes) | The bulk permutation and the scalar entry point compute the same function by different routes | 4 — covered |
+| [Risk-110](#risk-110--the-permutations-round-count-round-function-and-width-rule-are-frozen-and-three-rounds-looks-free) | The permutation's round count, round function and width rule are frozen, and three rounds looks free | 4 — covered |
+| [Risk-111](#risk-111--a-bulk-permutation-that-silently-stopped-threading-would-fail-no-test) | A bulk permutation that silently stopped threading would fail no test | 3 — not testable |
 
 ---
 
@@ -180,7 +183,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-109**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-112**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -884,6 +887,38 @@ starts paying for itself.
 
 **Test.** None possible for the logging trap — it is a property of a dependency's output, and a test
 asserting that a log is misleading would be asserting the bug rather than guarding against it.
+
+
+### Risk-111 — A bulk permutation that silently stopped threading would fail no test
+
+`pf_random_permutation`/`pf_random_subset` resolve a thread count in `random_threads` and then branch
+on it: `nth <= 1` takes a serial call, anything else opens a team. **Change that branch to always
+take the serial arm and every assertion in the suite still passes** — the answer is identical by
+construction, because element `k` depends only on `(seed, m, k)`, so a wholly serial implementation
+is *correct*. The only symptom is that a 10**8-element permutation takes 9.6 seconds instead of
+0.11.
+
+**The near-miss that motivates this entry was exactly that shape and did ship into the working
+tree.** The `!$omp parallel do` was first written without a `num_threads(nth)` clause, so OpenMP
+opened the DEFAULT team — 384 threads on machine B — and then ran a loop with `nth` iterations. Every
+call paid to create and destroy a full team whatever the caller asked for: `threads=2` on a
+1000-element permutation cost **11.3 ms against 10 us serial**, a fixed ~6–11 ms on every call at
+every size. Every test passed, including the bit-identity test, because the *values* were right. It
+was found only by a probe measuring wall time per element, and it presented as an absurdly expensive
+work floor rather than as a missing clause.
+
+**Two rules follow.** `num_threads(nth)` is load-bearing on both fill sites and may not be dropped as
+redundant. And a timing claim about this path is checked with `app/probe_random_perm.f90
+--mode=floor`, never inferred from the suite.
+
+**Test.** None in the suite, deliberately: the observable is wall time, and a timing assertion is the
+one kind this project has consistently found to be worse than no assertion. What the suite *does*
+carry is the pair that bounds the damage — `test_perm_threads` (`test/test_random_omp.f90`) asserts
+the result is bit-identical at 1, 2, 3, 5, 8, 16 and 64 threads, so a threading defect can only ever
+cost time; and `test_random_parallel_min_effect` (`test/test_settings.f90`) asserts the resolver
+returns what the settings say, with a negative control in both directions. Neither can see whether
+the fill went on to honour the count. `parquet_debug_random_bulk_threads` re-computes the rule rather
+than reporting what a call did, and that limitation is stated on the hook itself.
 
 
 ## 4. Risks already covered, kept for what they still forbid
@@ -4657,3 +4692,70 @@ across all of `src/` and verified to fire by reverting one site. Two of the fixe
 (`tools/generate_parquet_tables.py`, `tools/generate_parquet_sorting.py`) rather than in the emitted
 files — a hand-edit to `src/parquet_sorting_keys.f90` was silently reverted by the next
 regeneration during this very fix, and the check is what caught it.
+
+### Risk-109 — The bulk permutation and the scalar entry point compute the same function by different routes
+
+`pf_random_perm_at(seed, m, k)` and `pf_random_permutation(perm, seed)` must agree at every `k`, and
+they reach the answer differently on purpose: the scalar form divides `x = k - 1` by `b` to recover
+the Feistel halves `(l, r)`, while the bulk form gets them from its own loop indices and never
+divides. **A disagreement is not a crash and not an invalid result — it is two different, equally
+plausible permutations**, each internally consistent, each passing a bijectivity check, differing
+only in which element lands where. Nothing downstream can notice.
+
+**The loop bounds are the highest-risk edit in the file.** `perm_range_*` walks `r` from `r0` to a
+precomputed `rhi` and advances `l` when the row is exhausted; an off-by-one anywhere in that
+produces an array that is not a permutation at all, or one that is a permutation of the wrong
+coordinates. `rhi` is computed before the inner loop specifically so that the `hi` bound never
+becomes a branch inside it.
+
+**One copy of the round loop, and that is the structural half of the guard.** `perm_feistel_lr` holds
+the rounds; `perm_feistel` is a two-line wrapper that supplies the division. Both entry points reach
+the same body, so the two cannot drift in the *cipher* — only in how they enumerate coordinates.
+Splitting that body in two "for clarity" would remove the property.
+
+**Test.** `test_perm_bulk` (`test/test_random.f90`) asserts the identity elementwise over a sweep of
+`m` chosen for the bulk form's own failure modes rather than the kernel's — `100` where `a*b == m`
+exactly so the fill stops on the last iteration of both loops, `5` and `7` where the cycle-walk is
+entered, `1000` where it stops mid-row — for both result kinds, and separately re-asserts
+bijectivity of the bulk output. `test_perm_threads` (`test/test_random_omp.f90`) extends it to every
+thread count, asserting against the *scalar* form rather than against a one-thread bulk run, which is
+what makes it the outermost binding of the whole construction. This test may not be deleted as
+redundant on the grounds that the identity holds by construction: that is precisely the reason it
+must be kept, since a restructure is what would break it.
+
+### Risk-110 — The permutation's round count, round function and width rule are frozen, and three rounds looks free
+
+`pf_random_perm_algorithm` (`feistel-mix2-4/zaxzb/v1`) covers five things: the construction, the width
+rule (`a = ceil(sqrt(m))`, `b = ceil(m/a)`), the round count (4), the round function (`perm_mix2`) and
+the key derivation. Changing any of them changes every value the module can produce for every seed.
+
+**A future contributor optimising this will find three rounds tempting, and every marginal statistic
+will agree with them.** Three rounds is 25 % cheaper and passes fixed-point chi-square, cycle counts,
+position uniformity and subset membership. It is caught only by a **structural** distinguisher —
+asking whether two inputs sharing a coordinate produce outputs sharing one, enumerated exhaustively
+over the raw domain and calibrated against a Fisher–Yates control. Under that test three rounds leaks
+in **every one of six independent key sets, always in the same relation and always in the same
+direction** (z = 10–19), while four rounds wanders between relations and straddles the control. Two
+rounds is broken outright and provably so: after two rounds the left output is `(l + F1(r)) mod a`, so
+inputs sharing `r` can never share a left output — measured exactly 0.
+
+**An odd round count is disqualified for a separate, structural reason** that no statistic will show:
+the two factors swap every round, so after an odd count the state is in `Z_b × Z_a` and the output is
+encoded against transposed factors. The real choice was only ever 2, 4 or 6.
+
+**`perm_mix2`'s 31-bit masks are load-bearing and must not be simplified.** Removing them restores a
+wrapping signed multiply, and Risk-94 records this repository being caught with exactly that — the
+wrapping *measured* correct on the compiler in use, and the optimiser still used the overflow's
+undefinedness to delete a branch two functions away. The masks were measured free on gfortran and
+slightly faster on ifx, so there is no cost to weigh against.
+
+**Test.** `test_perm_golden` (`test/test_random.f90`), against 27 vectors from
+`tools/generate_random_perm_vectors.py` — an **arbitrary-precision Python model of the contract**,
+transcribed from the specification rather than from the Fortran, whose assertions also prove no
+intermediate reached 2⁶³. That file is the only thing that catches a round-count change:
+`test_perm_bijection` does **not**, and this was confirmed by mutation rather than assumed — with the
+vectors removed, `perm_rounds = 3` survived the entire suite, because an odd count still yields a
+bijective encoding of the same domain. Mutation testing over the round count, the multiply-shift
+mask, `perm_c1` and the width rule now kills all four; the conditional subtract is killed too, but as
+a **hang** rather than a failure, since removing it destroys the round's bijectivity and the
+cycle-walk orbit never re-enters range.

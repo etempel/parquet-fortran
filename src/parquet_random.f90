@@ -61,6 +61,13 @@
 module parquet_random
 
     use iso_fortran_env, only: int32, int64, real32, real64
+    ! parquet_settings_base, NOT parquet_settings: that one imports parquet_bindings to mirror the
+    ! C++-side knobs, so importing it here would make a program whose only dependency is this
+    ! pure-Fortran generator fail to link against the whole of parquet_wrapper.cpp. The leaf module
+    ! exists for exactly this, and parquet_strings reaches it the same way -- see its own header.
+    use parquet_settings_base, only: parquet_get_random_threads, &
+                                     parquet_get_random_parallel_min_elements, &
+                                     parquet_auto_thread_count, parquet_nested_team_unsafe
 
     implicit none
     private
@@ -75,9 +82,12 @@ module parquet_random
     public :: pf_random_seed
     public :: pf_random_key
     public :: parquet_debug_random_uses_int128
+    public :: parquet_debug_random_bulk_threads
     public :: parquet_debug_random_block
     public :: pf_random_perm_algorithm
     public :: pf_random_perm_at
+    public :: pf_random_permutation
+    public :: pf_random_subset
 
     !> Identifies the algorithm together with every mapping this module freezes -- the cipher, the
     !! key and counter layout, the word order, the integer rule and its retry key. Its value changes
@@ -338,6 +348,72 @@ module parquet_random
         module procedure pf_random_perm_at_i32
         module procedure pf_random_perm_at_i64
     end interface pf_random_perm_at
+
+    !> Fills `perm` with the whole permutation of `1 .. size(perm)` under `seed`.
+    !!
+    !! The bulk form of `pf_random_perm_at`, and an **identity rather than a second algorithm**:
+    !! `perm(k)` equals `pf_random_perm_at(seed, size(perm), k)` for every `k`, so the two may be
+    !! mixed freely and a prefix of one is a prefix of the other. That is the same relationship
+    !! `pf_random_at` and `pf_random_fill_draws` already have, and it is what keeps the two forms
+    !! from drifting apart under a later optimisation.
+    !!
+    !! `perm` is a rank-1 `integer(int32)` or `integer(int64)` array, `intent(out)`; `seed` is
+    !! `integer(int64)`. A zero-sized `perm` is a defined no-op.
+    !!
+    !! **`threads` is optional and changes only how fast the array is filled, never what is in
+    !! it** -- and that is provable here rather than merely intended, which is unusual for a
+    !! threading argument. `perm(k)` is a pure function of `(seed, size(perm), k)` and reads
+    !! nothing another element writes, so the 1-thread and N-thread results are bit-identical and
+    !! a program may switch thread counts while debugging without its permutation changing under
+    !! it. Absent means automatic: as many threads as OpenMP offers, capped by
+    !! `parquet_set_random_threads`, and **1 inside an OpenMP parallel region**, since a nested
+    !! region is the caller's business. An explicit `threads=` is honoured there too.
+    !!
+    !! **A work floor applies to both, and it is not a tuning detail.** Below
+    !! `parquet_set_random_parallel_min_elements` (default 1000) elements per thread the call runs
+    !! serially, because threading a small permutation is measurably *slower* than not threading
+    !! it -- so `threads=8` on a 100-element array is honoured by being declined.
+    !!
+    !! **It is about 2.4x cheaper per element than calling the elemental form `size(perm)` times**
+    !! (machine B, gfortran 14.2.1, `--profile release`: 9.9 ns against 24.1 ns at `m = 10**8`), for
+    !! two structural reasons rather than any tuning. Enumerating the domain in order hands the loop
+    !! the `(l, r)` split that the scalar form has to recover with an integer division; and, the
+    !! larger of the two, the width rule and the key schedule are derived once per call instead of
+    !! once per element, which a `pure elemental` function has no way to avoid. The values are
+    !! unchanged by either -- only the route to them is.
+    interface pf_random_permutation
+        module procedure pf_random_permutation_i32
+        module procedure pf_random_permutation_i64
+    end interface pf_random_permutation
+
+    !> Fills `idx` with the first `size(idx)` elements of the permutation of `1 .. m` under `seed`.
+    !!
+    !! A uniform random subset of size `size(idx)` drawn without replacement, in uniform random
+    !! order -- and it costs `O(size(idx))` rather than `O(m)`, which is the reason this permutation
+    !! is coordinate-addressed at all: 1000 rows out of `10**12` reads 1000 elements and never
+    !! materialises the population. `pf_random_subset(idx, size(idx), seed)` **is**
+    !! `pf_random_permutation(idx, seed)`, and a subset of size `n` is a prefix of one of size `2n`.
+    !!
+    !! `idx` is a rank-1 `integer(int32)` or `integer(int64)` array, `intent(out)`; `m` is
+    !! `integer(int32)` or `integer(int64)`; `seed` is `integer(int64)`. A zero-sized `idx` is a
+    !! defined no-op and is not validated -- it asks for nothing, so no precondition applies to it.
+    !! `threads` behaves exactly as it does on `pf_random_permutation`, including the work floor;
+    !! see there. Note the floor is measured in elements PRODUCED, `size(idx)`, not in `m` -- a
+    !! 100-element subset of a population of `10**12` is 100 elements of work.
+    !!
+    !! **Three preconditions, all of which abort rather than truncate or wrap** when `idx` is
+    !! non-empty: `m >= 1`; `size(idx) <= m`, since a subset drawn without replacement cannot be
+    !! larger than its population; and -- for an `integer(int32)` `idx` only -- `m <= huge(int32)`,
+    !! since an element may be any value in `[1, m]` and one above `huge(int32)` has nowhere to go.
+    !! The last of those is why the `integer(int32)`-array/`integer(int64)`-`m` pairing is accepted
+    !! at compile time and rejected at run time: refusing it in the interface would make a perfectly
+    !! ordinary `integer :: m` fail to compile against an `integer(int64)` array.
+    interface pf_random_subset
+        module procedure pf_random_subset_i32_i32
+        module procedure pf_random_subset_i32_i64
+        module procedure pf_random_subset_i64_i32
+        module procedure pf_random_subset_i64_i64
+    end interface pf_random_subset
 
     !> Derives an independent seed from a seed and a label, so one seed can fan out into families.
     !!
@@ -1810,9 +1886,9 @@ contains
     !> The round keys, derived from the seed once per call.
     pure subroutine perm_round_keys(seed, rk)
         integer(int64), intent(in) :: seed          !! the permutation family's seed
-        integer(int64), intent(out) :: rk(:)        !! one key per round
+        integer(int64), intent(out) :: rk(perm_rounds)  !! one key per round
         integer :: j
-        do j = 1, size(rk)
+        do j = 1, perm_rounds
             rk(j) = perm_mix2(int(j, int64) * perm_c1, iand(seed, M32))
             rk(j) = ieor(rk(j), perm_mix2(int(j, int64), iand(ishft(seed, -32), M32)))
         end do
@@ -1820,23 +1896,48 @@ contains
 
     !> One application of the network on `[0, a*b)`; a bijection for any round function.
     !!
-    !! The factors swap every round, which is why `perm_rounds` must be even. Two details are worth
-    !! keeping: `t = l + F` needs at most **one** conditional subtraction because `l < p` and
-    !! `F < p`, so no division is needed to reduce it; and the multiply-shift takes the mixed word
-    !! down to 31 bits before multiplying by `p`, which bounds that product below `2**63` for every
-    !! `m` a caller can name -- shifting a full 32-bit word instead would overflow above `m ~ 2**62`.
+    !! Splits `x` into `(l, r)` -- the one integer division on the scalar path -- and hands off to
+    !! `perm_feistel_lr`, which is where the rounds actually are. The bulk fill skips this split
+    !! entirely because its loop indices already are `(l, r)`; see that function's own note.
     pure function perm_feistel(rk, a, b, x) result(y)
-        integer(int64), intent(in) :: rk(:)         !! the round keys
+        integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
         integer(int64), intent(in) :: a             !! left factor
         integer(int64), intent(in) :: b             !! right factor
         integer(int64), intent(in) :: x             !! input in `[0, a*b)`
+        integer(int64) :: y                         !! output in `[0, a*b)`
+        integer(int64) :: l, r
+        l = x / b
+        r = x - l * b
+        y = perm_feistel_lr(rk, a, b, l, r)
+    end function perm_feistel
+
+    !> The rounds themselves, from an ALREADY-SPLIT input -- the shape the bulk fill uses.
+    !!
+    !! **There is exactly one copy of the round loop in this module, and it is here.** The scalar
+    !! and bulk entry points differ only in how they obtain `(l, r)`, so sharing this makes their
+    !! agreement structural rather than something two implementations have to be kept equal by
+    !! testing. `feature_risks.md` Risk-109 is the rule that it stays that way.
+    !!
+    !! The factors swap every round, which is why `perm_rounds` must be even. Three details are
+    !! worth keeping: `t = l + F` needs at most **one** conditional subtraction because `l < p` and
+    !! `F < p`, so no division is needed to reduce it; that subtraction is also what makes the round
+    !! a bijection at all, and removing it makes the caller's cycle-walk **non-terminating** rather
+    !! than merely wrong; and the multiply-shift takes the mixed word down to 31 bits before
+    !! multiplying by `p`, which bounds that product below `2**63` for every `m` a caller can name --
+    !! shifting a full 32-bit word instead would overflow above `m ~ 2**62`.
+    pure function perm_feistel_lr(rk, a, b, l0, r0) result(y)
+        integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: l0            !! left half of the input, in `[0, a)`
+        integer(int64), intent(in) :: r0            !! right half of the input, in `[0, b)`
         integer(int64) :: y                         !! output in `[0, a*b)`
         integer(int64) :: l, r, t, p, q, sw
         integer :: j
         p = a
         q = b
-        l = x / q
-        r = x - l * q
+        l = l0
+        r = r0
         do j = 1, perm_rounds
             t = l + ishft(iand(perm_mix2(rk(j), r), perm_m31) * p, -31)
             if (t >= p) t = t - p
@@ -1847,7 +1948,324 @@ contains
             q = sw
         end do
         y = l * q + r
-    end function perm_feistel
+    end function perm_feistel_lr
+
+    ! ---- The bulk forms ----
+
+    !> `pf_random_permutation` for an `integer(int32)` result array.
+    subroutine pf_random_permutation_i32(perm, seed, threads)
+        integer(int32), intent(out) :: perm(:)      !! filled with the permutation of `1 .. size(perm)`
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer, intent(in), optional :: threads    !! thread request; absent means automatic
+        call perm_fill_i32(seed, size(perm, kind=int64), size(perm, kind=int64), perm, threads)
+    end subroutine pf_random_permutation_i32
+
+    !> `pf_random_permutation` for an `integer(int64)` result array.
+    subroutine pf_random_permutation_i64(perm, seed, threads)
+        integer(int64), intent(out) :: perm(:)      !! filled with the permutation of `1 .. size(perm)`
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer, intent(in), optional :: threads    !! thread request; absent means automatic
+        call perm_fill_i64(seed, size(perm, kind=int64), size(perm, kind=int64), perm, threads)
+    end subroutine pf_random_permutation_i64
+
+    !> `pf_random_subset` for an `integer(int32)` result and an `integer(int32)` population size.
+    subroutine pf_random_subset_i32_i32(idx, m, seed, threads)
+        integer(int32), intent(out) :: idx(:)       !! filled with the first `size(idx)` elements
+        integer(int32), intent(in) :: m             !! population size; the permutation is of `1 .. m`
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer, intent(in), optional :: threads    !! thread request; absent means automatic
+        call subset_check(size(idx, kind=int64), int(m, int64), .true.)
+        call perm_fill_i32(seed, int(m, int64), size(idx, kind=int64), idx, threads)
+    end subroutine pf_random_subset_i32_i32
+
+    !> `pf_random_subset` for an `integer(int32)` result and an `integer(int64)` population size.
+    subroutine pf_random_subset_i32_i64(idx, m, seed, threads)
+        integer(int32), intent(out) :: idx(:)       !! filled with the first `size(idx)` elements
+        integer(int64), intent(in) :: m             !! population size; must not exceed `huge(int32)`
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer, intent(in), optional :: threads    !! thread request; absent means automatic
+        call subset_check(size(idx, kind=int64), m, .true.)
+        call perm_fill_i32(seed, m, size(idx, kind=int64), idx, threads)
+    end subroutine pf_random_subset_i32_i64
+
+    !> `pf_random_subset` for an `integer(int64)` result and an `integer(int32)` population size.
+    subroutine pf_random_subset_i64_i32(idx, m, seed, threads)
+        integer(int64), intent(out) :: idx(:)       !! filled with the first `size(idx)` elements
+        integer(int32), intent(in) :: m             !! population size; the permutation is of `1 .. m`
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer, intent(in), optional :: threads    !! thread request; absent means automatic
+        call subset_check(size(idx, kind=int64), int(m, int64), .false.)
+        call perm_fill_i64(seed, int(m, int64), size(idx, kind=int64), idx, threads)
+    end subroutine pf_random_subset_i64_i32
+
+    !> `pf_random_subset` for an `integer(int64)` result and an `integer(int64)` population size.
+    subroutine pf_random_subset_i64_i64(idx, m, seed, threads)
+        integer(int64), intent(out) :: idx(:)       !! filled with the first `size(idx)` elements
+        integer(int64), intent(in) :: m             !! population size; the permutation is of `1 .. m`
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer, intent(in), optional :: threads    !! thread request; absent means automatic
+        call subset_check(size(idx, kind=int64), m, .false.)
+        call perm_fill_i64(seed, m, size(idx, kind=int64), idx, threads)
+    end subroutine pf_random_subset_i64_i64
+
+    !> The `pf_random_subset` preconditions, in one place so all four specifics state them alike.
+    !!
+    !! A zero-sized request returns without checking anything: it asks for no element, so neither
+    !! `m` nor the representability of an element is a question about it.
+    subroutine subset_check(n, m, narrow)
+        integer(int64), intent(in) :: n             !! requested subset size, `size(idx)`
+        integer(int64), intent(in) :: m             !! population size, widened
+        logical, intent(in) :: narrow               !! `.true.` when `idx` is `integer(int32)`
+        character(len=32) :: t1, t2
+        if (n <= 0_int64) return
+        if (m < 1_int64) then
+            write (t1, '(i0)') m
+            error stop "pf_random_subset: population size m must be at least 1, got " // trim(t1)
+        end if
+        if (n > m) then
+            write (t1, '(i0)') n
+            write (t2, '(i0)') m
+            error stop "pf_random_subset: subset size " // trim(t1) // &
+                       " exceeds population size " // trim(t2)
+        end if
+        if (narrow .and. m > int(huge(1_int32), int64)) then
+            write (t1, '(i0)') m
+            error stop "pf_random_subset: population size " // trim(t1) // &
+                       " exceeds huge(int32); the elements need an integer(int64) array"
+        end if
+    end subroutine subset_check
+
+    !> How many threads a bulk permutation of `n` elements should use.
+    !!
+    !! **Both OpenMP rules come from `parquet_settings_base`** -- `parquet_auto_thread_count` for
+    !! the automatic answer and `parquet_nested_team_unsafe` for the Risk-104 deadlock guard on an
+    !! explicit request. This module deliberately holds no copy of either; CLAUDE.md's auto-threading
+    !! note names a further copy as the mistake, and `pf_sort_threads` asks the identical questions.
+    !!
+    !! What is specific to this module is the **work floor**. It applies to an explicit `threads=`
+    !! as well as to the automatic answer, because it asks whether the array is worth splitting at
+    !! all -- a property of the work, not of the caller's intent -- and threading a small
+    !! permutation is measurably *worse* than not threading it.
+    integer function random_threads(n, threads) result(nth)
+        integer(int64), intent(in) :: n             !! elements to produce
+        integer, intent(in), optional :: threads    !! caller's request; absent means automatic
+        integer(int64) :: want, floor_per, by_work
+        if (present(threads)) then
+            want = max(1_int64, int(threads, int64))
+            if (parquet_nested_team_unsafe()) want = 1_int64
+        else
+            want = int(parquet_auto_thread_count(parquet_get_random_threads()), int64)
+        end if
+        floor_per = parquet_get_random_parallel_min_elements()
+        if (floor_per > 0_int64) then
+            by_work = n / floor_per                 ! how many threads this much work can feed
+            if (want > by_work) want = by_work
+        end if
+        if (want > n) want = n                      ! never more threads than elements
+        if (want < 1_int64) want = 1_int64
+        nth = int(want, int32)
+    end function random_threads
+
+    !> Exposes `random_threads` for testing. **Test-only**; no library code calls it.
+    !!
+    !! Public because the rule it reports lives behind a private procedure in a module with no
+    !! `bind(C)` surface, so the C++-side debug-hook convention this library prefers is unavailable
+    !! here -- the same position `parquet_debug_string_bulk_threads` is in, and this mirrors it
+    !! deliberately rather than inventing a second shape. See CLAUDE.md, "A Fortran-side debug hook
+    !! has to be PUBLIC, so prefer a C++ one".
+    !!
+    !! **It RE-COMPUTES the rule rather than reporting what a call did**, which is the same
+    !! limitation the string-column hook has and is worth stating: it can assert that
+    !! `parquet_set_random_parallel_min_elements` changes the answer, and it cannot assert that the
+    !! fill went on to honour that answer. The bit-identity of the 1-thread and N-thread results is
+    !! what the suite checks instead, and `app/probe_random_perm.f90 --mode=floor` is what shows the
+    !! threading actually happens. See `feature_risks.md` Risk-111.
+    integer function parquet_debug_random_bulk_threads(n, threads) result(nth)
+        integer(int64), intent(in) :: n             !! elements a bulk call would produce
+        integer, intent(in), optional :: threads    !! the caller's request, if any
+        nth = random_threads(n, threads)
+    end function parquet_debug_random_bulk_threads
+
+    !> The bulk permutation fill, `integer(int32)` result. `perm_fill_i64` carries the design note.
+    subroutine perm_fill_i32(seed, m, n, v, threads)
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer(int64), intent(in) :: m             !! population size, at least 1 when `n > 0`
+        integer(int64), intent(in) :: n             !! how many elements to produce; `0 <= n <= m`
+        integer(int32), intent(out) :: v(:)         !! filled with elements `1 .. n`
+        integer, intent(in), optional :: threads    !! caller's request; absent means automatic
+        integer(int64) :: a, b, rk(perm_rounds), lo, hi, chunk
+        integer :: nth, t
+        if (n <= 0_int64) return
+        if (m <= 1_int64) then
+            v(1) = 1_int32                          ! `n <= m` leaves only n == m == 1 here
+            return
+        end if
+        call perm_factors(m, a, b)
+        call perm_round_keys(seed, rk)
+        nth = random_threads(n, threads)
+        if (nth <= 1) then
+            call perm_range_i32(m, a, b, rk, 1_int64, n, v)
+            return
+        end if
+        chunk = (n + int(nth, int64) - 1_int64) / int(nth, int64)
+#ifdef _OPENMP
+        ! **`num_threads(nth)` is load-bearing, not decoration.** Without it OpenMP opens the
+        ! DEFAULT team -- 384 threads on machine B -- and then runs a loop with `nth`
+        ! iterations, so every call pays to create and destroy a full team whatever the
+        ! caller asked for. Measured before the clause was added: `threads=2` on a
+        ! 1000-element permutation cost 11.3 ms against 10 us serial, a fixed ~6-11 ms on
+        ! every call at every size, which reads as an absurdly expensive work floor rather
+        ! than as a missing clause.
+        !$omp parallel do default(shared) private(t, lo, hi) schedule(static) num_threads(nth)
+#endif
+        do t = 0, nth - 1
+            lo = int(t, int64) * chunk + 1_int64
+            hi = min(n, lo + chunk - 1_int64)
+            if (lo <= hi) call perm_range_i32(m, a, b, rk, lo, hi, v)
+        end do
+#ifdef _OPENMP
+        !$omp end parallel do
+#endif
+    end subroutine perm_fill_i32
+
+    !> Fills `v(lo:hi)` with elements `lo .. hi` of the permutation. `perm_range_i64` has the note.
+    pure subroutine perm_range_i32(m, a, b, rk, lo, hi, v)
+        integer(int64), intent(in) :: m             !! population size, at least 2
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
+        integer(int64), intent(in) :: lo            !! first element index, 1-based
+        integer(int64), intent(in) :: hi            !! last element index, 1-based
+        integer(int32), intent(inout) :: v(:)       !! only `v(lo:hi)` is written
+        integer(int64) :: l, r0, rhi, y, k, r
+        k = lo
+        l = (lo - 1_int64) / b
+        r0 = (lo - 1_int64) - l * b
+        do while (k <= hi)
+            rhi = min(b - 1_int64, r0 + (hi - k))
+            do r = r0, rhi
+                y = perm_feistel_lr(rk, a, b, l, r)
+                do while (y >= m)
+                    y = perm_feistel(rk, a, b, y)
+                end do
+                v(k + (r - r0)) = int(y + 1_int64, int32)
+            end do
+            k = k + (rhi - r0 + 1_int64)
+            r0 = 0_int64
+            l = l + 1_int64
+        end do
+    end subroutine perm_range_i32
+
+    !> The bulk permutation fill, `integer(int64)` result -- and the division-free `(l, r)` shape.
+    !!
+    !! **Two things move out of the per-element path here, and the smaller one is the division.**
+    !!
+    !! The division first, since it names the shape: `perm_at_impl` must compute `l = x/b` and
+    !! `r = x - l*b` for each `k`, whereas walking `l` in the outer loop and `r` in the inner one
+    !! enumerates `x = l*b + r` as `0, 1, 2, ...` -- exactly the sequence of `k - 1` the caller
+    !! asked for, with the split already in hand.
+    !!
+    !! **The larger saving is the SETUP, and it is easy to miss because it is not in this loop.**
+    !! `pf_random_perm_at` is `pure elemental` and stateless, so every single call re-derives the
+    !! width rule (`perm_factors`: a `sqrt` and two correction loops) and the whole key schedule
+    !! (`perm_round_keys`: **eight** `perm_mix2` evaluations, against the four the network itself
+    !! performs). Here both happen once per call, whatever `n` is. That is why the measured gap is
+    !! **2.4x** -- machine B, gfortran 14.2.1, `--profile release`: 24.1 ns per element scalar
+    !! against 9.9 ns bulk at `m = 10**8`, and the same ratio at 1000 -- rather than the ~20 % a
+    !! removed division on its own would explain.
+    !!
+    !! **The cycle-walk keeps the division and that is fine**, because it is entered essentially
+    !! never -- 1.0000 applications per element at every size measured -- so it reuses the scalar
+    !! `perm_feistel` rather than duplicating a split-aware walk.
+    !!
+    !! **The loop bounds are the highest-risk edit in this file.** An off-by-one produces an array
+    !! that looks entirely plausible and is not a permutation. `feature_risks.md` Risk-109.
+    !!
+    !! **Threading is answer-invariant here by construction, not by care.** Element `k` is a pure
+    !! function of `(seed, m, k)` and reads nothing any other element writes, so splitting `1 .. n`
+    !! into contiguous chunks cannot change a value -- which is why `threads=` is admissible on this
+    !! call at all, and why the 1-thread and N-thread outputs are asserted bit-identical rather than
+    !! merely statistically similar. The factors and the round keys are derived **before** the
+    !! region and shared read-only, so each thread pays one division at entry and none per element.
+    subroutine perm_fill_i64(seed, m, n, v, threads)
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer(int64), intent(in) :: m             !! population size, at least 1 when `n > 0`
+        integer(int64), intent(in) :: n             !! how many elements to produce; `0 <= n <= m`
+        integer(int64), intent(out) :: v(:)         !! filled with elements `1 .. n`
+        integer, intent(in), optional :: threads    !! caller's request; absent means automatic
+        integer(int64) :: a, b, rk(perm_rounds), lo, hi, chunk
+        integer :: nth, t
+        if (n <= 0_int64) return
+        if (m <= 1_int64) then
+            v(1) = 1_int64                          ! `n <= m` leaves only n == m == 1 here
+            return
+        end if
+        call perm_factors(m, a, b)
+        call perm_round_keys(seed, rk)
+        nth = random_threads(n, threads)
+        if (nth <= 1) then
+            call perm_range_i64(m, a, b, rk, 1_int64, n, v)
+            return
+        end if
+        chunk = (n + int(nth, int64) - 1_int64) / int(nth, int64)
+#ifdef _OPENMP
+        ! **`num_threads(nth)` is load-bearing, not decoration.** Without it OpenMP opens the
+        ! DEFAULT team -- 384 threads on machine B -- and then runs a loop with `nth`
+        ! iterations, so every call pays to create and destroy a full team whatever the
+        ! caller asked for. Measured before the clause was added: `threads=2` on a
+        ! 1000-element permutation cost 11.3 ms against 10 us serial, a fixed ~6-11 ms on
+        ! every call at every size, which reads as an absurdly expensive work floor rather
+        ! than as a missing clause.
+        !$omp parallel do default(shared) private(t, lo, hi) schedule(static) num_threads(nth)
+#endif
+        do t = 0, nth - 1
+            lo = int(t, int64) * chunk + 1_int64
+            hi = min(n, lo + chunk - 1_int64)
+            if (lo <= hi) call perm_range_i64(m, a, b, rk, lo, hi, v)
+        end do
+#ifdef _OPENMP
+        !$omp end parallel do
+#endif
+    end subroutine perm_fill_i64
+
+    !> Fills `v(lo:hi)` with elements `lo .. hi` of the permutation, from an arbitrary start.
+    !!
+    !! **This is the only place elements are produced**, serial and threaded alike -- a thread's
+    !! chunk and the whole array are the same call with different bounds. That is deliberate: two
+    !! shapes for one computation is how a threaded path comes to disagree with its serial twin
+    !! over some boundary nobody tested.
+    !!
+    !! **One division per CALL, not per element.** Entering at `lo` needs `(l, r)` for
+    !! `x = lo - 1`, which costs a division once; from there the pair advances by the loop
+    !! structure exactly as the whole-array walk does. The inner loop is a counted loop with an
+    !! affine store and no early exit -- `rhi` is computed up front so the `hi` bound never becomes
+    !! a branch inside it, which is what a compiler needs to have any chance of vectorising it.
+    pure subroutine perm_range_i64(m, a, b, rk, lo, hi, v)
+        integer(int64), intent(in) :: m             !! population size, at least 2
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
+        integer(int64), intent(in) :: lo            !! first element index, 1-based
+        integer(int64), intent(in) :: hi            !! last element index, 1-based
+        integer(int64), intent(inout) :: v(:)       !! only `v(lo:hi)` is written
+        integer(int64) :: l, r0, rhi, y, k, r
+        k = lo
+        l = (lo - 1_int64) / b
+        r0 = (lo - 1_int64) - l * b
+        do while (k <= hi)
+            rhi = min(b - 1_int64, r0 + (hi - k))
+            do r = r0, rhi
+                y = perm_feistel_lr(rk, a, b, l, r)
+                do while (y >= m)
+                    y = perm_feistel(rk, a, b, y)
+                end do
+                v(k + (r - r0)) = y + 1_int64
+            end do
+            k = k + (rhi - r0 + 1_int64)
+            r0 = 0_int64
+            l = l + 1_int64
+        end do
+    end subroutine perm_range_i64
 
     ! ================================================================================
     ! Tier 1 -- the stateful stream

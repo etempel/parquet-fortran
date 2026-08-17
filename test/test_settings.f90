@@ -85,6 +85,10 @@ contains
             new_unittest("table_threads caps the parallel per-column rewrite", test_table_threads_effect), &
             new_unittest("string_threads caps what one string column resolves to", &
                 test_string_threads_effect), &
+            new_unittest("random_threads caps what a bulk permutation resolves to", &
+                test_random_threads_effect), &
+            new_unittest("random_parallel_min_elements decides whether a bulk permutation threads", &
+                test_random_parallel_min_effect), &
             new_unittest("the string work floor is a payload floor, overridable for tests", &
                 test_string_work_floor), &
             new_unittest("a string operation stands down inside a parallel region", &
@@ -264,6 +268,11 @@ contains
         if (allocated(error)) return
         call check(error, parquet_get_prefetch_threads() == 0, "prefetch_threads defaults to 0 (automatic)")
         if (allocated(error)) return
+        call check(error, parquet_get_random_threads() == 0, "random_threads defaults to 0 (automatic)")
+        if (allocated(error)) return
+        call check(error, parquet_get_random_parallel_min_elements() == 1000_int64, &
+            "random_parallel_min_elements defaults to 1000 elements per thread")
+        if (allocated(error)) return
         call parquet_get_default_compression(codec)
         call check(error, codec == "zstd", "default_compression defaults to zstd")
         if (allocated(error)) return
@@ -321,6 +330,8 @@ contains
         call parquet_set_sort_threads(6)
         call parquet_set_prefetch_threads(2)
         call parquet_set_string_threads(3)
+        call parquet_set_random_threads(4)
+        call parquet_set_random_parallel_min_elements(77_int64)
         call parquet_set_default_compression("gzip")
         call parquet_set_default_compression_level(9)
         call parquet_set_default_use_threads(.false.)
@@ -336,6 +347,11 @@ contains
         call check(error, parquet_get_prefetch_threads() == 0, "reset restores prefetch_threads")
         if (allocated(error)) return
         call check(error, parquet_get_string_threads() == 0, "reset restores string_threads")
+        if (allocated(error)) return
+        call check(error, parquet_get_random_threads() == 0, "reset restores random_threads")
+        if (allocated(error)) return
+        call check(error, parquet_get_random_parallel_min_elements() == 1000_int64, &
+            "reset restores random_parallel_min_elements")
         if (allocated(error)) return
         call parquet_get_default_compression(codec)
         call check(error, codec == "zstd", "reset restores default_compression")
@@ -885,6 +901,8 @@ contains
         call check(error, parquet_get_arrow_threads() == 3, "set_threads must resize Arrow's pool")
         if (.not. allocated(error)) call check(error, parquet_get_sort_threads() == 3, &
             "set_threads must set the sort cap")
+        if (.not. allocated(error)) call check(error, parquet_get_random_threads() == 3, &
+            "set_threads must set the random cap")
         if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 3, &
             "set_threads must set the prefetch cap")
         ! The fourth and fifth knobs. A forgotten call is invisible without its own assertion, since
@@ -943,6 +961,8 @@ contains
         call unset_env("PARQUET_FORTRAN_PREFETCH_THREADS")
         call unset_env("PARQUET_FORTRAN_TABLE_THREADS")
         call unset_env("PARQUET_FORTRAN_STRING_THREADS")
+        call unset_env("PARQUET_FORTRAN_RANDOM_THREADS")
+        call unset_env("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_PATH")
         call unset_env("PARQUET_FORTRAN_SORT_RADIX_PATH")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT")
@@ -975,6 +995,8 @@ contains
         call set_env("PARQUET_FORTRAN_PREFETCH_THREADS", "2")
         call set_env("PARQUET_FORTRAN_TABLE_THREADS", "7")
         call set_env("PARQUET_FORTRAN_STRING_THREADS", "5")
+        call set_env("PARQUET_FORTRAN_RANDOM_THREADS", "6")
+        call set_env("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS", "250")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_PATH", "false")
         call set_env("PARQUET_FORTRAN_SORT_RADIX_PATH", "false")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT", "128")
@@ -998,6 +1020,11 @@ contains
             "PARQUET_FORTRAN_TABLE_THREADS reaches table_threads")
         if (.not. allocated(error)) call check(error, parquet_get_string_threads() == 5, &
             "PARQUET_FORTRAN_STRING_THREADS reaches string_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_random_threads() == 6, &
+            "PARQUET_FORTRAN_RANDOM_THREADS reaches random_threads")
+        if (.not. allocated(error)) call check(error, &
+            parquet_get_random_parallel_min_elements() == 250_int64, &
+            "PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS reaches random_parallel_min_elements")
         if (.not. allocated(error)) call check(error, .not. parquet_get_sort_counting_path(), &
             "PARQUET_FORTRAN_SORT_COUNTING_PATH reaches sort_counting_path")
         if (.not. allocated(error)) call check(error, .not. parquet_get_sort_radix_path(), &
@@ -1666,6 +1693,101 @@ contains
         call parquet_close_writer(writer)
     end subroutine estimated_chunk_size
     !
+
+    !> The observed effect, not the round trip: a cap that were stored and never read would leave
+    !> the capped and automatic answers equal.
+    !>
+    !> **The negative control is the automatic arm**, asserted in the same test -- without it, a cap
+    !> that fired unconditionally would pass just as happily. The floor is disabled first because it
+    !> would otherwise decide the answer instead of the cap, and this test is about the cap; the
+    !> guard on `avail > 1` is a real limitation of a single-core machine, not a weakened assertion.
+    subroutine test_random_threads_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: auto_n, capped_n, avail
+        integer(int64), parameter :: BIG = 100000000_int64
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        call parquet_reset_settings()
+        call parquet_set_random_parallel_min_elements(0)
+        call parquet_set_random_threads(0)
+        auto_n = parquet_debug_random_bulk_threads(BIG)
+        call check(error, auto_n >= 1, "the automatic answer is always at least one thread")
+        if (allocated(error)) return
+        call check(error, auto_n <= avail, "the automatic answer never exceeds what OpenMP offers")
+        if (allocated(error)) return
+        !
+        call parquet_set_random_threads(1)
+        capped_n = parquet_debug_random_bulk_threads(BIG)
+        call check(error, capped_n == 1, "a random cap of 1 forces one thread")
+        if (allocated(error)) return
+        if (avail > 1) then
+            call check(error, auto_n > capped_n, &
+                "negative control: with threads available the automatic answer must EXCEED the cap")
+            if (allocated(error)) return
+        end if
+        !
+        ! An EXPLICIT threads= outranks the cap -- the cap is a default, not a ceiling on intent.
+        call check(error, parquet_debug_random_bulk_threads(BIG, threads=2) == 2, &
+            "an explicit threads= is honoured above the configured cap")
+        if (allocated(error)) return
+        call parquet_reset_settings()
+    end subroutine test_random_threads_effect
+
+    !> The observed effect of the work floor: it decides whether a bulk permutation threads at all.
+    !>
+    !> **Both directions are asserted, and the second is the negative control.** A floor that were
+    !> stored and never read would leave a tiny array threading; a floor that refused everything
+    !> would leave a huge array serial. Only asserting the pair distinguishes the setting from
+    !> either failure. The `avail > 1` guard is the single-core limitation again -- on such a
+    !> machine there is nothing for the floor to decide between.
+    subroutine test_random_parallel_min_effect(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: avail, small_n, big_n, lifted_n
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        call parquet_reset_settings()
+        if (avail <= 1) then
+            call check(error, parquet_debug_random_bulk_threads(1000000_int64) == 1, &
+                "with one thread available every resolution is serial")
+            return
+        end if
+        !
+        ! At the factory floor of 1000 per thread, 500 elements cannot feed even two threads.
+        small_n = parquet_debug_random_bulk_threads(500_int64)
+        call check(error, small_n == 1, "the work floor must keep a 500-element permutation serial")
+        if (allocated(error)) return
+        !
+        ! Negative control: the same floor, enough work -- otherwise a floor that refused
+        ! everything would pass the assertion above.
+        big_n = parquet_debug_random_bulk_threads(100000000_int64)
+        call check(error, big_n > 1, &
+            "negative control: at the same floor, a large permutation must still thread")
+        if (allocated(error)) return
+        !
+        ! And the floor is what decided it: lift it and the same small array now threads.
+        call parquet_set_random_parallel_min_elements(1_int64)
+        lifted_n = parquet_debug_random_bulk_threads(500_int64)
+        call check(error, lifted_n > 1, &
+            "lowering the work floor must let a 500-element permutation thread")
+        if (allocated(error)) return
+        !
+        ! The floor applies to an explicit threads= too -- it is a property of the work, not of
+        ! the caller's intent, so `threads=8` on a tiny array is honoured by being declined.
+        call parquet_reset_settings()
+        call check(error, parquet_debug_random_bulk_threads(500_int64, threads=8) == 1, &
+            "the work floor must decline an explicit threads= on too little work")
+        if (allocated(error)) return
+        call check(error, parquet_debug_random_bulk_threads(100000000_int64, threads=8) == 8, &
+            "negative control: the same explicit threads= is honoured when the work is there")
+        if (allocated(error)) return
+        call parquet_reset_settings()
+    end subroutine test_random_parallel_min_effect
 
     !> The observed effect, not the round trip. `parquet_string_threads()` is the ONE place the
     !> string cap and the OpenMP environment are combined, so it is what every bulk operation

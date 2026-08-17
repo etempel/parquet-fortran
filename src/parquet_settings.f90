@@ -39,7 +39,9 @@ module parquet_settings
     ! here, so that reading them does not import parquet_bindings transitively. See its header.
     use parquet_settings_base, only: cfg_verbosity, cfg_string_threads, &
         verb_normal, verb_silent, verb_errors_only, &
-        parquet_output_is_suppressed, parquet_get_string_threads
+        parquet_output_is_suppressed, parquet_get_string_threads, &
+        cfg_random_threads, cfg_random_parallel_min_elements, &
+        parquet_get_random_threads, parquet_get_random_parallel_min_elements
     implicit none
     private
     !
@@ -59,6 +61,9 @@ module parquet_settings
     public :: parquet_set_prefetch_threads, parquet_get_prefetch_threads
     public :: parquet_set_table_threads, parquet_get_table_threads
     public :: parquet_set_string_threads, parquet_get_string_threads
+    public :: parquet_set_random_threads, parquet_get_random_threads
+    public :: parquet_set_random_parallel_min_elements
+    public :: parquet_get_random_parallel_min_elements
     public :: parquet_set_threads
     public :: parquet_set_default_compression, parquet_get_default_compression
     public :: parquet_set_default_compression_level, parquet_get_default_compression_level
@@ -222,6 +227,12 @@ module parquet_settings
         module procedure parquet_set_sort_counting_bucket_limit_int32
         module procedure parquet_set_sort_counting_bucket_limit_int64
     end interface parquet_set_sort_counting_bucket_limit
+    !> Sets the work floor, in elements per thread, below which a bulk permutation stays
+    !> serial. See parquet_set_random_parallel_min_elements_int64 for the full description.
+    interface parquet_set_random_parallel_min_elements
+        module procedure parquet_set_random_parallel_min_elements_int32
+        module procedure parquet_set_random_parallel_min_elements_int64
+    end interface parquet_set_random_parallel_min_elements
     !> Sets the byte size an auto-sized row group aims for. See
     !> parquet_set_target_row_group_bytes_int64 for the full description.
     interface parquet_set_target_row_group_bytes
@@ -324,6 +335,59 @@ contains
         cfg_string_threads = n
     end subroutine parquet_set_string_threads
 
+    !> Sets the cap on how many threads one bulk `pf_random_permutation`/`pf_random_subset` call
+    !> may use internally.
+    !>
+    !> Read per call, so it takes effect immediately. `0` restores automatic behaviour (as many
+    !> threads as OpenMP offers). The value is a **cap** and never a request: it can only lower the
+    !> automatic answer, it never overrides the rule that an unqualified bulk call inside an OpenMP
+    !> parallel region runs serially, and an explicit `threads=` is still honoured everywhere.
+    !>
+    !> **Threading a permutation changes how fast it is built and never what it contains.**
+    !> `pf_random_perm_at(seed, m, k)` is a pure function of its coordinates, so every element is
+    !> computed independently of every other -- the 1-thread and 64-thread outputs were verified
+    !> bit-identical. That is a stronger guarantee than most threading knobs can offer, and it is
+    !> why this one is admissible as a setting at all.
+    subroutine parquet_set_random_threads(n)
+        integer, intent(in) :: n !! thread cap, or 0 for automatic; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_random_threads: n must be >= 0 (0 means automatic)"
+        cfg_random_threads = n
+    end subroutine parquet_set_random_threads
+
+    !> Sets the fewest elements a thread must be given before a bulk permutation opens a team.
+    !>
+    !> **A work floor, not a chunk size.** Threading a small permutation is not merely useless but
+    !> harmful -- the team costs more than the whole job -- so below `threads * this` elements the
+    !> bulk forms run serially however many threads are available. Machine B measured `m = 10` going
+    !> from 0.0021 ms on one core to 0.0050 on sixteen, and 1->16 thread efficiency of 99 % at
+    !> `10**6`, 95 % at `10**4`, 69 % at 1000 and 18 % at 100; the default of 1000 sits where that
+    !> curve turns.
+    !>
+    !> Read per call, so it takes effect immediately. `n` takes `integer(int32)` or
+    !> `integer(int64)`. `0` disables the floor entirely, which is how a test asks for a team on a
+    !> small array; it is not a useful production setting. An explicit `threads=` does not bypass
+    !> the floor -- the floor is about whether the work is worth splitting at all, which is a
+    !> property of the array rather than of the caller's intent.
+    subroutine parquet_set_random_parallel_min_elements_int64(n)
+        integer(int64), intent(in) :: n !! elements per thread, or 0 to disable; must be >= 0.
+
+        if (n < 0) error stop "parquet_set_random_parallel_min_elements: n must be >= 0 " // &
+            "(0 disables the work floor)"
+        cfg_random_parallel_min_elements = n
+    end subroutine parquet_set_random_parallel_min_elements_int64
+
+    !> int32 form of parquet_set_random_parallel_min_elements_int64 -- see it for what it means.
+    subroutine parquet_set_random_parallel_min_elements_int32(n)
+        integer(int32), intent(in) :: n !! elements per thread, or 0 to disable; must be >= 0.
+
+        call parquet_set_random_parallel_min_elements_int64(int(n, kind=int64))
+    end subroutine parquet_set_random_parallel_min_elements_int32
+
+    ! parquet_get_random_threads and parquet_get_random_parallel_min_elements are defined in
+    ! parquet_settings_base and re-exported by the `public ::` lines above, for the same reason
+    ! parquet_get_string_threads is: parquet_random must stay linkable without the C++ stack.
+
     ! parquet_get_string_threads is defined in parquet_settings_base and re-exported by the
     ! `public ::` line above. It reports the raw setting (0 if left automatic), not the resolved
     ! count -- ask `parquet_string_threads()` for the number a bulk operation would actually use
@@ -391,6 +455,7 @@ contains
         call parquet_set_prefetch_threads(n)
         call parquet_set_table_threads(n)
         call parquet_set_string_threads(n)
+        call parquet_set_random_threads(n)
     end subroutine parquet_set_threads
 
     !> Sets the compression codec `parquet_open_writer` uses when the caller passes no
@@ -926,6 +991,18 @@ contains
             call env_int32("PARQUET_FORTRAN_STRING_THREADS", text, n32)
             call parquet_set_string_threads(n32)
         end if
+
+        call env_value("PARQUET_FORTRAN_RANDOM_THREADS", text, got)
+        if (got) then
+            call env_int32("PARQUET_FORTRAN_RANDOM_THREADS", text, n32)
+            call parquet_set_random_threads(n32)
+        end if
+
+        call env_value("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS", text, got)
+        if (got) then
+            call env_int64("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS", text, n64)
+            call parquet_set_random_parallel_min_elements(n64)
+        end if
         call env_value("PARQUET_FORTRAN_SORT_COUNTING_PATH", text, got)
         if (got) then
             call env_logical("PARQUET_FORTRAN_SORT_COUNTING_PATH", text, flag)
@@ -1180,6 +1257,8 @@ contains
         cfg_prefetch_threads = 0
         cfg_table_threads = 0
         cfg_string_threads = 0
+        cfg_random_threads = 0
+        cfg_random_parallel_min_elements = 1000_int64
         cfg_default_compression = ""
         cfg_default_compression_level = level_codec_default
         cfg_default_use_threads = .true.
@@ -1216,6 +1295,8 @@ contains
         call print_one(u, "prefetch_threads", cfg_prefetch_threads)
         call print_one(u, "table_threads", cfg_table_threads)
         call print_one(u, "string_threads", cfg_string_threads)
+        call print_one(u, "random_threads", cfg_random_threads)
+        call print_big(u, "random_parallel_min_elements", cfg_random_parallel_min_elements)
         call print_text(u, "sort_counting_path", merge("true ", "false", cfg_sort_counting_path))
         call print_text(u, "sort_radix_path", merge("true ", "false", cfg_sort_radix_path))
         call print_big(u, "sort_counting_bucket_limit", parquet_get_sort_counting_bucket_limit())

@@ -181,6 +181,45 @@ smaller ones on the same hardware. The result is byte-identical at every thread 
 
 `parquet_string_threads()` reports the resolved answer for the current context;
 `parquet_get_string_threads()` reports the raw setting (`0` when automatic).
+
+## Threads for a bulk permutation
+
+`parquet_set_random_threads(n)` caps the threads one `pf_random_permutation` or `pf_random_subset`
+call may use. Like the sort, prefetch and table caps it is a cap rather than a request, read per
+call, with `0` meaning automatic and `1` forcing serial.
+
+**This is the one thread setting whose answer-invariance is provable rather than intended, and it is
+worth knowing why.** `pf_random_perm_at(seed, m, k)` is a pure function of its coordinates: element
+`k` is computed from the seed, the population size and `k` alone, reading nothing any other element
+writes. Splitting the array into contiguous chunks therefore cannot change a single value, and the
+one-thread and sixty-four-thread results are **bit-identical** — so you can switch thread counts
+while debugging, or run the same program on two differently-sized machines, and get the same
+permutation. That is what makes threading admissible here as a setting at all.
+
+Measured on a 192-core dual-socket server, wall nanoseconds per element:
+
+| threads | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|---|---|---|
+| `m` = 10 000 | 9.53 | 5.01 | 2.79 | 1.58 | 1.17 | 1.09 | 1.60 |
+| `m` = 1 000 000 | 9.55 | 4.78 | 2.39 | 1.20 | 0.60 | 0.31 | 0.17 |
+
+`parquet_set_random_parallel_min_elements(n)` is the **work floor**: the fewest elements a thread
+must be given before a team is opened at all. Below `threads * n` elements the call runs serially,
+however many threads are available. The default is 1000.
+
+This exists because threading a small permutation is not merely useless but actively harmful — the
+team costs more than the whole job. The floor applies to an explicit `threads=` as well as to the
+automatic answer, because it asks whether the array is worth splitting, which is a property of the
+work rather than of the caller's intent: `threads=8` on a 100-element array is honoured by being
+declined. Setting it to `0` disables the floor entirely, which is useful for testing and is not a
+useful production setting.
+
+Note the floor counts elements **produced**, not the population size. A 100-element subset drawn
+from a population of a trillion is 100 elements of work, and stays serial.
+
+`parquet_get_random_threads()` and `parquet_get_random_parallel_min_elements()` report the raw
+settings.
+
 ## Writer defaults
 
 `parquet_set_default_compression(name)` and `parquet_set_default_compression_level(n)` supply what
@@ -457,6 +496,8 @@ parquet-fortran settings
   prefetch_threads                 0
   table_threads                    0
   string_threads                   0
+  random_threads                   0
+  random_parallel_min_elements     1000
   sort_counting_path               true
   sort_radix_path                  true
   sort_counting_bucket_limit       4194304

@@ -65,6 +65,7 @@ contains
             new_unittest("the permutation is a bijection at every small m, exhaustively", test_perm_bijection), &
             new_unittest("permutation contract: prefixes, subsets, kinds, clamping, determinism", &
                          test_perm_contract), &
+            new_unittest("the bulk permutation and subset forms are the scalar form", test_perm_bulk), &
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
             new_unittest("the integer draw shares a block with the real draw at one coordinate", &
                 test_int_shares_block), &
@@ -1177,6 +1178,128 @@ contains
         call check(error, nfix >= 80 .and. nfix <= 320, &
             "fixed points over 200 permutations of 64 elements are far from the expected ~200")
     end subroutine test_perm_contract
+
+    !> The bulk forms are the scalar form: identity, subsets, prefixes, kinds and loop bounds.
+    !!
+    !! **This is the test that binds `pf_random_permutation`/`pf_random_subset` to
+    !! `pf_random_perm_at`, and it may not be deleted as redundant** (`feature_risks.md` Risk-109).
+    !! The agreement is structural today -- both routes reach one copy of the round loop, and differ
+    !! only in whether `(l, r)` comes from a division or from the loop indices -- but that is
+    !! precisely why it needs asserting: an identity that holds by construction fails loudly the
+    !! moment someone restructures one side, and silently produces two different permutations if
+    !! nothing is watching.
+    !!
+    !! The `m` sweep is chosen for the bulk form's own failure modes rather than the kernel's. `100`
+    !! has `a*b == m` exactly, so the fill stops on the last iteration of both loops; `5` and `7`
+    !! enter the cycle-walk; `1000` stops mid-inner-loop. The subset sizes include `n == m`, `n == 1`
+    !! and an `n` that is an exact multiple of `b`, because "exit after storing" and "exit before
+    !! storing" differ by one element at exactly those points.
+    subroutine test_perm_bulk(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: SD = 20260817_int64
+        integer(int64), parameter :: ms(*) = [1_int64, 2_int64, 3_int64, 5_int64, 7_int64, &
+                                              16_int64, 100_int64, 999_int64, 1000_int64, 4096_int64]
+        integer(int64), allocatable :: p64(:), s64(:), t64(:)
+        integer(int32), allocatable :: p32(:), s32(:)
+        integer(int64) :: m, k, n
+        integer :: si
+        logical :: seen(4096)
+        character(len=80) :: msg
+
+        do si = 1, size(ms)
+            m = ms(si)
+            allocate (p64(m), p32(m))
+            call pf_random_permutation(p64, SD)
+            call pf_random_permutation(p32, SD)
+
+            ! (1) The bulk form IS the scalar form, elementwise.
+            do k = 1_int64, m
+                if (p64(k) /= pf_random_perm_at(SD, m, k)) then
+                    write (msg, '(a,i0,a,i0)') "bulk disagrees with pf_random_perm_at at m=", m, " k=", k
+                    call check(error, .false., trim(msg))
+                    return
+                end if
+            end do
+
+            ! (2) The two result kinds agree.
+            do k = 1_int64, m
+                if (int(p32(k), int64) /= p64(k)) then
+                    write (msg, '(a,i0,a,i0)') "the int32 bulk specific disagrees with int64 at m=", m, " k=", k
+                    call check(error, .false., trim(msg))
+                    return
+                end if
+            end do
+
+            ! (3) It is still a permutation -- the loop bounds are the highest-risk edit here, and an
+            !     off-by-one produces a plausible array that repeats or omits exactly one value.
+            seen(1:int(m, int32)) = .false.
+            do k = 1_int64, m
+                if (p64(k) < 1_int64 .or. p64(k) > m) then
+                    write (msg, '(a,i0)') "bulk permutation escaped [1,m] at m=", m
+                    call check(error, .false., trim(msg))
+                    return
+                end if
+                if (seen(int(p64(k), int32))) then
+                    write (msg, '(a,i0)') "bulk permutation repeated a value at m=", m
+                    call check(error, .false., trim(msg))
+                    return
+                end if
+                seen(int(p64(k), int32)) = .true.
+            end do
+
+            ! (4) A subset is a prefix, at several sizes including the two loop-exit boundaries.
+            do n = 1_int64, m
+                if (n /= 1_int64 .and. n /= m .and. n /= m / 2_int64 .and. &
+                    n /= max(1_int64, m - 1_int64)) cycle
+                allocate (s64(n), s32(n))
+                call pf_random_subset(s64, m, SD)
+                call pf_random_subset(s32, m, SD)
+                if (any(s64 /= p64(1:n))) then
+                    write (msg, '(a,i0,a,i0)') "subset is not a prefix of the permutation at m=", m, " n=", n
+                    call check(error, .false., trim(msg))
+                    return
+                end if
+                if (any(int(s32, int64) /= p64(1:n))) then
+                    write (msg, '(a,i0,a,i0)') "the int32 subset specific disagrees at m=", m, " n=", n
+                    call check(error, .false., trim(msg))
+                    return
+                end if
+                deallocate (s64, s32)
+            end do
+
+            ! (5) A full-size subset IS the permutation, rather than merely agreeing with it.
+            allocate (s64(m))
+            call pf_random_subset(s64, m, SD)
+            call check(error, all(s64 == p64), "pf_random_subset at n == m is not pf_random_permutation")
+            if (allocated(error)) return
+            deallocate (s64)
+
+            deallocate (p64, p32)
+        end do
+
+        ! (6) All four subset kind pairings give the same values.
+        m = 1000_int64
+        allocate (s64(7), t64(7), s32(7), p32(7))
+        call pf_random_subset(s64, 1000_int32, SD)
+        call pf_random_subset(t64, 1000_int64, SD)
+        call pf_random_subset(s32, 1000_int32, SD)
+        call pf_random_subset(p32, 1000_int64, SD)
+        call check(error, all(s64 == t64), "subset int64-array specifics disagree across m's kind")
+        if (allocated(error)) return
+        call check(error, all(int(s32, int64) == s64) .and. all(int(p32, int64) == s64), &
+            "subset int32-array specifics disagree with the int64-array ones")
+        if (allocated(error)) return
+        deallocate (s64, t64, s32, p32)
+
+        ! (7) A zero-sized request is a defined no-op and validates nothing -- note the deliberately
+        !     impossible `m` here, which a non-empty request would abort on.
+        allocate (s64(0), s32(0))
+        call pf_random_permutation(s64, SD)
+        call pf_random_subset(s64, 0_int64, SD)
+        call pf_random_subset(s32, -5_int32, SD)
+        call check(error, size(s64) == 0 .and. size(s32) == 0, "a zero-sized fill must be a no-op")
+        deallocate (s64, s32)
+    end subroutine test_perm_bulk
 
     !> The module's `real64` mapping, repeated here so a straddling pair can be checked directly.
     pure function to_r64_local(bits) result(r)

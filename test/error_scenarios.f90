@@ -550,6 +550,12 @@ program error_scenarios
         call scenario_random_stream_jump_before_start()
     case ("random_stream_rewind_below_one")
         call scenario_random_stream_rewind_below_one()
+    case ("random_subset_larger_than_population")
+        call scenario_random_subset_larger_than_population()
+    case ("random_subset_empty_population")
+        call scenario_random_subset_empty_population()
+    case ("random_subset_int32_too_narrow")
+        call scenario_random_subset_int32_too_narrow()
     case ("sort_unknown_column")
         call scenario_sort_unknown_column()
     case ("sort_vector_column")
@@ -14791,6 +14797,39 @@ contains
         call rng%rewind(0_int64)   ! -> aborts
         print '(a,i0)', "unexpectedly rewound below the start, position ", rng%position()
     end subroutine scenario_random_stream_rewind_below_one
+
+    !> A subset is drawn without replacement, so it cannot be larger than its population. Clamping
+    !! to `m` would be the tempting alternative and is the wrong one: it silently hands back fewer
+    !! elements than the caller's array has room for, leaving the tail whatever it was. The control
+    !! asks for exactly `m`, which is the largest legal request and is the permutation itself.
+    subroutine scenario_random_subset_larger_than_population()
+        integer(int64) :: idx(10), full(10)
+        call pf_random_subset(full, 10_int64, 1_int64)   ! control: n == m is legal
+        print '(a,i0)', "drew a full-population subset, first element ", full(1)
+        call pf_random_subset(idx, 9_int64, 1_int64)   ! -> aborts (10 elements from 9)
+        print '(a,i0)', "unexpectedly drew more elements than the population has: ", idx(1)
+    end subroutine scenario_random_subset_larger_than_population
+
+    !> `m < 1` names no population at all. The control is `m == 1`, the smallest one that exists.
+    subroutine scenario_random_subset_empty_population()
+        integer(int64) :: idx(1)
+        call pf_random_subset(idx, 1_int64, 1_int64)     ! control: the one-element population
+        print '(a,i0)', "drew from the one-element population, got ", idx(1)
+        call pf_random_subset(idx, 0_int64, 1_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly drew from an empty population: ", idx(1)
+    end subroutine scenario_random_subset_empty_population
+
+    !> An element of the permutation may be any value in `[1, m]`, so an `integer(int32)` result
+    !! array cannot serve an `m` above `huge(int32)` -- and the failure would otherwise be a silent
+    !! narrowing wrap rather than a missing element, which no bijectivity check downstream could
+    !! see. The control is `m == huge(int32)` exactly, the largest that still fits.
+    subroutine scenario_random_subset_int32_too_narrow()
+        integer(int32) :: idx(4)
+        call pf_random_subset(idx, int(huge(1_int32), int64), 1_int64)   ! control: the largest that fits
+        print '(a,i0)', "drew from a population of huge(int32), first element ", idx(1)
+        call pf_random_subset(idx, int(huge(1_int32), int64) + 1_int64, 1_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly drew int32 elements from a wider population: ", idx(1)
+    end subroutine scenario_random_subset_int32_too_narrow
 
     !> A typed keyword makes the writer synthesize a "<KEY>.datatype" entry, so a caller's own
     !! entry of that name would be a second writer of the same key and the file would carry two,

@@ -44,7 +44,8 @@ contains
         testsuite = [ &
             new_unittest("draws are identical under every schedule and thread count", test_schedule_independence), &
             new_unittest("pf_random_seed differs across concurrent threads", test_seed_across_threads), &
-            new_unittest("a per-iteration stream reproduces under every schedule", test_stream_schedule) &
+            new_unittest("a per-iteration stream reproduces under every schedule", test_stream_schedule), &
+            new_unittest("a bulk permutation is bit-identical at every thread count", test_perm_threads) &
             ]
     end subroutine collect_tests_parquet_random_omp
 
@@ -338,5 +339,74 @@ contains
         t = 1
 #endif
     end function team_size
+
+    !> **The claim `threads=` rests on: the thread count changes the time and nothing else.**
+    !!
+    !! `pf_random_perm_at(seed, m, k)` is a pure function of its coordinates, so a bulk fill split
+    !! into contiguous chunks cannot produce a different array however the chunks are assigned. That
+    !! is what makes `threads=` admissible as an argument at all -- CLAUDE.md's settings rule is
+    !! that a knob may change how fast, how large or how loud, never what the library answers -- and
+    !! a user switching thread counts while debugging is entitled to the same permutation.
+    !!
+    !! Asserted against the SCALAR form rather than against a 1-thread bulk run, so this is also the
+    !! outermost binding of the whole construction: every thread count, both result kinds, the
+    !! subset form, and the elemental entry point all have to agree on one array.
+    !!
+    !! **The work floor is disabled first, or this test would be vacuous** -- at the factory default
+    !! a 5000-element permutation feeds at most five threads, and a `threads=64` arm would silently
+    !! resolve to five, leaving the high thread counts untested while still passing. The negative
+    !! control for that is `test_random_parallel_min_effect` in the settings suite, which asserts
+    !! the floor really does bite.
+    subroutine test_perm_threads(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: SD = 555_int64
+        integer(int64), parameter :: M = 5000_int64
+        integer, parameter :: teams(*) = [1, 2, 3, 5, 8, 16, 64]
+        integer(int64) :: ref(M), got(M), k
+        integer(int32) :: got32(M)
+        integer(int64) :: sub(M / 4_int64)
+        integer :: ti
+        character(len=72) :: msg
+
+        do k = 1_int64, M
+            ref(k) = pf_random_perm_at(SD, M, k)
+        end do
+        call parquet_set_random_parallel_min_elements(0)
+        do ti = 1, size(teams)
+            got = -1_int64
+            call pf_random_permutation(got, SD, threads=teams(ti))
+            if (any(got /= ref)) then
+                write (msg, '(a,i0,a)') "a bulk permutation at threads=", teams(ti), &
+                    " differs from the scalar form"
+                call check(error, .false., trim(msg))
+                call parquet_reset_settings()
+                return
+            end if
+            got32 = -1_int32
+            call pf_random_permutation(got32, SD, threads=teams(ti))
+            if (any(int(got32, int64) /= ref)) then
+                write (msg, '(a,i0,a)') "the int32 bulk permutation at threads=", teams(ti), &
+                    " differs from the scalar form"
+                call check(error, .false., trim(msg))
+                call parquet_reset_settings()
+                return
+            end if
+            sub = -1_int64
+            call pf_random_subset(sub, M, SD, threads=teams(ti))
+            if (any(sub /= ref(1:size(sub, kind=int64)))) then
+                write (msg, '(a,i0,a)') "a bulk subset at threads=", teams(ti), &
+                    " differs from the scalar form"
+                call check(error, .false., trim(msg))
+                call parquet_reset_settings()
+                return
+            end if
+        end do
+        call parquet_reset_settings()
+        !
+        ! The automatic form agrees too -- it is the one nobody passes an argument to.
+        got = -1_int64
+        call pf_random_permutation(got, SD)
+        call check(error, all(got == ref), "the automatic bulk permutation differs from the scalar form")
+    end subroutine test_perm_threads
 
 end module test_random_omp

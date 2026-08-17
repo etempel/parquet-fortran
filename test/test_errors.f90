@@ -377,6 +377,12 @@ contains
                 test_random_stream_jump_before_start_aborts), &
             new_unittest("a stream refuses a rewind below position 1", &
                 test_random_stream_rewind_below_one_aborts), &
+            new_unittest("a subset larger than its population aborts", &
+                test_random_subset_larger_than_population_aborts), &
+            new_unittest("a subset of an empty population aborts", &
+                test_random_subset_empty_population_aborts), &
+            new_unittest("an int32 subset of a wider-than-int32 population aborts", &
+                test_random_subset_int32_too_narrow_aborts), &
             new_unittest("metadata: a caller's own <KEY>.datatype wins, with a warning", &
                 test_metadata_datatype_key_collision_warns), &
             new_unittest("metadata: no <KEY>.datatype collision means no warning", &
@@ -4060,6 +4066,40 @@ contains
             failure_message="rewinding below position 1 was expected to abort", &
             required_stderr="position must be at least 1")
     end subroutine test_random_stream_rewind_below_one_aborts
+
+    !> A subset larger than its population: see scenario_random_subset_larger_than_population.
+    !> The scenario draws a legal `n == m` subset first, so a guard that fired on every call --
+    !> the easiest way to get this wrong -- would fail there rather than passing this vacuously.
+    subroutine test_random_subset_larger_than_population_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_subset_larger_than_population", &
+            expect_abort=.true., &
+            failure_message="a subset larger than its population was expected to abort", &
+            required_stderr="exceeds population size")
+    end subroutine test_random_subset_larger_than_population_aborts
+
+    !> `m < 1`: see scenario_random_subset_empty_population. Control is the `m == 1` population.
+    subroutine test_random_subset_empty_population_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_subset_empty_population", &
+            expect_abort=.true., &
+            failure_message="a subset of an empty population was expected to abort", &
+            required_stderr="population size m must be at least 1")
+    end subroutine test_random_subset_empty_population_aborts
+
+    !> An `integer(int32)` result array with `m` above `huge(int32)`: see
+    !> scenario_random_subset_int32_too_narrow. Without this guard the failure is a silent
+    !> narrowing wrap -- a plausible negative index -- rather than anything a caller could notice.
+    subroutine test_random_subset_int32_too_narrow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_subset_int32_too_narrow", &
+            expect_abort=.true., &
+            failure_message="an int32 subset of a wider population was expected to abort", &
+            required_stderr="exceeds huge(int32)")
+    end subroutine test_random_subset_int32_too_narrow_aborts
 
     !> A caller's own "<KEY>.datatype" entry beside a typed <KEY>: see
     !> scenario_metadata_datatype_key_collision in test/error_scenarios.f90. The write SUCCEEDS

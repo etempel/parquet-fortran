@@ -291,6 +291,76 @@ A stream addresses 2⁶³ words and refuses to go past that, or before its first
 position that does not exist stops the program rather than silently wrapping. No ordinary program is
 anywhere near either bound.
 
+## Permutations and subsets, addressed the same way
+
+The same idea extends from draws to permutations, and it is what makes sampling at scale practical.
+`pf_random_perm_at(seed, m, k)` is **element `k` of a permutation of `1 .. m`**, computed in constant
+time and constant memory from its coordinates alone. It touches no array, so there is no shuffled
+population to hold:
+
+```fortran
+integer(int64) :: k, who
+do k = 1_int64, 10_int64
+    who = pf_random_perm_at(20260817_int64, 1000000000000_int64, k)   ! a trillion-row population
+    print *, who
+end do
+```
+
+That loop draws ten distinct rows, without replacement, from a population of a trillion — in ten
+constant-time calls. A shuffle-based method would need the trillion-element array first.
+
+**The first `n` values are a uniform random `n`-subset**, so subsets need no separate machinery: ask
+for `k = 1 .. n`. Three properties follow for free rather than by construction:
+
+- **prefix consistency** — a size-3 subset is a prefix of a size-6 one from the same `(seed, m)`;
+- **a subset at `n == m` *is* the permutation**, rather than merely agreeing with it;
+- **order-independence** — element `k` depends on no other element, so a loop over `k` may run in
+  any order, on any number of threads, and give the same answer.
+
+`m` and `k` take `integer(int32)` or `integer(int64)` and the result follows them; `seed` is always
+`integer(int64)`. `k` outside `[1, m]` is clamped rather than reported, since this is
+`pure elemental` and has no way to abort.
+
+### The bulk forms
+
+```fortran
+call pf_random_permutation(perm, seed [, threads])   ! perm(k) = pf_random_perm_at(seed, size(perm), k)
+call pf_random_subset(idx, m, seed [, threads])      ! the first size(idx) of that same permutation
+```
+
+(Square brackets mark an optional argument; they are not part of the call.)
+
+Both fill a rank-1 `integer(int32)` or `integer(int64)` array. They are an **identity, not a second
+algorithm** — the bulk form returns exactly what the scalar form returns at the same coordinates, so
+the two may be mixed freely. They are about 2.4x cheaper per element, because enumerating the domain
+in order supplies a split the scalar form must divide to recover, and because the width rule and the
+key schedule are derived once per call instead of once per element, which a `pure elemental` function
+has no way to avoid.
+
+`pf_random_subset` requires `size(idx) <= m` and `m >= 1`, and aborts rather than truncating; an
+`integer(int32)` array additionally requires `m <= huge(int32)`, since an element may be any value in
+`[1, m]`. A zero-sized array is a defined no-op and is not validated.
+
+`threads=` changes only how fast the array is filled. See
+[Threads for a bulk permutation](../operating/settings.html#threads-for-a-bulk-permutation) for the
+cap, the work floor and the measured scaling.
+
+### What the permutation is, and what it is not
+
+The construction is a four-round Feistel network over `Z_a × Z_b` with cycle-walking, where
+`a = ceil(sqrt(m))`. `pf_random_perm_algorithm` names that contract — `feistel-mix2-4/zaxzb/v1` —
+**separately from `pf_random_algorithm`**, so a program that recorded the draw contract is not told
+its draws changed when only the permutation did.
+
+**It is not uniform over all `m!` permutations, and nothing with a 64-bit seed could be**: `m!`
+passes 2⁶⁴ at `m = 21`, so a 64-bit seed cannot even index the possibilities. What is measured is
+that it is indistinguishable from a uniform permutation under fixed-point counts, cycle structure,
+position uniformity, subset membership, and a structural test that asks whether sharing an input
+coordinate makes two outputs share one. The round count of four is where that last test puts the
+boundary: three rounds leak detectably in every replicate, and six buy nothing measurable.
+
+If you need a uniform shuffle of a small array with a large seed space, this is not that tool.
+
 ## What is guaranteed, and what is not
 
 **Guaranteed.** For a fixed seed, stream and draw, the value is fixed — for a given machine and

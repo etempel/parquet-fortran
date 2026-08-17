@@ -629,11 +629,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sidecars are unchanged. The VOTable sidecar declares the same types (`int`, `long`, `float`,
   `double`, `boolean`) for those keywords instead of calling every scalar a `char`. Nothing on the
   read side changes: a Fortran reader still selects its parse from the declared type of `value`.
+  See [A typed value records its own
+  type](doc/pages/schema/building-schema-in-code.md#a-typed-value-records-its-own-type).
 
 - **A counter-based random number generator, `parquet_random`** (`pf_random_at`, `pf_random32_at`,
   `pf_random_bits_at`, `pf_random_int_at`, `pf_random_fill_draws`, `pf_random_fill_streams`,
-  `pf_random_seed`, `pf_random_key`,
-  `pf_random_algorithm`), re-exported by `use parquet` and usable on its own as
+  `pf_random_seed`, `pf_random_key`, `pf_random_perm_at`, `pf_random_permutation`,
+  `pf_random_subset`,
+  `pf_random_algorithm`, `pf_random_perm_algorithm`), re-exported by `use parquet` and usable on its own as
   `use parquet_random`. Every value is a pure function of `(seed, i [, draw])` rather than of call
   order, so a parallel loop returns the same numbers under `schedule(static)`,
   `schedule(dynamic)`, one thread or three hundred — something no stateful generator can offer at
@@ -656,11 +659,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data-dependent (a rejection sampler, a random walk), handing out exactly the values the
   coordinate-addressed calls give at the same positions, so the two forms are interchangeable; it
   holds no allocatable components and no finalizer, which is what makes a per-thread instance safe
-  on both compilers. The generator is
+  on both compilers.
+  **Permutations are coordinate-addressed too**: `pf_random_perm_at(seed, m, k)` is element `k` of a
+  permutation of `1 .. m`, computed in constant time and constant memory from its coordinates alone,
+  so a subset needs no separate algorithm and no array — the first `n` values *are* a uniform random
+  `n`-subset, drawn without replacement, and drawing 1000 rows out of a trillion reads 1000 elements
+  rather than shuffling a trillion. `pf_random_permutation(perm, seed [, threads])` and
+  `pf_random_subset(idx, m, seed [, threads])` are its bulk forms, returning exactly what the scalar
+  form returns at the same coordinates; both take an optional `threads=`, capped by
+  `parquet_set_random_threads` and floored by `parquet_set_random_parallel_min_elements`, and the
+  result is **bit-identical at every thread count** because no element depends on any other — 87x on
+  192 cores, and about 2.4x over the scalar form on one. The construction is a four-round Feistel
+  network over `Z_a x Z_b` with cycle-walking, named separately by `pf_random_perm_algorithm`
+  (`feistel-mix2-4/zaxzb/v1`) so that a change to it cannot be confused with a change to the draws.
+  It is not uniform over all `m!` permutations and nothing with a 64-bit seed could be; what is
+  measured is that it is indistinguishable from uniform under fixed-point, cycle-structure,
+  position-uniformity, subset-membership and structural tests. The generator is
   **not cryptographic** and is documented as such. See
   [Random numbers](doc/pages/utilities/random.md).
-  See [A typed value records its own
-  type](doc/pages/schema/building-schema-in-code.md#a-typed-value-records-its-own-type).
 
 ### Changed
 

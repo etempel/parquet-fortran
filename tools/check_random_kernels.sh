@@ -81,7 +81,14 @@ case "$FC" in
         ;;
 esac
 
-SRC="src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
+# parquet_settings_base comes FIRST because parquet_random uses it (for the random thread cap, the
+# work floor, and the two shared OpenMP thread rules) and this is a plain ordered compile with no
+# dependency resolver. It is the leaf settings module -- one file, importing nothing but
+# iso_fortran_env and, under _OPENMP, omp_lib -- which is exactly why the standalone compile this
+# script depends on is still possible. Importing `parquet_settings` instead would have pulled in
+# parquet_bindings and, with it, the whole of parquet_wrapper.cpp and Arrow; see that module's own
+# header, and check_parquet_strings_stays_leaf in tools/check_source_conventions.py.
+SRC="src/parquet_settings_base.f90 src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
 REPO="$PWD"
 ABS_SRC=""
 for f in $SRC; do ABS_SRC="$ABS_SRC $REPO/$f"; done

@@ -3131,60 +3131,28 @@ contains
     !
     module procedure pf_sort_threads
         use parquet_settings, only : parquet_get_sort_threads
-#ifdef _OPENMP
-        use omp_lib, only : omp_get_max_threads, omp_get_level, omp_get_num_procs
-#endif
-        integer :: cap
+        use parquet_settings_base, only : parquet_auto_thread_count
         !
-        n = 1
-#ifdef _OPENMP
-        ! Serial inside a parallel region, deliberately. This is not a refusal and not a
-        ! correctness guard -- it picks a DEFAULT, exactly as parallel_prefetch_ok
-        ! (parquet_tables_read.f90) does for the table's own internally-parallel read, whose
-        ! comment states the reason: nested regions are the caller's business. Without it, T
-        ! OpenMP threads would each ask for T more, and T*T oversubscription is slower than not
-        ! threading at all. An EXPLICIT threads= is still honoured there -- see
-        ! resolve_thread_count, which only consults this when the caller said nothing.
+        ! **The rule itself lives in parquet_auto_thread_count (src/parquet_settings_base.f90)** --
+        ! the serial-inside-a-parallel-region default, why the predicate is omp_get_level rather
+        ! than omp_in_parallel, the libgomp deadlock behind that choice (feature_risks.md Risk-104),
+        ! why a cap may only lower the answer, and the omp_get_num_procs clamp. It was moved there
+        ! when parquet_random gained a threaded bulk permutation and needed the same answer:
+        ! CLAUDE.md's auto-threading note names a further copy of this rule as the mistake, and
+        ! parquet_random is pure Fortran, so it cannot reach this module without acquiring the C++
+        ! dependency parquet_sorting carries. Behaviour here is unchanged.
         !
-        ! **The predicate is `omp_get_level`, NOT `omp_in_parallel`, and the difference is not
-        ! pedantic.** `omp_in_parallel` answers "is the enclosing region ACTIVE", i.e. does its
-        ! team have more than one thread. It is therefore `.false.` inside a region that exists
-        ! but runs on one thread -- `!$omp parallel if(cond)` with `cond` false, or any region at
-        ! all under `OMP_NUM_THREADS=1`. That is still a nested region, and the rule above still
-        ! applies to it, so the old spelling let every such caller open a full team one level down.
-        !
-        ! It also deadlocks. libgomp (gfortran 15.2, macOS arm64) intermittently hangs when a team
-        ! is opened from inside a one-thread enclosing region: main thread and workers all park on
-        ! one libgomp mutex that nobody holds. Reduced to twenty lines with no library code --
-        ! `!$omp parallel num_threads(1)` / `!$omp single` / `!$omp parallel do num_threads(3)` --
-        ! it hangs 7 runs in 8. Bisected, every clause is load-bearing: `master` instead of
-        ! `single` never hangs, an enclosing team of 2 never hangs, and no environment setting
-        ! fixes it (`GOMP_SPINCOUNT=0` only moves 7/8 to 2/8). The library's own code is
-        ! standard-conforming; this predicate is what stops it building the shape. See
-        ! feature_risks.md Risk-104.
-        if (omp_get_level() == 0) n = omp_get_max_threads()
-#endif
-        ! parquet_set_sort_threads CAPS the automatic answer; it never raises it, and it never
-        ! overrides the parallel-region rule above -- a caller who capped sorting at 8 said nothing
-        ! about what should happen inside someone else's parallel region, and lifting the serial
-        ! answer back to 8 there is exactly the T*T oversubscription that rule exists to prevent.
-        ! This is the ONE place the setting is read: Risk-40 records that pf_sort_threads is public
-        ! precisely so a read-time sort_by= and a raw-array sort ask the same question, and a second
-        ! reader is how the two would come to disagree.
-        cap = parquet_get_sort_threads()
-        if (cap > 0 .and. cap < n) n = cap
-#ifdef _OPENMP
-        ! **Never report more threads than can actually run.** `omp_get_max_threads` answers an ICV,
-        ! which is what the environment ASKED for; `omp_get_num_procs` answers what this thread's
-        ! affinity mask allows. They differ whenever the initial thread was bound before `main` --
-        ! see `resolve_thread_count`, which clamps for the same reason and documents the trap.
-        if (n > omp_get_num_procs()) n = max(1, omp_get_num_procs())
-#endif
+        ! What stays here is which SETTING caps the sort, and this is the ONE place it is read:
+        ! Risk-40 records that pf_sort_threads is public precisely so a read-time sort_by= and a
+        ! raw-array sort ask the same question, and a second reader is how the two would come to
+        ! disagree.
+        n = parquet_auto_thread_count(parquet_get_sort_threads())
     end procedure pf_sort_threads
     !
     module procedure resolve_thread_count
+        use parquet_settings_base, only : parquet_nested_team_unsafe
 #ifdef _OPENMP
-        use omp_lib, only : omp_get_num_procs, omp_get_level, omp_get_active_level
+        use omp_lib, only : omp_get_num_procs
 #endif
         !
         if (present(threads)) then
@@ -3192,24 +3160,19 @@ contains
             ! region: the caller has said what they want, and refusing it there would leave no way
             ! to thread a sort at all from code that is itself parallel.
             count = max(1_int64, int(threads, int64))
-#ifdef _OPENMP
             ! **One exception, and it is narrow on purpose: an enclosing region that is not
-            ! actually running in parallel.** `omp_get_level() > 0` says a region encloses this
-            ! call; `omp_get_active_level() == 0` says its team has one thread. Opening a team
-            ! there is the exact shape libgomp deadlocks on -- see the reduction in
-            ! `pf_sort_threads` above and feature_risks.md Risk-104 -- and it is the one shape
-            ! that was measured hanging. An enclosing team of two or more never reproduced it in
-            ! any configuration tried, so a genuinely parallel caller keeps the promise above
-            ! untouched: that is the whole reason this clamp tests the ACTIVE level rather than
-            ! simply refusing every nested request.
+            ! actually running in parallel.** `parquet_nested_team_unsafe`
+            ! (src/parquet_settings_base.f90) is that predicate and carries the reduction and the
+            ! bisection behind it -- feature_risks.md Risk-104. It lives there rather than here so
+            ! that parquet_random's threaded bulk permutation asks the identical question; two
+            ! copies of a deadlock guard is exactly the shape that comes apart later.
             !
             ! **This clamps BOTH engines, and that is not a detail to get wrong.** The count
             ! resolved here is the one `drive_engine` hands to `sort_build_permutation_threaded`
             ! (Fortran) and to `parquet_sort_builder_build` (C++) alike, so the C++ engine is not
             ! exempt merely because it threads with `std::thread` rather than OpenMP. Only the
             ! ENCLOSING region's active level decides, never which engine is selected.
-            if (omp_get_level() > 0 .and. omp_get_active_level() == 0) count = 1_int64
-#endif
+            if (parquet_nested_team_unsafe()) count = 1_int64
         else
             count = int(pf_sort_threads(), int64)
         end if

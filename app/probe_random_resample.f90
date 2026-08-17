@@ -58,7 +58,7 @@ program probe_random_resample
     use omp_lib, only: omp_get_wtime, omp_get_max_threads
 #endif
     use iso_fortran_env, only: int32, int64, real64, output_unit
-    use parquet, only: pf_random_int_at, pf_random_fill_draws, pf_random_key, &
+    use parquet, only: pf_random_int_at, pf_random_fill_draws, pf_random_fill_streams, pf_random_key, &
                        parquet_debug_random_block, parquet_debug_random_uses_int128
 
     implicit none
@@ -120,6 +120,18 @@ program probe_random_resample
     do i = 1, size(m_list)
         call serial_row(m_list(i))
     end do
+    write (output_unit, '(a)') ''
+
+    write (output_unit, '(a)') '---- WRAPPER TAX: same algorithm, library vs this probe ----'
+    write (output_unit, '(a)') &
+        '            library     replica          tax'
+    call wrapper_tax_row()
+    write (output_unit, '(a)') ''
+
+    write (output_unit, '(a)') '---- STREAM axis, ns per value (best of rounds); m = 10**6 ----'
+    write (output_unit, '(a)') &
+        '                 shipped     hoisted   hoisted x2   shipped r64'
+    call streams_row(1000000_int64)
     write (output_unit, '(a)') ''
 
     write (output_unit, '(a)') '---- many SMALL resamples (the bootstrap shape); m = 10**6 ----'
@@ -186,6 +198,18 @@ contains
 
         ! G6: the narrow grid is uniform, and duplicates arrive at the rate replacement implies.
         call gate_uniform(mm, ng)
+
+        ! G7: the hoisted stream-axis arms are value-preserving. Same load-bearing role as G2.
+        call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm)
+        call streams_i64_hoisted(SEED, 1_int64, g3, 1_int64, mm, 1_int64)
+        call must_match(g1, g3, 'G7a streams hoisted == shipped fill_streams')
+        call streams_i64_hoisted2(SEED, 1_int64, g4, 1_int64, mm, 1_int64)
+        call must_match(g1, g4, 'G7b streams hoisted x2 == shipped fill_streams')
+        ! And again at a draw index that lands in a block's SECOND pair, which is the branch the
+        ! hoisted `second` flag replaces -- an arm that only ever tested draw 1 would not reach it.
+        call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm, 4_int64)
+        call streams_i64_hoisted(SEED, 1_int64, g3, 1_int64, mm, 4_int64)
+        call must_match(g1, g3, 'G7c streams hoisted == shipped, draw = 4')
 
         deallocate (g1, g2, g3, g4)
         write (output_unit, '(a)') 'all gates passed'
@@ -539,6 +563,114 @@ contains
     end function reduce32
 
     ! ============================================================================
+    ! The STREAM axis -- is `fill_streams_i64` behind its real-valued siblings?
+    ! ============================================================================
+
+    !> `pf_random_fill_streams` for integers, with the loop-invariant setup hoisted.
+    !!
+    !! The shipped `fill_streams_i64` is a plain loop calling `int_at_impl` once per element, and
+    !! `int_at_impl` re-derives `a = min(lo,hi)` and `s = width_of(...)` every time -- on the
+    !! `PF_INT128` arm `width_of` is 128-bit arithmetic with two branches -- while `bits_of` inside
+    !! it re-derives the block index and the pair parity from `draw`, which is CONSTANT across this
+    !! loop. Its two real-valued siblings hoist exactly these (`fill_streams_r64` names `blk` and
+    !! `second`; `fill_streams_r32` names `blk` and `slot`) and say so in their doc-comments.
+    !!
+    !! This arm hoists the same three things and nothing else, so it must be value-identical.
+    subroutine streams_i64_hoisted(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index
+        integer(int64), intent(inout) :: v(:)       !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end
+        integer(int64), intent(in) :: draw          !! 1-based value index
+        integer(int64) :: k, mm, blk, w0, w1, w2, w3, s, x
+        logical :: second
+        mm = size(v, kind=int64)
+        if (mm <= 0_int64) return
+        s = hi - lo + 1_int64                       ! `lo = 1`, `hi = m` here, so this is exact
+        blk = (draw - 1_int64) / 2_int64            ! a function of `draw` alone
+        second = (modulo(draw - 1_int64, 2_int64) == 1_int64)
+        do k = 1_int64, mm
+            call parquet_debug_random_block(seed, i0 + (k - 1_int64), blk, w0, w1, w2, w3)
+            if (second) then
+                x = ior(ishft(w3, 32), w2)
+            else
+                x = ior(ishft(w1, 32), w0)
+            end if
+            v(k) = reduce64_at(x, s, seed, i0 + (k - 1_int64), draw, lo)
+        end do
+    end subroutine streams_i64_hoisted
+
+    !> `streams_i64_hoisted` with TWO streams per body, to test whether the real-valued verdict
+    !! ("one stream per body wins, lane blocking buys nothing on gfortran") carries to the integer
+    !! path, which has more per-element work to overlap with the cipher.
+    subroutine streams_i64_hoisted2(seed, i0, v, lo, hi, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i0            !! first stream index
+        integer(int64), intent(inout) :: v(:)       !! filled from streams `i0 .. i0+size(v)-1`
+        integer(int64), intent(in) :: lo            !! one end of the closed range
+        integer(int64), intent(in) :: hi            !! the other end
+        integer(int64), intent(in) :: draw          !! 1-based value index
+        integer(int64) :: k, mm, blk, w0, w1, w2, w3, y0, y1, y2, y3, s, x
+        logical :: second
+        mm = size(v, kind=int64)
+        if (mm <= 0_int64) return
+        s = hi - lo + 1_int64
+        blk = (draw - 1_int64) / 2_int64
+        second = (modulo(draw - 1_int64, 2_int64) == 1_int64)
+        k = 1_int64
+        do while (k + 1_int64 <= mm)
+            call parquet_debug_random_block(seed, i0 + (k - 1_int64), blk, w0, w1, w2, w3)
+            call parquet_debug_random_block(seed, i0 + k, blk, y0, y1, y2, y3)
+            if (second) then
+                x = ior(ishft(w3, 32), w2)
+                v(k) = reduce64_at(x, s, seed, i0 + (k - 1_int64), draw, lo)
+                x = ior(ishft(y3, 32), y2)
+                v(k + 1_int64) = reduce64_at(x, s, seed, i0 + k, draw, lo)
+            else
+                x = ior(ishft(w1, 32), w0)
+                v(k) = reduce64_at(x, s, seed, i0 + (k - 1_int64), draw, lo)
+                x = ior(ishft(y1, 32), y0)
+                v(k + 1_int64) = reduce64_at(x, s, seed, i0 + k, draw, lo)
+            end if
+            k = k + 2_int64
+        end do
+        do while (k <= mm)
+            call parquet_debug_random_block(seed, i0 + (k - 1_int64), blk, w0, w1, w2, w3)
+            if (second) then
+                x = ior(ishft(w3, 32), w2)
+            else
+                x = ior(ishft(w1, 32), w0)
+            end if
+            v(k) = reduce64_at(x, s, seed, i0 + (k - 1_int64), draw, lo)
+            k = k + 1_int64
+        end do
+    end subroutine streams_i64_hoisted2
+
+    !> `reduce64` with an explicit range base, for the stream-axis arms.
+    pure function reduce64_at(x, s, seed, stream, draw, base) result(r)
+        integer(int64), intent(in) :: x             !! the 64-bit candidate
+        integer(int64), intent(in) :: s             !! the width
+        integer(int64), intent(in) :: seed          !! seed, for the delegated rejection path
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(in) :: draw          !! 1-based draw index
+        integer(int64), intent(in) :: base          !! the range's low end
+        integer(int64) :: r                         !! a uniform value in `[base, base+s-1]`
+        integer(int64) :: low, high
+        integer(k128) :: p
+        p = iand(int(x, k128), MASK64_128) * int(s, k128)
+        high = int(ishft(p, -64), int64)
+        low = fold64(iand(p, MASK64_128))
+        if (ult(low, s)) then
+            if (ult(low, int(mod(TWO64_128, int(s, k128)), int64))) then
+                r = pf_random_int_at(seed, stream, base, base + s - 1_int64, draw)
+                return
+            end if
+        end if
+        r = base + high
+    end function reduce64_at
+
+    ! ============================================================================
     ! Diagnostic floors -- the cipher with no reduction at all
     ! ============================================================================
 
@@ -645,6 +777,119 @@ contains
         call pair1_range(SEED, STREAM, mm, c, 1_int64, n)
         dt = now() - dt
     end function timed_pair1
+
+    !> A byte-for-byte replica of the library's `fill_r64`, built on `parquet_debug_random_block`.
+    !!
+    !! **The cost control this probe needs and did not have.** Every arm here reaches the cipher
+    !! through the public debug wrapper, while the library's own workers call the private
+    !! `random_block` directly. If that wrapper costs anything, every probe arm pays it and every
+    !! library arm does not — so a probe arm that merely *ties* the library is actually ahead, and
+    !! one that loses may still be ahead. This arm is the same algorithm as `fill_r64`, so the gap
+    !! between it and the shipped `real64` draw-axis fill IS the wrapper tax, in ns per value, and
+    !! every other figure can be corrected by it.
+    subroutine fill_r64_replica(seed, stream, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! stream index
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: draw          !! 1-based starting value index
+        integer(int64) :: position, blk, k, mm
+        integer(int64) :: w0, w1, w2, w3, x0, x1, x2, x3
+        mm = size(v, kind=int64)
+        if (mm <= 0_int64) return
+        k = 0_int64
+        position = draw - 1_int64
+        if (iand(position, 1_int64) /= 0_int64) then
+            call parquet_debug_random_block(seed, stream, ishft(position, -1), w0, w1, w2, w3)
+            k = 1_int64
+            v(1) = to_r64(ior(ishft(w3, 32), w2))
+            position = position + 1_int64
+        end if
+        blk = ishft(position, -1)
+        do while (k + 4_int64 <= mm)
+            call parquet_debug_random_block(seed, stream, blk, w0, w1, w2, w3)
+            call parquet_debug_random_block(seed, stream, blk + 1_int64, x0, x1, x2, x3)
+            v(k + 1_int64) = to_r64(ior(ishft(w1, 32), w0))
+            v(k + 2_int64) = to_r64(ior(ishft(w3, 32), w2))
+            v(k + 3_int64) = to_r64(ior(ishft(x1, 32), x0))
+            v(k + 4_int64) = to_r64(ior(ishft(x3, 32), x2))
+            k = k + 4_int64
+            blk = blk + 2_int64
+        end do
+        do while (k + 2_int64 <= mm)
+            call parquet_debug_random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(k + 1_int64) = to_r64(ior(ishft(w1, 32), w0))
+            v(k + 2_int64) = to_r64(ior(ishft(w3, 32), w2))
+            k = k + 2_int64
+            blk = blk + 1_int64
+        end do
+        if (k < mm) then
+            call parquet_debug_random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(mm) = to_r64(ior(ishft(w1, 32), w0))
+        end if
+    end subroutine fill_r64_replica
+
+    !> The library's `to_real64`, which is private: top 53 bits scaled by `2**-53`.
+    pure function to_r64(bits) result(r)
+        integer(int64), intent(in) :: bits          !! any 64-bit pattern
+        real(real64) :: r                           !! `[0, 1)`
+        r = real(ishft(bits, -11), real64) * 2.0_real64**(-53)
+    end function to_r64
+
+    !> Times the wrapper-tax control: the same algorithm, once through the library and once here.
+    subroutine wrapper_tax_row()
+        real(real64) :: t(2), t0
+        integer :: r
+        real(real64), allocatable :: vr(:), vs(:)
+        integer(int64) :: k
+        allocate (vr(n), vs(n))
+        vr = 0.0_real64; vs = 0.0_real64
+        ! Value gate first: the replica must reproduce the library exactly, or it is not a control.
+        call pf_random_fill_draws(SEED, STREAM, vs, 1_int64)
+        call fill_r64_replica(SEED, STREAM, vr, 1_int64)
+        do k = 1_int64, n
+            if (vr(k) /= vs(k)) then
+                write (output_unit, '(a,i0)') 'GATE FAILED G8 replica == library fill_r64 at k = ', k
+                error stop 1
+            end if
+        end do
+        t = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now(); call pf_random_fill_draws(SEED, STREAM, vs, 1_int64)
+            t(1) = min(t(1), now() - t0)
+            t0 = now(); call fill_r64_replica(SEED, STREAM, vr, 1_int64)
+            t(2) = min(t(2), now() - t0)
+        end do
+        write (output_unit, '(a12,3f12.2)') 'ns/value', &
+            t(1) * 1.0e9_real64 / real(n, real64), t(2) * 1.0e9_real64 / real(n, real64), &
+            (t(2) - t(1)) * 1.0e9_real64 / real(n, real64)
+        deallocate (vr, vs)
+        flush (output_unit)
+    end subroutine wrapper_tax_row
+
+    !> Times the stream-axis arms. The `real64` stream fill is the control: it is one block per
+    !! value with no reduction, so it is the floor this axis cannot go below.
+    subroutine streams_row(mm)
+        integer(int64), intent(in) :: mm            !! population size
+        real(real64) :: t(4), t0
+        integer :: r
+        real(real64), allocatable :: vr(:)
+        allocate (vr(n))
+        vr = 0.0_real64
+        t = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now(); call pf_random_fill_streams(SEED, 1_int64, b, 1_int64, mm)
+            t(1) = min(t(1), now() - t0)
+            t0 = now(); call streams_i64_hoisted(SEED, 1_int64, c, 1_int64, mm, 1_int64)
+            t(2) = min(t(2), now() - t0)
+            t0 = now(); call streams_i64_hoisted2(SEED, 1_int64, d, 1_int64, mm, 1_int64)
+            t(3) = min(t(3), now() - t0)
+            t0 = now(); call pf_random_fill_streams(SEED, 1_int64, vr)
+            t(4) = min(t(4), now() - t0)
+        end do
+        write (output_unit, '(a12,4f12.2)') 'ns/value', (t(r) * 1.0e9_real64 / real(n, real64), r=1, 4)
+        deallocate (vr)
+        flush (output_unit)
+    end subroutine streams_row
 
     !> Times many SMALL resamples, which is the bootstrap shape: `reps` replicates of `nsmall` each.
     !!

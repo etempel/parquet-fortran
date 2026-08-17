@@ -249,8 +249,10 @@ contains
 
         ! G2: the restructured arm is value-preserving. THE load-bearing gate: it is what makes
         !     `pair`'s timing a prediction about the library rather than about this file.
+#ifndef PF_NARROW32
         call pair_range(SEED, STREAM, mm, g3, 1_int64, ng)
         call must_match(g1, g3, 'G2 pair == shipped fill (value-preserving)')
+#endif
 
         ! G3: the two narrow arms are the same grid computed two ways.
         call w32_range(SEED, STREAM, mm, g3, 1_int64, ng)
@@ -274,17 +276,21 @@ contains
 
         ! G7: the hoisted stream-axis arms are value-preserving. Same load-bearing role as G2.
         call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm)
+#ifndef PF_NARROW32
         call streams_i64_hoisted(SEED, 1_int64, g3, 1_int64, mm, 1_int64)
         call must_match(g1, g3, 'G7a streams hoisted == shipped fill_streams')
         call streams_i64_hoisted2(SEED, 1_int64, g4, 1_int64, mm, 1_int64)
         call must_match(g1, g4, 'G7b streams hoisted x2 == shipped fill_streams')
         call streams_i64_plain(SEED, 1_int64, g4, 1_int64, mm, 1_int64)
         call must_match(g1, g4, 'G7f streams plain == shipped fill_streams')
+#endif
         ! And again at a draw index that lands in a block's SECOND pair, which is the branch the
         ! hoisted `second` flag replaces -- an arm that only ever tested draw 1 would not reach it.
+#ifndef PF_NARROW32
         call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm, 4_int64)
         call streams_i64_hoisted(SEED, 1_int64, g3, 1_int64, mm, 4_int64)
         call must_match(g1, g3, 'G7c streams hoisted == shipped, draw = 4')
+#endif
         ! G7d pins `fill_streams_i32` against its `int64` sibling, at both pair parities. The two
         ! are edited together and only the `int64` one is timed above, so without this the narrow
         ! specific could be broken by the same change that the `int64` gates certify as correct.
@@ -294,6 +300,37 @@ contains
         call pf_random_fill_streams(SEED, 1_int64, g5, 1_int32, int(mm, int32), 4_int64)
         call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm, 4_int64)
         call must_match(int(g5, int64), g1, 'G7e fill_streams int32 == int64, draw = 4')
+
+#ifdef PF_NARROW32
+        ! G8: under the narrow-grid MEASUREMENT build, the library's own fill must equal this
+        ! probe's independent implementation of the same rule, element for element. Two separately
+        ! written implementations of one rule agreeing is a far stronger check than either against
+        ! itself -- and it is the only oracle available here, because the golden vectors pin the
+        ! 64-bit grid and necessarily disagree with this build (that disagreement IS the contract
+        ! change under evaluation). G1 above already covers scalar-versus-bulk agreement, and it is
+        ! exercising the narrow path in this build rather than the 64-bit one.
+        ! **At a REJECTION-FREE width, and that restriction is load-bearing.** `reduce32` above
+        ! re-keys a rejection with `pf_random_key`, standing in for the library's private
+        ! `retry_key_of`, which is a different function -- so the two implementations are built to
+        ! disagree on any rejected draw and this gate is only an oracle where none occurs. `2**24`
+        ! divides `2**32`, so `2**32 mod s` is 0 and nothing is ever rejected; it is also exactly
+        ! the cap, so this doubles as the check that the cap's own value is admitted.
+        call pf_random_fill_draws(SEED, STREAM, g1, 1_int64, 16777216_int64)
+        call w32_range(SEED, STREAM, 16777216_int64, g3, 1_int64, ng)
+        call must_match(g1, g3, 'G8 library narrow fill == probe w32_range (rejection-free width)')
+        ! The rejecting widths are covered instead by G1 above -- library bulk against library
+        ! scalar at `m = 10**6`, where roughly one draw in 5000 is rejected -- plus containment.
+        call pf_random_fill_draws(SEED, STREAM, g1, 1_int64, mm)
+        call must_contain(g1, mm, 'G8b library narrow fill in [1, m]')
+        ! And at a width just ABOVE the cap the library must fall back to the 64-bit grid, or the
+        ! cap is not doing anything. 16777217 = 2**24 + 1.
+        call pf_random_fill_draws(SEED, STREAM, g1, 1_int64, 16777217_int64)
+        call w32_range(SEED, STREAM, 16777217_int64, g3, 1_int64, ng)
+        if (all(g1 == g3)) then
+            write (output_unit, '(a)') 'GATE FAILED: width 2**24+1 still took the narrow grid'
+            error stop 1
+        end if
+#endif
 
         deallocate (g1, g2, g3, g4, g5)
         write (output_unit, '(a)') 'all gates passed'

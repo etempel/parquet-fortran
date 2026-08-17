@@ -107,6 +107,20 @@ module parquet_random
 
     !> Low 32 bits set: masks a 64-bit register down to one Philox word.
     integer(int64), parameter :: M32 = 4294967295_int64
+#ifdef PF_NARROW32
+    !> **MEASUREMENT BUILD ONLY -- `PF_NARROW32` is not a shipped configuration.**
+    !!
+    !! The widest range the 32-bit candidate rule is allowed to serve. A block is four 32-bit words,
+    !! so a narrow draw costs a quarter of an enciphering instead of a half; the price is that the
+    !! rejection rate is `(2**32 mod s)/2**32`, which rises with `s` and reaches 33.3 % just above
+    !! `2**32/3`. Capping the WIDTH at `2**24` bounds the worst case over every admitted `s` at
+    !! 0.389 %, at `s = 16 711 936`. See `feature_random_resample.md` sections 5 and 19.4 -- and note
+    !! the cap is on the width `hi - lo + 1`, never on `size(idx)`, which are the same number for a
+    !! resample and different for everything else.
+    integer(int64), parameter :: NARROW32_CAP = 16777216_int64
+    !> `2**32`, as the modulus of the 32-bit rejection threshold.
+    integer(int64), parameter :: TWO32 = 4294967296_int64
+#endif
     !> First round multiplier.
     integer(int64), parameter :: PHILOX_M0 = int(z'D2511F53', int64)
     !> Second round multiplier.
@@ -1512,6 +1526,12 @@ contains
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         a = min(lo, hi)
         s = width_of(a, max(lo, hi))
+#ifdef PF_NARROW32
+        if (narrow32_ok(s)) then                    ! MEASUREMENT BUILD ONLY -- see NARROW32_CAP
+            call fill_draws32_i64(seed, stream, v, a, s, draw)
+            return
+        end if
+#endif
         k = 0_int64
         position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
         ! Head: one value when `draw` lands on a block's SECOND pair, after which we are aligned.
@@ -1558,6 +1578,12 @@ contains
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         a = int(min(lo, hi), int64)
         s = width_of(a, int(max(lo, hi), int64))
+#ifdef PF_NARROW32
+        if (narrow32_ok(s)) then                    ! MEASUREMENT BUILD ONLY -- see NARROW32_CAP
+            call fill_draws32_i32(seed, stream, v, a, s, draw)
+            return
+        end if
+#endif
         k = 0_int64
         position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
         if (iand(position, 1_int64) /= 0_int64) then            ! head: see `fill_draws_i64`
@@ -1615,8 +1641,45 @@ contains
         integer(int64), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
         integer(int64) :: k, m
+#ifdef PF_NARROW32
+        integer(int64) :: a, sw, st, nblk, xw, x0, x1, x2, x3   ! MEASUREMENT BUILD ONLY
+        integer :: nj
+#endif
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+#ifdef PF_NARROW32
+        ! The narrow rule must be reached INLINE here, not through `int_at_impl`. That procedure
+        ! keeps its own narrow arm out of line so the scalar entry point stays inlined, and a
+        ! per-element call to it costs this loop 60 % (17.0 -> 27.2 ns per value, measured). The
+        ! stream axis gains only the cheaper reduction -- one block per value either way -- so this
+        ! is a small win here and a large loss if forgotten.
+        a = min(lo, hi)
+        sw = width_of(a, max(lo, hi))
+        if (narrow32_ok(sw)) then
+            ! `random_block` DIRECTLY, not via `bits32_of` -- that helper has three-plus call sites
+            ! and GCC emits it out of line, which costs this loop a call per element (17.0 -> 27.2
+            ! ns per value, measured). `fill_draws32_i64`'s steady state avoids it for the same
+            ! reason. Block and word are functions of `draw` alone, so both hoist.
+            nblk = ishft(draw - 1_int64, -2)
+            nj = int(iand(draw - 1_int64, 3_int64), int32)
+            do k = 1_int64, m
+                st = i0 + (k - 1_int64)
+                call random_block(seed, st, nblk, x0, x1, x2, x3)
+                select case (nj)
+                case (0)
+                    xw = x0
+                case (1)
+                    xw = x1
+                case (2)
+                    xw = x2
+                case default
+                    xw = x3
+                end select
+                v(k) = int_reduce32(xw, a, sw, seed, st, draw)
+            end do
+            return
+        end if
+#endif
         do k = 1_int64, m
             v(k) = int_at_impl(seed, i0 + (k - 1_int64), lo, hi, draw)
         end do
@@ -1631,10 +1694,38 @@ contains
         integer(int32), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
         integer(int64) :: k, m, a, b
+#ifdef PF_NARROW32
+        integer(int64) :: lw, sw, st, nblk, xw, x0, x1, x2, x3  ! MEASUREMENT BUILD ONLY
+        integer :: nj
+#endif
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         a = int(lo, int64)
         b = int(hi, int64)
+#ifdef PF_NARROW32
+        lw = min(a, b)                              ! see `fill_streams_i64` for why this is inline
+        sw = width_of(lw, max(a, b))
+        if (narrow32_ok(sw)) then
+            nblk = ishft(draw - 1_int64, -2)        ! see `fill_streams_i64` for why not `bits32_of`
+            nj = int(iand(draw - 1_int64, 3_int64), int32)
+            do k = 1_int64, m
+                st = i0 + (k - 1_int64)
+                call random_block(seed, st, nblk, x0, x1, x2, x3)
+                select case (nj)
+                case (0)
+                    xw = x0
+                case (1)
+                    xw = x1
+                case (2)
+                    xw = x2
+                case default
+                    xw = x3
+                end select
+                v(k) = int(int_reduce32(xw, lw, sw, seed, st, draw), int32)
+            end do
+            return
+        end if
+#endif
         do k = 1_int64, m
             v(k) = int(int_at_impl(seed, i0 + (k - 1_int64), a, b, draw), int32)
         end do
@@ -1695,6 +1786,16 @@ contains
 
         a = min(lo, hi)                             ! `lo > hi` swaps: the function is total
         s = width_of(a, max(lo, hi))                ! the width, read as an UNSIGNED 64-bit pattern
+#ifdef PF_NARROW32
+        if (narrow32_ok(s)) then                    ! MEASUREMENT BUILD ONLY -- see NARROW32_CAP
+            ! Out of line DELIBERATELY. Inlining the narrow arm here puts two complete Philox
+            ! encipherings in one body, GCC gives up on the whole procedure, and `int_at_impl`
+            ! itself goes out of line -- which costs the SCALAR draw about 5 % at every width,
+            ! including the wide ones this branch never serves. Risk-114, a third time.
+            r = int_at_narrow32(seed, stream, a, s, draw)
+            return
+        end if
+#endif
         r = int_reduce(bits_of(seed, stream, draw), a, s, seed, stream, draw)
     end function int_at_impl
 
@@ -1790,6 +1891,188 @@ contains
         end do
         r = offset_by(a, high)
     end function int_reduce_retry
+
+#ifdef PF_NARROW32
+    !> **MEASUREMENT BUILD ONLY.** `fill_draws_i64` on the 32-bit grid: FOUR values per enciphering.
+    !!
+    !! Same head/steady-state/tail shape as the 64-bit form, with the alignment now to a block of
+    !! four rather than a pair. The head enciphers its block once per value, which costs at most
+    !! three redundant encipherings for the whole call and keeps the steady state branch-free.
+    pure subroutine fill_draws32_i64(seed, stream, v, a, s, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(out) :: v(:)         !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: a             !! the low end of the normalised range
+        integer(int64), intent(in) :: s             !! the width, `1 .. NARROW32_CAP`
+        integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
+        integer(int64) :: k, m, position, blk, w0, w1, w2, w3
+        m = size(v, kind=int64)
+        k = 0_int64
+        position = draw - 1_int64
+        do while (k < m .and. iand(position, 3_int64) /= 0_int64)        ! head, up to three values
+            v(k + 1_int64) = int_reduce32(bits32_of(seed, stream, draw + k), a, s, seed, stream, draw + k)
+            k = k + 1_int64
+            position = position + 1_int64
+        end do
+        blk = ishft(position, -2)
+        do while (k + 4_int64 <= m)                 ! steady state: one block, four values
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(k + 1_int64) = int_reduce32(w0, a, s, seed, stream, draw + k)
+            v(k + 2_int64) = int_reduce32(w1, a, s, seed, stream, draw + (k + 1_int64))
+            v(k + 3_int64) = int_reduce32(w2, a, s, seed, stream, draw + (k + 2_int64))
+            v(k + 4_int64) = int_reduce32(w3, a, s, seed, stream, draw + (k + 3_int64))
+            k = k + 4_int64
+            blk = blk + 1_int64
+        end do
+        do while (k < m)                            ! tail, up to three values
+            v(k + 1_int64) = int_reduce32(bits32_of(seed, stream, draw + k), a, s, seed, stream, draw + k)
+            k = k + 1_int64
+        end do
+    end subroutine fill_draws32_i64
+
+    !> **MEASUREMENT BUILD ONLY.** `fill_draws32_i64` narrowed to `integer(int32)`.
+    pure subroutine fill_draws32_i32(seed, stream, v, a, s, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int32), intent(out) :: v(:)         !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: a             !! the low end of the normalised range
+        integer(int64), intent(in) :: s             !! the width, `1 .. NARROW32_CAP`
+        integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
+        integer(int64) :: k, m, position, blk, w0, w1, w2, w3
+        m = size(v, kind=int64)
+        k = 0_int64
+        position = draw - 1_int64
+        do while (k < m .and. iand(position, 3_int64) /= 0_int64)
+            v(k + 1_int64) = int(int_reduce32(bits32_of(seed, stream, draw + k), a, s, seed, stream, draw + k), int32)
+            k = k + 1_int64
+            position = position + 1_int64
+        end do
+        blk = ishft(position, -2)
+        do while (k + 4_int64 <= m)
+            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            v(k + 1_int64) = int(int_reduce32(w0, a, s, seed, stream, draw + k), int32)
+            v(k + 2_int64) = int(int_reduce32(w1, a, s, seed, stream, &
+                                              draw + (k + 1_int64)), int32)
+            v(k + 3_int64) = int(int_reduce32(w2, a, s, seed, stream, &
+                                              draw + (k + 2_int64)), int32)
+            v(k + 4_int64) = int(int_reduce32(w3, a, s, seed, stream, &
+                                              draw + (k + 3_int64)), int32)
+            k = k + 4_int64
+            blk = blk + 1_int64
+        end do
+        do while (k < m)
+            v(k + 1_int64) = int(int_reduce32(bits32_of(seed, stream, draw + k), a, s, seed, stream, draw + k), int32)
+            k = k + 1_int64
+        end do
+    end subroutine fill_draws32_i32
+
+    !> **MEASUREMENT BUILD ONLY.** The scalar narrow draw, kept out of line on purpose.
+    !!
+    !! See `int_at_impl`'s call site for why. The cost is one call on a path that then enciphers a
+    !! whole Philox block, so it is small in relative terms; the alternative costs every *wide*
+    !! scalar draw as well, which is far worse.
+    pure function int_at_narrow32(seed, stream, a, s, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(in) :: a             !! the low end of the normalised range
+        integer(int64), intent(in) :: s             !! the width, `1 .. NARROW32_CAP`
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: r                         !! a uniform integer in the closed range
+!GCC$ ATTRIBUTES noinline :: int_at_narrow32
+!DIR$ ATTRIBUTES NOINLINE :: int_at_narrow32
+
+        r = int_reduce32(bits32_of(seed, stream, draw), a, s, seed, stream, draw)
+    end function int_at_narrow32
+
+    !> **MEASUREMENT BUILD ONLY.** Whether the 32-bit candidate rule may serve this width.
+    pure function narrow32_ok(s) result(ok)
+        integer(int64), intent(in) :: s             !! the width, as an unsigned pattern; 0 = full
+        logical :: ok                               !! `.true.` when a 32-bit candidate suffices
+        ok = (s >= 1_int64 .and. s <= NARROW32_CAP)
+    end function narrow32_ok
+
+    !> **MEASUREMENT BUILD ONLY.** The 32-bit word this draw addresses: block `(d-1)/4`, word
+    !! `(d-1) mod 4` -- which is exactly the grid `pf_random32_at` walks.
+    pure function bits32_of(seed, stream, draw) result(x)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(in) :: draw          !! 1-based value index; `< 1` clamps to 1
+        integer(int64) :: x                         !! the 32-bit candidate, in `[0, 2**32)`
+        integer(int64) :: e, w0, w1, w2, w3
+        e = max(draw, 1_int64) - 1_int64
+        call random_block(seed, stream, ishft(e, -2), w0, w1, w2, w3)
+        select case (int(iand(e, 3_int64), int32))
+        case (0)
+            x = w0
+        case (1)
+            x = w1
+        case (2)
+            x = w2
+        case default
+            x = w3
+        end select
+    end function bits32_of
+
+    !> **MEASUREMENT BUILD ONLY.** Lemire's reduction over a 32-bit candidate, exactly unbiased.
+    !!
+    !! `x < 2**32` and `s <= 2**24`, so `x * s` is below `2**56` and is an ordinary signed multiply:
+    !! no 128-bit product, no unsigned compare, no fold back into an `int64` pattern. That is why
+    !! this lever is worth more than the halved cipher work alone. The rejection test is the exact
+    !! 32-bit analogue -- accept iff `low32(x*s) >= 2**32 mod s` -- so the result is exactly uniform
+    !! rather than uniform to within `2**-32`.
+    !!
+    !! Split hot/cold exactly as `int_reduce`/`int_reduce_retry` are, and for the same reason: an
+    !! A/B that let this one inline differently from the rule it is being compared against would be
+    !! measuring the inline budget rather than the grid. See `feature_risks.md` Risk-114.
+    !! **The threshold is LAZY, exactly as the 64-bit rule's is, and this is not a detail.** An
+    !! eager `modulo(2**32, s)` is an integer division on every call. A bulk fill hoists it once and
+    !! never notices; `pf_random_int_at` cannot, and paying it per call measured a **6 % regression
+    !! on the scalar draw at every width, including widths the narrow grid never serves**. Deferring
+    !! it behind the same conservative guard `int_reduce` uses -- fire whenever the candidate
+    !! *might* be in the last partial block -- costs nothing and cannot bias anything, because
+    !! nothing here accepts or rejects.
+    pure function int_reduce32(x, a, s, seed, stream, draw) result(r)
+        integer(int64), intent(in) :: x             !! the 32-bit candidate
+        integer(int64), intent(in) :: a             !! the low end of the normalised range
+        integer(int64), intent(in) :: s             !! the width, `1 .. NARROW32_CAP`
+        integer(int64), intent(in) :: seed          !! the stream family's seed, for a re-key
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: r                         !! a uniform integer in the closed range
+        integer(int64) :: p
+        p = x * s
+        if (iand(p, M32) < s) then                  ! lazy guard: `int_reduce`'s, at 32 bits
+            r = int_reduce32_retry(a, s, seed, stream, draw)
+            return
+        end if
+        r = a + ishft(p, -32)
+    end function int_reduce32
+
+    !> **MEASUREMENT BUILD ONLY.** The 32-bit threshold and rejection loop, kept out of line.
+    pure function int_reduce32_retry(a, s, seed, stream, draw) result(r)
+        integer(int64), intent(in) :: a             !! the low end of the normalised range
+        integer(int64), intent(in) :: s             !! the width
+        integer(int64), intent(in) :: seed          !! the stream family's seed, for a re-key
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: r                         !! a uniform integer in the closed range
+        integer(int64) :: p, thr, attempt
+!GCC$ ATTRIBUTES noinline :: int_reduce32_retry
+!DIR$ ATTRIBUTES NOINLINE :: int_reduce32_retry
+
+        ! Reached only when the caller's lazy guard fired, so the division is off the hot path.
+        thr = modulo(TWO32, s)                      ! `2**32 mod s`; both operands positive
+        p = bits32_of(seed, stream, draw) * s
+        attempt = 0_int64
+        do while (iand(p, M32) < thr)
+            attempt = attempt + 1_int64
+            ! Re-key and re-encipher the SAME counter, so consumption stays fixed in counter
+            ! positions -- the rule `int_reduce_retry` follows, at the 32-bit grid's coordinate.
+            p = bits32_of(retry_key_of(seed, attempt), stream, draw) * s
+        end do
+        r = a + ishft(p, -32)
+    end function int_reduce32_retry
+#endif
 
     !> The retry key for attempt `n` (1-based): a re-key, never a tweak.
     !!

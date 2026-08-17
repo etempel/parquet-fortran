@@ -207,8 +207,11 @@ Measured on a 192-core dual-socket server, wall nanoseconds per element:
 | `pf_random_resample`, 10**7 draws | 12.04 | 6.02 | 3.01 | 1.51 | 0.75 | 0.38 | 0.19 |
 
 The resample row scales almost perfectly to 64 threads (63×) and then flattens: 128 threads buys only
-0.16 ns, and asking for one thread per core on this machine is *slower in absolute terms* than asking
-for 64. Treat a very high thread count as something to measure rather than assume, on any machine.
+0.16 ns. Asking for one thread per core (192 here) was *slower in absolute terms* than asking for 64
+— but that turned out to be a property of the **OpenMP runtime**, not of the machine: the same
+binary built with a different compiler ran 192 threads with no collapse at all. So treat a very high
+thread count as something to measure on your own toolchain rather than a number to assume, in either
+direction.
 
 `parquet_set_random_parallel_min_elements(n)` is the **work floor**: the fewest elements a thread
 must be given before a team is opened at all. Below `threads * n` elements the call runs serially,

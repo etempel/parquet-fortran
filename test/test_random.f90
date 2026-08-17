@@ -617,7 +617,65 @@ contains
         ! near-identical specifics differing only in two kind tokens are exactly the shape where a
         ! copy-paste defect hides, so each is named here with a distinct value/index kind pair.
         call check_specifics(error)
+
+        ! **The narrow/wide grid boundary, on both sides and on both axes.** A width of `2**24` is
+        ! admitted to the 32-bit grid and `2**24 + 1` is not, so these two populations are served by
+        ! different rules -- and every form must agree with the scalar draw on both sides, or the
+        ! grids have been wired inconsistently. `2**24` also divides `2**32`, so its rejection
+        ! threshold is 0 and no draw is ever rejected there; `2**24 - 1` is the neighbouring width
+        ! that does reject, which is why it is swept too.
+        call check_grid_boundary(error, 16777216_int64)      ! at the cap, narrow, never rejects
+        if (allocated(error)) return
+        call check_grid_boundary(error, 16777215_int64)      ! just under, narrow, rejects
+        if (allocated(error)) return
+        call check_grid_boundary(error, 16777217_int64)      ! just over, falls back to 64-bit
     end subroutine test_fill_int
+
+    !> Every integer form agrees with the scalar draw at one population size.
+    !!
+    !! Exists so the narrow/wide boundary can be swept on both axes without repeating six calls
+    !! three times. It asserts agreement, not particular values -- the values are frozen by
+    !! `test_random_vectors.f90`, which is generated from the arbitrary-precision oracle.
+    subroutine check_grid_boundary(error, mm)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), intent(in) :: mm            !! population size to sweep
+        integer(int64) :: v(9), k
+        integer(int32) :: v32(9)
+        character(len=200) :: msg          ! ample: a short buffer here aborts with "End of record"
+
+        call pf_random_fill_draws(4242_int64, 5_int64, v, 1_int64, mm)
+        do k = 1_int64, 9_int64
+            write (msg, '(a,i0,a)') "the draw-axis integer fill disagrees with the scalar draw at m = ", mm, &
+                " -- the narrow and wide grids are wired inconsistently"
+            call check(error, v(k) == pf_random_int_at(4242_int64, 5_int64, 1_int64, mm, k), trim(msg))
+            if (allocated(error)) return
+        end do
+        call pf_random_fill_streams(4242_int64, 5_int64, v, 1_int64, mm, 3_int64)
+        do k = 1_int64, 9_int64
+            write (msg, '(a,i0)') "the stream-axis integer fill disagrees with the scalar draw at m = ", mm
+            call check(error, v(k) == pf_random_int_at(4242_int64, 4_int64 + k, 1_int64, mm, 3_int64), trim(msg))
+            if (allocated(error)) return
+        end do
+        if (mm <= int(huge(1_int32), int64)) then
+            ! `v` currently holds the STREAM-axis values, so refill it on the draw axis before
+            ! comparing -- an earlier version of this compared against the wrong array and was
+            ! patched into a tautology rather than fixed, which is worse than no assertion.
+            call pf_random_fill_draws(4242_int64, 5_int64, v, 1_int64, mm)
+            call pf_random_fill_draws(4242_int64, 5_int64, v32, 1_int32, int(mm, int32))
+            do k = 1_int64, 9_int64
+                write (msg, '(a,i0)') "the int32 integer fill disagrees with the int64 one at m = ", mm
+                call check(error, int(v32(k), int64) == v(k), trim(msg))
+                if (allocated(error)) return
+            end do
+        end if
+        ! And the resample, which is the draw-axis fill under another name.
+        call pf_random_resample(v, mm, 4242_int64, 5_int64)
+        do k = 1_int64, 9_int64
+            write (msg, '(a,i0)') "pf_random_resample disagrees with the scalar draw at m = ", mm
+            call check(error, v(k) == pf_random_int_at(4242_int64, 5_int64, 1_int64, mm, k), trim(msg))
+            if (allocated(error)) return
+        end do
+    end subroutine check_grid_boundary
 
     !> Calls each of the eight integer fill specifics by name-resolving literal kinds, and checks it
     !! against the scalar draw at the same coordinate.
@@ -1822,11 +1880,12 @@ contains
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: seed = 987654321_int64
         integer(int64), parameter :: nstream = 2000_int64
-        integer(int64) :: i, w0, w1, w2, w3, bits, want, agree_d1, agree_d2
-        real(real64) :: rv
+        integer(int64) :: i, w0, w1, w2, w3, bits, want, agree_d1, agree_d2, agree_real
+        real(real64) :: rv, r32
 
         agree_d1 = 0_int64
         agree_d2 = 0_int64
+        agree_real = 0_int64
         do i = 1_int64, nstream
             call parquet_debug_random_block(seed, i, 0_int64, w0, w1, w2, w3)
             bits = ior(ishft(w1, 32), w0)
@@ -1837,17 +1896,29 @@ contains
             call check(error, pf_random_at(seed, i, 1_int64) == rv, &
                 "draw 1 of pf_random_at must be that same block's top 53 bits scaled into [0, 1)")
             if (allocated(error)) return
-            want = 1_int64 + int(6.0_real64 * rv, int64)
+            ! **A range of 6 is NARROW, so the integer draw reads ONE word -- word 0, the grid
+            ! `pf_random32_at` walks -- not the pair the real draw reads.** Before the 32-bit grid
+            ! was admitted this test asserted the collision against `pf_random_at`; that collision
+            ! has MOVED rather than gone away, and asserting where it moved to is the point.
+            r32 = real(ishft(w0, -8), real64) * 2.0_real64**(-24)
+            want = 1_int64 + int(6.0_real64 * r32, int64)
             if (pf_random_int_at(seed, i, 1_int64, 6_int64) == want) agree_d1 = agree_d1 + 1_int64
             if (pf_random_int_at(seed, i, 1_int64, 6_int64, 2_int64) == want) agree_d2 = agree_d2 + 1_int64
+            ! And it must NOT collide with the real draw any more, which is what changed.
+            if (pf_random_int_at(seed, i, 1_int64, 6_int64) == 1_int64 + int(6.0_real64 * rv, int64)) &
+                agree_real = agree_real + 1_int64
         end do
         call check(error, agree_d1 == nstream, &
-            "at draw 1 the integer draw must be a deterministic function of the real draw -- both read " // &
-            "words 0 and 1, so pf_random_int_at(seed, i, 1, 6) is 1 + floor(6 * pf_random_at(seed, i))")
+            "at draw 1 a NARROW integer draw must be a deterministic function of pf_random32_at -- both " // &
+            "read word 0, so pf_random_int_at(seed, i, 1, 6) is 1 + floor(6 * pf_random32_at(seed, i))")
         if (allocated(error)) return
         call check(error, agree_d2 < nstream / 2_int64, &
-            "negative control: taking the integer at draw 2 must BREAK that agreement -- it reads words " // &
-            "2 and 3 while the real draw reads 0 and 1, so agreement should fall to roughly 1 in 6")
+            "negative control: taking the integer at draw 2 must BREAK that agreement -- it reads word " // &
+            "1 while pf_random32_at draw 1 reads word 0, so agreement should fall to roughly 1 in 6")
+        if (allocated(error)) return
+        call check(error, agree_real < nstream / 2_int64, &
+            "a narrow integer draw must no longer collide with pf_random_at at the same coordinate -- " // &
+            "that collision moved to pf_random32_at when the 32-bit grid was admitted")
     end subroutine test_int_shares_block
 
     !> The GENERAL cross-generic aliasing rule, of which `test_int_shares_block` tests one point.

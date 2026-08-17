@@ -384,6 +384,21 @@ keyed by `(seed, m)` alone, so independent replicates of those come from `pf_ran
 instead. A resample is built on the draw axis, which carries a stream coordinate already. Both
 routes work here — `stream = b` and `seed = pf_random_key(seed, b)` are equally independent.
 
+**A narrow population is drawn on a cheaper grid, and that is part of the frozen contract.** When
+the range spans 2²⁴ values or fewer — which covers essentially every resample a table-oriented
+program does — an integer draw takes a single 32-bit word rather than a 64-bit pair, so one
+enciphering serves four values instead of two. It is still *exactly* unbiased: the rejection test is
+the 32-bit analogue of the same rule, not an approximation. Measured 2.2×–2.45× on the bulk fill,
+depending on the compiler, and it applies to `pf_random_int_at` and both integer fills alike, so
+every form still agrees value for value. Above 2²⁴ the 64-bit grid is used exactly as before. The
+switch is a function of `m`, which you pass, so it is deterministic and identical on every machine —
+it is **not** a setting and can never become one.
+
+One consequence worth knowing if you mix generics on one stream: at a *narrow* range the integer
+draw shares its word with `pf_random32_at` at the same coordinate, where a *wide* one shares its
+pair with `pf_random_at`/`pf_random_bits_at`. The advice is unchanged — take two generics at
+different draws, or on different streams — but which one a narrow integer collides with has moved.
+
 **There is deliberately no `size(idx) <= m` requirement**, which is the clearest statement of how
 this differs from `pf_random_subset`. Drawing 4000 values from a population of 4000 is the ordinary
 bootstrap, and drawing more than `m` is perfectly meaningful. Two preconditions do apply, and both

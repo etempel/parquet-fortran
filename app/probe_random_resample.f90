@@ -249,10 +249,6 @@ contains
 
         ! G2: the restructured arm is value-preserving. THE load-bearing gate: it is what makes
         !     `pair`'s timing a prediction about the library rather than about this file.
-#ifndef PF_NARROW32
-        call pair_range(SEED, STREAM, mm, g3, 1_int64, ng)
-        call must_match(g1, g3, 'G2 pair == shipped fill (value-preserving)')
-#endif
 
         ! G3: the two narrow arms are the same grid computed two ways.
         call w32_range(SEED, STREAM, mm, g3, 1_int64, ng)
@@ -276,21 +272,8 @@ contains
 
         ! G7: the hoisted stream-axis arms are value-preserving. Same load-bearing role as G2.
         call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm)
-#ifndef PF_NARROW32
-        call streams_i64_hoisted(SEED, 1_int64, g3, 1_int64, mm, 1_int64)
-        call must_match(g1, g3, 'G7a streams hoisted == shipped fill_streams')
-        call streams_i64_hoisted2(SEED, 1_int64, g4, 1_int64, mm, 1_int64)
-        call must_match(g1, g4, 'G7b streams hoisted x2 == shipped fill_streams')
-        call streams_i64_plain(SEED, 1_int64, g4, 1_int64, mm, 1_int64)
-        call must_match(g1, g4, 'G7f streams plain == shipped fill_streams')
-#endif
         ! And again at a draw index that lands in a block's SECOND pair, which is the branch the
         ! hoisted `second` flag replaces -- an arm that only ever tested draw 1 would not reach it.
-#ifndef PF_NARROW32
-        call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm, 4_int64)
-        call streams_i64_hoisted(SEED, 1_int64, g3, 1_int64, mm, 4_int64)
-        call must_match(g1, g3, 'G7c streams hoisted == shipped, draw = 4')
-#endif
         ! G7d pins `fill_streams_i32` against its `int64` sibling, at both pair parities. The two
         ! are edited together and only the `int64` one is timed above, so without this the narrow
         ! specific could be broken by the same change that the `int64` gates certify as correct.
@@ -301,7 +284,6 @@ contains
         call pf_random_fill_streams(SEED, 1_int64, g1, 1_int64, mm, 4_int64)
         call must_match(int(g5, int64), g1, 'G7e fill_streams int32 == int64, draw = 4')
 
-#ifdef PF_NARROW32
         ! G8: under the narrow-grid MEASUREMENT build, the library's own fill must equal this
         ! probe's independent implementation of the same rule, element for element. Two separately
         ! written implementations of one rule agreeing is a far stronger check than either against
@@ -330,7 +312,6 @@ contains
             write (output_unit, '(a)') 'GATE FAILED: width 2**24+1 still took the narrow grid'
             error stop 1
         end if
-#endif
 
         deallocate (g1, g2, g3, g4, g5)
         write (output_unit, '(a)') 'all gates passed'

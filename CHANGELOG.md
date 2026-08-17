@@ -647,7 +647,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrowing of the `real64` one; `pf_random_bits_at` gives 64 raw bits, of which `pf_random_at` is
   contractually the top 53; `pf_random_int_at` is exactly unbiased at every width, including above
   2**63 where the obvious implementations silently make part of the range unreachable, and swaps
-  `lo > hi` rather than failing; `pf_random_fill_draws` fills a rank-1 `real64`/`real32` array with
+  `lo > hi` rather than failing; a range spanning **2**24 values or fewer** is served by a cheaper
+  32-bit grid — one enciphering per four draws instead of two, measured 2.2x-2.45x on the bulk
+  fills — and is still *exactly* unbiased rather than approximately so, the switch being frozen
+  contract keyed on the range the caller passes and never a setting (one consequence: at a narrow
+  range the integer draw shares its word with `pf_random32_at` at the same coordinate, where a wide
+  one shares its pair with `pf_random_at`/`pf_random_bits_at`); `pf_random_fill_draws` fills a rank-1 `real64`/`real32` array with
   consecutive draws of one stream, and `pf_random_fill_streams` fills one with one draw of each of
   consecutive streams — both prefix-consistently and more cheaply than the equivalent scalar calls,
   each with the one precondition that the final position it addresses stays representable in `int64`

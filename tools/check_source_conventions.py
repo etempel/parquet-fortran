@@ -1950,6 +1950,48 @@ def check_allocate_extent_kind():
     return []
 
 
+def check_noinline_directives_are_paired():
+    """Every `noinline` marker in `parquet_random` must carry BOTH compilers' spellings.
+
+    Three procedures in `src/parquet_random.f90` are deliberately kept OUT of line --
+    `int_reduce_retry`, `int_reduce32_retry` and `int_at_narrow32` -- and each carries a matched
+    pair of directives, one for GCC and one for Intel. The pairing is what this checks, by shape
+    rather than by name, so a fourth such procedure is covered the day it is added.
+
+    **Why a lint check and not a comment.** Losing one of the two spellings is invisible: the file
+    compiles, every test passes, every value is identical, and one compiler silently inlines a body
+    that must not be inlined. The cost is real and was measured four separate times while the
+    32-bit grid was being adopted -- a bulk fill's shape pushing `int_reduce` past GCC's inline
+    budget cost the SCALAR draw 9 %; the narrow arm inlined into `int_at_impl` cost the WIDE scalar
+    draw 13 %; the fix for that cost the stream fills 60 %; and so on. Each was found only with
+    `objdump`. See `feature_risks.md` Risk-114 and Risk-115.
+
+    A directive is an ordinary comment to a compiler that does not know it, so carrying both is
+    free; carrying one is a silent, compiler-specific de-optimisation.
+    """
+    path = SRC / "parquet_random.f90"
+    if not path.is_file():
+        return ["tools/check_source_conventions.py: src/parquet_random.f90 not found -- this check "
+                "has gone stale and is silently testing nothing"]
+    text = path.read_text(encoding="utf-8", errors="replace")
+    gcc = set(re.findall(r"^!GCC\$ ATTRIBUTES noinline :: (\w+)", text, re.M))
+    ifx = set(re.findall(r"^!DIR\$ ATTRIBUTES NOINLINE :: (\w+)", text, re.M))
+    problems = []
+    # The empty-result guard: if the pattern stops matching, that is a moved file, not a clean bill.
+    if not gcc and not ifx:
+        problems.append(
+            "no noinline directives found in src/parquet_random.f90 at all -- either they were "
+            "removed (a silent de-optimisation on both compilers) or this check's pattern has gone "
+            "stale; either way it must not report success")
+    for name in sorted(gcc - ifx):
+        problems.append("%s has !GCC$ ATTRIBUTES noinline but no matching "
+                        "!DIR$ ATTRIBUTES NOINLINE -- ifx will inline it" % name)
+    for name in sorted(ifx - gcc):
+        problems.append("%s has !DIR$ ATTRIBUTES NOINLINE but no matching "
+                        "!GCC$ ATTRIBUTES noinline -- gfortran will inline it" % name)
+    return problems
+
+
 CHECKS = (
     ("benchmark build-tree names carry the compiler", check_build_tree_names_carry_the_compiler),
     ("parquet_table has no allocatable component", check_no_allocatable_component),
@@ -1976,6 +2018,7 @@ CHECKS = (
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
     ("parquet_random takes array lengths as int64", check_fill_size_kind),
     ("allocate extents from size() use int64", check_allocate_extent_kind),
+    ("noinline directives carry both spellings", check_noinline_directives_are_paired),
 )
 
 

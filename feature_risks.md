@@ -179,6 +179,7 @@ something a reader is expected to have.
 | [Risk-112](#risk-112--a-fills-position-arithmetic-overflows-at-the-boundary-the-suite-tests-and-still-answers-correctly) | A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly | 4 — covered |
 | [Risk-113](#risk-113--the-coordinate-addressed-generics-read-one-word-sequence-and-real32-walks-a-finer-grid) | The coordinate-addressed generics read one word sequence, and `real32` walks a finer grid | 4 — covered |
 | [Risk-114](#risk-114--a-bulk-fills-loop-shape-can-silently-de-optimise-the-scalar-draw-that-shares-its-reduction) | A bulk fill's loop shape can silently de-optimise the SCALAR draw that shares its reduction | 4 — covered |
+| [Risk-115](#risk-115--the-integer-rules-two-grids-are-one-contract-and-its-inlining-shape-is-load-bearing) | The integer rule's two grids are one contract, and its inlining shape is load-bearing | 4 — covered |
 
 ---
 
@@ -186,7 +187,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-115**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-116**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4952,3 +4953,59 @@ fill a SLICE of a longer array and assert the remainder is untouched. `test_resa
 (`test/test_random.f90`) does this at lengths 1, 3, 7, 15 and 31, and for an unaligned start at
 lengths 1-6; the mutation survives every other test in the suite and fails this one immediately.
 Copy the canary, not just the assertion, for any future fill that advances by more than one element.
+
+### Risk-115 — The integer rule's two grids are one contract, and its inlining shape is load-bearing
+
+`pf_random_int_at` reads **one of two grids, chosen by the range's WIDTH**: a width of `1 ..
+NARROW32_CAP` (`2**24`) takes a single 32-bit candidate at word `d-1`, the grid `pf_random32_at`
+walks; anything wider takes the 64-bit pair at words `2d-2, 2d-1`. Two separate things can break
+here silently, and they fail in different ways.
+
+**1. The grids are contract, and three implementations must agree.** The value at a coordinate is
+frozen by `pf_random_algorithm`, and it is pinned by three independently written models: the library
+(`src/parquet_random.f90`), the arbitrary-precision Python oracle
+(`tools/generate_random_golden_vectors.py`), and the limb-based Fortran reference
+(`test/test_random_reference.f90`). **A change to one of the three that is not made in the other two
+produces a test failure that looks like a bug in the library and is not** — and, worse, changing all
+three the same wrong way passes everything. The cap in particular is a **frozen contract value, never
+a setting**: it is a function of an argument the caller passes, identical on every machine and at
+every thread count, and making it adjustable would make the same call return different values in
+different programs. It appears in all three models and must be changed in all three or none.
+
+Two properties are easy to get wrong and cost nothing to state: the cap is on the **width**
+`hi - lo + 1`, never on how many values are drawn (they coincide for a resample and differ for
+everything else); and the rejection rate at a narrow width is `(2**32 mod s)/2**32`, which peaks at
+**33.3 %** just above `2**32/3` — the cap exists to bound it at 0.389 %, and raising it re-opens a
+case that measured **2.5x slower than doing nothing**.
+
+**2. The inlining shape is load-bearing, and every spelling of it was measured.** Three procedures
+are deliberately out of line — `int_reduce_retry`, `int_reduce32_retry`, `int_at_narrow32` — each
+carrying a matched pair of `!GCC$`/`!DIR$` directives. Removing one spelling silently de-optimises one
+compiler; restructuring the fork silently de-optimises something else. Measured, while adopting the
+narrow grid:
+
+| change | cost, and to what |
+|---|---|
+| eager `modulo(2**32, s)` instead of a lazy threshold | −6 % on the SCALAR draw at *every* width |
+| narrow arm inlined into `int_at_impl` | −5 % scalar; `int_at_impl` pushed out of line entirely |
+| one `random_block` site, no call (sounds strictly better) | −13 % on gfortran's wide scalar, +4 % on ifx's |
+| `noinline` narrow helper, but stream fills reaching it | **−60 %** on `pf_random_fill_streams` |
+| `bits32_of` left as the stream loops' word source | −50 % on the same, one call per element |
+
+**None of these fails a test.** Every value stays identical; only a benchmark notices. The shipped
+shape costs the wide scalar draw 3.6 % on gfortran and 11.7 % on ifx, which is the best worst case of
+the three structures tried, and that residual is itself unexplained — `int_at_impl` grows 14
+instructions and executes about two of them on that path.
+
+**Test.** The value contract is covered three ways and needs no new test: the golden vectors
+(`test/test_random_vectors.f90`, regenerated from the Python oracle and never from a Fortran run),
+`test_agreement_int` against the limb-based reference across the width regimes, and
+`test_int_shares_block`, which asserts *where the small-range collision moved to* — a narrow integer
+draw is now a deterministic function of `pf_random32_at`, not of `pf_random_at`, and that test carries
+both the new identity and a negative control that the old one is gone.
+
+The inlining half is **not testable** and is guarded two other ways: statically by
+`check_noinline_directives_are_paired` (`tools/check_source_conventions.py`), which matches by shape
+so a fourth out-of-line procedure is covered the day it is added, and by `objdump` — the one command
+is on `int_reduce_retry`'s doc-comment. **Grep it for `call`, not `\bcall\b`**: the latter does not
+match `callq`, which is how a 16-instruction thunk was once read as "fully inlined".

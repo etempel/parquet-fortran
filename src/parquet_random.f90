@@ -107,10 +107,7 @@ module parquet_random
 
     !> Low 32 bits set: masks a 64-bit register down to one Philox word.
     integer(int64), parameter :: M32 = 4294967295_int64
-#ifdef PF_NARROW32
-    !> **MEASUREMENT BUILD ONLY -- `PF_NARROW32` is not a shipped configuration.**
-    !!
-    !! The widest range the 32-bit candidate rule is allowed to serve. A block is four 32-bit words,
+    !> The widest range the 32-bit candidate rule is allowed to serve. A block is four 32-bit words,
     !! so a narrow draw costs a quarter of an enciphering instead of a half; the price is that the
     !! rejection rate is `(2**32 mod s)/2**32`, which rises with `s` and reaches 33.3 % just above
     !! `2**32/3`. Capping the WIDTH at `2**24` bounds the worst case over every admitted `s` at
@@ -118,9 +115,8 @@ module parquet_random
     !! the cap is on the width `hi - lo + 1`, never on `size(idx)`, which are the same number for a
     !! resample and different for everything else.
     integer(int64), parameter :: NARROW32_CAP = 16777216_int64
-    !> `2**32`, as the modulus of the 32-bit rejection threshold.
+    !> `2**32`, the modulus of the 32-bit rejection threshold.
     integer(int64), parameter :: TWO32 = 4294967296_int64
-#endif
     !> First round multiplier.
     integer(int64), parameter :: PHILOX_M0 = int(z'D2511F53', int64)
     !> Second round multiplier.
@@ -1526,12 +1522,10 @@ contains
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         a = min(lo, hi)
         s = width_of(a, max(lo, hi))
-#ifdef PF_NARROW32
-        if (narrow32_ok(s)) then                    ! MEASUREMENT BUILD ONLY -- see NARROW32_CAP
+        if (narrow32_ok(s)) then                    ! the 32-bit grid; see NARROW32_CAP
             call fill_draws32_i64(seed, stream, v, a, s, draw)
             return
         end if
-#endif
         k = 0_int64
         position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
         ! Head: one value when `draw` lands on a block's SECOND pair, after which we are aligned.
@@ -1578,12 +1572,10 @@ contains
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         a = int(min(lo, hi), int64)
         s = width_of(a, int(max(lo, hi), int64))
-#ifdef PF_NARROW32
-        if (narrow32_ok(s)) then                    ! MEASUREMENT BUILD ONLY -- see NARROW32_CAP
+        if (narrow32_ok(s)) then                    ! the 32-bit grid; see NARROW32_CAP
             call fill_draws32_i32(seed, stream, v, a, s, draw)
             return
         end if
-#endif
         k = 0_int64
         position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
         if (iand(position, 1_int64) /= 0_int64) then            ! head: see `fill_draws_i64`
@@ -1641,13 +1633,10 @@ contains
         integer(int64), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
         integer(int64) :: k, m
-#ifdef PF_NARROW32
-        integer(int64) :: a, sw, st, nblk, xw, x0, x1, x2, x3   ! MEASUREMENT BUILD ONLY
+        integer(int64) :: a, sw, st, nblk, xw, x0, x1, x2, x3
         integer :: nj
-#endif
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
-#ifdef PF_NARROW32
         ! The narrow rule must be reached INLINE here, not through `int_at_impl`. That procedure
         ! keeps its own narrow arm out of line so the scalar entry point stays inlined, and a
         ! per-element call to it costs this loop 60 % (17.0 -> 27.2 ns per value, measured). The
@@ -1679,7 +1668,6 @@ contains
             end do
             return
         end if
-#endif
         do k = 1_int64, m
             v(k) = int_at_impl(seed, i0 + (k - 1_int64), lo, hi, draw)
         end do
@@ -1694,15 +1682,12 @@ contains
         integer(int32), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
         integer(int64) :: k, m, a, b
-#ifdef PF_NARROW32
-        integer(int64) :: lw, sw, st, nblk, xw, x0, x1, x2, x3  ! MEASUREMENT BUILD ONLY
+        integer(int64) :: lw, sw, st, nblk, xw, x0, x1, x2, x3
         integer :: nj
-#endif
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         a = int(lo, int64)
         b = int(hi, int64)
-#ifdef PF_NARROW32
         lw = min(a, b)                              ! see `fill_streams_i64` for why this is inline
         sw = width_of(lw, max(a, b))
         if (narrow32_ok(sw)) then
@@ -1725,7 +1710,6 @@ contains
             end do
             return
         end if
-#endif
         do k = 1_int64, m
             v(k) = int(int_at_impl(seed, i0 + (k - 1_int64), a, b, draw), int32)
         end do
@@ -1786,16 +1770,20 @@ contains
 
         a = min(lo, hi)                             ! `lo > hi` swaps: the function is total
         s = width_of(a, max(lo, hi))                ! the width, read as an UNSIGNED 64-bit pattern
-#ifdef PF_NARROW32
-        if (narrow32_ok(s)) then                    ! MEASUREMENT BUILD ONLY -- see NARROW32_CAP
-            ! Out of line DELIBERATELY. Inlining the narrow arm here puts two complete Philox
-            ! encipherings in one body, GCC gives up on the whole procedure, and `int_at_impl`
-            ! itself goes out of line -- which costs the SCALAR draw about 5 % at every width,
-            ! including the wide ones this branch never serves. Risk-114, a third time.
+        if (narrow32_ok(s)) then
+            ! **Out of line deliberately, and this shape was chosen by measurement over two
+            ! rivals.** Inlining the narrow arm here puts two complete Philox encipherings in one
+            ! body; GCC then gives up and pushes `int_at_impl` itself out of line, costing the WIDE
+            ! scalar draw 13 %. Hoisting the enciphering above the fork so there is one
+            ! `random_block` site and no call at all -- which sounds strictly better -- makes the
+            ! body bigger still and costs gfortran the same 13 % while saving ifx 4 %. This shape
+            ! costs gfortran 3.6 % and ifx 11.7 % on the wide path, which is the best worst case of
+            ! the three. See `feature_random_resample.md` stage 5 for all six measurements, and
+            ! `feature_risks.md` Risk-115 for why nothing here may be "simplified" without
+            ! re-measuring both compilers.
             r = int_at_narrow32(seed, stream, a, s, draw)
             return
         end if
-#endif
         r = int_reduce(bits_of(seed, stream, draw), a, s, seed, stream, draw)
     end function int_at_impl
 
@@ -1892,8 +1880,7 @@ contains
         r = offset_by(a, high)
     end function int_reduce_retry
 
-#ifdef PF_NARROW32
-    !> **MEASUREMENT BUILD ONLY.** `fill_draws_i64` on the 32-bit grid: FOUR values per enciphering.
+    !> `fill_draws_i64` on the 32-bit grid: FOUR values per enciphering.
     !!
     !! Same head/steady-state/tail shape as the 64-bit form, with the alignment now to a block of
     !! four rather than a pair. The head enciphers its block once per value, which costs at most
@@ -1930,7 +1917,7 @@ contains
         end do
     end subroutine fill_draws32_i64
 
-    !> **MEASUREMENT BUILD ONLY.** `fill_draws32_i64` narrowed to `integer(int32)`.
+    !> `fill_draws32_i64` narrowed to `integer(int32)`.
     pure subroutine fill_draws32_i32(seed, stream, v, a, s, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
@@ -1966,7 +1953,7 @@ contains
         end do
     end subroutine fill_draws32_i32
 
-    !> **MEASUREMENT BUILD ONLY.** The scalar narrow draw, kept out of line on purpose.
+    !> The scalar narrow draw, kept out of line on purpose.
     !!
     !! See `int_at_impl`'s call site for why. The cost is one call on a path that then enciphers a
     !! whole Philox block, so it is small in relative terms; the alternative costs every *wide*
@@ -1984,14 +1971,14 @@ contains
         r = int_reduce32(bits32_of(seed, stream, draw), a, s, seed, stream, draw)
     end function int_at_narrow32
 
-    !> **MEASUREMENT BUILD ONLY.** Whether the 32-bit candidate rule may serve this width.
+    !> Whether the 32-bit candidate rule may serve this width.
     pure function narrow32_ok(s) result(ok)
         integer(int64), intent(in) :: s             !! the width, as an unsigned pattern; 0 = full
         logical :: ok                               !! `.true.` when a 32-bit candidate suffices
         ok = (s >= 1_int64 .and. s <= NARROW32_CAP)
     end function narrow32_ok
 
-    !> **MEASUREMENT BUILD ONLY.** The 32-bit word this draw addresses: block `(d-1)/4`, word
+    !> The 32-bit word this draw addresses: block `(d-1)/4`, word
     !! `(d-1) mod 4` -- which is exactly the grid `pf_random32_at` walks.
     pure function bits32_of(seed, stream, draw) result(x)
         integer(int64), intent(in) :: seed          !! the stream family's seed
@@ -2013,7 +2000,7 @@ contains
         end select
     end function bits32_of
 
-    !> **MEASUREMENT BUILD ONLY.** Lemire's reduction over a 32-bit candidate, exactly unbiased.
+    !> Lemire's reduction over a 32-bit candidate, exactly unbiased.
     !!
     !! `x < 2**32` and `s <= 2**24`, so `x * s` is below `2**56` and is an ordinary signed multiply:
     !! no 128-bit product, no unsigned compare, no fold back into an `int64` pattern. That is why
@@ -2048,7 +2035,7 @@ contains
         r = a + ishft(p, -32)
     end function int_reduce32
 
-    !> **MEASUREMENT BUILD ONLY.** The 32-bit threshold and rejection loop, kept out of line.
+    !> The 32-bit threshold and rejection loop, kept out of line.
     pure function int_reduce32_retry(a, s, seed, stream, draw) result(r)
         integer(int64), intent(in) :: a             !! the low end of the normalised range
         integer(int64), intent(in) :: s             !! the width
@@ -2072,7 +2059,6 @@ contains
         end do
         r = a + ishft(p, -32)
     end function int_reduce32_retry
-#endif
 
     !> The retry key for attempt `n` (1-based): a re-key, never a tweak.
     !!

@@ -69,6 +69,9 @@ module test_random_reference
     integer(int64), parameter :: RMIX_B = ior(ishft(int(z'94D049BB', int64), 32), int(z'133111EB', int64))
     !> The retry key's offset in label space.
     integer(int64), parameter :: RRETRY_TAG = ishft(int(z'5A170000', int64), 32)
+    !> The widest range served by the 32-bit candidate grid. Frozen contract, never a setting; see
+    !! `NARROW32_CAP` in `src/parquet_random.f90` and in the Python oracle.
+    integer(int64), parameter :: RNARROW32_CAP = 16777216_int64
 
 contains
 
@@ -449,6 +452,7 @@ contains
         integer(int64), intent(out) :: retries      !! how many rejections preceded it
         integer(int64) :: a, b, s, d, blk, x, low, high, threshold, key
         integer(int64) :: o0, o1, o2, o3
+        integer :: slot
         integer(int64) :: ulow(NL), us(NL), ut(NL)
         logical :: second
         a = min(lo, hi)
@@ -457,9 +461,42 @@ contains
         ! No multiplication, for the reason `ref_bits` records at length: `2 * (draw - 1)` overflows
         ! above draw 2**62 and made this model accuse the library of being wrong at high draws.
         d = max(draw, 1_int64)
+        retries = 0_int64
+        ! **A narrow range takes the 32-bit grid**: one word rather than a pair, at word index
+        ! `d - 1` -- the grid `pf_random32_at` walks -- so one block serves four draws. Spelled out
+        ! here rather than shared with the wide arm below, so that each rule reads as one piece.
+        if (s >= 1_int64 .and. s <= RNARROW32_CAP) then
+            blk = (d - 1_int64) / 4_int64
+            slot = int(modulo(d - 1_int64, 4_int64), int32)
+            threshold = modulo(4294967296_int64, s)     ! `2**32 mod s`; both operands positive
+            do
+                if (retries == 0_int64) then
+                    key = seed
+                else
+                    key = ref_mix64(ieor(ref_mix64(seed), ieor(retries, RRETRY_TAG)))
+                end if
+                call ref_block(key, stream, blk, o0, o1, o2, o3)
+                select case (slot)
+                case (0)
+                    x = o0
+                case (1)
+                    x = o1
+                case (2)
+                    x = o2
+                case default
+                    x = o3
+                end select
+                ! `x < 2**32` and `s <= 2**24`, so `x * s < 2**56`: an ordinary signed multiply,
+                ! with no 128-bit product and nothing to reduce on limbs.
+                low = x * s
+                if (iand(low, 4294967295_int64) >= threshold) exit
+                retries = retries + 1_int64
+            end do
+            value = a + ishft(low, -32)
+            return
+        end if
         blk = (d - 1_int64) / 2_int64
         second = (modulo(d - 1_int64, 2_int64) == 1_int64)
-        retries = 0_int64
         if (s == 0_int64) then
             call ref_block(seed, stream, blk, o0, o1, o2, o3)
             if (second) then

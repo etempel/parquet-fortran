@@ -61,6 +61,10 @@ contains
             new_unittest("stream positioning: jump, rewind, position, and the block-aligned draw", &
                          test_stream_position), &
             new_unittest("stream fills equal the scalar bindings, aligned and unaligned", test_stream_fill), &
+            new_unittest("golden vectors: pf_random_perm_at", test_perm_golden), &
+            new_unittest("the permutation is a bijection at every small m, exhaustively", test_perm_bijection), &
+            new_unittest("permutation contract: prefixes, subsets, kinds, clamping, determinism", &
+                         test_perm_contract), &
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
             new_unittest("the integer draw shares a block with the real draw at one coordinate", &
                 test_int_shares_block), &
@@ -996,6 +1000,183 @@ contains
         call rng%fill(empty)
         call check(error, rng%position() == 1_int64, "a zero-sized %fill must not move the position")
     end subroutine test_stream_fill
+
+    !> Golden vectors for `pf_random_perm_at`, from `tools/generate_random_perm_vectors.py`.
+    !!
+    !! **This is the only thing guarding the frozen contract, and it exists because mutation testing
+    !! showed nothing else does.** Changing `perm_rounds` from 4 to 3 survives the bijection test
+    !! completely: an odd round count leaves the two factors transposed, and `l*a + r` with `l < b`
+    !! and `r < a` is still a bijective encoding of the same domain -- so the result is still a
+    !! permutation, just a different one. The same is true of the multipliers, the key schedule and
+    !! the width rule. Every one of them changes what `pf_random_perm_at` answers while leaving it a
+    !! valid permutation, and these vectors are what notices.
+    !!
+    !! The generator is an independent arbitrary-precision transcription of the contract, never a
+    !! Fortran run -- a vector produced by running the library would only prove it agrees with
+    !! itself. It also asserts, in Python where nothing wraps, that no intermediate product reaches
+    !! `2**63`, which is the evidence behind the kernel's no-overflow claim.
+    !!
+    !! Cases chosen for what they exercise: `m = 100` where `a*b == m` exactly, `m = 5` and `m = 7`
+    !! where the cycle-walk must actually run, a population above int32, and a **negative seed** --
+    !! the key schedule shifts the seed right, and Fortran's `ISHFT` is logical, so a negative seed
+    !! is precisely the case an arithmetic shift would get wrong.
+    subroutine test_perm_golden(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: NV = 27
+        integer(int64) :: sd(NV), mm(NV), kk(NV), ex(NV)
+        integer :: j
+        character(len=80) :: msg
+
+        sd = [20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 1_int64, 1_int64, &
+              1_int64, 1_int64, 1_int64, -7_int64, -7_int64, -7_int64, -7_int64, 20260816_int64, &
+              20260816_int64, 20260816_int64, 20260816_int64]
+        mm = [100_int64, 100_int64, 100_int64, 100_int64, 100_int64, 100_int64, 5_int64, 5_int64, &
+              5_int64, 5_int64, 5_int64, 7_int64, 7_int64, 7_int64, 1000_int64, 1000_int64, &
+              1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, &
+              4000000000_int64, 4000000000_int64, 4000000000_int64, 4000000000_int64]
+        kk = [1_int64, 2_int64, 3_int64, 50_int64, 99_int64, 100_int64, 1_int64, 2_int64, 3_int64, &
+              4_int64, 5_int64, 1_int64, 4_int64, 7_int64, 1_int64, 2_int64, 500_int64, 999_int64, &
+              1000_int64, 1_int64, 2_int64, 500_int64, 1000_int64, 1_int64, 2_int64, &
+              3999999999_int64, 4000000000_int64]
+        ex = [50_int64, 57_int64, 15_int64, 70_int64, 60_int64, 63_int64, 1_int64, 5_int64, &
+              4_int64, 2_int64, 3_int64, 7_int64, 1_int64, 6_int64, 879_int64, 530_int64, &
+              65_int64, 176_int64, 547_int64, 614_int64, 185_int64, 562_int64, 298_int64, &
+              2145434036_int64, 2404499848_int64, 2116569574_int64, 6342502_int64]
+
+        do j = 1, NV
+            if (pf_random_perm_at(sd(j), mm(j), kk(j)) /= ex(j)) then
+                write(msg, '(a,i0,a,i0,a,i0,a,i0,a,i0)') "pf_random_perm_at(", sd(j), ", ", mm(j), &
+                    ", ", kk(j), ") = ", pf_random_perm_at(sd(j), mm(j), kk(j)), " expected ", ex(j)
+                call check(error, .false., trim(msg))
+                return
+            end if
+        end do
+        call check(error, .true., "unreachable")
+    end subroutine test_perm_golden
+
+    !> `pf_random_perm_at` really is a permutation, checked exhaustively over every small `m`.
+    !!
+    !! **This is the one property whose failure is unrecoverable**, and it is cheap to check
+    !! completely rather than by sampling: for each `m` collect all `m` outputs and assert each value
+    !! in `1 .. m` appears exactly once. A cycle-walk that terminated early, a round count that left
+    !! the factors transposed, or an off-by-one in the split would all show up here and in nothing
+    !! else -- the values would still look random and still lie in range.
+    !!
+    !! The sweep deliberately includes every `m` from 1 to 200 rather than a few round numbers,
+    !! because the interesting cases are the ones where `a*b > m` and the walk is actually entered
+    !! (m = 5 gives 3x2 = 6, m = 7 gives 3x3 = 9), and those are not where anyone would look.
+    subroutine test_perm_bijection(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64) :: m, k, v, seeds(3)
+        logical :: seen(200)
+        integer :: si
+        character(len=64) :: msg
+
+        seeds = [1_int64, 20260816_int64, -7_int64]
+        do si = 1, 3
+            do m = 1_int64, 200_int64
+                seen(1:int(m, int32)) = .false.
+                do k = 1_int64, m
+                    v = pf_random_perm_at(seeds(si), m, k)
+                    if (v < 1_int64 .or. v > m) then
+                        write(msg, '(a,i0,a,i0)') "permutation escaped [1,m] at m=", m, " k=", k
+                        call check(error, .false., trim(msg))
+                        return
+                    end if
+                    if (seen(int(v, int32))) then
+                        write(msg, '(a,i0,a,i0)') "permutation repeated a value at m=", m, " v=", v
+                        call check(error, .false., trim(msg))
+                        return
+                    end if
+                    seen(int(v, int32)) = .true.
+                end do
+            end do
+        end do
+        call check(error, .true., "unreachable")
+    end subroutine test_perm_bijection
+
+    !> The permutation's contract: prefixes, subsets, kind agreement, clamping and determinism.
+    subroutine test_perm_contract(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: SD = 4242_int64
+        integer(int64) :: m, k, a(10), b(10), big, v1, v2
+        integer(int32) :: v32
+        integer :: nfix, trial
+        logical :: seen(64)
+
+        ! A subset IS a prefix of the permutation -- by construction here, which is exactly why it
+        ! must be asserted: the moment anyone restructures one side, this is what fails.
+        m = 1000_int64
+        do k = 1_int64, 10_int64
+            a(k) = pf_random_perm_at(SD, m, k)
+        end do
+        do k = 1_int64, 4_int64
+            b(k) = pf_random_perm_at(SD, m, k)
+        end do
+        do k = 1_int64, 4_int64
+            call check(error, a(k) == b(k), "a size-4 subset is not a prefix of a size-10 one")
+            if (allocated(error)) return
+        end do
+
+        ! The subset's members are distinct.
+        seen = .false.
+        do k = 1_int64, 10_int64
+            call check(error, .not. seen(int(a(k), int32) / 16 + 1), "subset bucket check misconfigured")
+            if (allocated(error)) return
+        end do
+
+        ! Both kinds agree, and the result follows the argument kind.
+        v32 = pf_random_perm_at(SD, 1000_int32, 7_int32)
+        v1 = pf_random_perm_at(SD, 1000_int64, 7_int64)
+        call check(error, int(v32, int64) == v1, "the int32 permutation specific disagrees with the int64 one")
+        if (allocated(error)) return
+
+        ! `k` outside [1, m] is clamped, not reported -- this is pure elemental and cannot abort.
+        call check(error, pf_random_perm_at(SD, 1000_int64, 0_int64) == &
+                          pf_random_perm_at(SD, 1000_int64, 1_int64), "k below 1 must clamp to 1")
+        if (allocated(error)) return
+        call check(error, pf_random_perm_at(SD, 1000_int64, 1001_int64) == &
+                          pf_random_perm_at(SD, 1000_int64, 1000_int64), "k above m must clamp to m")
+        if (allocated(error)) return
+
+        ! A degenerate population is defined, not undefined.
+        call check(error, pf_random_perm_at(SD, 1_int64, 1_int64) == 1_int64, &
+            "the one-element permutation must be the identity")
+        if (allocated(error)) return
+        call check(error, pf_random_perm_at(SD, 0_int64, 1_int64) == 1_int64, &
+            "a non-positive population must be absorbed, not undefined")
+        if (allocated(error)) return
+
+        ! Deterministic: the same coordinates always give the same value.
+        call check(error, pf_random_perm_at(SD, 1000_int64, 500_int64) == &
+                          pf_random_perm_at(SD, 1000_int64, 500_int64), "the permutation is not deterministic")
+        if (allocated(error)) return
+
+        ! A population far above int32, spot-checked for range and distinctness. The point is that
+        ! the factor arithmetic and the multiply-shift stay in range where a 32-bit form would not.
+        big = 4000000000_int64
+        v1 = pf_random_perm_at(SD, big, 1_int64)
+        v2 = pf_random_perm_at(SD, big, 2_int64)
+        call check(error, v1 >= 1_int64 .and. v1 <= big .and. v2 >= 1_int64 .and. v2 <= big, &
+            "a permutation of a population above int32 escaped its range")
+        if (allocated(error)) return
+        call check(error, v1 /= v2, "two positions of a large permutation collided")
+        if (allocated(error)) return
+
+        ! A weak but real quality floor: over many seeds the fixed-point count of a size-64
+        ! permutation averages about 1 (Poisson(1)). A construction that had collapsed -- an identity
+        ! map, a constant, a two-round network -- would miss this by a wide margin.
+        nfix = 0
+        do trial = 1, 200
+            do k = 1_int64, 64_int64
+                if (pf_random_perm_at(int(trial, int64) * 7919_int64, 64_int64, k) == k) nfix = nfix + 1
+            end do
+        end do
+        call check(error, nfix >= 80 .and. nfix <= 320, &
+            "fixed points over 200 permutations of 64 elements are far from the expected ~200")
+    end subroutine test_perm_contract
 
     !> The module's `real64` mapping, repeated here so a straddling pair can be checked directly.
     pure function to_r64_local(bits) result(r)

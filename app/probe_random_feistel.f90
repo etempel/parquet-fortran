@@ -206,6 +206,229 @@ contains
         z = ieor(z, ishft(z, -31))
     end function pmix64
 
+    !> A two-multiply keyed mixer that is **UB-free by construction**, not by measurement.
+    !!
+    !! `feature_risks.md` Risk-94 records this repository being caught with a wrapping multiply that
+    !! measured correct while the optimiser used the overflow's undefinedness to delete a branch two
+    !! functions away. So a new round function must not overflow at all. Every operand is masked to
+    !! **31 bits** before each multiply and the constants are below `2**32`, so each product is
+    !! bounded by `(2**31 - 1) * (2**32 - 1) < 2**63` and no signed overflow is possible.
+    !!
+    !! This is the difference between a probe result and a shippable kernel: the earlier `pmix64`
+    !! arm in `run_opt` is SplitMix64's finaliser with plain 64-bit multiplies, which overflow and
+    !! could not be adopted as written. `src/parquet_random.f90`'s own `mix64` avoids that through
+    !! `mul64_lo_strict`, whose `#else` arm builds the product from 16-bit limbs -- correct, and far
+    !! too expensive for a per-round hot path. Masking is the cheap way to get the same guarantee.
+    pure function mix2(rk, x) result(w)
+        integer(int64), intent(in) :: rk            !! round key
+        integer(int64), intent(in) :: x             !! input, below `2**32`
+        integer(int64) :: w                         !! mixed word, below `2**32`
+        integer(int64), parameter :: M31 = 2147483647_int64
+        integer(int64), parameter :: M32 = 4294967295_int64
+        integer(int64), parameter :: C1 = 2654435761_int64      ! Knuth's 32-bit golden-ratio odd
+        integer(int64), parameter :: C2 = 2246822519_int64      ! xxHash prime 3, odd, < 2**32
+        integer(int64) :: z
+        z = ieor(x, rk)
+        z = iand(z, M31) * C1
+        z = ieor(z, ishft(z, -29))
+        z = iand(z, M31) * C2
+        z = ieor(z, ishft(z, -31))
+        w = iand(z, M32)
+    end function mix2
+
+    !> Round keys for `mix2`, derived once per permutation.
+    pure subroutine mix2_keys(seed, rounds, rk)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer, intent(in) :: rounds               !! how many rounds
+        integer(int64), intent(out) :: rk(:)        !! one key per round
+        integer :: k
+        do k = 1, rounds
+            rk(k) = mix2(int(k, int64) * 2654435761_int64, iand(seed, 4294967295_int64))
+            rk(k) = ieor(rk(k), mix2(int(k, int64), ishft(seed, -32)))
+        end do
+    end subroutine mix2_keys
+
+    !> The shippable candidate: modular Feistel, division-free, UB-free `mix2` round function.
+    pure function feistel_mix2(rk, rounds, a, b, x) result(y)
+        integer(int64), intent(in) :: rk(:)         !! per-permutation round keys
+        integer, intent(in) :: rounds               !! how many rounds; must be even
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: x             !! input in `[0, a*b)`
+        integer(int64) :: y                         !! output in the same domain
+        integer(int64) :: l, r, t, p, q, sw
+        integer :: k
+        p = a
+        q = b
+        l = x / q
+        r = x - l * q
+        do k = 1, rounds
+            t = l + ishft(iand(mix2(rk(k), r), 2147483647_int64) * p, -31)
+            if (t >= p) t = t - p
+            l = r
+            r = t
+            sw = p
+            p = q
+            q = sw
+        end do
+        y = l * q + r
+    end function feistel_mix2
+
+    !> Cycle-walked `mix2` bijection.
+    pure subroutine mix2_at(rk, m, rounds, a, b, k, v, trials)
+        integer(int64), intent(in) :: rk(:)         !! per-permutation round keys
+        integer(int64), intent(in) :: m             !! population size
+        integer, intent(in) :: rounds               !! how many rounds
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: k             !! input in `[0, m)`
+        integer(int64), intent(out) :: v            !! output in `[0, m)`
+        integer, intent(out) :: trials              !! network applications used
+        v = k
+        trials = 0
+        do
+            v = feistel_mix2(rk, rounds, a, b, v)
+            trials = trials + 1
+            if (v < m) exit
+        end do
+    end subroutine mix2_at
+
+    !> LEVER 5: a blocked, branch-free bulk fill, written so a compiler can vectorise it.
+    !!
+    !! Elements are mutually independent, `mix2` is integer multiply-and-shift with no memory access
+    !! and no branch, and under the modular rule the cycle-walk is taken essentially never (mean
+    !! applications 1.0000). So a block of `k` can be driven through the rounds as array expressions
+    !! and the walk handled afterwards as a rare fix-up over whatever landed out of range.
+    !!
+    !! This form exists only because Fisher-Yates is gone: a shuffle is inherently sequential, so
+    !! there was no vectorisable shape to compare against while it was still in the design.
+    pure subroutine perm_fill_block(rk, m, rounds, a, b, k0, v)
+        integer(int64), intent(in) :: rk(:)         !! per-permutation round keys
+        integer(int64), intent(in) :: m             !! population size
+        integer, intent(in) :: rounds               !! how many rounds; must be even
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: k0            !! first input index, 0-based
+        integer(int64), intent(inout) :: v(:)       !! filled with the images of `k0 .. k0+size(v)-1`
+        integer(int64) :: l(size(v)), r(size(v)), t(size(v)), w(size(v))
+        integer(int64), parameter :: M31 = 2147483647_int64
+        integer(int64), parameter :: M32 = 4294967295_int64
+        integer(int64), parameter :: C1 = 2654435761_int64
+        integer(int64), parameter :: C2 = 2246822519_int64
+        integer(int64) :: p, q, sw, x
+        integer :: k, j, n, trials
+        n = size(v)
+        do j = 1, n
+            v(j) = k0 + int(j, int64) - 1_int64
+        end do
+        p = a
+        q = b
+        l = v / q
+        r = v - l * q
+        do k = 1, rounds
+            w = ieor(r, rk(k))
+            w = iand(w, M31) * C1
+            w = ieor(w, ishft(w, -29))
+            w = iand(w, M31) * C2
+            w = ieor(w, ishft(w, -31))
+            w = iand(w, M32)
+            t = l + ishft(w * p, -32)
+            where (t >= p) t = t - p
+            l = r
+            r = t
+            sw = p
+            p = q
+            q = sw
+        end do
+        v = l * q + r
+        ! Fix-up: whatever fell outside `[0, m)` walks serially. Under the modular rule this is
+        ! empty whenever `a*b == m`, and a handful of elements otherwise.
+        do j = 1, n
+            if (v(j) >= m) then
+                x = v(j)
+                do
+                    x = feistel_mix2(rk, rounds, a, b, x)
+                    if (x < m) exit
+                end do
+                v(j) = x
+            end if
+        end do
+        trials = 0
+    end subroutine perm_fill_block
+
+    !> LEVER 6, done properly: a bulk fill that needs NO division at all.
+    !!
+    !! The scalar entry point must split `k` into `(l, r)` with `l = k / b`, and no SIMD unit has an
+    !! integer divide -- which is what stops `perm_fill_block` above from vectorising and is why it
+    !! matched the scalar form at every size but the smallest.
+    !!
+    !! A bulk fill does not need the division at all. As `k` runs `0 .. m-1`, the pair `(l, r)` runs
+    !! `l = 0 .. a-1` crossed with `r = 0 .. b-1` in exactly that order, so the outer loop supplies
+    !! `l` as a scalar and the inner one supplies `r` as a contiguous vector. **The split is loop
+    !! structure rather than arithmetic**, and what remains inside the rounds is multiply, shift, xor
+    !! and one masked compare -- all of which vectorise.
+    !!
+    !! The output index is `l*b + r + 1`, so writes stay sequential.
+    pure subroutine perm_fill_lr(rk, m, rounds, a, b, v)
+        integer(int64), intent(in) :: rk(:)         !! per-permutation round keys
+        integer(int64), intent(in) :: m             !! population size
+        integer, intent(in) :: rounds               !! how many rounds; must be even
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(inout) :: v(:)       !! filled with the image of `k` at `v(k+1)`
+        integer(int64), parameter :: M31 = 2147483647_int64
+        integer(int64), parameter :: M32 = 4294967295_int64
+        integer(int64), parameter :: C1 = 2654435761_int64
+        integer(int64), parameter :: C2 = 2246822519_int64
+        integer(int64) :: lo, r0, n, base, p, q, sw, x
+        integer(int64) :: l(1024), r(1024), t(1024), w(1024)
+        integer :: k
+        integer(int64) :: j
+        do lo = 0_int64, a - 1_int64
+            r0 = 0_int64
+            do while (r0 < b)
+                n = min(1024_int64, b - r0)
+                base = lo * b + r0
+                if (base >= m) exit
+                if (base + n > m) n = m - base
+                do j = 1_int64, n
+                    l(j) = lo
+                    r(j) = r0 + j - 1_int64
+                end do
+                p = a
+                q = b
+                do k = 1, rounds
+                    w(1:n) = ieor(r(1:n), rk(k))
+                    w(1:n) = iand(w(1:n), M31) * C1
+                    w(1:n) = ieor(w(1:n), ishft(w(1:n), -29))
+                    w(1:n) = iand(w(1:n), M31) * C2
+                    w(1:n) = ieor(w(1:n), ishft(w(1:n), -31))
+                    w(1:n) = iand(w(1:n), M32)
+                    t(1:n) = l(1:n) + ishft(iand(w(1:n), M31) * p, -31)
+                    where (t(1:n) >= p) t(1:n) = t(1:n) - p
+                    l(1:n) = r(1:n)
+                    r(1:n) = t(1:n)
+                    sw = p
+                    p = q
+                    q = sw
+                end do
+                v(base + 1_int64:base + n) = l(1:n) * q + r(1:n)
+                ! Rare fix-up: anything outside `[0, m)` walks serially. Empty when `a*b == m`.
+                do j = 1_int64, n
+                    if (v(base + j) >= m) then
+                        x = v(base + j)
+                        do
+                            x = feistel_mix2(rk, rounds, a, b, x)
+                            if (x < m) exit
+                        end do
+                        v(base + j) = x
+                    end if
+                end do
+                r0 = r0 + n
+            end do
+        end do
+    end subroutine perm_fill_lr
+
     !> Modular Feistel with **no divisions**, same round function (a full Philox block) as before.
     !!
     !! Two `modulo` calls per round become zero, and neither change touches the round function:
@@ -431,6 +654,8 @@ program probe_random_feistel
     if (mode == 'scale' .or. mode == 'all') call run_scale()
     if (mode == 'cores' .or. mode == 'all') call run_cores()
     if (mode == 'opt' .or. mode == 'all') call run_opt()
+    if (mode == 'prog' .or. mode == 'all') call run_prog()
+    if (mode == 'struct' .or. mode == 'all') call run_struct()
     if (mode == 'speed' .or. mode == 'all') call run_speed()
 
 contains
@@ -502,6 +727,10 @@ contains
         call stats_arm(M, NSEED, 4, 'cheap-round ', 5)
         call stats_arm(M, NSEED, 6, 'cheap-round ', 5)
         call stats_arm(M, NSEED, 8, 'cheap-round ', 5)
+        call stats_arm(M, NSEED, 2, 'mix2 UBfree ', 6)
+        call stats_arm(M, NSEED, 3, 'mix2 UBfree ', 6)
+        call stats_arm(M, NSEED, 4, 'mix2 UBfree ', 6)
+        call stats_arm(M, NSEED, 6, 'mix2 UBfree ', 6)
         write(output_unit, '(a)') ''
         flush(output_unit)
     end subroutine run_statistics
@@ -541,6 +770,7 @@ contains
         do s = 1, nseed
             key = SEED + g_shift * 1000003_int64 + int(s, int64) * 7919_int64
             if (vsel == 5) call mix_round_keys(key, max(rounds, 1), rkey)
+            if (vsel == 6) call mix2_keys(key, max(rounds, 1), rkey)
             if (rounds < 0) then
                 call fy_permutation(key, m, perm)
             else
@@ -554,6 +784,8 @@ contains
                         call mod_fast_at(key, m, rounds, fa, fb, j - 1_int64, v, trials)
                     case (5)
                         call mix_at(rkey, m, rounds, fa, fb, j - 1_int64, v, trials)
+                    case (6)
+                        call mix2_at(rkey, m, rounds, fa, fb, j - 1_int64, v, trials)
                     case default
                         call feistel_at(key, m, rounds, h, j - 1_int64, v, trials)
                     end select
@@ -1060,6 +1292,225 @@ contains
         write(output_unit, '(a)') ''
         flush(output_unit)
     end subroutine run_opt
+
+    !> The optimisation programme: every lever measured against the same baseline, single core.
+    subroutine run_prog()
+        integer(int64) :: sizes(4) = [10000_int64, 1000000_int64, 10000000_int64, 100000000_int64]
+        integer(int64), allocatable :: perm(:), ref(:)
+        integer(int64) :: m, a, b, j, pv, reps, r, rk(8), blk(512)
+        integer :: si, trials, rd, vi, nb, jb
+        real(real64) :: t0, t1, best(6)
+        character(len=14) :: nm(6)
+
+        nm(1) = 'baseline      '
+        nm(2) = 'mix2 scalar   '
+        nm(3) = 'mix2 blocked  '
+        nm(4) = 'pmix64 (unsafe'
+        nm(5) = 'nodiv philox  '
+        nm(6) = 'mix2 lr-fill  '
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'OPTIMISATION PROGRAMME -- ns per element, single core, 4 rounds'
+        write(output_unit, '(a)') 'modular width rule throughout; mix2 is the UB-free shippable mixer'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') &
+            '           m    baseline  mix2 scalar mix2 blocked  pmix64(uns)  nodiv-phlx  mix2 lr-fill'
+        flush(output_unit)
+
+        do si = 1, size(sizes)
+            m = sizes(si)
+            a = ceil_sqrt(m)
+            b = (m + a - 1_int64) / a
+            call mix2_keys(SEED, 4, rk)
+            allocate(perm(m), ref(m))
+            reps = max(1_int64, min(20000000_int64 / m, 2000_int64))
+
+            do vi = 1, 6
+                best(vi) = huge(1.0_real64)
+                do rd = 1, 3
+                    t0 = wall()
+                    do r = 1_int64, reps
+                        if (vi == 6) then
+                            call perm_fill_lr(rk, m, 4, a, b, perm)
+                        else if (vi == 3) then
+                            do jb = 1, int((m + 511_int64) / 512_int64, int32)
+                                nb = int(min(512_int64, m - int(jb - 1, int64) * 512_int64), int32)
+                                call perm_fill_block(rk, m, 4, a, b, int(jb - 1, int64) * 512_int64, &
+                                                     blk(1:nb))
+                                perm(int(jb - 1, int64) * 512_int64 + 1_int64: &
+                                     int(jb - 1, int64) * 512_int64 + int(nb, int64)) = blk(1:nb)
+                            end do
+                        else
+                            do j = 1_int64, m
+                                select case (vi)
+                                case (1)
+                                    call mod_at(SEED, m, 4, a, b, j - 1_int64, pv, trials)
+                                case (2)
+                                    call mix2_at(rk, m, 4, a, b, j - 1_int64, pv, trials)
+                                case (4)
+                                    call mix_at(rk, m, 4, a, b, j - 1_int64, pv, trials)
+                                case default
+                                    call mod_fast_at(SEED, m, 4, a, b, j - 1_int64, pv, trials)
+                                end select
+                                perm(j) = pv
+                            end do
+                        end if
+                    end do
+                    t1 = wall()
+                    best(vi) = min(best(vi), (t1 - t0) / real(reps, real64) / real(m, real64) * 1.0e9_real64)
+                    if (m > 1000000_int64) exit
+                end do
+                call assert_permutation(perm, m, nm(vi))
+                if (vi == 2) ref = perm
+                ! The blocked form must reproduce the scalar mix2 EXACTLY -- it is the same kernel
+                ! rearranged, so any difference is a defect in the rearrangement, not a variant.
+                if (vi == 3 .or. vi == 6) then
+                    do j = 1_int64, m
+                        if (perm(j) /= ref(j)) then
+                            write(output_unit, '(a,a,a,i0)') 'FATAL: ', nm(vi), ' differs from scalar at ', j
+                            error stop 1
+                        end if
+                    end do
+                end if
+            end do
+
+            write(output_unit, '(i12,6f13.3)') m, best(1), best(2), best(3), best(4), best(5), best(6)
+            flush(output_unit)
+            deallocate(perm, ref)
+        end do
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+    end subroutine run_prog
+
+    !> STAGE 0: the modular-domain structural distinguisher, over many keys.
+    !!
+    !! `structure_probe` is a power-of-two-HALVES test and cannot see the modular family at all, so
+    !! every clearance the modular kernel has comes from marginal statistics -- the same half of the
+    !! battery that passed 3-round balanced, which the structural test then caught at +2.9 sigma.
+    !! This closes that gap, and the single-key limitation of §9 at the same time.
+    !!
+    !! **What it asks.** An input is a pair `(l, r)` in `Z_a x Z_b`; so is an output. If sharing one
+    !! input component makes the outputs share a component more (or less) often than chance, the
+    !! network has left structure behind. Four relations are enumerated **exhaustively** over the raw
+    !! domain -- no sampling, so no power is lost to a quantisation artefact:
+    !!
+    !!   * same input `r`, differing `l` -> same output `l`?   (the two-round signature: exactly 0)
+    !!   * same input `r`, differing `l` -> same output `r`?
+    !!   * same input `l`, differing `r` -> same output `l`?
+    !!   * same input `l`, differing `r` -> same output `r`?
+    !!
+    !! **Fisher-Yates supplies the null.** Rather than comparing against a formula, the control
+    !! builds a genuinely uniform permutation of the same raw domain and runs the identical four
+    !! counts on it. That is what the maintainer's decision to keep Fisher-Yates in `test/` buys:
+    !! the calibration is measured, not assumed, so "3.4 % of pairs match" is read against what a
+    !! correct construction actually does rather than against `(b-1)/(ab-1)`.
+    !!
+    !! Run on the RAW network, before cycle-walking, because walking mixes the structure and would
+    !! hide what is being asked.
+    subroutine run_struct()
+        integer(int64), parameter :: MM = 1000_int64
+        integer, parameter :: NKEYS = 64
+        integer :: rlist(4) = [2, 3, 4, 6]
+        integer(int64) :: a, b, nd, x, y1, y2, l1, l2, r1, r2, key, rk(8)
+        integer(int64), allocatable :: y(:), fyperm(:)
+        real(real64) :: f(4, NKEYS), mu(4), sd(4), ctl_mu(4), ctl_sd(4), z
+        integer(int64) :: hit(4), npair(4)
+        integer :: ri, ka, arm
+        character(len=14) :: nm
+
+        a = ceil_sqrt(MM)
+        b = (MM + a - 1_int64) / a
+        nd = a * b
+        allocate(y(0:nd - 1), fyperm(nd))
+
+        write(output_unit, '(a)') '=========================================================='
+        write(output_unit, '(a)') 'STAGE 0 -- modular-domain structural distinguisher'
+        write(output_unit, '(a,i0,a,i0,a,i0,a,i0,a)') 'raw domain Z_', a, ' x Z_', b, ' = ', nd, &
+            ' elements, ', NKEYS, ' independent keys, all pairs enumerated'
+        write(output_unit, '(a)') 'columns: r->l  r->r  l->l  l->r   (fraction of pairs sharing an output component)'
+        write(output_unit, '(a)') 'z is against the Fisher-Yates control, in units of the control''s own key-to-key sd'
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') '   arm            rounds       r->l       r->r       l->l       l->r        max|z|'
+        flush(output_unit)
+
+        do arm = 0, size(rlist)
+            do ka = 1, NKEYS
+                key = SEED + g_shift * 7919393_int64 + int(ka, int64) * 104729_int64
+                if (arm == 0) then
+                    call fy_permutation(key, nd, fyperm)
+                    do x = 0_int64, nd - 1_int64
+                        y(x) = fyperm(x + 1_int64)
+                    end do
+                else
+                    call mix2_keys(key, rlist(arm), rk)
+                    do x = 0_int64, nd - 1_int64
+                        y(x) = feistel_mix2(rk, rlist(arm), a, b, x)
+                    end do
+                end if
+
+                hit = 0_int64
+                npair = 0_int64
+                ! Pairs sharing the input right component.
+                do r1 = 0_int64, b - 1_int64
+                    do l1 = 0_int64, a - 2_int64
+                        y1 = y(l1 * b + r1)
+                        do l2 = l1 + 1_int64, a - 1_int64
+                            y2 = y(l2 * b + r1)
+                            npair(1) = npair(1) + 1_int64
+                            if (y1 / b == y2 / b) hit(1) = hit(1) + 1_int64
+                            if (modulo(y1, b) == modulo(y2, b)) hit(2) = hit(2) + 1_int64
+                        end do
+                    end do
+                end do
+                npair(2) = npair(1)
+                ! Pairs sharing the input left component.
+                do l1 = 0_int64, a - 1_int64
+                    do r1 = 0_int64, b - 2_int64
+                        y1 = y(l1 * b + r1)
+                        do r2 = r1 + 1_int64, b - 1_int64
+                            y2 = y(l1 * b + r2)
+                            npair(3) = npair(3) + 1_int64
+                            if (y1 / b == y2 / b) hit(3) = hit(3) + 1_int64
+                            if (modulo(y1, b) == modulo(y2, b)) hit(4) = hit(4) + 1_int64
+                        end do
+                    end do
+                end do
+                npair(4) = npair(3)
+                do ri = 1, 4
+                    f(ri, ka) = real(hit(ri), real64) / real(npair(ri), real64)
+                end do
+            end do
+
+            do ri = 1, 4
+                mu(ri) = sum(f(ri, :)) / real(NKEYS, real64)
+                sd(ri) = sqrt(sum((f(ri, :) - mu(ri))**2) / real(NKEYS - 1, real64))
+            end do
+
+            if (arm == 0) then
+                ctl_mu = mu
+                ctl_sd = sd
+                nm = 'Fisher-Yates  '
+                write(output_unit, '(a,a,a,4f11.5,a)') '   ', nm, '     -', mu(1), mu(2), mu(3), mu(4), &
+                    '        (null)'
+            else
+                z = 0.0_real64
+                do ri = 1, 4
+                    if (ctl_sd(ri) > 0.0_real64) &
+                        z = max(z, abs(mu(ri) - ctl_mu(ri)) / (ctl_sd(ri) / sqrt(real(NKEYS, real64))))
+                end do
+                nm = 'mix2 modular  '
+                write(output_unit, '(a,a,i6,4f11.5,f14.2)') '   ', nm, rlist(arm), &
+                    mu(1), mu(2), mu(3), mu(4), z
+            end if
+            flush(output_unit)
+        end do
+        write(output_unit, '(a)') ''
+        write(output_unit, '(a)') 'A |z| of a few is ordinary across 4 relations x 5 arms; two rounds should be'
+        write(output_unit, '(a)') 'unmistakable (r->l exactly 0), and 4 rounds should sit in the control''s range.'
+        write(output_unit, '(a)') ''
+        flush(output_unit)
+        deallocate(y, fyperm)
+    end subroutine run_struct
 
     subroutine speed_one(m)
         integer(int64), intent(in) :: m

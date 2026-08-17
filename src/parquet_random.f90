@@ -76,6 +76,8 @@ module parquet_random
     public :: pf_random_key
     public :: parquet_debug_random_uses_int128
     public :: parquet_debug_random_block
+    public :: pf_random_perm_algorithm
+    public :: pf_random_perm_at
 
     !> Identifies the algorithm together with every mapping this module freezes -- the cipher, the
     !! key and counter layout, the word order, the integer rule and its retry key. Its value changes
@@ -139,6 +141,43 @@ module parquet_random
     !> Low 64 bits set, widened.
     integer(k128), parameter :: MASK64_128 = TWO64_128 - 1_k128
 #endif
+
+    ! ---- The permutation bijection (see `pf_random_perm_at`) ----
+
+    !> Identifies the PERMUTATION contract, separately from `pf_random_algorithm`.
+    !!
+    !! Two identifiers rather than one, deliberately. `pf_random_algorithm` names the draw grid's
+    !! mappings; the permutation is a different construction with its own kernel, so folding it into
+    !! that string would tell every program which recorded it that its stored *draws* had changed
+    !! when only the permutation had. This one covers exactly five things and nothing else: the
+    !! construction (a Feistel network with cycle-walking), the width rule (`Z_a x Z_b` with
+    !! `a = ceil(sqrt(m))`), the round count, the round function, and the round-key derivation.
+    character(len=*), parameter :: pf_random_perm_algorithm = "feistel-mix2-4/zaxzb/v1"
+
+    !> Feistel rounds. **Four, and it must stay even.**
+    !!
+    !! Even because the two factors swap places every round, so an odd count leaves the state in
+    !! `Z_b x Z_a` and the output encoded against transposed factors -- the value would depend on the
+    !! parity of the round count in a way nothing else in this module does.
+    !!
+    !! Four because it is where the evidence puts the boundary, measured rather than assumed. A
+    !! structural distinguisher over the raw domain (all pairs sharing an input component, asking
+    !! whether the outputs share one, calibrated against a genuinely uniform permutation) detects
+    !! **two** rounds at |z| ~ 165-194 -- it is exactly 0, since the output's left component is then
+    !! `(l + F1(r)) mod a` and distinct `l` cannot collide -- and detects **three** rounds in every
+    !! one of six independent key sets, always in the same relation and always in the same direction.
+    !! At four rounds no relation is consistently off (|z| 1.05-4.03 with no repetition), and six
+    !! buys nothing measurable. Luby-Rackoff puts the theoretical boundary in the same place.
+    integer, parameter :: perm_rounds = 4
+
+    !> First `mix2` multiplier: the odd 32-bit golden-ratio constant, as used by xxHash and others.
+    integer(int64), parameter :: perm_c1 = 2654435761_int64
+    !> Second `mix2` multiplier: xxHash's PRIME32_2. Odd, below `2**32`, and well studied.
+    integer(int64), parameter :: perm_c2 = 2246822519_int64
+    !> Low 31 bits set. **Load-bearing, not decoration** -- see `perm_mix2`.
+    integer(int64), parameter :: perm_m31 = 2147483647_int64
+    !> Largest `a` whose square is representable, so `a * a` in `perm_factors` cannot overflow.
+    integer(int64), parameter :: perm_a_max = 3037000499_int64
 
     !> Process-wide call counter behind `pf_random_seed`, and the module's only mutable state.
     !! Every other procedure here is a pure function of its arguments.
@@ -265,6 +304,40 @@ module parquet_random
         module procedure pf_random_fill_streams_i64_i32
         module procedure pf_random_fill_streams_i64_i64
     end interface pf_random_fill_streams
+
+    !> Element `k` of a uniform-looking permutation of `1 .. m`, addressed by its coordinates.
+    !!
+    !! The permutation counterpart of `pf_random_at`: a pure function of `(seed, m, k)`, computed in
+    !! constant time and constant memory, touching no array. Element `k` depends on no other element,
+    !! so a loop over `k` may be run in any order, on any number of threads, and gives the same
+    !! answer -- which is the property the whole module exists for, extended from draws to
+    !! permutations.
+    !!
+    !! ```fortran
+    !! !$omp parallel do
+    !! do k = 1, m
+    !!     perm(k) = pf_random_perm_at(seed, m, k)      ! same result at any thread count
+    !! end do
+    !! ```
+    !!
+    !! **The first `n` values are a uniform random `n`-subset of `1 .. m`**, so a subset needs no
+    !! separate machinery and no memory: ask for `k = 1 .. n`. Prefix consistency follows for free --
+    !! a size-3 subset is a prefix of a size-6 one from the same `(seed, m)` -- and a subset at
+    !! `n == m` **is** the permutation, rather than merely agreeing with it.
+    !!
+    !! **`m` and `k` share their kind** (`integer(int32)` or `integer(int64)`) and the result follows
+    !! them; `seed` is always `integer(int64)`. `k` outside `[1, m]` is clamped rather than reported,
+    !! the same convention `draw_or_1` uses and for the same reason: this is `pure elemental` and has
+    !! no way to abort.
+    !!
+    !! **It is not uniform over all `m!` permutations, and nothing with a 64-bit seed could be** --
+    !! `m!` passes `2**64` at `m = 21`. What is measured is that it is indistinguishable from a
+    !! uniform permutation under fixed-point, cycle-structure, position-uniformity, subset-membership
+    !! and structural tests; `pf_random_perm_algorithm` names the contract that fixes it.
+    interface pf_random_perm_at
+        module procedure pf_random_perm_at_i32
+        module procedure pf_random_perm_at_i64
+    end interface pf_random_perm_at
 
     !> Derives an independent seed from a seed and a label, so one seed can fan out into families.
     !!
@@ -1624,6 +1697,157 @@ contains
         integer(int64) :: r                         !! an independent seed
         r = mix64(ieor(mix64(seed), label))
     end function key_from
+
+    ! ================================================================================
+    ! The permutation bijection
+    ! ================================================================================
+
+    !> `pf_random_perm_at` for `integer(int32)` population size and index.
+    !!
+    !! The result is inside `[1, m]` by construction, so narrowing the `int64` worker's answer is
+    !! exact -- the same argument `pf_random_int_at_i32` rests on.
+    pure elemental function pf_random_perm_at_i32(seed, m, k) result(r)
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer(int32), intent(in) :: m             !! population size; the permutation is of `1 .. m`
+        integer(int32), intent(in) :: k             !! 1-based position; clamped into `[1, m]`
+        integer(int32) :: r                         !! element `k` of that permutation
+        r = int(perm_at_impl(seed, int(m, int64), int(k, int64)), int32)
+    end function pf_random_perm_at_i32
+
+    !> `pf_random_perm_at` for `integer(int64)` population size and index.
+    pure elemental function pf_random_perm_at_i64(seed, m, k) result(r)
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer(int64), intent(in) :: m             !! population size; the permutation is of `1 .. m`
+        integer(int64), intent(in) :: k             !! 1-based position; clamped into `[1, m]`
+        integer(int64) :: r                         !! element `k` of that permutation
+        r = perm_at_impl(seed, m, k)
+    end function pf_random_perm_at_i64
+
+    !> The permutation itself: split, encipher, cycle-walk, rejoin.
+    !!
+    !! The walk is what turns a bijection on `[0, a*b)` into one on `[0, m)`: re-apply the network
+    !! while the value is out of range. It terminates because the network is a bijection, so every
+    !! orbit closes, and the orbit of a value below `m` must return to it. With `a*b` sitting on top
+    !! of `m` it is entered essentially never -- measured at 1.0000 applications per element at
+    !! m = 10**6, 10**7 and 10**8.
+    pure function perm_at_impl(seed, m, k) result(r)
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(in) :: k             !! 1-based position, not yet clamped
+        integer(int64) :: r                         !! element `k`, in `[1, m]`
+        integer(int64) :: a, b, rk(perm_rounds), x, n
+        n = m
+        if (n < 1_int64) n = 1_int64                ! a degenerate population is one element
+        x = k - 1_int64
+        if (x < 0_int64) x = 0_int64                ! clamp rather than report; see the interface doc
+        if (x >= n) x = n - 1_int64
+        if (n == 1_int64) then
+            r = 1_int64
+            return
+        end if
+        call perm_factors(n, a, b)
+        call perm_round_keys(seed, rk)
+        do
+            x = perm_feistel(rk, a, b, x)
+            if (x < n) exit
+        end do
+        r = x + 1_int64
+    end function perm_at_impl
+
+    !> The width rule: `a = ceil(sqrt(m))`, `b = ceil(m/a)`, so `a*b` sits just above `m`.
+    !!
+    !! **This is contract, not tuning** -- it decides the cycle-walk orbit and therefore every value.
+    !! It was chosen by measurement over two power-of-two alternatives: a balanced rule (`b` even)
+    !! walks up to 2.68 applications per element at m = 10**8, an unbalanced one 1.34 and only when
+    !! `ceil(log2(m))` happens to be odd, and this one 1.0000 at every size measured. The price is a
+    !! division per application instead of a mask, which measured 22 % -- worth paying whenever the
+    !! walk ratio exceeds about 1.22, which is most of its range.
+    !!
+    !! `a` is capped at `perm_a_max` so that `a * a` cannot overflow while the loops correct it.
+    pure subroutine perm_factors(m, a, b)
+        integer(int64), intent(in) :: m             !! population size, at least 2
+        integer(int64), intent(out) :: a            !! left factor, `ceil(sqrt(m))`
+        integer(int64), intent(out) :: b            !! right factor, `ceil(m/a)`
+        a = int(sqrt(real(m, real64)), int64)
+        if (a < 1_int64) a = 1_int64
+        if (a > perm_a_max) a = perm_a_max
+        do while (a < perm_a_max .and. a * a < m)
+            a = a + 1_int64
+        end do
+        do while (a > 1_int64 .and. (a - 1_int64) * (a - 1_int64) >= m)
+            a = a - 1_int64
+        end do
+        b = (m + a - 1_int64) / a
+    end subroutine perm_factors
+
+    !> One Feistel round-function evaluation: two multiplies, and **no overflow is possible**.
+    !!
+    !! **Every operand is masked to 31 bits before each multiply, and that is a correctness
+    !! requirement rather than tidiness.** The multipliers are below `2**32`, so each product is
+    !! bounded by `(2**31 - 1) * (2**32 - 1) < 2**63` and no signed overflow can occur.
+    !! `feature_risks.md` Risk-94 records this repository being caught with a wrapping multiply that
+    !! *measured* correct while the optimiser used the overflow's undefinedness to delete a branch
+    !! two functions away, so a new kernel must be free of it by construction. **Do not remove the
+    !! masks**; the alternative, routing through `mul64_lo_strict`, is correct but builds the product
+    !! from 16-bit limbs on the wrapping arm and is far too expensive for a per-round path.
+    !!
+    !! A Feistel network is a bijection for **any** round function, so the mask costs a little
+    !! mixing and can cost nothing else. What it costs was measured: nothing on gfortran, and it is
+    !! slightly *faster* than the unmasked form on ifx.
+    pure function perm_mix2(rk, x) result(w)
+        integer(int64), intent(in) :: rk            !! this round's key
+        integer(int64), intent(in) :: x             !! the half being mixed, below `2**32`
+        integer(int64) :: w                         !! a mixed word, below `2**32`
+        integer(int64) :: z
+        z = ieor(x, rk)
+        z = iand(z, perm_m31) * perm_c1
+        z = ieor(z, ishft(z, -29))
+        z = iand(z, perm_m31) * perm_c2
+        z = ieor(z, ishft(z, -31))
+        w = iand(z, M32)
+    end function perm_mix2
+
+    !> The round keys, derived from the seed once per call.
+    pure subroutine perm_round_keys(seed, rk)
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer(int64), intent(out) :: rk(:)        !! one key per round
+        integer :: j
+        do j = 1, size(rk)
+            rk(j) = perm_mix2(int(j, int64) * perm_c1, iand(seed, M32))
+            rk(j) = ieor(rk(j), perm_mix2(int(j, int64), iand(ishft(seed, -32), M32)))
+        end do
+    end subroutine perm_round_keys
+
+    !> One application of the network on `[0, a*b)`; a bijection for any round function.
+    !!
+    !! The factors swap every round, which is why `perm_rounds` must be even. Two details are worth
+    !! keeping: `t = l + F` needs at most **one** conditional subtraction because `l < p` and
+    !! `F < p`, so no division is needed to reduce it; and the multiply-shift takes the mixed word
+    !! down to 31 bits before multiplying by `p`, which bounds that product below `2**63` for every
+    !! `m` a caller can name -- shifting a full 32-bit word instead would overflow above `m ~ 2**62`.
+    pure function perm_feistel(rk, a, b, x) result(y)
+        integer(int64), intent(in) :: rk(:)         !! the round keys
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer(int64), intent(in) :: x             !! input in `[0, a*b)`
+        integer(int64) :: y                         !! output in `[0, a*b)`
+        integer(int64) :: l, r, t, p, q, sw
+        integer :: j
+        p = a
+        q = b
+        l = x / q
+        r = x - l * q
+        do j = 1, perm_rounds
+            t = l + ishft(iand(perm_mix2(rk(j), r), perm_m31) * p, -31)
+            if (t >= p) t = t - p
+            l = r
+            r = t
+            sw = p
+            p = q
+            q = sw
+        end do
+        y = l * q + r
+    end function perm_feistel
 
     ! ================================================================================
     ! Tier 1 -- the stateful stream

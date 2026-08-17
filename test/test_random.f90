@@ -69,6 +69,8 @@ contains
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
             new_unittest("the integer draw shares a block with the real draw at one coordinate", &
                 test_int_shares_block), &
+            new_unittest("the three generics read one word sequence with different strides", &
+                test_generic_stride_aliasing), &
             new_unittest("the int32 specifics equal the int64 specifics", test_kind_specifics), &
             new_unittest("elemental calls equal elementwise scalar calls", test_elemental), &
             new_unittest("contract edges: swap, clamp, degenerate and extreme arguments", test_edges), &
@@ -1384,6 +1386,111 @@ contains
             "negative control: taking the integer at draw 2 must BREAK that agreement -- it reads block 1 " // &
             "while the real draw reads block 0, so agreement should fall to roughly 1 in 6")
     end subroutine test_int_shares_block
+
+    !> The GENERAL cross-generic aliasing rule, of which `test_int_shares_block` tests one point.
+    !!
+    !! One `(seed, i)` is one sequence of 32-bit words, and the three coordinate-addressed generics
+    !! read it with different strides -- 1 word per `pf_random32_at` value, 2 per `pf_random_at` /
+    !! `pf_random_bits_at`, and a whole 4-word block per `pf_random_int_at`. Two exact identities
+    !! follow, and they are asserted here because the guide now states them as rules a caller must
+    !! reason with:
+    !!
+    !! ```
+    !! pf_random_int_at(seed, i, lo, hi, d)  ==  pf_random_bits_at(seed, i, 2d-1)
+    !! pf_random32_at(seed, i, 2d-1)         ==  the low word of pf_random_bits_at(seed, i, d)
+    !! ```
+    !!
+    !! The first is asserted over the **full int64 range**, where the reduction is skipped and the
+    !! integer draw returns the raw pattern, so the two are literally equal rather than merely
+    !! derived from the same bits.
+    !!
+    !! **This test pins behaviour that is a consequence of the design, not a promise to callers.**
+    !! If the generics are ever domain-separated -- folding a per-generic constant into the key, so
+    !! that collisions become impossible -- this test SHOULD fail, and the correct response is to
+    !! rewrite it into its opposite (assert the three generics no longer collide at any of these
+    !! coordinates) and to delete the stride table from `doc/pages/utilities/random.md` and from
+    !! `parquet_random`'s own banner comment. Do not simply delete it: the aliasing is what the
+    !! documentation currently tells users to reason about, and a silent divergence between the two
+    !! is the failure this guards. Note that such a change would also break `pf_random_stream`'s
+    !! correspondence with the coordinate forms -- see `feature_risks.md` Risk-113.
+    subroutine test_generic_stride_aliasing(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: SD = 20260817_int64
+        integer(int64), parameter :: LO = -huge(1_int64) - 1_int64, HI = huge(1_int64)
+        integer(int64) :: i, d, bits, hits, ctrl
+        real(real32) :: w32
+
+        ! (1) pf_random_int_at(d) is exactly pf_random_bits_at(2d-1), with 2d as the control.
+        hits = 0_int64
+        ctrl = 0_int64
+        do i = 1_int64, 100_int64
+            do d = 1_int64, 5_int64
+                if (pf_random_int_at(SD, i, LO, HI, d) == &
+                    pf_random_bits_at(SD, i, 2_int64 * d - 1_int64)) hits = hits + 1_int64
+                if (pf_random_int_at(SD, i, LO, HI, d) == &
+                    pf_random_bits_at(SD, i, 2_int64 * d)) ctrl = ctrl + 1_int64
+            end do
+        end do
+        call check(error, hits == 500_int64, &
+            "pf_random_int_at(seed, i, lo, hi, d) must read the same 64 bits as " // &
+            "pf_random_bits_at(seed, i, 2d-1) -- the stride-4 and stride-2 views coinciding")
+        if (allocated(error)) return
+        call check(error, ctrl == 0_int64, &
+            "negative control: it must NOT equal pf_random_bits_at(seed, i, 2d), which is a " // &
+            "different pair of words entirely")
+        if (allocated(error)) return
+
+        ! (2) the real32 view has stride 1, so its draws 2d-1 and 2d are that pair's two words.
+        hits = 0_int64
+        ctrl = 0_int64
+        do i = 1_int64, 100_int64
+            do d = 1_int64, 5_int64
+                bits = pf_random_bits_at(SD, i, d)
+                w32 = real(ishft(iand(bits, 4294967295_int64), -8), real32) * 2.0_real32**(-24)
+                if (pf_random32_at(SD, i, 2_int64 * d - 1_int64) == w32) hits = hits + 1_int64
+                w32 = real(ishft(ishft(bits, -32), -8), real32) * 2.0_real32**(-24)
+                if (pf_random32_at(SD, i, 2_int64 * d) == w32) ctrl = ctrl + 1_int64
+            end do
+        end do
+        call check(error, hits == 500_int64, &
+            "pf_random32_at(seed, i, 2d-1) must be the LOW word of pf_random_bits_at(seed, i, d)")
+        if (allocated(error)) return
+        call check(error, ctrl == 500_int64, &
+            "pf_random32_at(seed, i, 2d) must be the HIGH word of pf_random_bits_at(seed, i, d)")
+        if (allocated(error)) return
+
+        ! (3) The consequence the documentation now warns about: separating two generics on the
+        !     DRAW axis is not sufficient. The guide's own example is safe; the next step along
+        !     collides completely. Both directions are asserted, since a rule with only one is
+        !     indistinguishable from a rule that always holds.
+        hits = 0_int64
+        ctrl = 0_int64
+        do i = 1_int64, 1000_int64
+            if (pf_random_int_at(SD, i, LO, HI, 2_int64) == &
+                pf_random_bits_at(SD, i, 1_int64)) hits = hits + 1_int64
+            if (pf_random_int_at(SD, i, LO, HI, 2_int64) == &
+                pf_random_bits_at(SD, i, 3_int64)) ctrl = ctrl + 1_int64
+        end do
+        call check(error, hits == 0_int64, &
+            "the guide's own pairing -- a real at draw 1, an integer at draw 2 -- must NOT collide")
+        if (allocated(error)) return
+        call check(error, ctrl == 1000_int64, &
+            "but an integer at draw 2 and a real at draw 3 MUST collide, which is why the guide no " // &
+            "longer offers 'walk the draw axis' as a general rule for mixing generics")
+        if (allocated(error)) return
+
+        ! (4) A separate STREAM is safe at every one of those coordinates -- the recommended fix.
+        hits = 0_int64
+        do i = 1_int64, 500_int64
+            do d = 1_int64, 3_int64
+                if (pf_random_int_at(SD, 2_int64 * i, LO, HI, d) == &
+                    pf_random_bits_at(SD, 2_int64 * i + 1_int64, 2_int64 * d - 1_int64)) &
+                    hits = hits + 1_int64
+            end do
+        end do
+        call check(error, hits == 0_int64, &
+            "two different streams must not collide at the coordinates that alias within one stream")
+    end subroutine test_generic_stride_aliasing
 
     !> The `int32` specifics must be bit-identical to the `int64` ones at equal argument values.
     !!

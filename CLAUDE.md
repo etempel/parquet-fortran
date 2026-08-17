@@ -1921,7 +1921,7 @@ the CI-environment image is not a route to a second toolchain; anything needing 
 | arch / SIMD | **arm64, NEON (128-bit)** | **x86-64 Zen 4, AVX-512** (f/bw/dq/vl/vnni/bf16/…) | **x86-64 Comet Lake, AVX2 (256-bit)** |
 | RAM | 32 GB | **1132 GB** | 128 GB |
 | OS | macOS (arm64) | RHEL 9.7, kernel 5.14 | macOS (x86_64) |
-| Fortran | gfortran 15.2 (MacPorts), **flang 22.1.8** | **ifx 2026.1.1**; gfortran 14.2.1 (gcc-toolset-14); system gfortran 11.5 — *see the warning below* | gfortran 15.2 (MacPorts), **flang-mp-22** |
+| Fortran | gfortran 15.2 (MacPorts), **flang 22.1.8** | **ifx 2026.1.1**; gfortran 15.2.1 (gcc-toolset-15, what `activate_gcc.sh` now selects); gfortran 14.2.1 (gcc-toolset-14); system gfortran 11.5 — *see the warning below* | gfortran 15.2 (MacPorts), **flang-mp-22** |
 | C++ | Apple clang 21, **`g++-mp-15`** (GCC 15.2) | **icpx 2026.1.1**; g++ 14.2.1 (toolset) or 11.5 (system) | Apple clang, MacPorts GCC |
 | Arrow / Parquet | 25.0.0 | **24.0.0** | 25.0.0 |
 | fpm | 0.13.0 alpha | 0.13.0 alpha | 0.13.0 alpha |
@@ -1931,15 +1931,21 @@ implicit — a shell there starts in the ifx environment:
 
 - **ifx** (the default): `source /storage/projektid/qmost/activate_qmost_env.sh`. Sets `FPM_FC=ifx`
   and exports `FPM_CXXFLAGS`/`FPM_LDFLAGS` carrying Arrow's paths.
-- **gfortran**: `source /opt/fortran/activate_gcc.sh`. Switches to gcc-toolset-14 (gfortran/g++
-  14.2.1) and sets `FPM_FC=gfortran`.
+- **gfortran**: `source /opt/fortran/activate_gcc.sh`, plus the `scl` line below. It sets
+  `FPM_FC=gfortran` and ends with `scl enable gcc-toolset-15 /bin/bash`.
+
+**Which toolset that script selects has CHANGED, and the number is worth checking rather than
+copying from here.** It used to end with `scl enable gcc-toolset-14`; it now selects **15**
+(gfortran/g++ 15.2.1), which is what made UBSan possible on this machine — gcc-toolset-14 shipped
+only a 32-bit `libubsan`, and 15 has the x86-64 one. Read the last line of the script rather than
+trusting this paragraph, and use whatever toolset it names in the `enable` line below.
 
 **Both activations need help to survive being sourced NON-INTERACTIVELY, and the gfortran one needs
 two commands rather than one:**
 
 ```bash
 source /opt/fortran/activate_gcc.sh </dev/null >/dev/null 2>&1
-source /opt/rh/gcc-toolset-14/enable      # REQUIRED -- the line above is not sufficient
+source /opt/rh/gcc-toolset-15/enable      # REQUIRED -- the line above is not sufficient
 ```
 
 Without the redirection the script's trailing interactive subshell exits immediately with no tty and
@@ -1984,8 +1990,10 @@ and will silently miscompile it.** In the ifx environment `/usr/bin/gfortran` (1
 `activate_gcc.sh` gets a compiler that miscompiles the optional allocatable-`character` argument in
 `schema%add_col_qc` — surfacing as a spurious "column not found" abort at runtime, far from the
 cause (see "Compiler & language gotchas" for the underlying bug). **Always source
-`activate_gcc.sh` before building with gfortran on B**, and check `gfortran --version` reports 14.x
-before trusting a result from there.
+`activate_gcc.sh` before building with gfortran on B**, and check `gfortran --version` reports the
+toolset's version (15.2.1 as of 2026-08-17, 14.2.1 before that) rather than 11.5.0 before trusting a
+result from there. The check is "not 11.5.0", not a specific number — the toolset has moved once
+already.
 
 **Machine B's gfortran environment exports `-ffree-line-length-none` in `FPM_FFLAGS`.** That is
 directly contrary to this project's enforced 132-column limit, so **a build on B cannot be used to
@@ -2833,11 +2841,21 @@ applied to the harness instead of the source.
   loop's final unused index update — is typically optimised away before instrumentation, so it traps
   nothing while remaining fully available to the optimiser as a range assumption. Use the
   cross-implementation agreement sweep to answer that question, never a trapping build.
-  **UBSan is the tool that would answer it properly and is not currently available on any machine in
-  the fleet**: MacPorts gcc15 ships no `libubsan` and flang rejects `-fsanitize` for Fortran
-  (machines A and C), while on machine B gcc-toolset-14 has only the 32-bit `libubsan` — the sole
-  x86-64 copy belongs to the system gcc 11.5, which is below this project's floor and miscompiles the
-  library. Installing the 64-bit `libubsan` for gcc-toolset-14 on machine B would close that gap.
+  **UBSan is the tool that answers it properly, and it is now available on machine B** — the gap this
+  note used to record is closed. `/opt/fortran/activate_gcc.sh` now selects **gcc-toolset-15**, whose
+  `libubsan` is present for x86-64, so `-fsanitize=undefined` links and runs. Machines A and C still
+  cannot (MacPorts gcc15 ships no `libubsan`, and flang rejects `-fsanitize` for Fortran), so this is
+  a machine-B-only instrument.
+
+  **Run it with `tools/check_random_ubsan.sh`**, which drives both arms of the route (e) fork —
+  UBSan on a gfortran build alone only ever exercises the `int128` arm, so the wrapping arm needs
+  the same `-U__GFORTRAN__` forcing `tools/check_random_kernels.sh` uses. **What it found on its
+  first run is the reason to keep running it**: the wrapping arm reports exactly the six documented
+  deliberate sites (`random_block`'s two `#else` multiplies, `mulhilo64`'s four partial products)
+  and the shipped arm reports nothing — but the ordinary suite build reported **six further,
+  undocumented signed-overflow sites** in the bulk fills, where `base + k - 1_int64` forms `huge + 1`
+  at the boundary the suite deliberately tests. Every value was correct; only UBSan could see it.
+  See `feature_risks.md` Risk-112, and note that a `-ftrapv` build had never flagged any of them.
 
 ### Arrow's own type singletons have thread-unsafe lazy state on first concurrent use
 

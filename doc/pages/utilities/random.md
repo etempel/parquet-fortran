@@ -409,18 +409,88 @@ sibling for that reason.
 the same words makes them the same randomness twice, and a rejection is what would separate them —
 but at any realistic range that happens with probability around 2⁻⁴⁰, so in practice it never does.
 At a small range the integer is simply a function of the real: `pf_random_int_at(seed, i, 1, 6)`
-equals `1 + floor(6 * pf_random_at(seed, i))` for 20000 of 20000 streams measured, where taking the
-integer one draw along gives the 1-in-6 agreement independence predicts.
+equals `1 + floor(6 * pf_random_at(seed, i))` for 20000 of 20000 streams measured.
 
-The fix is the one this page already recommends for any two values in one iteration — walk the draw
-axis, or derive a separate family:
+### Mixing generics on one stream: the stride table
+
+The same-coordinate case above is one instance of a general rule, and the rule is worth knowing in
+full because the obvious workaround does not work.
+
+**One `(seed, i)` pair names one sequence of 32-bit words. The three coordinate-addressed generics
+are three *views* of that one sequence, and they consume different numbers of words per value:**
+
+| generic | words read for draw `d` (0-based) | stride |
+|---|---|---|
+| `pf_random32_at(seed, i, d)` | `d-1` | 1 |
+| `pf_random_at(seed, i, d)`, `pf_random_bits_at(seed, i, d)` | `2d-2`, `2d-1` | 2 |
+| `pf_random_int_at(seed, i, lo, hi, d)` | `4d-4`, `4d-3` (a whole block, half used) | 4 |
+
+So the same `draw` index means a different thing to each, and two generics alias whenever their
+word ranges meet. Every collision follows from the table by arithmetic. The two that bite:
+
+```
+pf_random_int_at(seed, i, lo, hi, d)  reads the same 64 bits as  pf_random_bits_at(seed, i, 2d-1)
+pf_random32_at(seed, i, 2d-1)         is the low word of         pf_random_bits_at(seed, i, d)
+```
+
+**"Walk the draw axis" is therefore not a safe rule when you are mixing generics**, and an earlier
+version of this page gave it as one. It is safe for the particular pairing shown below, and it fails
+for the next one anyone would write:
+
+```fortran
+! SAFE -- measured 0 collisions in 1000 streams
+x    = pf_random_at(seed, i, 1_int64)               ! words 0,1
+die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! words 4,5
+
+! COLLIDES -- measured 1000 of 1000: both read words 4,5
+die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! words 4,5
+y    = pf_random_at(seed, i, 3_int64)               ! words 4,5  <-- same randomness as `die`
+```
+
+The failure is silent. The values are not *equal* — Lemire's reduction is a different function of
+the same bits — so every structural check passes and only a distributional test can see it.
+
+### Three constructions that are safe
+
+**Use a separate stream.** Two streams never overlap, whatever draw indices you use on each:
 
 ```fortran
 do i = 1, n
-    x(i)   = pf_random_at(seed, i)                       ! draw 1
-    die(i) = pf_random_int_at(seed, i, 1, 6, 2_int64)    ! draw 2: independent of x(i)
+    x(i)   = pf_random_at(seed, 2*i)                      ! one stream for the reals
+    die(i) = pf_random_int_at(seed, 2*i + 1, 1, 6)        ! another for the integers
 end do
 ```
+
+**Use a separate family.** `pf_random_key(seed, label)` gives each role its own seed, which is the
+clearest choice when the roles are named things rather than numbered ones:
+
+```fortran
+integer(int64) :: seed_pos, seed_die
+seed_pos = pf_random_key(seed, 1_int64)
+seed_die = pf_random_key(seed, 2_int64)
+```
+
+**Or use `pf_random_stream`, which is the purpose-built answer.** A stream tracks its own word
+cursor, so consecutive calls consume consecutive words and cannot alias — whatever mixture of
+`%uniform`, `%uniform32` and `%int_range` you take, and however many of each:
+
+```fortran
+type(pf_random_stream) :: rng
+call rng%seed(seed, i)
+call rng%uniform(x)                 ! consumes 2 words
+call rng%int_range(die, 1, 6)       ! consumes the next block -- never the words `x` used
+```
+
+This is what a stream is *for*: the coordinate-addressed forms are the right tool when you know
+which value you want, and a stream is the right tool when you are consuming several per step.
+
+### Why this is not simply removed
+
+Folding a per-generic constant into the key would make collisions impossible by construction. It
+would also break the property `pf_random_stream` exists to provide — that a stream hands out exactly
+the values the coordinate-addressed calls give at the same positions — because that correspondence
+is possible only while all three generics read one word space. The stride table is the design, and
+this section documents it rather than working around it.
 
 ### Not cryptographic
 

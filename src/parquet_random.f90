@@ -203,6 +203,40 @@ module parquet_random
         module procedure pf_random_at_i64
     end interface pf_random_at
 
+    ! ---- ONE STREAM IS ONE SEQUENCE OF WORDS, AND THE GENERICS HAVE DIFFERENT STRIDES ----
+    !
+    ! This is the module's single most important cross-cutting fact and the one a caller is most
+    ! likely to get wrong, so it is stated once here rather than a third of it on each generic.
+    !
+    ! A `(seed, i)` pair names one deterministic sequence of 32-bit Philox words. The three
+    ! coordinate-addressed generics are three VIEWS of that one sequence, and they consume
+    ! different numbers of words per value:
+    !
+    !   generic                                    words read for draw d (0-based)   stride
+    !   pf_random32_at(seed, i, d)                 d-1                               1
+    !   pf_random_at / pf_random_bits_at(.., d)    2d-2, 2d-1                        2
+    !   pf_random_int_at(seed, i, lo, hi, d)       4d-4, 4d-3  (a block, half used)   4
+    !
+    ! So the SAME `draw` index means a different thing to each, and two generics on one stream
+    ! alias whenever their word ranges meet. Every collision follows from the table by arithmetic;
+    ! the two that bite, both verified empirically rather than derived on paper:
+    !
+    !   pf_random_int_at(seed, i, lo, hi, d)  ==  pf_random_bits_at(seed, i, 2d-1)   500 of 500
+    !   pf_random32_at(seed, i, 2d-1)         ==  the LOW word of bits_at(seed,i,d)  500 of 500
+    !
+    ! **"Walk the draw axis" is therefore NOT a safe rule for mixing generics**, though it reads
+    ! like one and was given as one here for a while. The three safe constructions are: a separate
+    ! STREAM index, a separate family from `pf_random_key`, or `pf_random_stream`, which tracks its
+    ! own word cursor and so cannot alias by construction.
+    !
+    ! **This is a consequence of the design rather than a defect in it, which is why it is
+    ! documented rather than removed.** Domain-separating the generics -- folding a per-generic
+    ! constant into the key -- would make collisions impossible, and would also break the property
+    ! `pf_random_stream` exists to provide: that a stream hands out exactly the values the
+    ! coordinate-addressed calls give at the same positions (`test_stream_values`). That
+    ! correspondence is possible only because all three generics read one word space. See
+    ! `feature_risks.md` Risk-113.
+
     !> One uniform `real32` in `[0, 1)`: value `draw` (default 1) of stream `i` under `seed`.
     !!
     !! This enumerates its OWN sequence, one word per value, and is deliberately not a narrowing
@@ -1256,8 +1290,16 @@ contains
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         blk = (draw - 1_int64) / 2_int64
         second = (modulo(draw - 1_int64, 2_int64) == 1_int64)
+        ! **`i0 + (k - 1)`, parenthesised, and the brackets are load-bearing.** Fortran evaluates
+        ! `i0 + k - 1` left to right, so at the documented boundary -- a fill whose last stream is
+        ! exactly `huge(int64)`, which the suite tests -- the intermediate `i0 + k` forms
+        ! `huge + 1` and overflows, wraps, and the `- 1` brings it back to the right answer. The
+        ! result is correct on both compilers and the arithmetic is undefined, which is precisely
+        ! the shape feature_risks.md Risk-94 records the optimiser exploiting two functions away.
+        ! Since `k >= 1`, `k - 1` is non-negative and `i0 + (k - 1)` cannot exceed the sum the
+        ! precondition already bounds. Found by UBSan; see feature_risks.md Risk-112.
         do k = 1_int64, m
-            call random_block(seed, i0 + k - 1_int64, blk, w0, w1, w2, w3)
+            call random_block(seed, i0 + (k - 1_int64), blk, w0, w1, w2, w3)
             if (second) then
                 v(k) = to_real64(ior(ishft(w3, 32), w2))
             else
@@ -1286,7 +1328,7 @@ contains
         blk = (draw - 1_int64) / 4_int64
         slot = int(modulo(draw - 1_int64, 4_int64), int32)
         do k = 1_int64, m
-            call random_block(seed, i0 + k - 1_int64, blk, c0, c1, c2, c3)
+            call random_block(seed, i0 + (k - 1_int64), blk, c0, c1, c2, c3)
             select case (slot)
             case (0)
                 v(k) = to_real32(c0)
@@ -1323,7 +1365,7 @@ contains
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         do k = 1_int64, m
-            v(k) = int_at_impl(seed, stream, lo, hi, draw + k - 1_int64)
+            v(k) = int_at_impl(seed, stream, lo, hi, draw + (k - 1_int64))
         end do
     end subroutine fill_draws_i64
 
@@ -1344,7 +1386,7 @@ contains
         a = int(lo, int64)
         b = int(hi, int64)
         do k = 1_int64, m
-            v(k) = int(int_at_impl(seed, stream, a, b, draw + k - 1_int64), int32)
+            v(k) = int(int_at_impl(seed, stream, a, b, draw + (k - 1_int64)), int32)
         end do
     end subroutine fill_draws_i32
 
@@ -1364,7 +1406,7 @@ contains
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
         do k = 1_int64, m
-            v(k) = int_at_impl(seed, i0 + k - 1_int64, lo, hi, draw)
+            v(k) = int_at_impl(seed, i0 + (k - 1_int64), lo, hi, draw)
         end do
     end subroutine fill_streams_i64
 
@@ -1382,7 +1424,7 @@ contains
         a = int(lo, int64)
         b = int(hi, int64)
         do k = 1_int64, m
-            v(k) = int(int_at_impl(seed, i0 + k - 1_int64, a, b, draw), int32)
+            v(k) = int(int_at_impl(seed, i0 + (k - 1_int64), a, b, draw), int32)
         end do
     end subroutine fill_streams_i32
 
@@ -1406,18 +1448,30 @@ contains
     !! probability is around 2**-40.
     !!
     !! **At the same coordinate this reads the SAME two words as `pf_random_at` and
-    !! `pf_random_bits_at`, so the three are not independent draws.** The block index is `draw - 1`
-    !! here and `(draw - 1)/2` there, and those coincide at draw 1 -- which is the default and by
-    !! far the commonest call. They diverge from draw 2 onwards, where this takes block 1 while the
-    !! real draws take block 0's second pair.
+    !! `pf_random_bits_at`, so the three are not independent draws** -- and that is one case of a
+    !! general rule, stated in full on the `pf_random_at` interface above and in
+    !! `doc/pages/utilities/random.md`. One `(seed, i)` is one sequence of 32-bit words; the three
+    !! coordinate-addressed generics are three views of that sequence with **different strides**, so
+    !! a `draw` index means a different thing to each. This one addresses a whole block and uses its
+    !! first pair: draw `d` reads words `4d-4` and `4d-3`. `pf_random_bits_at` has stride 2.
+    !! Solving the two gives an exact identity, verified 500 of 500 over the full `int64` range
+    !! where the reduction is skipped and the raw pattern is returned:
+    !!
+    !! `pf_random_int_at(seed, i, lo, hi, d)` reads the same 64 bits as
+    !! `pf_random_bits_at(seed, i, 2d-1)`.
+    !!
+    !! **So "separate them on the draw axis" is NOT a sufficient rule**, and an earlier version of
+    !! this comment gave it as one. It happens to be safe for the pairing the guide illustrates (a
+    !! real at draw 1, an integer at draw 2 -- measured 0 of 1000 collisions) and it fails for the
+    !! next one anybody would write: an integer at draw 2 against a real at draw 3 collides **1000
+    !! of 1000**. Use a separate stream, a separate family from `pf_random_key`, or
+    !! `pf_random_stream`, which tracks word consumption itself and cannot alias.
     !!
     !! The returned *value* differs, because Lemire's reduction is a different function of those
     !! bits and a rejection re-keys; but "different value" is not "independent", and at a small
     !! range the integer is a **deterministic function** of the real. Measured on two machines and
     !! two architectures: `pf_random_int_at(seed, i, 1, 6)` equals `1 + floor(6 * pf_random_at(seed,
-    !! i))` for **20000 of 20000** streams, against 1-in-6 when the integer is taken at draw 2. So a
-    !! caller wanting one real and one integer per iteration must separate them on the draw axis or
-    !! with `pf_random_key`, exactly as `doc/pages/utilities/random.md` says.
+    !! i))` for **20000 of 20000** streams, against 1-in-6 when the integer is taken at draw 2.
     !!
     !! An earlier version of this comment opened "Unlike `pf_random_at` and `pf_random_bits_at`,
     !! which read the same two words as each other" -- asserting that this procedure does *not*.

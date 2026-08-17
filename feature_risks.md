@@ -176,6 +176,8 @@ something a reader is expected to have.
 | [Risk-109](#risk-109--the-bulk-permutation-and-the-scalar-entry-point-compute-the-same-function-by-different-routes) | The bulk permutation and the scalar entry point compute the same function by different routes | 4 — covered |
 | [Risk-110](#risk-110--the-permutations-round-count-round-function-and-width-rule-are-frozen-and-three-rounds-looks-free) | The permutation's round count, round function and width rule are frozen, and three rounds looks free | 4 — covered |
 | [Risk-111](#risk-111--a-bulk-permutation-that-silently-stopped-threading-would-fail-no-test) | A bulk permutation that silently stopped threading would fail no test | 3 — not testable |
+| [Risk-112](#risk-112--a-fills-position-arithmetic-overflows-at-the-boundary-the-suite-tests-and-still-answers-correctly) | A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly | 4 — covered |
+| [Risk-113](#risk-113--the-three-coordinate-addressed-generics-read-one-word-sequence-with-different-strides) | The three coordinate-addressed generics read one word sequence with different strides | 4 — covered |
 
 ---
 
@@ -183,7 +185,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-112**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-114**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -4759,3 +4761,77 @@ bijective encoding of the same domain. Mutation testing over the round count, th
 mask, `perm_c1` and the width rule now kills all four; the conditional subtract is killed too, but as
 a **hang** rather than a failure, since removing it destroys the round's bijectivity and the
 cycle-walk orbit never re-enters range.
+
+### Risk-112 — A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly
+
+Six sites in `src/parquet_random.f90`'s bulk fills computed a position as `base + k - 1_int64`, which
+Fortran evaluates left to right as `(base + k) - 1`. Both fill families document a precondition that
+the **last** position stays representable — a fill ending exactly at `huge(int64)` is legal and is
+tested — and at exactly that boundary the intermediate `base + k` forms `huge + 1`, overflows, wraps,
+and the `- 1` brings it back to the right answer.
+
+**Every value was correct on every compiler, and the arithmetic was undefined.** That is the shape
+Risk-94 records this repository being caught with before: a wrapping multiply that measured correct
+on the compiler in use, while the optimiser used the overflow's undefinedness to delete a branch two
+functions away and return a plausible wrong answer from a different procedure entirely. Nothing in
+the suite could see it — the assertions were on the results, and the results were right.
+
+**The fix is one pair of brackets per site**: `base + (k - 1_int64)`. Every loop is
+`do k = 1_int64, m`, so `k - 1` is non-negative and `base + (k - 1)` cannot exceed the sum the
+precondition already bounds. There is no cost, so there is nothing to weigh.
+
+**The general rule this leaves behind: in this module, a position is built as `base + (k - 1)`, never
+`base + k - 1`.** The two are equal in exact arithmetic and differ in whether the intermediate can
+leave the type. Grep for `+ k - 1_int64` before adding a fill.
+
+**Test.** `tools/check_random_ubsan.sh`, which is what found all six. Note the ordinary suite cannot:
+it asserts values, and the values were never wrong. A `-ftrapv` build cannot either — see that
+script's header for why, and CLAUDE.md's `-ftrapv` note for the case where a trapping build's silence
+was already mistaken for evidence here.
+
+### Risk-113 — The three coordinate-addressed generics read one word sequence with different strides
+
+A `(seed, i)` pair names one deterministic sequence of 32-bit Philox words. The three
+coordinate-addressed generics are three **views** of that one sequence and consume different numbers
+of words per value: `pf_random32_at` one, `pf_random_at`/`pf_random_bits_at` two, `pf_random_int_at`
+a whole four-word block of which it uses half. So the same `draw` index means a different thing to
+each, and two generics alias whenever their word ranges meet:
+
+```
+pf_random_int_at(seed, i, lo, hi, d)  reads the same 64 bits as  pf_random_bits_at(seed, i, 2d-1)
+pf_random32_at(seed, i, 2d-1)         is the low word of         pf_random_bits_at(seed, i, d)
+```
+
+**The failure is silent and only a distributional test can see it.** The aliased values are not
+*equal* — Lemire's reduction is a different function of the same bits — so a sampler built this way
+produces distinct, in-range items in the right count while its distribution is wrong. It was found
+in a downstream weighted-draw sampler by a Monte Carlo comparison, at 0.029 against a standard error
+of 0.0008; every structural check passed.
+
+**"Walk the draw axis" is not a safe rule for mixing generics, and this file's own documentation gave
+it as one for a while.** It is safe for the pairing the guide illustrates — a real at draw 1, an
+integer at draw 2, measured 0 collisions in 1000 streams — and fails for the next one anybody would
+write: an integer at draw 2 against a real at draw 3 collides **1000 of 1000**. The three safe
+constructions are a separate stream index, a separate family from `pf_random_key`, and
+`pf_random_stream`, which tracks its own word cursor and cannot alias by construction.
+
+**This is a consequence of the design and is documented rather than removed, and that decision is the
+part worth keeping.** Domain-separating the generics — folding a per-generic constant into the key —
+would make collisions impossible. It would also break the property `pf_random_stream` exists to
+provide: that a stream hands out exactly the values the coordinate-addressed calls give at the same
+positions, which is only possible because all three generics read one word space. Note the *cost* of
+the change is not what rules it out: `parquet_random` has never appeared in a published CHANGELOG
+section, so regenerating the golden vectors would be free. The reason is the stream.
+
+**A third option exists and has not been taken**: give the integer generic stride 2 rather than 4, so
+that draw `d` means the same words to every 64-bit generic. That would make same-index aliasing the
+only kind, which is the model users already assume, and would let a future bulk integer fill use both
+pairs of a block. It is a contract change and belongs to the maintainer, not to a bug fix.
+
+**Test.** `test_generic_stride_aliasing` (`test/test_random.f90`) asserts both identities, with a
+negative control on each; asserts that the guide's own safe pairing does not collide *and* that the
+next step along does, since a rule with only one direction is indistinguishable from one that always
+holds; and asserts that two different streams do not collide at the coordinates that alias within
+one. `test_int_shares_block` covers the same-coordinate case that motivated the original note. **If
+the generics are ever domain-separated, this test should fail** — its doc-comment says what to
+rewrite it into, and which two documents must change with it.

@@ -674,7 +674,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`feistel-mix2-4/zaxzb/v1`) so that a change to it cannot be confused with a change to the draws.
   It is not uniform over all `m!` permutations and nothing with a 64-bit seed could be; what is
   measured is that it is indistinguishable from uniform under fixed-point, cycle-structure,
-  position-uniformity, subset-membership and structural tests. The generator is
+  position-uniformity, subset-membership and structural tests.
+  **One property to know before mixing generics on a single stream**: a `(seed, i)` pair names one
+  sequence of 32-bit words, and the three coordinate-addressed generics read it with different
+  strides — one word per `pf_random32_at` value, two per `pf_random_at`/`pf_random_bits_at`, and a
+  whole block per `pf_random_int_at` — so the same `draw` index means a different thing to each and
+  two of them alias where their word ranges meet (exactly:
+  `pf_random_int_at(…, d)` is `pf_random_bits_at(…, 2d-1)`). Separating two generics along the draw
+  axis is therefore not sufficient; use a separate stream, a separate `pf_random_key` family, or
+  `pf_random_stream`, which tracks its own word cursor and cannot alias. The generator is
   **not cryptographic** and is documented as such. See
   [Random numbers](doc/pages/utilities/random.md).
 

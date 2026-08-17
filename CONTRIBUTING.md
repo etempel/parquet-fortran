@@ -430,6 +430,68 @@ under another name would report a null result that looks like a finding. Build t
 for the configuration alone lets a second toolchain's binary land in the first one's directory.
 Maintainer-only (stripped from the fpm-published package, see `tools/prep_fpm_publish.sh`).
 
+`tools/benchmark_random.sh` times `pf_random_*` against the intrinsic `random_number`, per value,
+driving `app/benchmark_random.f90`. Three arms: the `real64` and `real32` bulk fills
+(`call random_number(v)` against `call pf_random_fill_draws(seed, s, v)`, the like-for-like array
+shape) and a scalar loop (`call random_number(x)` against `x = pf_random_at(seed, i)`).
+
+**Its result inverts between compilers, which is the reason to run it per machine rather than quote
+a figure.** On machine B the library costs **2.2x** the intrinsic under gfortran 15.2 and **0.48x**
+— i.e. it is over twice as fast — under ifx 2026.1, because ifx's own `random_number` is about
+11 ns per value for both kinds while gfortran's is 3.9 (`real64`) and 1.4 (`real32`). Neither
+figure says anything about this library on its own.
+
+Read the ratio as a **price rather than a defect**: the two generators do not do the same job. The
+intrinsic advances hidden per-process state, so no value can be named, nothing is reproducible
+across compilers, and concurrent use needs care; `pf_random_*` is counter-based, so every value has
+a coordinate, any value can be produced without producing its predecessors, and the answer is frozen
+by `pf_random_algorithm`. The scalar arm is not even like-for-like — the library arm addresses a
+fresh stream per iteration, which the intrinsic cannot express at all.
+
+The harness ties itself down to an independently measured anchor, per this project's rule that a
+benchmark replicating library call shapes is untested code until one of its rows reproduces a figure
+measured elsewhere: its intrinsic rows match a standalone program that never links this library, to
+within 0.1% on both compilers. Build trees go to `test_run/random-bench-<compiler>/`.
+Maintainer-only (stripped from the fpm-published package).
+
+```sh
+tools/benchmark_random.sh
+ROUNDS=9 tools/benchmark_random.sh
+SIZES=10000,1000000 tools/benchmark_random.sh
+```
+
+`tools/benchmark_random_kernels.sh` times `parquet_random`'s **two route (e) kernels against each
+other on one compiler** — the 128-bit kernel (`#ifdef PF_INT128`) and the wrapping kernel (`#else`)
+— driving `tools/benchmark_random_kernels.f90`. Like `tools/check_random_kernels.sh`, and for the
+same reason, it cannot go through fpm and its driver is not under `app/`: forcing the other kernel
+needs `-U__GFORTRAN__`, which also flips `src/parquet.f90`'s stringify branch, so the package will
+not build that way at all. Only a standalone compile of `parquet_random` plus `parquet_settings_base`
+works.
+
+Two gates decide whether it reports anything, and both exist because their failure mode is a
+plausible-looking number rather than an error. The **vacuity guard** requires the two halves to
+report different kernel names — if `-U__GFORTRAN__` ever stops defeating the allowlist, this would
+build the same kernel twice and print a perfectly reasonable 1.00×. The **checksum gate** requires
+the two halves to agree bit for bit, which they must, being the same algorithm by different
+arithmetic; gfortran is known to miscompile the wrapping kernel under LTO
+(`feature_risks.md` Risk-101), and a timing from a miscompiled arm is a timing for something that is
+not this library. LTO is therefore not the default `OPT`, and a disagreeing run is refused outright
+rather than printed with a warning.
+
+Measured on machine B, gfortran 15.2.1 at fpm's release flags, checksums identical throughout: the
+**wrapping kernel is 1.58× faster** than the shipped `int128` one on the `real64` bulk fill, 1.57× on
+`real32` and 1.93× on the scalar path (1.5–2.0× across `-O2`, `-O3` and `-O3 -funroll-loops`). The
+mechanism is visible in the object code and is *not* the multiply — both arms emit the same 20
+`imul` in `random_block`, so the fork header's "the optimiser narrows it straight back to a native
+multiply" holds. What the `int128` arm adds is 20 `shrd` instructions extracting halves across a
+register pair whose upper 64 bits are provably zero, and 230 instructions against 167.
+
+```sh
+tools/benchmark_random_kernels.sh
+OPT=-O2 tools/benchmark_random_kernels.sh
+FC=ifx tools/benchmark_random_kernels.sh     # ships wrapping already; reports one arm and says so
+```
+
 `tools/benchmark_stage7.sh` runs a set of targeted micro-measurements over paths this library's
 optimisation work needs numbers for, and — this is why it exists rather than being a throwaway
 script — prints the **toolchain provenance** ahead of them: compiler and version, Arrow version,

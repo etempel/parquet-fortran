@@ -4764,16 +4764,50 @@ wrapping *measured* correct on the compiler in use, and the optimiser still used
 undefinedness to delete a branch two functions away. The masks were measured free on gfortran and
 slightly faster on ifx, so there is no cost to weigh against.
 
-**Test.** `test_perm_golden` (`test/test_random.f90`), against 27 vectors from
+**Test — two oracles now, and they fail for different reasons, which is the point.**
+
+`test_perm_golden` (`test/test_random.f90`) checks 27 vectors from
 `tools/generate_random_perm_vectors.py` — an **arbitrary-precision Python model of the contract**,
 transcribed from the specification rather than from the Fortran, whose assertions also prove no
-intermediate reached 2⁶³. That file is the only thing that catches a round-count change:
-`test_perm_bijection` does **not**, and this was confirmed by mutation rather than assumed — with the
-vectors removed, `perm_rounds = 3` survived the entire suite, because an odd count still yields a
-bijective encoding of the same domain. Mutation testing over the round count, the multiply-shift
-mask, `perm_c1` and the width rule now kills all four; the conditional subtract is killed too, but as
-a **hang** rather than a failure, since removing it destroys the round's bijectivity and the
-cycle-walk orbit never re-enters range.
+intermediate reached 2⁶³. It catches a round-count change **deterministically**, and for a long time
+it was the only thing that did: `test_perm_bijection` does **not**, confirmed by mutation rather than
+assumed — with the vectors removed, `perm_rounds = 3` survived the entire suite, because an odd count
+still yields a bijective encoding of the same domain. Mutation testing over the round count, the
+multiply-shift mask, `perm_c1` and the width rule kills all four; the conditional subtract is killed
+too, but as a **hang** rather than a failure, since removing it destroys the round's bijectivity and
+the cycle-walk orbit never re-enters range.
+
+`test_perm_structural` (same file) is the second, and it is the **structural distinguisher this entry
+describes**, ported from `app/probe_random_feistel.f90 --mode=struct`. It reaches the shipped
+permutation through the public API at **m = 1024**, where `a = b = 32` so `a*b = m` exactly and the
+cycle-walk never runs — which is what makes the public output the raw bijection on `Z_32 x Z_32` with
+no debug hook. Measured: shipped **1.82**, mutated to three rounds **8.74** (and the elevated relation
+is `r->l`, at 0.03197 — the relation *and* direction this entry predicts), a 2-round power control at
+**177.68** with `r->l` exactly 0, and a Fisher–Yates control landing on the analytic `31/1023`. The
+gate is 5.0.
+
+**Keeping both is deliberate and neither is redundant.** The vectors catch the change, but only
+because someone regenerated them from a Python model of the *intended* contract — they cannot say
+whether four rounds was the right number, only that the number has not moved. The distinguisher is
+the only thing in the repository that can answer the original question, and it is what a future
+contributor proposing three rounds has to argue with. Deleting it because "the golden vectors already
+catch that" would remove the evidence and keep only the assertion.
+
+**Why the port needed a power control rather than just a sensitivity check.** The 2-round arm's
+signature is *algebraic*: after two modular rounds the left output is `(l + F1(r)) mod a`, so inputs
+sharing `r` cannot share it and `r->l` must be **exactly** 0, not merely small. Its round function is
+deliberately unrelated to the library's — a Feistel is a bijection for any round function — so that
+arm validates the four relations and their orientation. Without it, a test that mislabelled or
+transposed the relations would pass on the shipped arm and mean nothing.
+
+**The round function's constants are analysed, and the analysis says the round count is what
+matters.** `app/probe_random_mix2.f90` sweeps five conventional multiplier pairs through the same
+distinguisher: all are clean at 4 rounds (|z| 0.79–1.85) and four of five are detected at 3. It also
+shows `perm_mix2`'s avalanche is at the sampling floor on every bit it reads, that it discards input
+bit 31 by the very mask this entry says is load-bearing (harmless while `m <= 2**62`), and — from
+three deliberately bad pairs — *why* a large odd multiplier is required: the width rule reads only the
+top `log2(p)` bits of the round function, so a small multiplier never carries the input's low bits up
+to where they are read, and the network degenerates.
 
 ### Risk-112 — A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly
 

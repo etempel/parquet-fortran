@@ -70,7 +70,7 @@ To generate the executables:
 
     fpm install --prefix my_path
 
-`fpm.toml` sets `auto-executables = true`, so **eleven** executables are built from `app/*.f90` and placed in `my_path/bin`:
+`fpm.toml` sets `auto-executables = true`, so **every** `app/*.f90` becomes an executable in `my_path/bin` — 24 of them as of this writing. Only `run_parquet_fortran` ships in the fpm-published package (see `tools/prep_fpm_publish.sh`, whose `APP_KEEP` is an allow-list, so a new probe added here is stripped from a consumer's install automatically and needs no edit there):
 
 | Executable | Source | Purpose |
 |---|---|---|
@@ -89,6 +89,15 @@ To generate the executables:
 | `check_arrow_release` | `app/check_arrow_release.f90` | Driven by `tools/check_arrow_release.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `playground` | `app/playground.f90` | Maintainer scratch file for trying out Fortran code; no fixed purpose. |
 | `demo_print_schema_info` | `app/demo_print_schema_info.f90` | Maintainer demo for reviewing `schema%print_schema_info`'s output. |
+| `benchmark_sort_tail` | `app/benchmark_sort_tail.f90` | Sort tail-latency probe. Run directly; `--profile release` is required, as for every measurement app here. |
+| `probe_radix_parallel` | `app/probe_radix_parallel.f90` | Parallel radix-sort prototype measurements. |
+| `probe_random_stream` | `app/probe_random_stream.f90` | `parquet_random` tier-1: whether `pf_random_stream` should keep its enciphered block (it should), and how every producer prices against a tier-0 loop. Also carries the `pf_random_fill_streams` row that `feature_random_phase2.md` §11 item 5's lane-blocking decision rests on. |
+| `probe_random_perm` | `app/probe_random_perm.f90` | The permutation API. `--mode=check` identity and bijectivity, `--mode=bench` per-element cost, `--mode=floor` thread scaling for both `pf_random_permutation` and `pf_random_subset`, `--mode=guarantee` what coordinate addressing costs against a stream Fisher–Yates and against key-and-argsort. |
+| `probe_random_feistel` | `app/probe_random_feistel.f90` | The Stage 0 campaign behind the Feistel permutation: width rules, round functions, round count, throughput and thread scaling. `--mode=struct` is the modular structural distinguisher, now also ported into the suite as `test_perm_structural`. |
+| `probe_random_mix2` | `app/probe_random_mix2.f90` | Justifies `perm_mix2`'s two multipliers. `--mode=selfcheck` proves the local replication reproduces `pf_random_perm_at` exactly (a precondition for the rest), then `props`, `avalanche` and `sweep` — the last running the structural distinguisher over conventional and deliberately-bad multiplier pairs, which is what shows the shipped clearance tracks the round count rather than the constants. |
+| `probe_random_subset` | `app/probe_random_subset.f90` | Partial Fisher–Yates against key-and-select over `n/m` and `m`; the measurements behind rejecting key-and-select. |
+| `probe_random_int_rule` | `app/probe_random_int_rule.f90` | The exact-rejection integer rule: rejection rates and cost across width regimes. |
+| `probe_random_weighted` | `app/probe_random_weighted.f90` | Weighted sequential draw / weighted shuffle constructions (`feature_random_suffle.md`). The probe whose distribution gate found the `philox4x32-10/v1` stride defect. |
 
 If `fpm test` behaves unexpectedly right after a source change (e.g. a test seems to still run old
 code, or `error_scenarios` reports a scenario name as unrecognized even though it's clearly in

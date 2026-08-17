@@ -172,7 +172,7 @@ program probe_random_stream
     use iso_fortran_env, only: int32, int64, real32, real64, output_unit
     use pf_probe_stream, only: stream_plain, stream_cached
     use parquet, only: pf_random_at, pf_random32_at, pf_random_int_at, pf_random_fill_draws, &
-                       parquet_debug_random_uses_int128
+                       pf_random_fill_streams, parquet_debug_random_uses_int128
 
     implicit none
 
@@ -222,8 +222,8 @@ contains
         real(real64), allocatable :: v(:), ref(:)
         real(real32), allocatable :: v32(:), ref32(:)
         integer(int64), allocatable :: vi(:)
-        real(real64) :: t_at, t_stream_axis, t_plain, t_cached, t_fill
-        real(real64) :: q_at, q_plain, q_cached, q_fill
+        real(real64) :: t_at, t_stream_axis, t_plain, t_cached, t_fill, t_fill_streams
+        real(real64) :: q_at, q_plain, q_cached, q_fill, q_fill_streams
         real(real64) :: t_int
         integer(int64) :: k
         type(stream_plain) :: rp
@@ -283,21 +283,25 @@ contains
         t_plain = timed_plain(v, n)
         t_cached = timed_cached(v, n)
         t_fill = timed_fill(v, n)
+        t_fill_streams = timed_fill_streams(v, n)
         q_at = timed_at32(v32, n)
         q_plain = timed_plain32(v32, n)
         q_cached = timed_cached32(v32, n)
         q_fill = timed_fill32(v32, n)
+        q_fill_streams = timed_fill_streams32(v32, n)
         t_int = timed_int(vi, n)
 
         write(output_unit, '(a,i0,a)') '================ n = ', n, ' values'
         write(output_unit, '(a)') 'real64                                ns/value   vs plain'
         call row('  pf_random_at (draw axis)      ', t_at, t_plain)
         call row('  pf_random_at (stream axis)    ', t_stream_axis, t_plain)
+        call row('  pf_random_fill_streams        ', t_fill_streams, t_plain)
         call row('  stream_plain%uniform          ', t_plain, t_plain)
         call row('  stream_cached%uniform         ', t_cached, t_plain)
         call row('  pf_random_fill_draws          ', t_fill, t_plain)
         write(output_unit, '(a)') 'real32                                ns/value   vs plain'
         call row('  pf_random32_at                ', q_at, q_plain)
+        call row('  pf_random_fill_streams (r32)  ', q_fill_streams, q_plain)
         call row('  stream_plain%uniform32        ', q_plain, q_plain)
         call row('  stream_cached%uniform32       ', q_cached, q_plain)
         call row('  pf_random_fill_draws          ', q_fill, q_plain)
@@ -403,6 +407,45 @@ contains
         end do
         call keep(v)
     end function timed_fill
+
+    !> The shipped stream-AXIS bulk fill, against the scalar loop over streams two rows above.
+    !!
+    !! **This pair is `feature_random_phase2.md` §11 item 5's live evidence.** That item asks
+    !! whether a lane-blocked kernel is worth building; the answer depends on how much room is left
+    !! between the scalar loop and the shipped one-stream-per-body form, and Phase 1's figures for
+    !! that gap predate every change the module has had since. The two lane-blocked prototypes it
+    !! measured no longer exist, so their rows cannot be re-run -- but the baseline they were
+    !! measured against can, and a decision resting on a stale baseline is not a decision.
+    real(real64) function timed_fill_streams(v, n)
+        real(real64), intent(inout) :: v(:)         !! destination, already warmed
+        integer(int64), intent(in) :: n             !! element count
+        integer(int64) :: t0, t1
+        integer :: r
+        timed_fill_streams = huge(1.0_real64)
+        do r = 1, g_rounds
+            call tick(t0)
+            call pf_random_fill_streams(SEED, 1_int64, v)
+            call tick(t1)
+            timed_fill_streams = min(timed_fill_streams, ns(t0, t1, n))
+        end do
+        call keep(v)
+    end function timed_fill_streams
+
+    !> `timed_fill_streams` for `real32`, the least block-efficient entry point in the module.
+    real(real64) function timed_fill_streams32(v, n)
+        real(real32), intent(inout) :: v(:)         !! destination, already warmed
+        integer(int64), intent(in) :: n             !! element count
+        integer(int64) :: t0, t1
+        integer :: r
+        timed_fill_streams32 = huge(1.0_real64)
+        do r = 1, g_rounds
+            call tick(t0)
+            call pf_random_fill_streams(SEED, 1_int64, v)
+            call tick(t1)
+            timed_fill_streams32 = min(timed_fill_streams32, ns(t0, t1, n))
+        end do
+        call keep32(v)
+    end function timed_fill_streams32
 
     real(real64) function timed_at32(v, n)
         real(real32), intent(inout) :: v(:)

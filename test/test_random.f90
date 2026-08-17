@@ -66,10 +66,12 @@ contains
             new_unittest("permutation contract: prefixes, subsets, kinds, clamping, determinism", &
                          test_perm_contract), &
             new_unittest("the bulk permutation and subset forms are the scalar form", test_perm_bulk), &
+            new_unittest("the permutation carries no modular-domain structure a uniform one lacks", &
+                test_perm_structural), &
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
             new_unittest("the integer draw shares a block with the real draw at one coordinate", &
                 test_int_shares_block), &
-            new_unittest("the three generics read one word sequence with different strides", &
+            new_unittest("the three 64-bit generics share one stride-2 grid; real32 does not", &
                 test_generic_stride_aliasing), &
             new_unittest("the int32 specifics equal the int64 specifics", test_kind_specifics), &
             new_unittest("elemental calls equal elementwise scalar calls", test_elemental), &
@@ -1309,6 +1311,237 @@ contains
         call check(error, size(s64) == 0 .and. size(s32) == 0, "a zero-sized fill must be a no-op")
         deallocate (s64, s32)
     end subroutine test_perm_bulk
+
+    !> The modular-domain structural distinguisher, ported from `app/probe_random_feistel.f90
+    !! --mode=struct`. **The only oracle that can see a round-count regression statistically.**
+    !!
+    !! `pf_random_perm_at` is a 4-round Feistel network over `Z_a x Z_b`. Every marginal statistic
+    !! this suite carries -- fixed points, cycle structure, position uniformity, subset membership --
+    !! passes at **three** rounds as well as four; a round count is not a marginal property. What
+    !! separates them is a *joint* one: does sharing an input component make two outputs share an
+    !! output component more often than a uniform permutation would? Four relations, all pairs
+    !! enumerated exhaustively over the raw domain, no sampling:
+    !!
+    !! ```
+    !!   r->l   inputs share their right component; do outputs share their left?
+    !!   r->r   ... their right?
+    !!   l->l   inputs share their left component;  do outputs share their left?
+    !!   l->r   ... their right?
+    !! ```
+    !!
+    !! **Three arms, and the two controls are what make the middle one mean anything.**
+    !!
+    !! *Fisher-Yates supplies the null*, rather than the analytic `(b-1)/(ab-1)`. That is the whole
+    !! reason a Fisher-Yates lives in `test/` at all: it makes the calibration **measured**, so
+    !! "elevated" can be told from "noisy" using the null's own key-to-key spread. It is checked
+    !! against the analytic value too, which is what catches a broken *shuffle* rather than a broken
+    !! cipher.
+    !!
+    !! *A 2-round Feistel supplies the power control*, and it is stronger than a merely-detectable
+    !! one because its signature is **algebraic rather than statistical**: after two modular rounds
+    !! the output's left component is `(l + F1(r)) mod a`, so two inputs sharing `r` and differing in
+    !! `l` can never share an output left component. `r->l` must be **exactly zero** -- not "small".
+    !! Its round function is deliberately unrelated to the library's, since a Feistel is a bijection
+    !! for any round function; this control tests the *relations and their orientation*, which a
+    !! sensitivity-only control cannot.
+    !!
+    !! **`m = 1024` is load-bearing.** `perm_factors` gives `a = ceil(sqrt(m)) = 32` and
+    !! `b = ceil(m/a) = 32`, so `a*b = 1024 = m` exactly and the cycle-walk never runs. The public
+    !! permutation therefore *is* the raw bijection on `Z_32 x Z_32`, which is what lets this test
+    !! reach the structure through the shipped API with no debug hook. Any `m` whose factors do not
+    !! multiply back to it would mix walked and unwalked outputs and blunt every relation.
+    !!
+    !! **Deterministic, not statistical, despite the vocabulary.** Fixed seeds give fixed
+    !! permutations give one fixed `z` per arm, and the permutation is bit-identical across
+    !! compilers by contract -- so there is nothing to flake and the gate can be tight. The three
+    !! numbers, all measured on machine B and all reproducible anywhere:
+    !!
+    !! ```
+    !!   shipped, 4 rounds     zmax = 1.823     control mu = 0.03025 .. 0.03048 vs analytic 0.030303
+    !!   MUTATED to 3 rounds   zmax = 8.741     and the elevated relation is r->l, at 0.03197
+    !!   2-round control       zmax = 177.68    with r->l exactly 0
+    !! ```
+    !!
+    !! The gate is **5.0**, between the two live arms with 2.7x of margin below and 1.7x above.
+    !! The 3-round row is not merely "detected": its signal lands on `r->l` and above the control,
+    !! which is the direction and the relation `feature_random_feistel.md` §19 predicted from four
+    !! independent key sets (0.03194-0.03339 there, 0.03197 here). **A real structural leak repeats
+    !! in one place; noise moves** -- so a future failure should be read by looking at *which*
+    !! relation carries it before concluding anything.
+    subroutine test_perm_structural(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: MS = 1024_int64          ! 32*32 exactly -- see the note above
+        integer(int64), parameter :: AA = 32_int64, BB = 32_int64
+        integer, parameter :: NKEYS = 64
+        real(real64), parameter :: ZGATE = 5.0_real64
+        integer(int64), parameter :: SD0 = 20260817_int64
+        real(real64) :: f(4, NKEYS), mu(4), sd(4), ctl_mu(4), ctl_sd(4), z, zmax, analytic
+        integer(int64) :: y(0:MS - 1), perm(MS), key
+        integer :: arm, ka, ri
+
+        ! The analytic null: given two distinct outputs of a uniform permutation, the chance the
+        ! second shares the first's left (or right) component is (b-1)/(ab-1) -- equal for both
+        ! here only because a == b.
+        analytic = real(BB - 1_int64, real64) / real(AA * BB - 1_int64, real64)
+
+        ctl_mu = 0.0_real64
+        ctl_sd = 0.0_real64
+        do arm = 1, 3
+            do ka = 1, NKEYS
+                key = SD0 + int(ka, int64) * 104729_int64
+                select case (arm)
+                case (1)
+                    call struct_fisher_yates(key, MS, y)
+                case (2)
+                    call pf_random_permutation(perm, key)
+                    y = perm - 1_int64                         ! the library is 1-based; y is 0-based
+                case default
+                    call struct_two_round(key, AA, BB, y)
+                end select
+                call struct_relations(y, AA, BB, f(:, ka))
+            end do
+            do ri = 1, 4
+                mu(ri) = sum(f(ri, :)) / real(NKEYS, real64)
+                sd(ri) = sqrt(sum((f(ri, :) - mu(ri))**2) / real(NKEYS - 1, real64))
+            end do
+
+            if (arm == 1) then
+                ctl_mu = mu
+                ctl_sd = sd
+                ! The null must be behaving before anything is compared against it. A shuffle that
+                ! was not uniform would move this, and would then quietly excuse a real leak.
+                do ri = 1, 4
+                    call check(error, abs(mu(ri) - analytic) < 5.0e-4_real64, &
+                        "the Fisher-Yates control does not reproduce the analytic null (b-1)/(ab-1) -- " // &
+                        "the calibration oracle is broken, so no verdict below it means anything")
+                    if (allocated(error)) return
+                    call check(error, ctl_sd(ri) > 0.0_real64, &
+                        "the Fisher-Yates control has zero key-to-key spread, so every z below would " // &
+                        "be infinite or undefined")
+                    if (allocated(error)) return
+                end do
+                cycle
+            end if
+
+            zmax = 0.0_real64
+            do ri = 1, 4
+                z = abs(mu(ri) - ctl_mu(ri)) / (ctl_sd(ri) / sqrt(real(NKEYS, real64)))
+                zmax = max(zmax, z)
+            end do
+
+            if (arm == 2) then
+                call check(error, zmax < ZGATE, &
+                    "pf_random_permutation shows modular-domain structure a uniform permutation " // &
+                    "does not: some relation is many standard errors off the Fisher-Yates control. " // &
+                    "The round count is the first thing to check -- three rounds passes every " // &
+                    "marginal statistic in this suite and fails exactly here")
+                if (allocated(error)) return
+            else
+                ! Power control. The algebraic signature first: it is exact, so it also proves the
+                ! relations are oriented the way the comment above claims.
+                call check(error, mu(1) == 0.0_real64, &
+                    "the 2-round control's r->l relation must be EXACTLY zero -- after two modular " // &
+                    "rounds the left output is (l + F1(r)) mod a, so inputs sharing r cannot share " // &
+                    "it. A non-zero value means the four relations are mislabelled or transposed, " // &
+                    "and the verdict on the shipped arm is then meaningless")
+                if (allocated(error)) return
+                call check(error, zmax > 20.0_real64, &
+                    "the 2-round control was NOT detected, so this test has no power and its pass " // &
+                    "on the shipped permutation says nothing")
+                if (allocated(error)) return
+            end if
+        end do
+    end subroutine test_perm_structural
+
+    !> The four structural relations, over all pairs sharing an input component. `y` is 0-based.
+    !!
+    !! Exhaustive rather than sampled: `b*C(a,2) + a*C(b,2)` pairs, which at `a = b = 32` is 31744
+    !! and costs nothing. Sampling here would reintroduce the quantisation artefact
+    !! `feature_random_feistel.md` §5.2 records.
+    pure subroutine struct_relations(y, a, b, f)
+        integer(int64), intent(in) :: y(0:)         !! the permutation, 0-based in and out
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        real(real64), intent(out) :: f(4)           !! r->l, r->r, l->l, l->r
+        integer(int64) :: l1, l2, r1, r2, y1, y2, hit(4), npair(4)
+        hit = 0_int64
+        npair = 0_int64
+        do r1 = 0_int64, b - 1_int64                ! pairs sharing the input RIGHT component
+            do l1 = 0_int64, a - 2_int64
+                y1 = y(l1 * b + r1)
+                do l2 = l1 + 1_int64, a - 1_int64
+                    y2 = y(l2 * b + r1)
+                    npair(1) = npair(1) + 1_int64
+                    if (y1 / b == y2 / b) hit(1) = hit(1) + 1_int64
+                    if (modulo(y1, b) == modulo(y2, b)) hit(2) = hit(2) + 1_int64
+                end do
+            end do
+        end do
+        npair(2) = npair(1)
+        do l1 = 0_int64, a - 1_int64                ! pairs sharing the input LEFT component
+            do r1 = 0_int64, b - 2_int64
+                y1 = y(l1 * b + r1)
+                do r2 = r1 + 1_int64, b - 1_int64
+                    y2 = y(l1 * b + r2)
+                    npair(3) = npair(3) + 1_int64
+                    if (y1 / b == y2 / b) hit(3) = hit(3) + 1_int64
+                    if (modulo(y1, b) == modulo(y2, b)) hit(4) = hit(4) + 1_int64
+                end do
+            end do
+        end do
+        npair(4) = npair(3)
+        f = real(hit, real64) / real(npair, real64)
+    end subroutine struct_relations
+
+    !> A uniform permutation of `0 .. m-1` by Fisher-Yates, as the distinguisher's calibration null.
+    !!
+    !! Driven by coordinate-addressed draws, so it is reproducible -- but it is a *shuffle*, and
+    !! §18.4 keeps it in `test/` precisely because a measured null beats an assumed one. `tmp` is not
+    !! optional: by step `j`, slot `j` may already hold a value an earlier step swapped in, so
+    !! writing the literal `j-1` would duplicate one value and lose another, producing a plausible
+    !! array that is not a permutation.
+    subroutine struct_fisher_yates(seed, m, y)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer(int64), intent(in) :: m             !! population size
+        integer(int64), intent(out) :: y(0:)        !! filled with a permutation of `0 .. m-1`
+        integer(int64) :: j, r, tmp
+        do j = 0_int64, m - 1_int64
+            y(j) = j
+        end do
+        do j = 1_int64, m
+            r = pf_random_int_at(seed, 0_int64, j, m, j)
+            tmp = y(j - 1_int64)
+            y(j - 1_int64) = y(r - 1_int64)
+            y(r - 1_int64) = tmp
+        end do
+    end subroutine struct_fisher_yates
+
+    !> A TWO-round Feistel over `Z_a x Z_b`, as the distinguisher's power control.
+    !!
+    !! Its round function is deliberately **not** the library's -- a Feistel is a bijection for any
+    !! round function, and the point of this arm is the relation orientation and the test's power,
+    !! neither of which depends on which mixer is used. Two rounds leaves `(l + F1(r)) mod a` in the
+    !! left output, so `r->l` is exactly 0 by algebra rather than by measurement.
+    !!
+    !! Requires `a == b`, which holds at `m = 1024`; the swap between rounds would otherwise have to
+    !! carry the factors, and this control has no reason to be more general than its one caller.
+    subroutine struct_two_round(seed, a, b, y)
+        integer(int64), intent(in) :: seed          !! the seed
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor, equal to `a` here
+        integer(int64), intent(out) :: y(0:)        !! filled with a permutation of `0 .. a*b-1`
+        integer(int64) :: x, l, r, t, j
+        do x = 0_int64, a * b - 1_int64
+            l = x / b
+            r = modulo(x, b)
+            do j = 1_int64, 2_int64                 ! two rounds, swapping each time
+                t = modulo(l + pf_random_int_at(seed, j, 0_int64, a - 1_int64, r + 1_int64), a)
+                l = r
+                r = t
+            end do
+            y(x) = l * b + r
+        end do
+    end subroutine struct_two_round
 
     !> The module's `real64` mapping, repeated here so a straddling pair can be checked directly.
     pure function to_r64_local(bits) result(r)

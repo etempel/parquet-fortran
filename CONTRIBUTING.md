@@ -98,6 +98,9 @@ To generate the executables:
 | `probe_random_subset` | `app/probe_random_subset.f90` | Partial Fisher–Yates against key-and-select over `n/m` and `m`; the measurements behind rejecting key-and-select. |
 | `probe_random_int_rule` | `app/probe_random_int_rule.f90` | The exact-rejection integer rule: rejection rates and cost across width regimes. |
 | `probe_random_weighted` | `app/probe_random_weighted.f90` | Weighted sequential draw / weighted shuffle constructions (`feature_random_suffle.md`). The probe whose distribution gate found the `philox4x32-10/v1` stride defect. |
+| `probe_random_resample` | `app/probe_random_resample.f90` | What `pf_random_resample` could cost. Decomposes the integer draw into cipher and reduction, prices a value-preserving restructure of `fill_draws_i*` and a narrow-range 32-bit grid against it, and sweeps thread scaling. Every arm is gated equal to the shipped fill, or statistically, before any timing prints. |
+| `probe_random_practrand` | `app/probe_random_practrand.f90` | Streams raw bits from one axis of `parquet_random` to stdout for PractRand. Driven by `tools/run_practrand.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `probe_random_philox` | `app/probe_random_philox.f90` | Dumps blocks from the shipped Philox kernel over arbitrary 64-bit coordinates, for `tools/philox_reference.py` to verify. Driven by `tools/check_philox_compliance.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 
 If `fpm test` behaves unexpectedly right after a source change (e.g. a test seems to still run old
 code, or `error_scenarios` reports a scenario name as unrecognized even though it's clearly in
@@ -297,6 +300,29 @@ tools/check_random_kernels.sh --quick         # only the LTO/IPO setting
 tools/check_random_kernels.sh --shipped-only  # only the kernel this compiler ships (what CI runs)
 FC=ifx tools/check_random_kernels.sh          # ifx ships the wrapping kernel; nothing to force
 ```
+
+`tools/check_philox_compliance.sh` sweeps the **shipped** Philox kernel against `tools/philox_reference.py`, an independent philox4x32-10 written from the Random123 specification in Python's arbitrary-precision integers. It complements rather than duplicates `test_kat_vectors`: that test pins the kernel at the three published vectors and the golden vectors pin a grid of the public surface, both exact and both narrow, whereas this sweeps thousands of arbitrary 64-bit `(key, stream, index)` coordinates. It goes through `parquet_debug_random_block`, so it reaches counter values no draw index can produce — which is where two of the three published vectors sit — and exercises whichever arm of the route (e) fork the build took. The dump opens with the full cross product of a table of awkward values (zero, all-ones, single bits, either side of the 32-bit boundary), because that is where a shift or half-swap defect lives; a uniformly random coordinate would merely turn into another random-looking one.
+
+**Four vacuity guards run before the sweep, and each must fire**, because "0 mismatches" is equally what a comparison that never happened reports: the oracle must reproduce the three published vectors; a deliberately mutated oracle (`--mutate=rounds`, `--mutate=multiplier`) must be *rejected* rather than used; an empty input must be refused rather than passed; and a correct-cipher-but-mis-packed oracle (`--mutate=packing`, which passes the first guard by construction) must produce mismatches, proving the comparison can detect a wrong kernel at all. A guard that does not fire exits 3 and the run is reported as worthless rather than as a pass.
+
+```bash
+tools/check_philox_compliance.sh              # 20000 blocks, all guards
+N=200000 tools/check_philox_compliance.sh     # deeper sweep
+python3 tools/philox_reference.py --self-test # just the published vectors
+```
+
+Exit codes: 0 compliant, 1 pre-flight failure, 2 terminated early, 3 a guard did not fire, 4 the kernel disagrees with the specification. Maintainer-only.
+
+`tools/run_practrand.sh` runs the [PractRand](https://sourceforge.net/projects/pracrand/) battery against `parquet_random`, one axis at a time, feeding it from `app/probe_random_philox`'s sibling `app/probe_random_practrand`. It is **not** a way to check that Philox is a good generator — that is published, and `test_kat_vectors` establishes bit-exactness to it far more sharply than any battery could, since a wrong constant would still be a strong mixing function and would very likely pass. What it reaches is the part the literature says nothing about: **this library's own mapping** from `(seed, stream, draw)` onto the cipher's key and counter words, and the constructions built on top of it. Hence the axes, ordered most-informative first: `stream` (the loop the guide tells users to write), `seedwalk` (seeds at Hamming distance 1, emulating PractRand's own `-ttseed64 -walk_greycode`, which cannot be aimed at an external RNG through `stdin`), `seed`, `key`, `perm` (the modular Feistel, 32-bit words) and `draw` (the sequential counter walk published results already cover, so a wiring check rather than a finding).
+
+It runs a known-weak generator through the identical pipe first and aborts if that does **not** fail, verifies `RNG_test` identifies itself as PractRand rather than merely being executable, and judges each run on the **final** result block only — an anomaly at an interim length that is gone by the end is the signature of noise, since a real bias accumulates as the length doubles. PractRand ships only MSVC binaries, so it must be built once (`cd "$PRACTRAND_DIR/unix" && make`). Every parameter is in the script's own CONFIGURATION block.
+
+```bash
+tools/run_practrand.sh                                    # defaults: 6 axes x 3 seeds, 1GB each
+AXES="stream seedwalk" TLMAX=1TB tools/run_practrand.sh   # the deep run worth leaving overnight
+```
+
+Maintainer-only, and deliberately never in CI: a deep run takes hours, and a battery that emits marginal p-values by design is a flaky test waiting to happen.
 
 **The forced half currently fails on gfortran under LTO, and that is expected** — see [`feature_risks.md`](feature_risks.md) Risk-101. It is a gfortran bug affecting a kernel gfortran never ships (gfortran takes the protected arm and is clean; ifx ships the wrapping arm and is clean at every setting measured, including `-ipo`), so CI runs `--shipped-only` rather than going permanently red on it. Maintainer-only (stripped from the fpm-published package).
 

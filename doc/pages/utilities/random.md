@@ -164,11 +164,11 @@ swapped rather than refused, exactly as in `pf_random_int_at`. Each element is p
 integer draw at the same coordinate, so these are interchangeable with a loop in the same way the
 real-valued fills are.
 
-One asymmetry to expect: **the integer draw-axis fill saves the per-element call and nothing more.**
-An integer draw consumes a whole enciphering on its own — the exact-rejection rule needs a full
-64-bit candidate and takes its own block — so consecutive integer draws cannot share a block the way
-two consecutive `real64` values do. The stream-axis integer fill gives up nothing at all by
-comparison, since that axis already spent one enciphering per value.
+**The integer draw-axis fill amortises just as the `real64` one does.** An integer draw costs one
+word pair, so two consecutive draws are the two pairs of a single enciphering, and the fill reuses
+the block it already has. Measured at **1.61×** against a loop of `pf_random_int_at` (machine B,
+gfortran 15.2.1, 4M values). The stream-*axis* integer fill is the one that cannot amortise, since
+each element belongs to a different stream and so needs its own enciphering.
 
 ### Filling several values at once
 
@@ -240,9 +240,9 @@ The producers, with what each costs in words (positions are counted in 32-bit wo
 | `call rng%uniform(x)` | `real64` in `[0, 1)` | 2 |
 | `call rng%uniform32(x)` | `real32` in `[0, 1)` | 1 |
 | `call rng%bits(b)` | 64 raw bits | 2 |
-| `call rng%int_range(lo, hi, r)` | exactly-unbiased integer in `[lo, hi]` | 4 |
-| `call rng%fill(v)` | the next `size(v)` values | 2, 1 or 4 each |
-| `call rng%fill(v, lo, hi)` | the next `size(v)` integers | 4 each |
+| `call rng%int_range(lo, hi, r)` | exactly-unbiased integer in `[lo, hi]` | 2 |
+| `call rng%fill(v)` | the next `size(v)` values | 2 or 1 each |
+| `call rng%fill(v, lo, hi)` | the next `size(v)` integers | 2 each |
 | `call rng%jump(n)` | seeks `n` words, in O(1); negative seeks back | — |
 | `call rng%rewind([pos])` | sets the position; no argument means 1 | — |
 | `rng%position()` | the current position | — |
@@ -252,11 +252,12 @@ Everything that produces a value is a subroutine — deliberately, since `rng%un
 as an expression would have a sign that depends on which the compiler evaluates first, and Fortran
 does not fix that order.
 
-`%int_range` starts on a block boundary — the generator produces four words at a time, and an
-integer draw needs a whole group of four — so from an unaligned position it first advances to the
-next boundary. That is what keeps `rng%int_range(lo, hi, r)` equal to the `pf_random_int_at` at the
-same coordinate rather than re-reading words an earlier `%uniform` already handed out. Positions
-above are exact for a stream that uses one producer throughout, which is the ordinary case.
+`%int_range` starts on a word *pair* boundary — an integer draw names a pair at a fixed grid, the
+same grid `%uniform` and `%bits` use — so from an odd position, which only `%uniform32` can leave
+behind, it first advances one word. That is what keeps `rng%int_range(lo, hi, r)` equal to the
+`pf_random_int_at` at the same coordinate rather than re-reading a word an earlier producer already
+handed out. Positions above are exact for a stream that uses one producer throughout, which is the
+ordinary case.
 
 **Seed once per loop iteration, not once per program.** This is the discipline that keeps a stream
 reproducible:
@@ -376,11 +377,15 @@ agree, and that requirement is checked by the same golden vectors under each.
 `pf_random_algorithm` names the frozen contract:
 
 ```fortran
-print *, pf_random_algorithm            ! philox4x32-10/v1
+print *, pf_random_algorithm            ! philox4x32-10/v2
 ```
 
 Its value changes if and only if some value the module can produce changes. Record it alongside a
 seed if you need to be able to tell, years later, whether a stored result is still reproducible.
+That is exactly what it was for when `/v1` became `/v2`: the integer generic's draw axis moved (see
+[the stride table](#mixing-generics-on-one-stream-the-stride-table)) while the cipher, the key and
+counter layout, the word order, the rejection rule and the retry key all stayed put, so the string
+is the only thing that can tell a stored `pf_random_int_at` result which mapping produced it.
 
 **Not guaranteed.** `pf_random_seed()` is nondeterministic by design — that is its whole job. And
 sequences are per `(seed, i)`, **per procedure and per result type**: `pf_random32_at` is not a
@@ -398,11 +403,11 @@ divide by `1 - x` but not by `x`.
 into `[0, 1)`. That identity is contract and is asserted by the suite.
 
 **`pf_random_int_at` shares no such identity with anything**, and none should be assumed. It reads
-the same two words as `pf_random_at` at the same coordinate, but a rejection moves it to a
-different key, so the two coincide only when no rejection happened. It also consumes one whole
-enciphering per value and uses half of it — which costs nothing today and is worth knowing if you
-are counting: a future bulk integer fill will be roughly 0.6× the throughput of its `real64`
-sibling for that reason.
+the same two words as `pf_random_at` at the same coordinate, but Lemire's reduction is a different
+function of those bits, and a rejection moves it to a different key — so the two are the same
+randomness without being the same number. It costs the same two words per value as its `real64`
+sibling, so a bulk integer fill amortises one enciphering over two values exactly as the `real64`
+one does.
 
 **So do not take a real and an integer at the same coordinate and expect two independent numbers.**
 "No identity" means the two *values* are not equal; it does not mean they are unrelated. Reading
@@ -414,41 +419,56 @@ equals `1 + floor(6 * pf_random_at(seed, i))` for 20000 of 20000 streams measure
 ### Mixing generics on one stream: the stride table
 
 The same-coordinate case above is one instance of a general rule, and the rule is worth knowing in
-full because the obvious workaround does not work.
+full, because one of the four generics walks a finer grid than the others.
 
-**One `(seed, i)` pair names one sequence of 32-bit words. The three coordinate-addressed generics
-are three *views* of that one sequence, and they consume different numbers of words per value:**
+**One `(seed, i)` pair names one sequence of 32-bit words. The coordinate-addressed generics are
+*views* of that one sequence, and there are two strides:**
 
-| generic | words read for draw `d` (0-based) | stride |
+| generic | words read for draw `d` (1-based) | stride |
 |---|---|---|
 | `pf_random32_at(seed, i, d)` | `d-1` | 1 |
 | `pf_random_at(seed, i, d)`, `pf_random_bits_at(seed, i, d)` | `2d-2`, `2d-1` | 2 |
-| `pf_random_int_at(seed, i, lo, hi, d)` | `4d-4`, `4d-3` (a whole block, half used) | 4 |
+| `pf_random_int_at(seed, i, lo, hi, d)` | `2d-2`, `2d-1` | 2 |
 
-So the same `draw` index means a different thing to each, and two generics alias whenever their
-word ranges meet. Every collision follows from the table by arithmetic. The two that bite:
+Two rules follow, and between them they are the whole story:
+
+1. **The three 64-bit generics agree on what draw `d` means.** At one coordinate they are three
+   presentations of the same 64 bits; at different coordinates they are independent. So walking the
+   draw axis *is* a safe way to separate them.
+2. **`pf_random32_at` has its own finer grid**, one word per value, and is deliberately not a
+   narrowing of `pf_random_at`. Its draws `2d-1` and `2d` are the two halves of 64-bit draw `d`, so
+   mixing it with the others on one stream still aliases across draw indices:
 
 ```
-pf_random_int_at(seed, i, lo, hi, d)  reads the same 64 bits as  pf_random_bits_at(seed, i, 2d-1)
-pf_random32_at(seed, i, 2d-1)         is the low word of         pf_random_bits_at(seed, i, d)
+pf_random32_at(seed, i, 2d-1)  is the low word of  pf_random_bits_at(seed, i, d)
 ```
 
-**"Walk the draw axis" is therefore not a safe rule when you are mixing generics**, and an earlier
-version of this page gave it as one. It is safe for the particular pairing shown below, and it fails
-for the next one anyone would write:
+In practice:
 
 ```fortran
-! SAFE -- measured 0 collisions in 1000 streams
+! SAFE -- different draws of two 64-bit generics are independent
 x    = pf_random_at(seed, i, 1_int64)               ! words 0,1
-die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! words 4,5
+die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! words 2,3
 
-! COLLIDES -- measured 1000 of 1000: both read words 4,5
-die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! words 4,5
-y    = pf_random_at(seed, i, 3_int64)               ! words 4,5  <-- same randomness as `die`
+! ALSO SAFE -- and this is the pairing that did NOT use to be
+die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! words 2,3
+y    = pf_random_at(seed, i, 3_int64)               ! words 4,5
+
+! COLLIDES -- pf_random32_at is on the finer grid
+y    = pf_random_at(seed, i, 2_int64)               ! words 2,3
+z    = pf_random32_at(seed, i, 3_int64)             ! word  2  <-- half of `y`'s randomness
 ```
 
-The failure is silent. The values are not *equal* — Lemire's reduction is a different function of
-the same bits — so every structural check passes and only a distributional test can see it.
+The failure is silent when it happens. The values are not *equal* — the two generics scale their
+words differently — so every structural check passes and only a distributional test can see it.
+That is why the safest habit remains the one in the next section: give each role its own stream.
+
+> **Changed in an unreleased revision.** `pf_random_int_at` used to have stride 4, taking a whole
+> four-word block per value and using half of it. Rule 1 above was then false: `pf_random_int_at(…,
+> d)` was `pf_random_bits_at(…, 2d-1)`, so an integer at draw 2 and a real at draw 3 were the same
+> randomness — measured 1000 of 1000 — and this page said "walk the draw axis" was not a safe rule.
+> It is now. Draw 1 is unchanged; every integer draw from 2 up returns a different value than it did,
+> and `pf_random_algorithm` reads `philox4x32-10/v2` rather than `/v1` to say so.
 
 ### Three constructions that are safe
 
@@ -478,19 +498,20 @@ cursor, so consecutive calls consume consecutive words and cannot alias — what
 type(pf_random_stream) :: rng
 call rng%seed(seed, i)
 call rng%uniform(x)                 ! consumes 2 words
-call rng%int_range(die, 1, 6)       ! consumes the next block -- never the words `x` used
+call rng%int_range(die, 1, 6)       ! consumes the next 2 words -- never the ones `x` used
 ```
 
 This is what a stream is *for*: the coordinate-addressed forms are the right tool when you know
 which value you want, and a stream is the right tool when you are consuming several per step.
 
-### Why this is not simply removed
+### Why the remaining overlap is not simply removed
 
-Folding a per-generic constant into the key would make collisions impossible by construction. It
-would also break the property `pf_random_stream` exists to provide — that a stream hands out exactly
-the values the coordinate-addressed calls give at the same positions — because that correspondence
-is possible only while all three generics read one word space. The stride table is the design, and
-this section documents it rather than working around it.
+Folding a per-generic constant into the key would make even the `pf_random32_at` overlap impossible
+by construction. It would also break the property `pf_random_stream` exists to provide — that a
+stream hands out exactly the values the coordinate-addressed calls give at the same positions —
+because that correspondence is possible only while every generic reads one word space. Aligning the
+three 64-bit generics onto one stride removed the overlap that actually caused mistakes while
+keeping that correspondence; the `real32` grid is what remains, and this section documents it.
 
 ### Not cryptographic
 

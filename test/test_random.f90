@@ -232,8 +232,8 @@ contains
         real(real64) :: got64
         real(real32) :: got32
 
-        call check(error, pf_random_algorithm == "philox4x32-10/v1", &
-            "pf_random_algorithm no longer reads philox4x32-10/v1: the vectors in this suite are the contract for " // &
+        call check(error, pf_random_algorithm == "philox4x32-10/v2", &
+            "pf_random_algorithm no longer reads philox4x32-10/v2: the vectors in this suite are the contract for " // &
             "that exact string, so they must be regenerated with it, or the identifier must go back")
         if (allocated(error)) return
 
@@ -560,16 +560,17 @@ contains
                 "a full-width integer fill disagrees with the scalar draw")
             if (allocated(error)) return
         end do
-        ! The full-width draw IS the raw bits -- but only at draw 1, where the integer rule's block
-        ! index `draw-1` and `bits_of`'s `(draw-1)/2` coincide. They diverge from draw 2 onwards, and
-        ! asserting the identity across the whole fill would be asserting something untrue of the
-        ! shipped scalar draw too.
-        call check(error, wide(1) == pf_random_bits_at(999_int64, 4_int64, 1_int64), &
-            "a full-width integer draw at draw 1 must be the raw bits at that coordinate")
-        if (allocated(error)) return
-        call check(error, wide(2) /= pf_random_bits_at(999_int64, 4_int64, 2_int64), &
-            "the full-width draw and the raw bits must diverge from draw 2, as int_at_impl documents")
-        if (allocated(error)) return
+        ! The full-width draw IS the raw bits, at EVERY draw -- both go through `bits_of` on one
+        ! stride-2 grid. Under `pf_random_algorithm` `/v1` this held at draw 1 alone (the integer
+        ! rule's block index was `draw-1` against `bits_of`'s `(draw-1)/2`, which coincide only
+        ! there), and this test asserted the divergence from draw 2 instead. Sweeping the whole fill
+        ! is the stronger assertion, and it is also what catches a fill whose block cache serves a
+        ! stale pair -- an error that a draw-1 check cannot see, because draw 1 always enciphers.
+        do k = 1, 5
+            call check(error, wide(k) == pf_random_bits_at(999_int64, 4_int64, int(k, int64)), &
+                "a full-width integer draw must be the raw bits at the SAME draw index, at every draw")
+            if (allocated(error)) return
+        end do
 
         ! Prefix consistency: a shorter fill is a prefix of a longer one.
         call pf_random_fill_draws(999_int64, 4_int64, short, 1_int64, 6_int64)
@@ -767,7 +768,7 @@ contains
             if (allocated(error)) return
         end do
 
-        ! %int_range takes one block per draw, so it walks the integer grid.
+        ! %int_range takes one word pair per draw, so it walks the same grid %bits just did.
         call rng%seed(777_int64, 3_int64)
         do k = 1, 6
             call rng%int_range(1_int64, 1000_int64, ir)
@@ -837,18 +838,24 @@ contains
         call check(error, rng%position() == 5_int64, "%bits must cost exactly two words")
         if (allocated(error)) return
         call rng%int_range(1_int64, 6_int64, ir)
-        call check(error, rng%position() == 9_int64, "%int_range from a block boundary must cost four words")
+        call check(error, rng%position() == 7_int64, "%int_range from a pair boundary must cost two words")
+        if (allocated(error)) return
+        call check(error, ir == pf_random_int_at(5_int64, 2_int64, 1_int64, 6_int64, 3_int64), &
+            "%int_range at word 4 must be the integer draw 3, which is the pair starting there")
         if (allocated(error)) return
 
-        ! From an unaligned position, %int_range first advances to the next block boundary.
+        ! From an unaligned position, %int_range first advances to the next PAIR boundary -- one
+        ! word, not up to three, since /v2 gave the integer generic stride 2. The value assertion is
+        ! what pins the alignment: an implementation that skipped it would read words 1 and 2 here,
+        ! which is no draw index at all.
         call rng%seed(5_int64, 2_int64)
-        call rng%uniform32(y)                        ! position 2, which is not a block boundary
+        call rng%uniform32(y)                        ! position 2, which is not a pair boundary
         call rng%int_range(1_int64, 6_int64, ir)
-        call check(error, rng%position() == 9_int64, &
-            "%int_range from an unaligned position must align first, then cost four words")
+        call check(error, rng%position() == 5_int64, &
+            "%int_range from an unaligned position must align by one word, then cost two")
         if (allocated(error)) return
         call check(error, ir == pf_random_int_at(5_int64, 2_int64, 1_int64, 6_int64, 2_int64), &
-            "an aligned %int_range must equal the integer draw of the block it landed on")
+            "an aligned %int_range must equal the integer draw of the pair it landed on")
         if (allocated(error)) return
 
         ! %jump(n) equals discarding n words' worth of draws.
@@ -1330,15 +1337,19 @@ contains
             "pf_random_at is not the top 53 bits of pf_random_bits_at everywhere -- the two are contractually identical")
     end subroutine test_bits_identity
 
-    !> **The integer draw and the real draws read the SAME block at the same coordinate**, so they
-    !! are not independent draws — this pins that mechanism rather than the wording that describes
-    !! it.
+    !> **The integer draw and the real draws read the SAME two words at the same coordinate**, so
+    !! they are not independent draws — this pins that mechanism rather than the wording that
+    !! describes it.
     !!
-    !! `int_at_impl`'s block index is `draw - 1` and `bits_of`'s is `(draw - 1)/2`; those coincide
-    !! at draw 1, which is the default and the commonest call. The consequence is measurable and is
-    !! what this asserts: at a small range the integer is a **deterministic function** of the real,
-    !! agreeing for every stream tried, where taking the integer one draw along agrees at the 1-in-6
-    !! rate independence predicts.
+    !! Both go through `bits_of`, so both take words `2d-2, 2d-1`; they agree at every draw, not
+    !! only at draw 1. The consequence is measurable and is what this asserts: at a small range the
+    !! integer is a **deterministic function** of the real, agreeing for every stream tried, where
+    !! taking the integer one draw along agrees at the 1-in-6 rate independence predicts.
+    !!
+    !! Under `pf_random_algorithm` `/v1` the integer generic's block index was `draw - 1` against
+    !! `bits_of`'s `(draw - 1)/2`, so the two coincided at draw 1 and nowhere else. That made this
+    !! test's draw-1 arm pass for a reason that has since changed; the assertion is the same and its
+    !! mechanism is not, which is why the paragraph above was rewritten rather than left alone.
     !!
     !! **Why this test exists at all.** Nothing else in the suite asserts the relationship in either
     !! direction, so a refactor that changed either block index would silently leave both the
@@ -1380,64 +1391,81 @@ contains
         end do
         call check(error, agree_d1 == nstream, &
             "at draw 1 the integer draw must be a deterministic function of the real draw -- both read " // &
-            "block 0, so pf_random_int_at(seed, i, 1, 6) is 1 + floor(6 * pf_random_at(seed, i))")
+            "words 0 and 1, so pf_random_int_at(seed, i, 1, 6) is 1 + floor(6 * pf_random_at(seed, i))")
         if (allocated(error)) return
         call check(error, agree_d2 < nstream / 2_int64, &
-            "negative control: taking the integer at draw 2 must BREAK that agreement -- it reads block 1 " // &
-            "while the real draw reads block 0, so agreement should fall to roughly 1 in 6")
+            "negative control: taking the integer at draw 2 must BREAK that agreement -- it reads words " // &
+            "2 and 3 while the real draw reads 0 and 1, so agreement should fall to roughly 1 in 6")
     end subroutine test_int_shares_block
 
     !> The GENERAL cross-generic aliasing rule, of which `test_int_shares_block` tests one point.
     !!
-    !! One `(seed, i)` is one sequence of 32-bit words, and the three coordinate-addressed generics
-    !! read it with different strides -- 1 word per `pf_random32_at` value, 2 per `pf_random_at` /
-    !! `pf_random_bits_at`, and a whole 4-word block per `pf_random_int_at`. Two exact identities
-    !! follow, and they are asserted here because the guide now states them as rules a caller must
-    !! reason with:
+    !! One `(seed, i)` is one sequence of 32-bit words, and the coordinate-addressed generics read it
+    !! with two strides: 1 word per `pf_random32_at` value, 2 per `pf_random_at`, `pf_random_bits_at`
+    !! and `pf_random_int_at`. So there are two facts to pin, and they point opposite ways:
     !!
     !! ```
-    !! pf_random_int_at(seed, i, lo, hi, d)  ==  pf_random_bits_at(seed, i, 2d-1)
-    !! pf_random32_at(seed, i, 2d-1)         ==  the low word of pf_random_bits_at(seed, i, d)
+    !! pf_random_int_at(seed, i, lo, hi, d)  ==  pf_random_bits_at(seed, i, d)      SAME draw, always
+    !! pf_random32_at(seed, i, 2d-1)         ==  the low word of bits_at(seed, i, d) CROSSES draws
     !! ```
     !!
     !! The first is asserted over the **full int64 range**, where the reduction is skipped and the
     !! integer draw returns the raw pattern, so the two are literally equal rather than merely
     !! derived from the same bits.
     !!
-    !! **This test pins behaviour that is a consequence of the design, not a promise to callers.**
-    !! If the generics are ever domain-separated -- folding a per-generic constant into the key, so
-    !! that collisions become impossible -- this test SHOULD fail, and the correct response is to
-    !! rewrite it into its opposite (assert the three generics no longer collide at any of these
-    !! coordinates) and to delete the stride table from `doc/pages/utilities/random.md` and from
-    !! `parquet_random`'s own banner comment. Do not simply delete it: the aliasing is what the
-    !! documentation currently tells users to reason about, and a silent divergence between the two
-    !! is the failure this guards. Note that such a change would also break `pf_random_stream`'s
-    !! correspondence with the coordinate forms -- see `feature_risks.md` Risk-113.
+    !! **Section (1)'s negative control is the load-bearing one and must not be dropped.** Under
+    !! `pf_random_algorithm` `/v1` the integer generic had stride 4, and the identity ran
+    !! `int_at(d) == bits_at(2d-1)` instead -- so an integer at draw 2 was a real at draw 3, and
+    !! "walk the draw axis" was unsafe. At draw 1 the two mappings coincide, which is why the
+    !! control sweeps `d >= 2`: a draw-1-only test passes identically against both and proves
+    !! nothing about which one is compiled. This test is what stops the old mapping coming back.
+    !!
+    !! **Section (5) is what this suite still has to warn about**, since `/v2` aligned the three
+    !! 64-bit generics and deliberately left `pf_random32_at` on its own finer grid. Domain-separating
+    !! the generics -- folding a per-generic constant into the key -- would close that too, and would
+    !! break `pf_random_stream`'s correspondence with the coordinate forms (`test_stream_values`),
+    !! which is why it was declined. If it is ever done, this test should be rewritten into its
+    !! opposite rather than deleted, and the stride table removed from
+    !! `doc/pages/utilities/random.md` and from `parquet_random`'s own banner. See
+    !! `feature_risks.md` Risk-113.
     subroutine test_generic_stride_aliasing(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: SD = 20260817_int64
         integer(int64), parameter :: LO = -huge(1_int64) - 1_int64, HI = huge(1_int64)
-        integer(int64) :: i, d, bits, hits, ctrl
+        integer(int64) :: i, d, bits, hits, ctrl, old
         real(real32) :: w32
 
-        ! (1) pf_random_int_at(d) is exactly pf_random_bits_at(2d-1), with 2d as the control.
+        ! (1) pf_random_int_at(d) is exactly pf_random_bits_at(d) -- the SAME draw index. The two
+        !     controls are the neighbouring draws on either side, plus the superseded /v1 identity.
         hits = 0_int64
         ctrl = 0_int64
+        old = 0_int64
         do i = 1_int64, 100_int64
             do d = 1_int64, 5_int64
                 if (pf_random_int_at(SD, i, LO, HI, d) == &
-                    pf_random_bits_at(SD, i, 2_int64 * d - 1_int64)) hits = hits + 1_int64
+                    pf_random_bits_at(SD, i, d)) hits = hits + 1_int64
                 if (pf_random_int_at(SD, i, LO, HI, d) == &
-                    pf_random_bits_at(SD, i, 2_int64 * d)) ctrl = ctrl + 1_int64
+                    pf_random_bits_at(SD, i, d + 1_int64)) ctrl = ctrl + 1_int64
+                ! d >= 2 only: at d = 1 the /v1 and /v2 mappings coincide, so counting draw 1 here
+                ! would make this control unfalsifiable.
+                if (d >= 2_int64) then
+                    if (pf_random_int_at(SD, i, LO, HI, d) == &
+                        pf_random_bits_at(SD, i, 2_int64 * d - 1_int64)) old = old + 1_int64
+                end if
             end do
         end do
         call check(error, hits == 500_int64, &
             "pf_random_int_at(seed, i, lo, hi, d) must read the same 64 bits as " // &
-            "pf_random_bits_at(seed, i, 2d-1) -- the stride-4 and stride-2 views coinciding")
+            "pf_random_bits_at(seed, i, d) -- the three 64-bit generics share one stride-2 grid")
         if (allocated(error)) return
         call check(error, ctrl == 0_int64, &
-            "negative control: it must NOT equal pf_random_bits_at(seed, i, 2d), which is a " // &
+            "negative control: it must NOT equal pf_random_bits_at(seed, i, d+1), which is a " // &
             "different pair of words entirely")
+        if (allocated(error)) return
+        call check(error, old == 0_int64, &
+            "regression control: pf_random_int_at(seed, i, lo, hi, d) must NOT equal " // &
+            "pf_random_bits_at(seed, i, 2d-1) for d >= 2 -- that is the superseded /v1 stride-4 " // &
+            "mapping, under which an integer at draw 2 was the same randomness as a real at draw 3")
         if (allocated(error)) return
 
         ! (2) the real32 view has stride 1, so its draws 2d-1 and 2d are that pair's two words.
@@ -1459,10 +1487,10 @@ contains
             "pf_random32_at(seed, i, 2d) must be the HIGH word of pf_random_bits_at(seed, i, d)")
         if (allocated(error)) return
 
-        ! (3) The consequence the documentation now warns about: separating two generics on the
-        !     DRAW axis is not sufficient. The guide's own example is safe; the next step along
-        !     collides completely. Both directions are asserted, since a rule with only one is
-        !     indistinguishable from a rule that always holds.
+        ! (3) The rule the documentation now states: among the 64-bit generics, separating on the
+        !     draw axis IS sufficient. Both neighbours of draw 2 are checked, because a rule with
+        !     one direction only is indistinguishable from a rule that always holds -- and the
+        !     draw-3 arm is exactly what collided 1000 of 1000 under /v1.
         hits = 0_int64
         ctrl = 0_int64
         do i = 1_int64, 1000_int64
@@ -1472,20 +1500,45 @@ contains
                 pf_random_bits_at(SD, i, 3_int64)) ctrl = ctrl + 1_int64
         end do
         call check(error, hits == 0_int64, &
-            "the guide's own pairing -- a real at draw 1, an integer at draw 2 -- must NOT collide")
+            "a real at draw 1 and an integer at draw 2 must NOT collide")
         if (allocated(error)) return
-        call check(error, ctrl == 1000_int64, &
-            "but an integer at draw 2 and a real at draw 3 MUST collide, which is why the guide no " // &
-            "longer offers 'walk the draw axis' as a general rule for mixing generics")
+        call check(error, ctrl == 0_int64, &
+            "nor must an integer at draw 2 and a real at draw 3 -- that pairing collided 1000 of " // &
+            "1000 under /v1, which is why 'walk the draw axis' was not a safe rule then")
         if (allocated(error)) return
 
-        ! (4) A separate STREAM is safe at every one of those coordinates -- the recommended fix.
+        ! (4) Positive control for (3): the SAME draw index must still collide completely. Without
+        !     it, a build in which every generic returned an unrelated constant would satisfy every
+        !     "must not collide" assertion above.
+        hits = 0_int64
+        do i = 1_int64, 1000_int64
+            if (pf_random_int_at(SD, i, LO, HI, 2_int64) == &
+                pf_random_bits_at(SD, i, 2_int64)) hits = hits + 1_int64
+        end do
+        call check(error, hits == 1000_int64, &
+            "positive control: at ONE coordinate the integer and raw-bits generics are two " // &
+            "presentations of the same 64 bits, and must agree for every stream")
+        if (allocated(error)) return
+
+        ! (5) What /v2 did NOT fix, and the guide still warns about: pf_random32_at walks a finer
+        !     grid, so mixing it with a 64-bit generic across draw indices still aliases.
+        hits = 0_int64
+        do i = 1_int64, 500_int64
+            bits = pf_random_bits_at(SD, i, 2_int64)
+            w32 = real(ishft(iand(bits, 4294967295_int64), -8), real32) * 2.0_real32**(-24)
+            if (pf_random32_at(SD, i, 3_int64) == w32) hits = hits + 1_int64
+        end do
+        call check(error, hits == 500_int64, &
+            "pf_random32_at at draw 3 must still be the low half of the 64-bit draw 2 -- aligning " // &
+            "the 64-bit generics deliberately left the real32 grid alone, and the guide says so")
+        if (allocated(error)) return
+
+        ! (6) A separate STREAM is safe at every one of those coordinates -- the recommended fix.
         hits = 0_int64
         do i = 1_int64, 500_int64
             do d = 1_int64, 3_int64
                 if (pf_random_int_at(SD, 2_int64 * i, LO, HI, d) == &
-                    pf_random_bits_at(SD, 2_int64 * i + 1_int64, 2_int64 * d - 1_int64)) &
-                    hits = hits + 1_int64
+                    pf_random_bits_at(SD, 2_int64 * i + 1_int64, d)) hits = hits + 1_int64
             end do
         end do
         call check(error, hits == 0_int64, &

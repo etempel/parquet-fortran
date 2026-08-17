@@ -641,7 +641,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order, so a parallel loop returns the same numbers under `schedule(static)`,
   `schedule(dynamic)`, one thread or three hundred — something no stateful generator can offer at
   any speed, and which locking does not fix. The generator is Philox4x32-10; `pf_random_algorithm`
-  names the frozen bit contract (`philox4x32-10/v1`) and changes only if some value the module can
+  names the frozen bit contract (`philox4x32-10/v2`) and changes only if some value the module can
   produce changes. `pf_random_at`/`pf_random32_at` give `real64`/`real32` in `[0, 1)` with 1.0
   unreachable by construction, and the `real32` sequence is deliberately its own rather than a
   narrowing of the `real64` one; `pf_random_bits_at` gives 64 raw bits, of which `pf_random_at` is
@@ -676,13 +676,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured is that it is indistinguishable from uniform under fixed-point, cycle-structure,
   position-uniformity, subset-membership and structural tests.
   **One property to know before mixing generics on a single stream**: a `(seed, i)` pair names one
-  sequence of 32-bit words, and the three coordinate-addressed generics read it with different
-  strides — one word per `pf_random32_at` value, two per `pf_random_at`/`pf_random_bits_at`, and a
-  whole block per `pf_random_int_at` — so the same `draw` index means a different thing to each and
-  two of them alias where their word ranges meet (exactly:
-  `pf_random_int_at(…, d)` is `pf_random_bits_at(…, 2d-1)`). Separating two generics along the draw
-  axis is therefore not sufficient; use a separate stream, a separate `pf_random_key` family, or
-  `pf_random_stream`, which tracks its own word cursor and cannot alias. The generator is
+  sequence of 32-bit words, and the coordinate-addressed generics read it with two strides — one word
+  per `pf_random32_at` value, two per `pf_random_at`, `pf_random_bits_at` and `pf_random_int_at`. So
+  the three 64-bit generics agree on what a `draw` index means, and separating two of them along the
+  draw axis is sufficient; but `pf_random32_at` walks a finer grid, and its draws `2d-1` and `2d` are
+  the two halves of 64-bit draw `d`, so mixing it with the others across draw indices still aliases.
+  Use a separate stream, a separate `pf_random_key` family, or `pf_random_stream`, which tracks its
+  own word cursor and cannot alias. The frozen contract identifier `pf_random_algorithm` reads
+  `philox4x32-10/v2`; `/v1`, which never appeared in a release, gave `pf_random_int_at` stride 4 and
+  so made an integer at draw 2 the same randomness as a real at draw 3. The generator is
   **not cryptographic** and is documented as such. See
   [Random numbers](doc/pages/utilities/random.md).
 

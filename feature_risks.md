@@ -172,12 +172,12 @@ something a reader is expected to have.
 | [Risk-105](#risk-105--an-allocate-extent-from-a-default-kind-size-overflows-the-array-it-just-allocated) | An allocate extent from a default-kind `size()` overflows the array it just allocated | 4 — covered |
 | [Risk-106](#risk-106--a-stream-consumed-across-loop-iterations-is-irreproducible-and-nothing-fails) | A stream consumed across loop iterations is irreproducible, and nothing fails | 4 — covered |
 | [Risk-107](#risk-107--a-queue-shaped-stream-buffer-would-pull-the-buffer-state-into-the-contract) | A queue-shaped stream buffer would pull the buffer state into the contract | 4 — covered |
-| [Risk-108](#risk-108--an-integer-draw-taken-off-a-block-boundary-re-reads-words-already-handed-out) | An integer draw taken off a block boundary re-reads words already handed out | 4 — covered |
+| [Risk-108](#risk-108--an-integer-draw-taken-off-a-pair-boundary-re-reads-a-word-already-handed-out) | An integer draw taken off a pair boundary re-reads a word already handed out | 4 — covered |
 | [Risk-109](#risk-109--the-bulk-permutation-and-the-scalar-entry-point-compute-the-same-function-by-different-routes) | The bulk permutation and the scalar entry point compute the same function by different routes | 4 — covered |
 | [Risk-110](#risk-110--the-permutations-round-count-round-function-and-width-rule-are-frozen-and-three-rounds-looks-free) | The permutation's round count, round function and width rule are frozen, and three rounds looks free | 4 — covered |
 | [Risk-111](#risk-111--a-bulk-permutation-that-silently-stopped-threading-would-fail-no-test) | A bulk permutation that silently stopped threading would fail no test | 3 — not testable |
 | [Risk-112](#risk-112--a-fills-position-arithmetic-overflows-at-the-boundary-the-suite-tests-and-still-answers-correctly) | A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly | 4 — covered |
-| [Risk-113](#risk-113--the-three-coordinate-addressed-generics-read-one-word-sequence-with-different-strides) | The three coordinate-addressed generics read one word sequence with different strides | 4 — covered |
+| [Risk-113](#risk-113--the-coordinate-addressed-generics-read-one-word-sequence-and-real32-walks-a-finer-grid) | The coordinate-addressed generics read one word sequence, and `real32` walks a finer grid | 4 — covered |
 
 ---
 
@@ -978,25 +978,34 @@ faster it looks. The measured worth of the cache is 1.70x (gfortran) / 1.78x (if
 2.88x / 3.35x on `real32`; a queue would not beat that by enough to buy a contract change, and
 `pf_random_fill_draws` already exists for callers who want the last 1.7x.
 
-### Risk-108 — An integer draw taken off a block boundary re-reads words already handed out
+### Risk-108 — An integer draw taken off a pair boundary re-reads a word already handed out
 
-The integer rule addresses a **block**, not a word pair: `int_at_impl` reads words 0 and 1 of block
-`draw-1`. A stream's `%int_range` therefore aligns to the next block boundary before taking one. Drop
-that alignment — it is three lines, and looks like padding — and an `%int_range` called at word 2
-re-reads words 0 and 1, which an earlier `%uniform` has already handed out to the caller.
+An integer draw names a **word pair at a fixed grid**: since `pf_random_algorithm` `/v2`,
+`int_at_impl` goes through `bits_of` and reads words `2d-2, 2d-1`. A stream's `%int_range` therefore
+aligns to the next pair boundary before taking one. Drop that alignment — it is two lines, and looks
+like padding — and an `%int_range` called at word 1, which only a preceding `%uniform32` can leave
+behind, re-reads word 0, already handed out to the caller.
 
 **The failure is silent and it is not merely a repeat.** The two draws are different *functions* of
 the same bits (one is a scaled top-53, the other Lemire's reduction), so nothing looks duplicated;
 the integers stay exactly uniform, and no containment or distribution test can see it. What is lost
 is independence between two values a caller has every reason to treat as independent — the same class
 of defect `int_at_impl`'s own doc-comment records for `pf_random_int_at` against `pf_random_at` at
-draw 1.
+one coordinate.
 
-**Test:** `test_stream_position` (`test/test_random.f90`) calls `%uniform32` (leaving position 2) then
-`%int_range`, and asserts both the resulting position (9, i.e. aligned then four words) and that the
-value equals `pf_random_int_at` at draw 2. Removing the alignment is caught.
+**`/v2` made this risk narrower, not smaller.** Under `/v1` the integer rule addressed a whole block
+(`draw-1`, first pair only), so `align_to_block` skipped up to three words and *any* preceding
+producer could leave the cursor unaligned. Now only `%uniform32` can, and the skip is one word — but
+the consequence of dropping it is identical, and the smaller window makes it *less* likely that a
+casual test happens to catch it.
 
-**What it still forbids:** "simplifying" `align_to_block` away, and adding any new block-addressed
+**Test:** `test_stream_position` (`test/test_random.f90`) calls `%uniform32` (leaving position 2)
+then `%int_range`, and asserts both the resulting position (5, i.e. aligned then two words) and that
+the value equals `pf_random_int_at` at draw 2 — the assertion that actually pins the alignment, since
+an unaligned implementation would read words 1 and 2, which is no draw index at all. It also asserts
+the aligned case: from word 4, `%int_range` must be integer draw 3.
+
+**What it still forbids:** "simplifying" `align_to_pair` away, and adding any new pair-addressed
 producer that does not call it. The same applies to the integer `%fill` specifics, which align once
 for the whole array.
 
@@ -4360,11 +4369,15 @@ count that differs is not by itself evidence of anything; the verdict is PASS ve
 **The count also moves when code OUTSIDE the fork changes, which is the most confusing way to meet
 it.** The forced-wrapping build compiles the `#else` arms together with every procedure common to
 both arms, so an edit to a fill or to `word_of` changes what LTO has to work with and therefore how
-much it gets wrong. Confirmed: the same gfortran 14.2.1 went from **480** to **528** across the
-`fill_r64`/`fill_r32`/`word_of` restructuring, with no new failure class (the labels stayed
-`literal-seed at32` and `literal-seed bits`) and with every **shipped** configuration passing at
-every setting including `-O3 -flto`. So a moved count after an unrelated change is expected; a moved
-*verdict* on a shipped arm would not be.
+much it gets wrong. Confirmed twice. The same gfortran 14.2.1 went from **480** to **528** across the
+`fill_r64`/`fill_r32`/`word_of` restructuring; and machine B's gfortran 15.2.1 went from **528** to
+**456** across the `pf_random_algorithm` `/v2` stride change, which rewrote `bits_of`, `int_at_impl`
+and both integer fills *and* changed the golden vectors the driver compares against. Neither move
+brought a new failure class (the labels stayed `literal-seed at32` and `literal-seed bits`) and in
+both cases every **shipped** configuration passed at every setting including `-O3 -flto`. So a moved
+count after an unrelated change is expected; a moved *verdict* on a shipped arm would not be. Note
+the second move had two independent causes at once — the code and the vectors — which is worth
+knowing before anyone tries to attribute a count to one edit.
 
 **Which draws break depends on the range, and "it is a `pf_random32_at` bug" is the non-negative
 half of the answer only.** Uncapped per-label counts from the driver at `-O3 -flto`, forced
@@ -4789,49 +4802,56 @@ it asserts values, and the values were never wrong. A `-ftrapv` build cannot eit
 script's header for why, and CLAUDE.md's `-ftrapv` note for the case where a trapping build's silence
 was already mistaken for evidence here.
 
-### Risk-113 — The three coordinate-addressed generics read one word sequence with different strides
+### Risk-113 — The coordinate-addressed generics read one word sequence, and `real32` walks a finer grid
 
-A `(seed, i)` pair names one deterministic sequence of 32-bit Philox words. The three
-coordinate-addressed generics are three **views** of that one sequence and consume different numbers
-of words per value: `pf_random32_at` one, `pf_random_at`/`pf_random_bits_at` two, `pf_random_int_at`
-a whole four-word block of which it uses half. So the same `draw` index means a different thing to
-each, and two generics alias whenever their word ranges meet:
+A `(seed, i)` pair names one deterministic sequence of 32-bit Philox words. The coordinate-addressed
+generics are **views** of that one sequence, and since `pf_random_algorithm` `/v2` there are two
+strides: `pf_random32_at` one word per value, and `pf_random_at`, `pf_random_bits_at` and
+`pf_random_int_at` two. So the three 64-bit generics agree on what a `draw` index means, and
+`pf_random32_at` does not:
 
 ```
-pf_random_int_at(seed, i, lo, hi, d)  reads the same 64 bits as  pf_random_bits_at(seed, i, 2d-1)
+pf_random_int_at(seed, i, lo, hi, d)  reads the same 64 bits as  pf_random_bits_at(seed, i, d)
 pf_random32_at(seed, i, 2d-1)         is the low word of         pf_random_bits_at(seed, i, d)
 ```
 
-**The failure is silent and only a distributional test can see it.** The aliased values are not
-*equal* — Lemire's reduction is a different function of the same bits — so a sampler built this way
-produces distinct, in-range items in the right count while its distribution is wrong. It was found
-in a downstream weighted-draw sampler by a Monte Carlo comparison, at 0.029 against a standard error
-of 0.0008; every structural check passed.
+**The failure is silent and only a distributional test can see it.** Aliased values are not *equal* —
+the generics scale their words differently, and Lemire's reduction is a different function again — so
+a sampler built this way produces distinct, in-range items in the right count while its distribution
+is wrong. That is how the `/v1` defect below was found: in a downstream weighted-draw sampler, by a
+Monte Carlo comparison, at 0.029 against a standard error of 0.0008, with every structural check
+passing.
 
-**"Walk the draw axis" is not a safe rule for mixing generics, and this file's own documentation gave
-it as one for a while.** It is safe for the pairing the guide illustrates — a real at draw 1, an
-integer at draw 2, measured 0 collisions in 1000 streams — and fails for the next one anybody would
-write: an integer at draw 2 against a real at draw 3 collides **1000 of 1000**. The three safe
-constructions are a separate stream index, a separate family from `pf_random_key`, and
-`pf_random_stream`, which tracks its own word cursor and cannot alias by construction.
+**`/v1` had `pf_random_int_at` on stride 4** — a whole block per value, first pair only — which made
+`int_at(d)` equal `bits_at(2d-1)`. "Walk the draw axis" was then unsafe, and this repository's own
+documentation gave it as a rule for a while: it held for the pairing the guide illustrated (a real at
+draw 1, an integer at draw 2 — 0 collisions in 1000 streams) and failed for the next one anybody
+would write, an integer at draw 2 against a real at draw 3, colliding **1000 of 1000**. `/v2` gave the
+integer generic stride 2, which removed that class entirely, halved the cost of a draw-axis integer
+fill (25.21-25.32 → 15.74-15.76 ns per value, 1.61x) and left draw 1 bit-identical. Every anchor in
+`tools/generate_random_golden_vectors.py` was unaffected for that reason; every emitted vector at
+draw ≥ 2 moved.
 
-**This is a consequence of the design and is documented rather than removed, and that decision is the
-part worth keeping.** Domain-separating the generics — folding a per-generic constant into the key —
-would make collisions impossible. It would also break the property `pf_random_stream` exists to
-provide: that a stream hands out exactly the values the coordinate-addressed calls give at the same
-positions, which is only possible because all three generics read one word space. Note the *cost* of
-the change is not what rules it out: `parquet_random` has never appeared in a published CHANGELOG
-section, so regenerating the golden vectors would be free. The reason is the stream.
+**What remains, and why it is documented rather than removed.** `pf_random32_at` keeps its own
+one-word grid, so mixing it with a 64-bit generic across draw indices still aliases. Closing that too
+means domain-separating the generics — folding a per-generic constant into the key — which would also
+break the property `pf_random_stream` exists to provide: that a stream hands out exactly the values
+the coordinate-addressed calls give at the same positions, possible only because every generic reads
+one word space. Note the *cost* of such a change is not what rules it out: `parquet_random` has never
+appeared in a published CHANGELOG section, so regenerating the golden vectors is free. The reason is
+the stream. The three safe constructions remain a separate stream index, a separate family from
+`pf_random_key`, and `pf_random_stream`.
 
-**A third option exists and has not been taken**: give the integer generic stride 2 rather than 4, so
-that draw `d` means the same words to every 64-bit generic. That would make same-index aliasing the
-only kind, which is the model users already assume, and would let a future bulk integer fill use both
-pairs of a block. It is a contract change and belongs to the maintainer, not to a bug fix.
-
-**Test.** `test_generic_stride_aliasing` (`test/test_random.f90`) asserts both identities, with a
-negative control on each; asserts that the guide's own safe pairing does not collide *and* that the
-next step along does, since a rule with only one direction is indistinguishable from one that always
-holds; and asserts that two different streams do not collide at the coordinates that alias within
-one. `test_int_shares_block` covers the same-coordinate case that motivated the original note. **If
-the generics are ever domain-separated, this test should fail** — its doc-comment says what to
-rewrite it into, and which two documents must change with it.
+**Test.** `test_generic_stride_aliasing` (`test/test_random.f90`) asserts the same-draw identity with
+two negative controls — the neighbouring draw, and **the superseded `/v1` identity `int_at(d) ==
+bits_at(2d-1)` swept over `d ≥ 2`**, which is the one that stops the old mapping coming back. It must
+sweep `d ≥ 2`: at draw 1 the two mappings coincide, so a draw-1 check passes identically against both
+and proves nothing about which is compiled. It also asserts that draw-axis separation now works in
+both directions, with a positive control that the *same* coordinate still collides completely (else a
+build returning unrelated constants would satisfy every "must not collide" assertion); that
+`pf_random32_at` still crosses; and that two streams never collide. The generator's own `--self-test`
+carries the same pair of checks against its arbitrary-precision oracle, and
+`test/test_random_vectors.f90` pins draws 1-5, 1000, 1001 plus two retries taken off draw 1 — the
+rows that fix the retry path's own addressing, which nothing else reaches. **If the generics are ever
+domain-separated, this test should fail** — its doc-comment says what to rewrite it into, and which
+two documents must change with it.

@@ -42,11 +42,25 @@ and three independent statements corroborate the prose:
     loop, where each block's second value is reserved for draw 2 at that index" -- neither
     sentence means anything if a scalar draw already consumes a whole block;
   * the reference's §2.2 note that a future `pf_random_fill_int` costs ~1/0.6 of its `real64`
-    sibling per value -- a ratio that would be exactly 1.0 under one-block-per-value.
+    sibling per value -- a ratio that would be exactly 1.0 under one-block-per-value. (That 0.6
+    is itself now obsolete: it described `/v1`, where the integer generic really did take a whole
+    block. Under `/v2` the two fills are on one grid and the ratio is far closer to 1. It is still
+    evidence for what the reference assumed about `real64`, which is the only thing it is cited
+    for here.)
 
 Nine of Table 1's twelve rows use `draw = 1`, where the two mappings coincide, which is why only
 two rows ever disagreed. The mapping lives in `real64_word_indices()` below; reversing this
 decision is an edit to that one function plus a regeneration.
+
+`pf_random_int_at` USED TO BE THE ODD ONE OUT, and `/v2` fixed it. Under `philox4x32-10/v1` it
+was the generic that really did take a whole block per value (`index = d - 1`, first pair only),
+which is a plausible reason the scratch oracle above generalised that shape to `real64` as well.
+The consequence was an exact collision -- `int_at(seed, i, lo, hi, d)` returned the bits of
+`bits_at(seed, i, 2d-1)` -- so an integer at draw 2 and a real at draw 3 were the same
+randomness. `/v2` gives it stride 2 like its siblings. Draw 1 is bit-identical under both, which
+is why every anchor in this file survived the change untouched; every emitted vector at draw >= 2
+did not. Same rule as above: the mapping is `int_at()` below, and reversing it is an edit there
+plus a regeneration -- never an edit to the table.
 --------------------------------------------------------------------------------------------
 """
 
@@ -176,20 +190,27 @@ def umod_2p64(s):
 
 
 def int_at(seed, stream, lo, hi, draw=1):
-    """`pf_random_int_at`: exact rejection over the block's low 64 bits.  Returns (value, retries)."""
+    """`pf_random_int_at`: exact rejection over the SAME 64 bits `bits_at` returns.
+
+    Stride 2, the same grid as `pf_random_at`/`pf_random_bits_at` -- draw `d` is words `2d-2` and
+    `2d-1`, i.e. block `(d-1)//2` pair `(d-1)%2`.  Under `pf_random_algorithm` `/v1` this generic
+    had stride 4 (`index = d - 1`, first pair only), which made it collide with `bits_at` at draw
+    `2d-1`; `/v2` aligns them.  Draw 1 is identical under both, which is why every published anchor
+    below is unaffected by the change.  Returns (value, retries).
+    """
     if lo > hi:
         lo, hi = hi, lo
     a, s = lo, u64(hi - lo + 1)
-    index = clamp_draw(draw) - 1
+    d = clamp_draw(draw)
+    blk, pair = (d - 1) // 2, (d - 1) % 2
     if s == 0:                                    # the full int64 range: nothing to reduce
-        c = block(seed, stream, index)
-        return signed64((c[1] << 32) | c[0]), 0
+        return signed64(bits_at(seed, stream, d)), 0
     threshold = umod_2p64(s)
     attempt = 0
     while True:                                   # uncapped: a cap would reintroduce bias
         key = None if attempt == 0 else retry_key(seed, attempt)
-        c = block(seed, stream, index, key=key)
-        x = (c[1] << 32) | c[0]
+        c = block(seed, stream, blk, key=key)
+        x = (c[2 * pair + 1] << 32) | c[2 * pair]
         product = x * s
         if (product & MASK64) >= threshold:
             return a + (product >> 64), attempt
@@ -322,6 +343,21 @@ def self_test():
     eq("draw 1 is pair (c0,c1)", bits_at(12345, 1, 1), (c[1] << 32) | c[0])
     eq("draw 2 is pair (c2,c3)", bits_at(12345, 1, 2), (c[3] << 32) | c[2])
 
+    # `/v2`: the integer generic is on the SAME grid as the 64-bit real one.  Asserted at every
+    # draw, not only draw 1 -- draw 1 agrees under `/v1` too, so a draw-1-only check would pass
+    # unchanged against the mapping this replaced and prove nothing.
+    for d in (1, 2, 3, 4, 5, 8, 9):
+        eq("int_at at draw %d is bits_at at draw %d" % (d, d),
+           int_at(12345, 1, INT64_MIN, INT64_MAX, d)[0], signed64(bits_at(12345, 1, d)))
+    # Negative control: the `/v1` identity `int_at(d) == bits_at(2d-1)` must now FAIL for d >= 2.
+    # Without this, restoring the old mapping would satisfy every check above at draw 1 alone.
+    for d in (2, 3, 5):
+        if int_at(12345, 1, INT64_MIN, INT64_MAX, d)[0] == signed64(bits_at(12345, 1, 2 * d - 1)):
+            bad.append("int_at at draw %d still equals bits_at at draw %d -- this is the /v1 "
+                       "stride-4 mapping, which /v2 replaced" % (d, 2 * d - 1))
+    # Two consecutive integer draws must share one block, which is what the bulk fill amortises.
+    eq("int draws 1 and 2 share block 0", ((1 - 1) // 2, (2 - 1) // 2), (0, 0))
+
     return bad
 
 
@@ -362,9 +398,26 @@ INT_CASES = [
     (0, 1, 0, 999999, 1, "seed 0"),
     (-7, 3, -100, 100, 1, "negative seed"),
     (INT64_MAX, 1, 0, 4294967296, 1, "width just over 2**32"),
-    (12345, 1, 0, 999999, 2, "draw 2 -- a different block from draw 1"),
+    # ---- the draw axis -------------------------------------------------------------------------
+    # Under `/v2` an integer draw has stride 2, so draw `d` is block `(d-1)/2` pair `(d-1)%2` and
+    # consecutive draws share a block two at a time. These rows exist to pin BOTH halves of that:
+    # the block index and the parity. Draws 1 and 2 must land in block 0, draws 3 and 4 in block 1.
+    # Under `/v1` (stride 4, first pair only) every one of them named a different block and always
+    # pair 0, so a grid that stopped at draw 1 could not tell the two mappings apart at all.
+    (12345, 1, 0, 999999, 2, "draw 2 -- block 0's SECOND pair, shared with draw 1"),
+    (12345, 1, 0, 999999, 3, "draw 3 -- block 1, first pair"),
+    (12345, 1, 0, 999999, 4, "draw 4 -- block 1, second pair"),
     (12345, 1, 0, 999999, 5, "draw 5"),
     (12345, 1, 0, 999999, 0, "draw 0 clamps to 1"),
+    (12345, 1, 0, 999999, 1000, "a large even draw: block index arithmetic"),
+    (12345, 1, 0, 999999, 1001, "the odd draw sharing that block"),
+    (12345, 1, INT64_MIN, INT64_MAX, 2, "width 0 at draw 2: the pair choice, unreduced"),
+    (12345, 1, INT64_MIN, INT64_MAX, 3, "width 0 at draw 3: the block step, unreduced"),
+    # A retry taken OFF draw 1. The retry re-keys and re-reads the same coordinate, so it inherits
+    # the stride -- under `/v1` this row would read block 1 pair 0 of the retry key, under `/v2`
+    # block 0 pair 1. Nothing else in the grid pins the retry path's own addressing.
+    (12345, 2, INT64_MIN, INT64_MIN + int(0.672 * 2 ** 64) - 1, 2, "a retry at draw 2"),
+    (12345, 7, INT64_MIN, INT64_MIN + int(0.672 * 2 ** 64) - 1, 3, "a retry at draw 3"),
     (INT64_MIN, -1, INT64_MIN, 0, 1, "width 2**63 placed at the bottom of the range"),
     (12345, 1, -1, INT64_MAX, 1, "width 2**63 + 1, low limb borrows"),
     (12345, 4, INT64_MIN + 1, INT64_MAX - 1, 1, "width 2**64 - 3"),
@@ -493,7 +546,7 @@ def gen_module():
     L.append("!!")
     L.append("!! Every value here is permanent: it is what the library promises to return for a")
     L.append("!! given seed, stream and draw, on every machine and compiler, for as long as")
-    L.append("!! `pf_random_algorithm` reads \"philox4x32-10/v1\". The tables are derived from an")
+    L.append("!! `pf_random_algorithm` reads \"philox4x32-10/v2\". The tables are derived from an")
     L.append("!! arbitrary-precision model of the contract in the generator named above, never")
     L.append("!! from a Fortran run -- a table read back out of the implementation could only")
     L.append("!! ever confirm that the implementation agrees with itself.")

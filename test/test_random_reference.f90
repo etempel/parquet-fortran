@@ -428,6 +428,17 @@ contains
     end function ref_offset
 
     !> `pf_random_int_at`'s value, and how many times the rejection loop re-keyed.
+    !!
+    !! **The candidate is the pair `ref_bits` would return at this coordinate** -- stride 2, block
+    !! `(d-1)/2`, pair `mod(d-1,2)` -- because under `pf_random_algorithm` `/v2` the integer generic
+    !! sits on the same draw grid as `pf_random_at`. It is spelled out here from the block words
+    !! rather than delegated to `ref_bits`, so that this model still says what it means when read
+    !! alone, and so that the parity selection is visible in the one place a reader would check it.
+    !!
+    !! Under `/v1` it read block `d - 1` and always the first pair. The change is one line here, and
+    !! the retry loop inherits it: a rejection re-keys and re-reads the SAME coordinate, so it moves
+    !! to the same pair of a differently-keyed block. `test/test_random_vectors.f90` carries two rows
+    !! whose whole purpose is to pin that -- a retry at draw 2 and one at draw 3.
     pure subroutine ref_int_at(seed, stream, lo, hi, draw, value, retries)
         integer(int64), intent(in) :: seed          !! the seed
         integer(int64), intent(in) :: stream        !! the stream index
@@ -436,17 +447,26 @@ contains
         integer(int64), intent(in) :: draw          !! the 1-based value index
         integer(int64), intent(out) :: value        !! a uniform integer in the closed range
         integer(int64), intent(out) :: retries      !! how many rejections preceded it
-        integer(int64) :: a, b, s, index, x, low, high, threshold, key
+        integer(int64) :: a, b, s, d, blk, x, low, high, threshold, key
         integer(int64) :: o0, o1, o2, o3
         integer(int64) :: ulow(NL), us(NL), ut(NL)
+        logical :: second
         a = min(lo, hi)
         b = max(lo, hi)
         s = ref_width(a, b)
-        index = max(draw, 1_int64) - 1_int64
+        ! No multiplication, for the reason `ref_bits` records at length: `2 * (draw - 1)` overflows
+        ! above draw 2**62 and made this model accuse the library of being wrong at high draws.
+        d = max(draw, 1_int64)
+        blk = (d - 1_int64) / 2_int64
+        second = (modulo(d - 1_int64, 2_int64) == 1_int64)
         retries = 0_int64
         if (s == 0_int64) then
-            call ref_block(seed, stream, index, o0, o1, o2, o3)
-            value = ior(ishft(o1, 32), o0)
+            call ref_block(seed, stream, blk, o0, o1, o2, o3)
+            if (second) then
+                value = ior(ishft(o3, 32), o2)
+            else
+                value = ior(ishft(o1, 32), o0)
+            end if
             return
         end if
         threshold = ref_umod_2p64(s)
@@ -458,8 +478,12 @@ contains
             else
                 key = ref_mix64(ieor(ref_mix64(seed), ieor(retries, RRETRY_TAG)))
             end if
-            call ref_block(key, stream, index, o0, o1, o2, o3)
-            x = ior(ishft(o1, 32), o0)
+            call ref_block(key, stream, blk, o0, o1, o2, o3)
+            if (second) then
+                x = ior(ishft(o3, 32), o2)
+            else
+                x = ior(ishft(o1, 32), o0)
+            end if
             call ref_mulhilo64(x, s, low, high)
             call lset(low, ulow)
             if (lcmp(ulow, ut) >= 0) exit           ! accept: unsigned compare, on limbs

@@ -11,7 +11,7 @@
 !!
 !! Every value here is permanent: it is what the library promises to return for a
 !! given seed, stream and draw, on every machine and compiler, for as long as
-!! `pf_random_algorithm` reads "philox4x32-10/v1". The tables are derived from an
+!! `pf_random_algorithm` reads "philox4x32-10/v2". The tables are derived from an
 !! arbitrary-precision model of the contract in the generator named above, never
 !! from a Fortran run -- a table read back out of the implementation could only
 !! ever confirm that the implementation agrees with itself.
@@ -242,44 +242,50 @@ module test_random_vectors
     ! value was accepted. It is data, not decoration: a suite that never asserts a
     ! non-zero entry here would pass just as happily against a retry path that is
     ! compiled and never entered.
-    integer, parameter :: n_int = 30
+    integer, parameter :: n_int = 38
     integer(int64), parameter :: int_seed(n_int) = [ &
         12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, &
         12345_int64, 12345_int64, 0_int64, -7_int64, 9223372036854775807_int64, 12345_int64, 12345_int64, 12345_int64, &
+        12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, &
         (-huge(1_int64) - 1_int64), 12345_int64, 12345_int64, -1_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, &
         12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64]
     integer(int64), parameter :: int_stream(n_int) = [ &
         1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 2_int64, 10_int64, 1_int64, 3_int64, &
-        1_int64, 1_int64, 1_int64, 1_int64, -1_int64, 1_int64, 4_int64, 1_int64, 1_int64, 1_int64, 4_int64, 5_int64, 7_int64, &
-        8_int64, 15_int64, 16_int64, 18_int64]
+        1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 2_int64, 7_int64, -1_int64, &
+        1_int64, 4_int64, 1_int64, 1_int64, 1_int64, 4_int64, 5_int64, 7_int64, 8_int64, 15_int64, 16_int64, 18_int64]
     integer(int64), parameter :: int_lo(n_int) = [ &
         0_int64, 0_int64, 1_int64, 999999_int64, 7_int64, -10_int64, 0_int64, -9223372036854775807_int64, &
         (-huge(1_int64) - 1_int64), -6050532056176732160_int64, -6050532056176732160_int64, 0_int64, -100_int64, 0_int64, &
-        0_int64, 0_int64, 0_int64, (-huge(1_int64) - 1_int64), -1_int64, -9223372036854775807_int64, 1_int64, 0_int64, &
+        0_int64, 0_int64, 0_int64, 0_int64, 0_int64, 0_int64, 0_int64, (-huge(1_int64) - 1_int64), &
         (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), &
-        (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64)]
+        -1_int64, -9223372036854775807_int64, 1_int64, 0_int64, (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), &
+        (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64), &
+        (-huge(1_int64) - 1_int64), (-huge(1_int64) - 1_int64)]
     integer(int64), parameter :: int_hi(n_int) = [ &
         999999_int64, 3999999999999_int64, 6_int64, 0_int64, 7_int64, 10_int64, 9223372036854775807_int64, &
         9223372036854775807_int64, 9223372036854775807_int64, 6148914691236517205_int64, 6148914691236517205_int64, &
-        999999_int64, 100_int64, 4294967296_int64, 999999_int64, 999999_int64, 999999_int64, 0_int64, &
-        9223372036854775807_int64, 9223372036854775806_int64, 2_int64, 1_int64, 3172839980678043647_int64, &
+        999999_int64, 100_int64, 4294967296_int64, 999999_int64, 999999_int64, 999999_int64, 999999_int64, 999999_int64, &
+        999999_int64, 999999_int64, 9223372036854775807_int64, 9223372036854775807_int64, 3172839980678043647_int64, &
+        3172839980678043647_int64, 0_int64, 9223372036854775807_int64, 9223372036854775806_int64, 2_int64, 1_int64, &
         3172839980678043647_int64, 3172839980678043647_int64, 3172839980678043647_int64, 3172839980678043647_int64, &
-        3172839980678043647_int64, 3172839980678043647_int64, 3172839980678043647_int64]
+        3172839980678043647_int64, 3172839980678043647_int64, 3172839980678043647_int64, 3172839980678043647_int64]
     integer(int64), parameter :: int_draw(n_int) = [ &
         1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, &
-        1_int64, 2_int64, 5_int64, 0_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, &
-        1_int64, 1_int64, 1_int64, 1_int64]
+        1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 0_int64, 1000_int64, 1001_int64, 2_int64, 3_int64, 2_int64, 3_int64, &
+        1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64]
     integer(int64), parameter :: int_value(n_int) = [ &
         928153_int64, 3712615530458_int64, 6_int64, 928153_int64, 7_int64, 9_int64, 8560708566805553027_int64, &
         7898045096756330246_int64, -1325326940098445562_int64, 5643041406335965790_int64, -3081733643211087111_int64, &
-        939658_int64, -16_int64, 1636308124_int64, 629059_int64, 580195_int64, 928153_int64, -5401791581310065855_int64, &
-        8560708566805553026_int64, 5570266330584253006_int64, 1_int64, 1_int64, -5086051776471225431_int64, &
-        790076011734761060_int64, -6054873121505743155_int64, 521183060985571225_int64, 2132046319114964035_int64, &
-        -4042887919606544480_int64, 258394804016340808_int64, 2082961514198786300_int64]
+        939658_int64, -16_int64, 1636308124_int64, 545000_int64, 629059_int64, 699890_int64, 672151_int64, 928153_int64, &
+        408598_int64, 987902_int64, -8393255251538826264_int64, -6842640927238797366_int64, -1033983730311719739_int64, &
+        -2769564151432465793_int64, -5401791581310065855_int64, 8560708566805553026_int64, 5570266330584253006_int64, &
+        1_int64, 1_int64, -5086051776471225431_int64, 790076011734761060_int64, -6054873121505743155_int64, &
+        521183060985571225_int64, 2132046319114964035_int64, -4042887919606544480_int64, 258394804016340808_int64, &
+        2082961514198786300_int64]
     integer(int32), parameter :: int_retries(n_int) = [ &
         0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 2_int32, 5_int32, 0_int32, 0_int32, &
-        0_int32, 0_int32, 0_int32, 0_int32, 1_int32, 0_int32, 0_int32, 0_int32, 0_int32, 1_int32, 1_int32, 1_int32, 5_int32, &
-        2_int32, 1_int32, 1_int32, 1_int32]
+        0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 0_int32, 1_int32, 1_int32, 1_int32, &
+        0_int32, 0_int32, 0_int32, 0_int32, 1_int32, 1_int32, 1_int32, 5_int32, 2_int32, 1_int32, 1_int32, 1_int32]
 
     ! ---- pf_random_key ----
     !

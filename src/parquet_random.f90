@@ -94,7 +94,13 @@ module parquet_random
     !! if and only if one of those changes, so a program that records it can tell whether a stored
     !! result is still reproducible. Identical on both sides of the route (e) fork, which changes
     !! how a product is formed and never what it equals.
-    character(len=*), parameter :: pf_random_algorithm = "philox4x32-10/v1"
+    !!
+    !! `/v2` differs from `/v1` in exactly one mapping: `pf_random_int_at`'s draw axis, which had
+    !! stride 4 (a whole block per value, half of it unused) and now has stride 2, agreeing with
+    !! `pf_random_at` and `pf_random_bits_at`. Draw 1 is unchanged; draws from 2 up moved. The
+    !! cipher, the key and counter layout, the word order, the rejection rule and the retry key are
+    !! all identical between the two.
+    character(len=*), parameter :: pf_random_algorithm = "philox4x32-10/v2"
 
     ! ---- Philox4x32-10 constants (verified against Random123) ----
 
@@ -203,39 +209,44 @@ module parquet_random
         module procedure pf_random_at_i64
     end interface pf_random_at
 
-    ! ---- ONE STREAM IS ONE SEQUENCE OF WORDS, AND THE GENERICS HAVE DIFFERENT STRIDES ----
+    ! ---- ONE STREAM IS ONE SEQUENCE OF WORDS, AND real32 WALKS A FINER GRID ----
     !
     ! This is the module's single most important cross-cutting fact and the one a caller is most
     ! likely to get wrong, so it is stated once here rather than a third of it on each generic.
     !
-    ! A `(seed, i)` pair names one deterministic sequence of 32-bit Philox words. The three
-    ! coordinate-addressed generics are three VIEWS of that one sequence, and they consume
-    ! different numbers of words per value:
+    ! A `(seed, i)` pair names one deterministic sequence of 32-bit Philox words. The four
+    ! coordinate-addressed generics are VIEWS of that one sequence, and two strides exist:
     !
-    !   generic                                    words read for draw d (0-based)   stride
+    !   generic                                    words read for draw d (1-based)   stride
     !   pf_random32_at(seed, i, d)                 d-1                               1
     !   pf_random_at / pf_random_bits_at(.., d)    2d-2, 2d-1                        2
-    !   pf_random_int_at(seed, i, lo, hi, d)       4d-4, 4d-3  (a block, half used)   4
+    !   pf_random_int_at(seed, i, lo, hi, d)       2d-2, 2d-1                        2
     !
-    ! So the SAME `draw` index means a different thing to each, and two generics on one stream
-    ! alias whenever their word ranges meet. Every collision follows from the table by arithmetic;
-    ! the two that bite, both verified empirically rather than derived on paper:
+    ! Two rules follow, and together they are the whole story:
     !
-    !   pf_random_int_at(seed, i, lo, hi, d)  ==  pf_random_bits_at(seed, i, 2d-1)   500 of 500
-    !   pf_random32_at(seed, i, 2d-1)         ==  the LOW word of bits_at(seed,i,d)  500 of 500
+    !   1. The three 64-bit generics AGREE on what draw `d` means. At one coordinate they are three
+    !      presentations of the same 64 bits -- not independent draws -- and at different draws they
+    !      are independent. So "walk the draw axis" IS a safe rule among them.
+    !   2. `pf_random32_at` has its own finer grid, one word per value, and it deliberately is not a
+    !      narrowing of `pf_random_at`. Its draws `2d-1` and `2d` are the two halves of 64-bit draw
+    !      `d`, so mixing it with the others on ONE stream still aliases across draw indices:
     !
-    ! **"Walk the draw axis" is therefore NOT a safe rule for mixing generics**, though it reads
-    ! like one and was given as one here for a while. The three safe constructions are: a separate
-    ! STREAM index, a separate family from `pf_random_key`, or `pf_random_stream`, which tracks its
-    ! own word cursor and so cannot alias by construction.
+    !        pf_random32_at(seed, i, 2d-1)  ==  the LOW word of bits_at(seed, i, d)   500 of 500
     !
-    ! **This is a consequence of the design rather than a defect in it, which is why it is
-    ! documented rather than removed.** Domain-separating the generics -- folding a per-generic
-    ! constant into the key -- would make collisions impossible, and would also break the property
-    ! `pf_random_stream` exists to provide: that a stream hands out exactly the values the
-    ! coordinate-addressed calls give at the same positions (`test_stream_values`). That
-    ! correspondence is possible only because all three generics read one word space. See
-    ! `feature_risks.md` Risk-113.
+    ! The three constructions that cannot alias at all are: a separate STREAM index, a separate
+    ! family from `pf_random_key`, or `pf_random_stream`, which tracks its own word cursor.
+    !
+    ! **`pf_random_int_at` had stride 4 until `pf_random_algorithm` reached `/v2`**, addressing the
+    ! whole of block `d-1` and using its first pair -- which made it equal `pf_random_bits_at` at
+    ! draw `2d-1`, so rule 1 above was false and an integer at draw 2 collided with a real at draw
+    ! 3. Aligning the strides fixed that, halved the cost of a draw-axis integer fill, and left draw
+    ! 1 bit-identical. See `feature_risks.md` Risk-113.
+    !
+    ! Domain-separating the generics -- folding a per-generic constant into the key -- would remove
+    ! rule 2 as well, and would break the property `pf_random_stream` exists to provide: that a
+    ! stream hands out exactly the values the coordinate-addressed calls give at the same positions
+    ! (`test_stream_values`). That correspondence is possible only because every generic reads one
+    ! word space. It was considered and declined for that reason.
 
     !> One uniform `real32` in `[0, 1)`: value `draw` (default 1) of stream `i` under `seed`.
     !!
@@ -289,11 +300,12 @@ module parquet_random
     !! `pf_random_at`. The specifics are distinguishable on `v`'s type alone, so the generic resolves
     !! without ambiguity, and `lo > hi` is swapped rather than refused, exactly as in the scalar draw.
     !!
-    !! **The integer form saves the call overhead and nothing else, deliberately.** An integer draw
-    !! consumes a whole block by contract (`int_at_impl` reads words 0 and 1 of block `draw-1`), so
-    !! consecutive integer draws are always consecutive *blocks* and there is no second pair to
-    !! amortise -- unlike `real64`, where one block serves two values. Do not "optimise" this by
-    !! pairing draws into one block: that would change every value the module returns.
+    !! **The integer form amortises much as `real64` does**: an integer draw has stride 2, so
+    !! consecutive draws pair up two to a block and the fill enciphers once for each pair. Measured
+    !! on machine B (gfortran 15.2.1, `-O3 -funroll-loops`, 4M values, best of three alternating
+    !! rounds against the committed `/v1` build, with the `real64` fill flat at 8.66-8.69 ns as a
+    !! cross-build control): **25.21-25.32 ns per value before, 15.74-15.76 after, 1.61x**. It was
+    !! not always so -- see `pf_random_int_at`'s own note on the stride change that made it possible.
     interface pf_random_fill_draws
         module procedure pf_random_fill_draws_r64_i32
         module procedure pf_random_fill_draws_r64_i64
@@ -504,11 +516,11 @@ module parquet_random
     !!
     !! **Position is measured in 32-bit words, 1-based, and the word cost of each producer is
     !! contract** -- `%jump`, `%position` and `%rewind` are denominated in it: `%uniform` 2,
-    !! `%uniform32` 1, `%bits` 2, `%int_range` 4. `%int_range` additionally starts on a block
-    !! boundary, advancing to the next one first if the stream is not on one, so a sequence mixing it
-    !! with the others can spend up to three further words on that alignment. This is what keeps an
-    !! `%int_range` equal to the `pf_random_int_at` at the same coordinate rather than re-reading
-    !! words a previous draw already used.
+    !! `%uniform32` 1, `%bits` 2, `%int_range` 2. `%int_range` additionally starts on a word PAIR
+    !! boundary, advancing one word first if a `%uniform32` has left the cursor odd. This is what
+    !! keeps an `%int_range` equal to the `pf_random_int_at` at the same coordinate rather than
+    !! re-reading a word a previous draw already used. It cost 4 words plus up to 3 of alignment
+    !! until `pf_random_algorithm` reached `/v2`, when the integer generic's stride became 2.
     !!
     !! **The type is plain scalars: no allocatable components, no `FINAL`, deliberately and
     !! permanently.** gfortran does not reliably default-initialise an OpenMP `private()` copy of a
@@ -547,7 +559,7 @@ module parquet_random
         procedure :: bits => stream_bits            !! Next 64 raw bits; costs 2 words.
         procedure, private :: int_range_i32 => stream_int_range_i32  !! `%int_range`, `int32`
         procedure, private :: int_range_i64 => stream_int_range_i64  !! `%int_range`, `int64`
-        !> Next integer in `[lo, hi]`, exactly unbiased; costs one block, taken block-aligned.
+        !> Next integer in `[lo, hi]`, exactly unbiased; costs one word pair, taken pair-aligned.
         generic :: int_range => int_range_i32, int_range_i64
         procedure, private :: fill_arr_r64 => stream_fill_r64        !! `%fill`, `real64`
         procedure, private :: fill_arr_r32 => stream_fill_r32        !! `%fill`, `real32`
@@ -1020,17 +1032,39 @@ contains
     !> The 64-bit pattern of `real64`/raw-bits value `draw` (1-based) of a stream.
     !!
     !! Value `d` occupies words `2d-2` and `2d-1`, so a block carries TWO values: draw 1 takes the
-    !! pair `(c0, c1)` and draw 2 the pair `(c2, c3)`. The first word is the LOW half. A later
-    !! phase's draw-axis bulk fill is faster precisely because it can use both pairs of a block
-    !! where a scalar draw uses one.
+    !! pair `(c0, c1)` and draw 2 the pair `(c2, c3)`. The first word is the LOW half. A draw-axis
+    !! bulk fill is faster precisely because it can use both pairs of a block where a scalar draw
+    !! uses one. **`pf_random_int_at` reaches this too**, and has since `pf_random_algorithm` `/v2`
+    !! -- the three 64-bit generics are one grid, so there is one function that decides which words
+    !! a draw index names, and it is this one.
+    !!
+    !! **`ishft`/`iand` rather than `/` and `modulo`, and the spelling is measured, not assumed.**
+    !! Machine B, gfortran 15.2.1, `-O3 -funroll-loops`, best of three rounds over 4M values, with
+    !! the `real64` bulk fill as a cross-build control (8.66-8.70 ns in every build, a 0.5 % floor):
+    !! a scalar `pf_random_int_at` costs **27.9 ns** with `/`+`modulo` and **25.8** with
+    !! `ishft`+`iand`, and the integer draw-axis fill **16.3** against **15.8**. So this is worth
+    !! about 2 ns on the integer path, which is the whole of what stride-2 addressing costs it.
+    !!
+    !! Note `word_of`'s own header records the same substitution measuring **nothing** for its
+    !! `index/4` and `modulo(index,4)`, on two machines, and being declined there for that reason.
+    !! Both notes are right: they are different functions on different paths, and the point is that
+    !! the spelling is decided per site by measurement. Do not propagate either verdict to the other.
+    !!
+    !! The `max(draw, 1)` is what keeps the substitution safe, and it is **free** -- it measured
+    !! inside the noise of the arms above. `ISHFT` is a LOGICAL shift, so `ishft(-1_int64, -1)` is
+    !! `2**63 - 1` rather than 0: without the clamp, a negative `draw` would name an absurd block
+    !! where `/` and `modulo` merely named the wrong pair. Every caller already clamps (`draw_or_1`
+    !! at tier 0, `take_pair` at the stream, `draw + (k-1)` in the fills), so this changes no value
+    !! any caller can obtain -- it makes the function total on its own rather than by their courtesy.
     pure function bits_of(seed, stream, draw) result(b)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
-        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64), intent(in) :: draw          !! 1-based value index; `< 1` clamps to 1
         integer(int64) :: b                         !! the 64-bit pattern
-        integer(int64) :: w0, w1, w2, w3
-        call random_block(seed, stream, (draw - 1_int64) / 2_int64, w0, w1, w2, w3)
-        if (modulo(draw - 1_int64, 2_int64) == 0_int64) then
+        integer(int64) :: w0, w1, w2, w3, e
+        e = max(draw, 1_int64) - 1_int64            ! 0-based value index; non-negative by the max
+        call random_block(seed, stream, ishft(e, -1), w0, w1, w2, w3)
+        if (iand(e, 1_int64) == 0_int64) then
             b = ior(ishft(w1, 32), w0)
         else
             b = ior(ishft(w3, 32), w2)
@@ -1344,16 +1378,19 @@ contains
 
     !> Fills `v` with consecutive `integer(int64)` draws of one stream, starting at `draw`.
     !!
-    !! **A plain loop over `int_at_impl`, and that is the whole implementation on purpose.** The
-    !! real-valued draw-axis fill is fast because one block carries two `real64` values; an integer
-    !! draw consumes a block on its own (`int_at_impl` reads words 0 and 1 of block `draw-1`), so
-    !! consecutive integer draws are consecutive blocks with nothing left over to amortise. There is
-    !! no block-walking form of this loop that returns the same values, and returning different ones
-    !! is a contract change, not an optimisation.
+    !! **One enciphering serves two draws.** An integer draw has stride 2, exactly like its `real64`
+    !! sibling, so draws `d` and `d+1` for odd `d` are the two pairs of one block. The loop holds the
+    !! block it last enciphered and reuses it whenever the next draw falls in the same one, which
+    !! halves the cipher work against a loop of `int_at_impl`. The values are identical to that loop
+    !! by construction -- the cache is *keyed* by block index and reaches nothing in the contract.
     !!
-    !! Two things it does still buy over a caller's own loop: one call instead of `size(v)`, and the
-    !! `lo`/`hi` normalisation done once per call rather than once per element by the elemental
-    !! scalar entry point.
+    !! A rejection is never served from the held block: it re-keys, so `int_reduce` goes back to
+    !! `bits_of` under a derived key, exactly as the scalar entry point does. The `lo`/`hi`
+    !! normalisation is also done once per call rather than once per element.
+    !!
+    !! An earlier revision could not do any of this, because the integer generic then had stride 4
+    !! and consumed a whole block per value; that comment said so and said a block-walking form
+    !! "returns different values" -- true then, and no longer true now that the strides agree.
     pure subroutine fill_draws_i64(seed, stream, v, lo, hi, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
@@ -1361,18 +1398,43 @@ contains
         integer(int64), intent(in) :: lo            !! one end of the closed range
         integer(int64), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
-        integer(int64) :: k, m
+        integer(int64) :: k, m, a, s, d, blk, held, x
+        integer(int64) :: w0, w1, w2, w3
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        a = min(lo, hi)
+        s = width_of(a, max(lo, hi))
+        held = -1_int64                             ! nothing held; a block index is never negative
+        w0 = 0_int64; w1 = 0_int64; w2 = 0_int64; w3 = 0_int64
         do k = 1_int64, m
-            v(k) = int_at_impl(seed, stream, lo, hi, draw + (k - 1_int64))
+            ! `draw + (k - 1)` parenthesised, for the reason `fill_streams_r64` spells out at
+            ! length: the unbracketed form overflows at the documented boundary. Risk-112.
+            d = draw + (k - 1_int64)
+            ! `/` and `modulo` here, NOT the `ishft`/`iand` pair `bits_of` uses -- measured, and
+            ! the verdict is the opposite way round on this loop: 15.71-15.75 ns per value against
+            ! 15.97-16.03 for the shift spelling, over four alternating rounds with the `real64`
+            ! fill flat at 8.66-8.69 in both builds. The safer spelling is also the faster one here,
+            ! so there is nothing to trade. See `bits_of` for why the same substitution wins there.
+            blk = (d - 1_int64) / 2_int64
+            if (blk /= held) then
+                call random_block(seed, stream, blk, w0, w1, w2, w3)
+                held = blk
+            end if
+            if (modulo(d - 1_int64, 2_int64) == 0_int64) then
+                x = ior(ishft(w1, 32), w0)
+            else
+                x = ior(ishft(w3, 32), w2)
+            end if
+            v(k) = int_reduce(x, a, s, seed, stream, d)
         end do
     end subroutine fill_draws_i64
 
     !> `fill_draws_i64` narrowed to `integer(int32)`.
     !!
     !! The result is inside `[min(lo,hi), max(lo,hi)]` by construction, so the narrowing is exact --
-    !! the same argument `pf_random_int_at_i32` rests on.
+    !! the same argument `pf_random_int_at_i32` rests on. The block cache is the same one
+    !! `fill_draws_i64` documents, written out again rather than shared, because sharing it would
+    !! mean materialising an `integer(int64)` temporary the size of `v`.
     pure subroutine fill_draws_i32(seed, stream, v, lo, hi, draw)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
@@ -1380,13 +1442,27 @@ contains
         integer(int32), intent(in) :: lo            !! one end of the closed range
         integer(int32), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based starting value index, already clamped
-        integer(int64) :: k, m, a, b
+        integer(int64) :: k, m, a, s, d, blk, held, x
+        integer(int64) :: w0, w1, w2, w3
         m = size(v, kind=int64)
         if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
-        a = int(lo, int64)
-        b = int(hi, int64)
+        a = int(min(lo, hi), int64)
+        s = width_of(a, int(max(lo, hi), int64))
+        held = -1_int64                             ! nothing held; a block index is never negative
+        w0 = 0_int64; w1 = 0_int64; w2 = 0_int64; w3 = 0_int64
         do k = 1_int64, m
-            v(k) = int(int_at_impl(seed, stream, a, b, draw + (k - 1_int64)), int32)
+            d = draw + (k - 1_int64)                ! parenthesised: see `fill_draws_i64`
+            blk = (d - 1_int64) / 2_int64           ! `/` and `modulo`: see `fill_draws_i64`
+            if (blk /= held) then
+                call random_block(seed, stream, blk, w0, w1, w2, w3)
+                held = blk
+            end if
+            if (modulo(d - 1_int64, 2_int64) == 0_int64) then
+                x = ior(ishft(w1, 32), w0)
+            else
+                x = ior(ishft(w3, 32), w2)
+            end if
+            v(k) = int(int_reduce(x, a, s, seed, stream, d), int32)
         end do
     end subroutine fill_draws_i32
 
@@ -1434,11 +1510,12 @@ contains
 
     !> A uniform integer in `[min(lo,hi), max(lo,hi)]`, exactly unbiased.
     !!
-    !! Lemire's multiply-shift with the exact rejection test. A candidate is the block's low 64
-    !! bits; `x * s` is formed as a full 128-bit product, whose high half is the answer's offset
-    !! and whose low half decides acceptance. Only the last `2**64 mod s` candidates of the range
-    !! are rejected, which is what makes the result exactly uniform rather than uniform to within
-    !! 2**-64.
+    !! Lemire's multiply-shift with the exact rejection test, over the same 64-bit pattern
+    !! `pf_random_bits_at` returns at this coordinate; `x * s` is formed as a full 128-bit product,
+    !! whose high half is the answer's offset and whose low half decides acceptance. Only the last
+    !! `2**64 mod s` candidates of the range are rejected, which is what makes the result exactly
+    !! uniform rather than uniform to within 2**-64. The reduction itself lives in `int_reduce`, so
+    !! that the bulk fills can reuse it against a candidate they enciphered once for two draws.
     !!
     !! A rejection RE-KEYS and re-enciphers the SAME counter, so consumption stays fixed in counter
     !! positions -- block ownership and prefix consistency are untouched and the answer is still a
@@ -1447,37 +1524,30 @@ contains
     !! probability 1, the worst chain measured is 7, and at a range of a few million the retry
     !! probability is around 2**-40.
     !!
-    !! **At the same coordinate this reads the SAME two words as `pf_random_at` and
-    !! `pf_random_bits_at`, so the three are not independent draws** -- and that is one case of a
-    !! general rule, stated in full on the `pf_random_at` interface above and in
-    !! `doc/pages/utilities/random.md`. One `(seed, i)` is one sequence of 32-bit words; the three
-    !! coordinate-addressed generics are three views of that sequence with **different strides**, so
-    !! a `draw` index means a different thing to each. This one addresses a whole block and uses its
-    !! first pair: draw `d` reads words `4d-4` and `4d-3`. `pf_random_bits_at` has stride 2.
-    !! Solving the two gives an exact identity, verified 500 of 500 over the full `int64` range
-    !! where the reduction is skipped and the raw pattern is returned:
+    !! **This reads exactly the two words `pf_random_at` and `pf_random_bits_at` read at the SAME
+    !! coordinate -- stride 2, the same grid** -- so all three 64-bit generics agree on what draw
+    !! `d` means, and separating two of them on the draw axis really does separate them. That is a
+    !! deliberate contract choice, not an accident of the implementation; `pf_random32_at` still
+    !! walks a finer grid of its own, so the full rule is stated once on the `pf_random_at`
+    !! interface above and in `doc/pages/utilities/random.md`.
     !!
-    !! `pf_random_int_at(seed, i, lo, hi, d)` reads the same 64 bits as
-    !! `pf_random_bits_at(seed, i, 2d-1)`.
+    !! An earlier revision gave this generic **stride 4**: draw `d` addressed the whole of block
+    !! `d-1` and used only its first pair. That made `pf_random_int_at(seed, i, lo, hi, d)` read the
+    !! same 64 bits as `pf_random_bits_at(seed, i, 2d-1)` -- verified 1000 of 1000 -- so an integer
+    !! at draw 2 and a real at draw 3 were the same randomness, and "walk the draw axis" was unsafe
+    !! for the next pairing anybody would write after the one the guide illustrated. It also left
+    !! half of every enciphering unused, which is why a draw-axis integer fill could not amortise.
+    !! Both are fixed by this mapping. Draw 1 is unchanged by the switch (block 0, first pair, under
+    !! either rule); every draw from 2 up moved, which is why `pf_random_algorithm` is at `/v2`.
     !!
-    !! **So "separate them on the draw axis" is NOT a sufficient rule**, and an earlier version of
-    !! this comment gave it as one. It happens to be safe for the pairing the guide illustrates (a
-    !! real at draw 1, an integer at draw 2 -- measured 0 of 1000 collisions) and it fails for the
-    !! next one anybody would write: an integer at draw 2 against a real at draw 3 collides **1000
-    !! of 1000**. Use a separate stream, a separate family from `pf_random_key`, or
-    !! `pf_random_stream`, which tracks word consumption itself and cannot alias.
-    !!
-    !! The returned *value* differs, because Lemire's reduction is a different function of those
-    !! bits and a rejection re-keys; but "different value" is not "independent", and at a small
-    !! range the integer is a **deterministic function** of the real. Measured on two machines and
-    !! two architectures: `pf_random_int_at(seed, i, 1, 6)` equals `1 + floor(6 * pf_random_at(seed,
-    !! i))` for **20000 of 20000** streams, against 1-in-6 when the integer is taken at draw 2.
-    !!
-    !! An earlier version of this comment opened "Unlike `pf_random_at` and `pf_random_bits_at`,
-    !! which read the same two words as each other" -- asserting that this procedure does *not*.
-    !! It does. Do not restore that reading; and note the rejection clause cannot rescue it, since
-    !! at a realistic range the retry probability is around 2**-40, so the no-rejection case is
-    !! effectively the only case.
+    !! What remains, and is contract: at ONE coordinate the three 64-bit generics are three
+    !! *presentations* of the same 64 bits, not independent draws. The returned value still differs,
+    !! because Lemire's reduction is a different function of those bits; but "different value" is
+    !! not "independent", and at a small range the integer is a **deterministic function** of the
+    !! real -- `pf_random_int_at(seed, i, 1, 6)` equals `1 + floor(6 * pf_random_at(seed, i))` for
+    !! 20000 of 20000 streams. The rejection clause cannot rescue that, since at a realistic range
+    !! the retry probability is around 2**-40, so the no-rejection case is effectively the only
+    !! case. Take the two at different draws, or on different streams.
     pure function int_at_impl(seed, stream, lo, hi, draw) result(r)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
@@ -1485,25 +1555,43 @@ contains
         integer(int64), intent(in) :: hi            !! the other end
         integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
         integer(int64) :: r                         !! a uniform integer in the closed range
-        integer(int64) :: a, b, s, x, low, high, threshold, index, attempt
-        integer(int64) :: w0, w1, w2, w3
+        integer(int64) :: a, s
 
         a = min(lo, hi)                             ! `lo > hi` swaps: the function is total
-        b = max(lo, hi)
-        s = width_of(a, b)                          ! the width, read as an UNSIGNED 64-bit pattern
-        index = draw - 1_int64
+        s = width_of(a, max(lo, hi))                ! the width, read as an UNSIGNED 64-bit pattern
+        r = int_reduce(bits_of(seed, stream, draw), a, s, seed, stream, draw)
+    end function int_at_impl
+
+    !> Lemire's reduction with the exact rejection loop, over a candidate already in hand.
+    !!
+    !! Split out from `int_at_impl` so that `fill_draws_i64`/`fill_draws_i32` can supply a candidate
+    !! they enciphered once for two draws. There is exactly one copy of the rejection rule, which is
+    !! the point: a second copy could drift, and a drifted rejection rule is a biased generator that
+    !! passes every structural test.
+    !!
+    !! A rejection re-keys and re-enciphers the same counter, so it is `bits_of` under a derived key
+    !! -- consumption stays fixed in counter positions, and the answer is still a pure function of
+    !! `(seed, stream, draw)`. Two draws sharing a block also share their retry blocks, at the two
+    !! pairs they already occupy, so no new correlation is introduced by the sharing.
+    pure function int_reduce(x0, a, s, seed, stream, draw) result(r)
+        integer(int64), intent(in) :: x0            !! the first candidate's 64-bit pattern
+        integer(int64), intent(in) :: a             !! the low end of the normalised range
+        integer(int64), intent(in) :: s             !! the width, as an unsigned pattern; 0 = full
+        integer(int64), intent(in) :: seed          !! the stream family's seed, for a re-key
+        integer(int64), intent(in) :: stream        !! stream index
+        integer(int64), intent(in) :: draw          !! 1-based value index, already clamped
+        integer(int64) :: r                         !! a uniform integer in the closed range
+        integer(int64) :: x, low, high, threshold, attempt
 
         if (s == 0_int64) then
             ! The whole int64 range: every pattern is in range, so there is nothing to reduce and
-            ! nothing to reject. At draw 1 this is exactly `pf_random_bits_at`.
-            call random_block(seed, stream, index, w0, w1, w2, w3)
-            r = ior(ishft(w1, 32), w0)
+            ! nothing to reject. This is exactly `pf_random_bits_at` at the same coordinate.
+            r = x0
             return
         end if
 
         attempt = 0_int64
-        call random_block(seed, stream, index, w0, w1, w2, w3)
-        x = ior(ishft(w1, 32), w0)
+        x = x0
         call mulhilo64(x, s, low, high)
         if (ult(low, s)) then
             ! Lemire's lazy threshold: the division is reached only when the candidate falls in the
@@ -1511,13 +1599,12 @@ contains
             threshold = umod_2p64(s)
             do while (ult(low, threshold))
                 attempt = attempt + 1_int64
-                call random_block(retry_key_of(seed, attempt), stream, index, w0, w1, w2, w3)
-                x = ior(ishft(w1, 32), w0)
+                x = bits_of(retry_key_of(seed, attempt), stream, draw)
                 call mulhilo64(x, s, low, high)
             end do
         end if
         r = offset_by(a, high)
-    end function int_at_impl
+    end function int_reduce
 
     !> The retry key for attempt `n` (1-based): a re-key, never a tweak.
     !!
@@ -2452,9 +2539,9 @@ contains
         integer(int64), intent(in) :: lo                !! one end of the closed range
         integer(int64), intent(in) :: hi                !! the other end; `lo > hi` is swapped
         integer(int64), intent(out) :: r                !! a uniform integer in the closed range
-        integer(int64) :: blk
-        call take_block(self, blk)
-        r = int_at_impl(self%key, self%stream, lo, hi, blk + 1_int64)
+        integer(int64) :: d
+        call take_pair(self, d)
+        r = int_at_impl(self%key, self%stream, lo, hi, d)
     end subroutine stream_int_range_i64
 
     !> `%int_range` for `integer(int32)` bounds and result.
@@ -2466,9 +2553,9 @@ contains
         integer(int32), intent(in) :: lo                !! one end of the closed range
         integer(int32), intent(in) :: hi                !! the other end; `lo > hi` is swapped
         integer(int32), intent(out) :: r                !! a uniform integer in the closed range
-        integer(int64) :: blk
-        call take_block(self, blk)
-        r = int(int_at_impl(self%key, self%stream, int(lo, int64), int(hi, int64), blk + 1_int64), int32)
+        integer(int64) :: d
+        call take_pair(self, d)
+        r = int(int_at_impl(self%key, self%stream, int(lo, int64), int(hi, int64), d), int32)
     end subroutine stream_int_range_i32
 
     !> `%fill` for a `real64` array.
@@ -2509,19 +2596,19 @@ contains
         call fill_r32(self%key, self%stream, v, self%pos - m + 1_int64)
     end subroutine stream_fill_r32
 
-    !> `%fill` for an `integer(int64)` array; aligns to a block first, exactly as `%int_range` does.
+    !> `%fill` for an `integer(int64)` array; aligns to a pair first, exactly as `%int_range` does.
     pure subroutine stream_fill_i64(self, v, lo, hi)
         class(pf_random_stream), intent(inout) :: self  !! the stream to advance
         integer(int64), intent(out) :: v(:)             !! filled with the next `size(v)` values
         integer(int64), intent(in) :: lo                !! one end of the closed range
         integer(int64), intent(in) :: hi                !! the other end; `lo > hi` is swapped
-        integer(int64) :: m, blk
+        integer(int64) :: m, d
         m = size(v, kind=int64)
         if (m <= 0_int64) return                        ! a zero-sized fill is a defined no-op
-        call align_to_block(self)
-        blk = self%pos / 4_int64
-        call advance_by(self, 4_int64 * m)
-        call fill_draws_i64(self%key, self%stream, v, lo, hi, blk + 1_int64)
+        call align_to_pair(self)
+        d = self%pos / 2_int64 + 1_int64
+        call advance_by(self, 2_int64 * m)
+        call fill_draws_i64(self%key, self%stream, v, lo, hi, d)
     end subroutine stream_fill_i64
 
     !> `%fill` for an `integer(int32)` array.
@@ -2530,13 +2617,13 @@ contains
         integer(int32), intent(out) :: v(:)             !! filled with the next `size(v)` values
         integer(int32), intent(in) :: lo                !! one end of the closed range
         integer(int32), intent(in) :: hi                !! the other end; `lo > hi` is swapped
-        integer(int64) :: m, blk
+        integer(int64) :: m, d
         m = size(v, kind=int64)
         if (m <= 0_int64) return                        ! a zero-sized fill is a defined no-op
-        call align_to_block(self)
-        blk = self%pos / 4_int64
-        call advance_by(self, 4_int64 * m)
-        call fill_draws_i32(self%key, self%stream, v, lo, hi, blk + 1_int64)
+        call align_to_pair(self)
+        d = self%pos / 2_int64 + 1_int64
+        call advance_by(self, 2_int64 * m)
+        call fill_draws_i32(self%key, self%stream, v, lo, hi, d)
     end subroutine stream_fill_i32
 
     !> Points the stream at `(seed, stream)`, position 1, holding nothing.
@@ -2596,28 +2683,29 @@ contains
         self%pos = self%pos + w
     end subroutine advance_by
 
-    !> Advances to the next block boundary if the stream is not already on one.
+    !> Advances to the next word PAIR boundary if the stream is not already on one.
     !!
-    !! `%int_range` and the integer fills need this because the integer rule addresses a *block*
-    !! (`int_at_impl` reads words 0 and 1 of block `draw-1`), not a word pair. Without it, an integer
-    !! draw taken at word 2 would re-read words 0 and 1 -- bits an earlier `%uniform` had already
-    !! handed out. Aligning costs at most three words, and is what keeps a stream's `%int_range`
-    !! equal to the `pf_random_int_at` at the same coordinate.
-    pure subroutine align_to_block(self)
+    !! `%int_range` and the integer fills need this because the integer rule addresses a word pair
+    !! at a fixed grid -- draw `d` is words `2d-2, 2d-1` -- while `%uniform32` can leave the cursor
+    !! on an odd word. Without it, an integer draw taken at word 1 would re-read word 0, a bit
+    !! pattern an earlier producer had already handed out. Aligning costs at most ONE word, and is
+    !! what keeps a stream's `%int_range` equal to the `pf_random_int_at` at the same coordinate.
+    !!
+    !! It cost up to three words, and was called `align_to_block`, while the integer generic had
+    !! stride 4 and consumed a whole block per value.
+    pure subroutine align_to_pair(self)
         class(pf_random_stream), intent(inout) :: self  !! the stream to align
-        integer(int64) :: off
-        off = modulo(self%pos, 4_int64)
-        if (off /= 0_int64) call advance_by(self, 4_int64 - off)
-    end subroutine align_to_block
+        if (modulo(self%pos, 2_int64) /= 0_int64) call advance_by(self, 1_int64)
+    end subroutine align_to_pair
 
-    !> Aligns, then reserves one whole block, returning its index.
-    pure subroutine take_block(self, blk)
+    !> Aligns, then reserves one word pair, returning the 1-based draw index it occupies.
+    pure subroutine take_pair(self, draw)
         class(pf_random_stream), intent(inout) :: self  !! the stream to advance
-        integer(int64), intent(out) :: blk              !! index of the block reserved
-        call align_to_block(self)
-        blk = self%pos / 4_int64
-        call advance_by(self, 4_int64)
-    end subroutine take_block
+        integer(int64), intent(out) :: draw             !! draw index of the pair reserved
+        call align_to_pair(self)
+        draw = self%pos / 2_int64 + 1_int64
+        call advance_by(self, 2_int64)
+    end subroutine take_pair
 
     !> One word of the stream, from the held block when it is the right one.
     !!

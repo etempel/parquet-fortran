@@ -126,15 +126,24 @@ contains
     !! which is the segment tree's one weakness (see `st_next`).
     !!
     !! **The two draws come from two different STREAMS, never from two draw indices of one
-    !! stream, and that is load-bearing rather than stylistic.** `pf_random_at` and
-    !! `pf_random_int_at` map `draw` onto Philox blocks differently -- the first reads block
-    !! `(draw-1)/2` (words `w0,w1` on an odd draw), the second reads block `draw-1` (always
-    !! `w0,w1`). Interleaving them on one stream as draws `2k-1` and `2k` therefore makes the
-    !! class pick at `k=2` read exactly the block and words the index pick at `k=1` already
-    !! consumed, so the two are identical instead of independent. That version passed every
-    !! distinctness check and failed the distribution gate at 0.029 against a 0.0008 standard
-    !! error. Streams `2*stream-1` and `2*stream` cannot collide with each other or with a
-    !! neighbouring caller's pair.
+    !! stream.** Streams `2*stream-1` and `2*stream` cannot collide with each other or with a
+    !! neighbouring caller's pair, whatever the library's draw grid does.
+    !!
+    !! **This probe is where `pf_random_algorithm` `/v1`'s stride defect was found**, and the story
+    !! is worth keeping because the failure mode is the interesting part. Under `/v1`,
+    !! `pf_random_at` and `pf_random_int_at` mapped `draw` onto Philox blocks differently -- the
+    !! first read block `(draw-1)/2` (words `w0,w1` on an odd draw), the second block `draw-1`
+    !! (always `w0,w1`). Interleaving them on one stream as draws `2k-1` and `2k` therefore made the
+    !! class pick at `k=2` read exactly the block and words the index pick at `k=1` had already
+    !! consumed, so the two were identical instead of independent. That version passed every
+    !! distinctness check and failed the distribution gate at 0.029 against a 0.0008 standard error
+    !! -- only a Monte Carlo comparison could see it.
+    !!
+    !! `/v2` gave `pf_random_int_at` stride 2, so the interleaved-draws version would now be correct.
+    !! **The two-stream shape is kept anyway**, and deliberately: it is immune to the draw grid
+    !! entirely, so it cannot be re-broken by a future contract change, and it stays correct if a
+    !! `pf_random32_at` draw is ever mixed in -- that generic still walks its own finer grid. See
+    !! `feature_risks.md` Risk-113.
     subroutine cb_next(seed, stream, kdraw, cls_v, cls_start, cls_n, idx, nclass, item, lg_c, lg_j)
         integer(int64), intent(in) :: seed          !! the seed
         integer(int64), intent(in) :: stream        !! stream index

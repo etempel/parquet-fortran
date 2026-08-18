@@ -4384,8 +4384,37 @@ oracles and there is no second kernel to cross-check against.
 
 **Per-release failure counts, for anyone comparing a future run**: gfortran 14.2.1 reports **480**
 (144 from the positive stream arm, 336 from the negative — see the breakdown below); gfortran 15.2
-on machine C reports **432**. The figures are driver-specific as well as release-specific, so a
-count that differs is not by itself evidence of anything; the verdict is PASS versus FAIL.
+on machine C reports **432**; machine B's gfortran **15.2.1 reports 528** as of 2026-08-18. The
+figures are driver-specific as well as release-specific, so a count that differs is not by itself
+evidence of anything; the verdict is PASS versus FAIL. (The 456 recorded here previously was machine
+B at an earlier source state; 528 was confirmed identical before and after the permutation kernel
+was rewritten, by running the check against `6751dd3:src/parquet_random.f90` — so that rewrite moved
+neither the count nor the verdict.)
+
+**The overflow-free spelling has now been TRIED, in two forms, and it costs 3x on the compiler that
+ships this arm.** This is the question anyone meeting this entry asks first — if the products are
+undefined, why not just compute them without overflowing? — and it is now answered with a
+measurement rather than an estimate. Both forms remove the undefined behaviour completely and make
+**all twelve arms of `tools/check_random_kernels.sh` pass**, including the two that fail today:
+
+| `random_block`'s `#else` product | ifx bulk r64 | bulk r32 | scalar r64 |
+|---|---:|---:|---:|
+| shipped, wrapping | **5.33** | **2.66** | **14.13** |
+| overflow-free, 16-bit limb split (2 multiplies) | 16.14 | 8.28 | 33.07 |
+| overflow-free, halving split (**1** multiply) | 15.88 | 8.33 | 30.95 |
+
+ns per value, machine B, ifx 2026.1.1, `--profile release`, best of 7. `random_number` was measured
+in every build as an untouchable control: **11.06–11.15 ns**, a 0.8 % spread, so these are real.
+
+Two things follow, and the second is the more useful. **The cost is not the multiply** — the
+one-multiply form (halve `c`, so `M*(c>>1) < 2**63`, and bring the lost bit back by masking with
+`-(c & 1)`) is within noise of the two-multiply one, so what costs 3x is the ~8 extra integer
+operations per product in a 10-round loop that ifx otherwise vectorises. There is therefore no
+cheaper spelling to look for; anything that avoids a wide type pays roughly this. And **gfortran
+pays nothing either way**, because gfortran takes the `#ifdef` arm — the entire cost falls on ifx,
+which is the only compiler that runs this code and the only one on which it is correct. Paying 3x on
+the shipped path to fix a configuration that exists only inside a test harness is the wrong trade,
+so the wrapping form stays and this entry stays with it.
 
 **The count also moves when code OUTSIDE the fork changes, which is the most confusing way to meet
 it.** The forced-wrapping build compiles the `#else` arms together with every procedure common to
@@ -4485,6 +4514,16 @@ and do not narrow the kernel check's stream ranges to a symmetric sweep.* Also d
 consumer-facing macro for selecting the fork: the module's header explains that the absence of one
 is deliberate, and `-U__GFORTRAN__` at a standalone compile already provides everything a test
 needs.
+
+**Those two arms are LISTED as known exposures in the check, and the list is checked both ways.**
+`tools/check_random_kernels.sh`'s `xfail_reason` names them, so the default invocation reports
+`XFAIL` and exits **0** rather than exiting 1 on every run of every machine. That is not a
+softening: a check which always fails is a check nobody reads, and this one had already been
+misreported once as "2 of 12 arms failing" as though it were an open problem. **A listed arm that
+PASSES is a hard error**, so if a future gfortran fixes this — or if someone removes the undefined
+behaviour despite the cost above — the check says so instead of absorbing it. Both directions were
+verified by deliberately corrupting the list. An entry may be added there only for a configuration
+this library does not ship, with an entry here behind it.
 
 **Test.** `tools/check_random_kernels.sh` plus its driver `tools/check_random_kernels.f90` build the
 module both ways across six optimisation settings including LTO, and check the golden vectors, the

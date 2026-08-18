@@ -30,15 +30,22 @@
 # `--shipped-only` is what CI runs, and the reason is worth stating plainly rather than leaving as
 # a flag someone later "tidies up". On gfortran the forced half builds the wrapping kernel, which
 # gfortran NEVER SHIPS -- it has a 128-bit kind and always takes the protected arm. That half
-# currently FAILS at `-O3 -flto` and `-Ofast -flto`, reproducibly, because gfortran miscompiles
-# the wrapping arithmetic under LTO (see feature_risks.md Risk-101). That is a real hazard and a
-# real gfortran bug, but it is not a defect in any configuration this library ships: gfortran ships
-# the int128 kernel and is clean, ifx ships the wrapping kernel and is clean at every setting
-# measured including `-ipo`. Making CI red on it would train people to ignore CI, so CI checks the
-# shipped kernel -- which nothing else covers under LTO -- and the forced half stays the default
-# for anyone running this by hand, where a failure is information rather than noise.
+# FAILS at `-O3 -flto` and `-Ofast -flto`, reproducibly, because gfortran miscompiles the wrapping
+# arithmetic under LTO (see feature_risks.md Risk-101). That is a real hazard and a real gfortran
+# bug, but it is not a defect in any configuration this library ships: gfortran ships the int128
+# kernel and is clean, ifx ships the wrapping kernel and is clean at every setting measured
+# including `-ipo`. CI checks the shipped kernel -- which nothing else covers under LTO -- and the
+# forced half stays the default for anyone running this by hand.
 #
-# Exits nonzero on any mismatch, on a build that fails, or if the two kernels cannot be told apart.
+# **Those two arms are now listed as KNOWN EXPOSURES (`xfail_reason` below) rather than simply
+# failing the run**, and the reason is that a check which always fails is a check nobody reads. It
+# had already gone wrong exactly that way: a hand run was written up as "2 of 12 arms failing" as
+# though it were an open problem, when this header already said it was expected. The list is
+# checked in both directions -- a listed arm that PASSES is a hard error -- so it cannot decay into
+# a way of silencing failures.
+#
+# Exits nonzero on any UNLISTED mismatch, on a listed arm that unexpectedly passes, on a build that
+# fails, or if the two kernels cannot be told apart. Exits zero when only listed exposures fail.
 
 set -uo pipefail
 
@@ -98,9 +105,9 @@ trap 'rm -rf "$WORK"' EXIT
 # The flag that defeats the allowlist depends on which compiler defines what. Keep this in step
 # with the `#if defined(...)` line at the top of src/parquet_random.f90.
 case "$FC" in
-    *flang*) UNDEF="-U__flang__ -U__FLANG" ; CPP="-cpp" ;;
-    *ifx*|*ifort*) UNDEF="" ; CPP="-fpp" ;;   # already takes the wrapping arm; nothing to defeat
-    *)       UNDEF="-U__GFORTRAN__" ; CPP="-cpp" ;;
+    *flang*) UNDEF="-U__flang__ -U__FLANG" ; CPP="-cpp" ; FAMILY="flang" ;;
+    *ifx*|*ifort*) UNDEF="" ; CPP="-fpp" ; FAMILY="intel" ;;  # already wrapping; nothing to defeat
+    *)       UNDEF="-U__GFORTRAN__" ; CPP="-cpp" ; FAMILY="gnu" ;;
 esac
 
 # Flag spellings are per family. The interprocedural configurations matter most -- they are the
@@ -134,6 +141,39 @@ case "$FC" in
 esac
 
 fail=0
+xfailed=0
+xpass=0
+
+# ---- known exposures: arms that are EXPECTED to fail, and why -------------------------------
+#
+# **A check that always fails is a check nobody reads.** The forced half on gfortran builds the
+# wrapping kernel, which gfortran never ships, and gfortran miscompiles it under LTO -- so before
+# this list existed the default invocation exited 1 on every run, on every machine, for a reason
+# that is not a defect in anything this library ships. That is not a loud warning; it is noise
+# that hides a real regression, and it has already caused one: a run was reported as "2 of 12 arms
+# failing" as though it were an open problem, when the script's own header said it was expected.
+#
+# So each known exposure is listed here with its reason, and the list is checked in BOTH
+# directions. A listed arm that fails is XFAIL and does not fail the run. **A listed arm that
+# PASSES is a hard error**, because it means the exposure is gone -- a fixed compiler, or a source
+# change that removed the undefined behaviour -- and the next person deserves to be told that the
+# check just got stronger rather than to have it silently absorbed.
+#
+# **This is not a licence to silence a failure by adding a line here.** An entry may be added only
+# for a configuration this library does not ship, with a `feature_risks.md` entry behind it.
+xfail_reason() {
+    case "$FAMILY|$1" in
+        'gnu|forced -O3 -flto'|'gnu|forced -Ofast -flto')
+            echo "gfortran miscompiles the WRAPPING kernel under LTO (feature_risks.md Risk-101)."
+            echo "        gfortran has a 128-bit kind and always ships the protected arm, so this"
+            echo "        configuration exists only inside this check. ifx ships the wrapping"
+            echo "        kernel and is clean at every setting including -ipo."
+            echo "        If this arm ever PASSES: the exposure is gone -- confirm whether the"
+            echo "        compiler was fixed or the source stopped overflowing, then delete this"
+            echo "        entry and update Risk-101."
+            ;;
+    esac
+}
 
 # The vacuity guard below needs one kernel name per half, so two scalars are all this has to
 # carry. It was an associative array once, and that made the whole script a no-op on macOS:
@@ -184,9 +224,20 @@ build_and_run () {
     verdict=$(echo "$res" | grep '^KERNEL=' | tail -1)
     [ -n "$verdict" ] || verdict=$(echo "$res" | tail -1)
     printf "  %-38s %s\n" "$label" "$verdict"
+    local xr
+    xr=$(xfail_reason "$label")
     if [ $rc -ne 0 ]; then
-        echo "$res" | grep '\[FAIL\]' | head -5 | sed 's/^/        /'
-        fail=1
+        if [ -n "$xr" ]; then
+            printf "        XFAIL (expected) -- %s\n" "$xr"
+            xfailed=$((xfailed + 1))
+        else
+            echo "$res" | grep '\[FAIL\]' | head -5 | sed 's/^/        /'
+            fail=1
+        fi
+    elif [ -n "$xr" ]; then
+        printf "        XPASS -- this arm is listed as a KNOWN FAILURE and it just passed.\n"
+        printf "        %s\n" "$xr"
+        xpass=1
     fi
     # Record which kernel this build actually compiled, for the vacuity guard below. Only the
     # first configuration of each half is kept: every configuration in a half compiles the same
@@ -247,8 +298,19 @@ else
     echo "--- single kernel exercised: $shipped_kernel ---"
 fi
 
+if [ $xpass -ne 0 ]; then
+    echo "check_random_kernels: an arm listed as a KNOWN FAILURE passed -- see XPASS above." >&2
+    echo "       This is reported rather than absorbed: the list is what makes a real regression" >&2
+    echo "       visible, and an entry that no longer describes reality quietly weakens it." >&2
+    exit 1
+fi
 if [ $fail -ne 0 ]; then
     echo "check_random_kernels: FAILED"
     exit 1
 fi
-echo "check_random_kernels: all configurations passed"
+if [ $xfailed -ne 0 ]; then
+    echo "check_random_kernels: all configurations behaved as expected" \
+         "($xfailed known exposure(s) still failing, listed above)"
+else
+    echo "check_random_kernels: all configurations passed"
+fi

@@ -23,7 +23,7 @@ module test_random_omp
     use iso_fortran_env, only: int32, int64, real64
     use testdrive, only: new_unittest, unittest_type, error_type, check
 #ifdef _OPENMP
-    use omp_lib, only: omp_get_max_threads, omp_get_num_threads
+    use omp_lib, only: omp_get_max_threads, omp_get_num_threads, omp_get_thread_num
 #endif
 
     implicit none
@@ -46,7 +46,8 @@ contains
             new_unittest("pf_random_seed differs across concurrent threads", test_seed_across_threads), &
             new_unittest("a per-iteration stream reproduces under every schedule", test_stream_schedule), &
             new_unittest("a bulk permutation is bit-identical at every thread count", test_perm_threads), &
-            new_unittest("a resample is bit-identical at every thread count", test_resample_threads) &
+            new_unittest("a resample is bit-identical at every thread count", test_resample_threads), &
+            new_unittest("per-thread weighted samplers reproduce the serial sequences", test_weighted_per_thread) &
             ]
     end subroutine collect_tests_parquet_random_omp
 
@@ -533,5 +534,65 @@ contains
         call pf_random_resample(got, M, SD, ST)
         call check(error, all(got == ref), "the automatic resample differs from the scalar integer draw")
     end subroutine test_resample_threads
+
+    !> The documented way to run many weighted sequences at once must equal running them serially.
+    !!
+    !! `pf_weighted_draw` mutates its tree, so one sampler cannot serve two threads; the guide gives
+    !! a shared array with one sampler per thread, indexed by `omp_get_thread_num()`. This asserts
+    !! that shape produces exactly the serial answer -- which it must, since each sequence is named
+    !! by its own `(seed, stream)` and reads nothing another thread writes.
+    !!
+    !! **`schedule(dynamic)` is deliberate.** A static schedule would hand iteration `j` to a
+    !! predictable thread, so a sampler that leaked state between iterations could still line up
+    !! with the serial run by accident. A dynamic one makes the thread that serves `j` vary with
+    !! timing, so any dependence on which sampler was used shows up as a mismatch.
+    !!
+    !! Note the samplers are built OUTSIDE any parallel region here. Building them inside one is
+    !! also correct and is what the guide shows, since the builds are independent; this suite runs
+    !! its own regions and nesting them would only test a team of one.
+    subroutine test_weighted_per_thread(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error carrier
+        integer, parameter :: nw = 200, nouter = 64, kd = 5
+        type(pf_weighted_draw) :: one
+        type(pf_weighted_draw), allocatable :: dd(:)
+        real(real64) :: w(nw)
+        integer :: ser(kd, nouter), par(kd, nouter), i, j, tid, nt
+        logical :: ok
+
+        do i = 1, nw
+            w(i) = 0.25_real64 + real(mod(i, 13), real64) / 3.0_real64 + real(i, real64) / 97.0_real64
+        end do
+
+        call one%init(w, seed)
+        do j = 1, nouter
+            call one%reseed(seed, stream=j)
+            do i = 1, kd
+                call one%next(ser(i, j), ok)
+            end do
+        end do
+
+        nt = 1
+        !$ nt = omp_get_max_threads()
+        allocate(dd(nt))
+        do tid = 1, nt
+            call dd(tid)%init(w, seed)
+        end do
+        par = -1
+        !$omp parallel do default(shared) private(j, i, tid, ok) schedule(dynamic)
+        do j = 1, nouter
+            tid = 1
+            !$ tid = omp_get_thread_num() + 1
+            call dd(tid)%reseed(seed, stream=j)
+            do i = 1, kd
+                call dd(tid)%next(par(i, j), ok)
+            end do
+        end do
+
+        call check(error, all(par == ser), &
+                   "per-thread weighted samplers must reproduce the serial sequences exactly")
+        if (allocated(error)) return
+        call check(error, all(par >= 1) .and. all(par <= nw), &
+                   "every item drawn in parallel must be a valid item index")
+    end subroutine test_weighted_per_thread
 
 end module test_random_omp

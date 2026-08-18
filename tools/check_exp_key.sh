@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+#
+# Assert the frozen `-log(u)` transform gives the SAME BITS under every IEEE-conforming build.
+#
+# Why this exists, and why it is not an `fpm test` arm:
+#
+#   * `pf_weighted_permutation` orders items by `-log(u)/w`. If two builds disagree about one key
+#     by a single ulp, they disagree about the permutation whenever that key crosses its
+#     neighbour. Nothing fails, no test goes red, and two machines simply return different items.
+#     Only a cross-BUILD comparison can see it, and a unit test runs in one build by construction.
+#   * The threat is real and was found by this check rather than predicted. An earlier design note
+#     concluded FMA contraction was harmless, on the strength of four builds -- none of which
+#     enabled FMA on gfortran. `gfortran -O3 -march=native` changes the fingerprint of an
+#     unbarriered Horner chain, and `-march=native` is an entirely ordinary thing to build with.
+#     `exp_key` now rounds every product through a `volatile` to prevent the fusion; this script is
+#     what keeps that true when a compiler version moves.
+#
+# TWO CONFIGURATIONS ARE KNOWN TO DIFFER AND ARE NOT DEFECTS IN THIS LIBRARY. Both switch the
+# compiler out of IEEE semantics altogether, which no source-level device can undo -- in
+# particular `-ffast-math`/`-fp-model=fast` may compute `(m-1)/(m+1)` by reciprocal approximation,
+# and a rounding barrier cannot make an approximate divide exact:
+#
+#   * gfortran `-Ofast` / `-ffast-math`
+#   * ifx WITHOUT `-fp-model=precise`, which is ifx's default -- see the note below
+#
+# **The ifx exposure is worth reading before dismissing it.** `fpm --profile release` and
+# `--profile debug` both pass `-fp-model=precise`, so everything this project ships or benchmarks
+# is fine. A BARE `fpm build`/`fpm test` with no `--profile` passes no fp-model flag at all, so it
+# takes ifx's default and lands on the differing fingerprint. That is the ordinary development
+# command, so an ifx developer can build a library whose weighted permutations disagree with every
+# other build, with nothing to say so.
+#
+# Usage:  tools/check_exp_key.sh
+#   FC=<compiler>   Fortran compiler to use (default: gfortran).
+#
+# Exits 0 only if every IEEE-conforming configuration reproduces EXPECTED_FP below. A new expected
+# value may only be adopted deliberately: it is the frozen contract, and changing it changes every
+# weighted permutation this library has ever produced.
+set -u
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+# The contract. Reproduced by gfortran 15.2.1 at -O0/-O2/-O3/-march=native/-mfma/-flto and by
+# ifx 2026.1.1 at -fp-model=precise, both on machine B.
+EXPECTED_FP="-9123008136727752159"
+
+FC="${FC:-gfortran}"
+if ! command -v "$FC" >/dev/null 2>&1; then
+    echo "check_exp_key.sh: compiler '$FC' not found on PATH" >&2
+    exit 2
+fi
+
+SRC="src/parquet_expkey.f90 tools/check_exp_key.f90"
+WORK="$(mktemp -d)"
+# `finished` guards against the script stopping early and still exiting 0 -- a check that dies
+# quietly is worse than no check, because it also removes the doubt that would prompt a look.
+finished=0
+trap '[ "$finished" = "1" ] || { echo "check_exp_key.sh: TERMINATED EARLY -- this run proves nothing" >&2; rm -rf "$WORK"; exit 2; }' EXIT
+
+case "$($FC --version 2>&1 | head -1)" in
+    *ifx*|*ifort*) PP="-fpp"; MD="-module $WORK"
+                   CONFIGS=("-O0 -fp-model=precise" "-O2 -fp-model=precise" \
+                            "-O3 -xHost -fp-model=precise" "-O3 -fp-model=precise -ipo") ;;
+    *)             PP="-cpp"; MD="-J$WORK"
+                   CONFIGS=("-O0" "-O2" "-O3 -funroll-loops" "-O3 -march=native" \
+                            "-O3 -mfma" "-O3 -flto" "-O3 -ffp-contract=fast") ;;
+esac
+
+echo "check_exp_key.sh: $FC -- $($FC --version 2>&1 | head -1)"
+echo "expected fingerprint: $EXPECTED_FP"
+echo
+
+fails=0
+ran=0
+for cfg in "${CONFIGS[@]}"; do
+    rm -f "$WORK"/*.mod
+    if ! $FC $cfg $PP $MD -o "$WORK/ek" $SRC >"$WORK/log" 2>&1; then
+        echo "  [BUILD FAIL] $cfg"
+        sed 's/^/      /' "$WORK/log" | head -5
+        fails=$((fails + 1))
+        continue
+    fi
+    got="$("$WORK/ek" | awk '/EXPKEY_FINGERPRINT/ {print $2}')"
+    ran=$((ran + 1))
+    if [ "$got" = "$EXPECTED_FP" ]; then
+        printf "  [ok]   %-28s %s\n" "$cfg" "$got"
+    else
+        printf "  [FAIL] %-28s %s\n" "$cfg" "$got"
+        fails=$((fails + 1))
+    fi
+done
+
+echo
+# A run that built nothing must not pass. Without this the script reports green when the compiler
+# cannot build the module at all, which is exactly when someone most needs to be told.
+if [ "$ran" -eq 0 ]; then
+    echo "check_exp_key.sh: NO configuration built -- this run proves nothing" >&2
+    rm -rf "$WORK"
+    finished=1
+    exit 2
+fi
+
+rm -rf "$WORK"
+finished=1
+if [ "$fails" -eq 0 ]; then
+    echo "check_exp_key.sh: all $ran configuration(s) reproduce the frozen transform."
+    exit 0
+fi
+echo "check_exp_key.sh: $fails configuration(s) FAILED -- the frozen transform is not frozen." >&2
+exit 1

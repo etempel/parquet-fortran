@@ -950,6 +950,113 @@ Every entry here has a test behind it. What keeps it in the document is the seco
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
 
+### Risk-119 — A weighted segment tree maintained by SUBTRACTION stops being a permutation
+
+`pf_weighted_draw`'s tree removes an item by zeroing its leaf and **recomputing** each ancestor from
+its two children. Decrementing instead — `st(p) = st(p) - w`, which is the same cost and reads more
+naturally — folds another rounding error into a running value at every draw, so the root drifts away
+from the true remaining weight and the descent starts landing on leaves that have already been
+drawn. Measured during design: **16% duplicate draws** over 18 decades of dynamic range, and, less
+comfortably, **100 duplicates with plain uniform(0,1) weights**, so this is not an exotic-input
+problem.
+
+Two things make it hard to catch. It is **invisible for exactly-representable weights** — at 1.0 and
+2.5 the error is exactly zero, so the natural fixture cannot see it — and every structural check
+except a duplicate scan still passes.
+
+**Covered** by `test_wide_dynamic_range` (`test/test_random_weighted.f90`), which is the mutation
+test's only catcher: substituting the subtractive rule leaves the other fifteen tests in that suite
+green. **What it still forbids**: the fixture is 18 decades of weight *on purpose*. Do not
+"simplify" it to round numbers, and do not add a weighted fixture elsewhere built from 1.0 and 2.5
+and think it covers this.
+
+Two weaker forms of the same family sit beside it and are worth knowing about rather than
+rediscovering. Testing exhaustion on the root's weight instead of a live integer count is
+**redundant given the recompute rule** — a drawn leaf is exactly `0.0`, so a node above only-drawn
+leaves is an exact sum of exact zeros — and its mutation duly survives the suite; it stops being
+redundant the moment the recompute rule is weakened, which is exactly when nothing else would
+notice. And the descent's per-child liveness test is **defensive**: the obvious route into a dead
+subtree is already closed by exact-zero arithmetic, and what remains needs `u` within about `2**-52`
+of 1 at a specific node, so no fixture this repository can build reaches it. Both are the
+`column_has_nulls_from_footer` pattern — individually redundant, jointly load-bearing. Do not delete
+either on the strength of a surviving mutant or a coverage report.
+
+### Risk-120 — A frozen transform that depends on libm, or on FMA, is not frozen
+
+`pf_weighted_permutation` orders items by `-log(u)/w`. Any value this library promises is
+reproducible must come from integer arithmetic or from IEEE `+ - * /` only. Measured: **1.33%** of
+`-log(u)` values differ between gfortran and ifx at default flags (worst gap 126775 ulp) and
+**0.083%** still differ under `-fp-model=precise`. Nothing fails, no test goes red, and two machines
+simply disagree about which items were drawn.
+
+**The FMA half is the part that was nearly missed, and it is the reason this entry exists rather
+than a code comment.** An earlier design note concluded FMA contraction was harmless, on the
+strength of four builds that agreed — three of which were gfortran builds that never enabled FMA, so
+the test could not fail. `gfortran -O3 -march=native` changes the fingerprint of a plain Horner
+chain, and `-march=native` is an entirely ordinary thing to build with. `exp_key`
+(`src/parquet_expkey.f90`) therefore rounds every product through a `volatile` before it reaches an
+add, which costs 2.53x on the polynomial and cannot be `pure` — both compilers reject a `volatile`
+local in a pure procedure.
+
+**Covered** by `tools/check_exp_key.sh`, which sweeps eleven configurations (gfortran at seven
+including `-march=native`, `-mfma` and `-flto`; ifx at four including `-xHost` and `-ipo`) against
+one frozen fingerprint, and by `exp_key_contract_ok`, which re-derives 32 values at run time so a
+build that cannot honour the contract aborts instead of returning quietly different permutations.
+
+**What it still forbids**, and none of it is visible in the source:
+
+- **`src/parquet_expkey.f90` must not gain a dependency.** It is a leaf module *so that the check
+  can compile it standalone*; `parquet_random` itself cannot be compiled that way any more, having
+  gained `parquet_sorting` and hence Arrow. A dependency here silently disables the check.
+- **Do not restore `pure`, and do not remove the barriers to get it back.** The mutation is
+  invisible to every in-process test.
+- **`-ffast-math` / `-fp-model=fast` are out of scope and cannot be brought in** — they may compute
+  `(m-1)/(m+1)` by reciprocal approximation, which no rounding barrier can undo. The run-time check
+  is the answer to that, not a source change.
+- **Never quote a flag sweep that omits the flag under test.** That is precisely how the original
+  four-build conclusion went wrong.
+
+### Risk-121 — `private(d)` on a weighted sampler gives every thread a tree of garbage
+
+OpenMP's `private` gives each thread a **fresh** object, not a copy. For a derived type with
+allocatable components, gfortran 15.2.1 and ifx 2026.1.1 both allocate the component to the
+original's shape and leave the contents **uninitialised**, with every scalar back at its default
+initialiser — measured at 64 of 64 iterations wrong on both compilers. So `allocated(d%tree)` is
+`.true.`, which is what makes this treacherous: a defensive check passes, `%reseed` then works on a
+tree of garbage, nothing aborts, and every drawn item is still a plausible-looking index.
+
+This is not the documented gfortran hazard about finalizable types in `private()` — `pf_weighted_draw`
+has no `FINAL` at all — and it is not a compiler bug. It is what `private` means.
+
+**Covered** by `test_weighted_per_thread` (`test/test_random_omp.f90`), which asserts the per-thread
+array reproduces the serial sequences, under `schedule(dynamic)` so a sampler leaking state between
+iterations cannot line up by luck.
+
+**What it still forbids**: `pf_weighted_draw` must not acquire a `FINAL` procedure — its allocatable
+components self-deallocate, and adding one would put it in the gfortran `private()` hazard class as
+well. And any guide page or example showing `private(<a weighted sampler>)` is wrong and should be
+corrected on sight; the supported shape is a shared per-thread array, built inside a parallel region.
+
+### Risk-122 — A sentinel key for zero-weight items returns them in INDEX order, not random order
+
+The obvious way to keep zero-weight items last in the exponential race is to give them a key of
+`+huge`. It fails twice, and both failures are silent.
+
+Every sort in `parquet_sorting` is **stable**, so a block of items tied at the sentinel comes back in
+*index* order — which is not the uniform random order the design promises, while every other
+assertion (it is a permutation, zero weights are last, it reproduces) still passes. And there is no
+safe sentinel value anyway: a denormal weight makes `-log(u)/w` overflow to `+Inf`, which sorts
+*after* `huge` and would place zero-weight items in the middle.
+
+`wperm_impl` therefore holds them out of the race entirely and permutes the tail with the same
+uniform machinery the sequential family uses; a key that overflows is refused outright.
+
+**Covered** by `test_race_zero_weight_tail`, which asserts specifically that the tail is **not** in
+index order — the assertion a sentinel implementation fails and every other one passes.
+
+**What it still forbids**: do not "simplify" the tail back into the key. The stability of the sort is
+what makes the sentinel look correct in every test that does not check for index order specifically.
+
 ### Risk-106 — A stream consumed across loop iterations is irreproducible, and nothing fails
 
 `pf_random_stream` carries a position, so which value an iteration receives depends on how many

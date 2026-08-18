@@ -356,6 +356,22 @@ program error_scenarios
         call scenario_strings_copy_buffers_offsets_too_short()
     case ("strings_copy_buffers_data_too_short")
         call scenario_strings_copy_buffers_data_too_short()
+    case ("weighted_negative_weight")
+        call scenario_weighted_negative_weight()
+    case ("weighted_all_zero")
+        call scenario_weighted_all_zero()
+    case ("weighted_nan_weight")
+        call scenario_weighted_nan_weight()
+    case ("weighted_next_uninitialised")
+        call scenario_weighted_next_uninitialised()
+    case ("weighted_init_twice")
+        call scenario_weighted_init_twice()
+    case ("weighted_subset_too_large")
+        call scenario_weighted_subset_too_large()
+    case ("weighted_perm_size_mismatch")
+        call scenario_weighted_perm_size_mismatch()
+    case ("weighted_perm_key_overflow")
+        call scenario_weighted_perm_key_overflow()
     case ("settings_env_two_numbers")
         call scenario_settings_env_two_numbers()
     case ("settings_env_out_of_range")
@@ -4253,6 +4269,101 @@ contains
         call parquet_settings_from_env()   ! -> aborts (not an integer)
         print '(a)', "unexpectedly accepted two numbers as one integer from the environment"
     end subroutine scenario_settings_env_two_numbers
+
+    !> A negative weight is refused rather than silently drawn FIRST.
+    !!
+    !! The key of a negative-weight item is negative, so the race would place it ahead of every
+    !! real item -- the exact opposite of any sane reading of "this item is unlikely".
+    subroutine scenario_weighted_negative_weight()
+        type(pf_weighted_draw) :: d
+        real(real64) :: w(4)
+
+        w = [1.0_real64, 2.0_real64, -0.5_real64, 1.0_real64]
+        call d%init(w, 1_int64)            ! -> aborts (a weight is negative)
+        print '(a)', "unexpectedly accepted a negative weight"
+    end subroutine scenario_weighted_negative_weight
+
+    !> An all-zero weight vector names no distribution and is refused.
+    subroutine scenario_weighted_all_zero()
+        type(pf_weighted_draw) :: d
+        real(real64) :: w(4)
+
+        w = 0.0_real64
+        call d%init(w, 1_int64)            ! -> aborts (every weight is zero)
+        print '(a)', "unexpectedly accepted an all-zero weight vector"
+    end subroutine scenario_weighted_all_zero
+
+    !> A NaN weight is refused rather than quietly filed as a zero.
+    !!
+    !! A NaN compares false against every bound, so `w > 0` and `w < 0` are both false and a guard
+    !! written without an explicit NaN test would classify it as zero-weight and drop it to the
+    !! tail. That is a silently wrong answer, which is why the test exists at all.
+    subroutine scenario_weighted_nan_weight()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_weighted_draw) :: d
+        real(real64) :: w(3)
+
+        w = [1.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), 1.0_real64]
+        call d%init(w, 1_int64)            ! -> aborts (a weight is NaN)
+        print '(a)', "unexpectedly accepted a NaN weight"
+    end subroutine scenario_weighted_nan_weight
+
+    !> Drawing from a sampler that was never initialised aborts instead of reading garbage.
+    subroutine scenario_weighted_next_uninitialised()
+        type(pf_weighted_draw) :: d
+        integer :: item
+        logical :: ok
+
+        call d%next(item, ok)              ! -> aborts (never initialised)
+        print '(a,i0)', "unexpectedly drew from an uninitialised sampler: ", item
+    end subroutine scenario_weighted_next_uninitialised
+
+    !> A second `%init` is refused, so a sequence in progress cannot be discarded by accident.
+    !!
+    !! `%reseed` is the supported way to reuse a sampler and is `O(k log n)` where a rebuild is
+    !! `O(n)`, so a caller reaching for `%init` twice is nearly always reaching for the wrong one.
+    subroutine scenario_weighted_init_twice()
+        type(pf_weighted_draw) :: d
+        real(real64) :: w(4)
+
+        w = 1.0_real64
+        call d%init(w, 1_int64)
+        call d%init(w, 2_int64)            ! -> aborts (already initialised)
+        print '(a)', "unexpectedly accepted a second %init"
+    end subroutine scenario_weighted_init_twice
+
+    !> A subset larger than its population is refused.
+    subroutine scenario_weighted_subset_too_large()
+        real(real64) :: w(3)
+        integer :: idx(5)
+
+        w = 1.0_real64
+        call pf_weighted_subset(idx, w, 1_int64)   ! -> aborts (5 items from a population of 3)
+        print '(a,i0)', "unexpectedly drew a subset larger than its population: ", idx(1)
+    end subroutine scenario_weighted_subset_too_large
+
+    !> A permutation array that does not match the weights is refused.
+    subroutine scenario_weighted_perm_size_mismatch()
+        real(real64) :: w(6)
+        integer :: perm(4)
+
+        w = 1.0_real64
+        call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (4 slots for 6 items)
+        print '(a,i0)', "unexpectedly returned a short permutation: ", perm(1)
+    end subroutine scenario_weighted_perm_size_mismatch
+
+    !> A weight small enough to overflow its key is refused rather than tying at infinity.
+    !!
+    !! `-log(u)/w` overflows below about `2e-307`. Several items at `+Inf` would compare equal, and
+    !! a stable sort would then order them by index -- a distributional change with no symptom.
+    subroutine scenario_weighted_perm_key_overflow()
+        real(real64) :: w(3)
+        integer :: perm(3)
+
+        w = [1.0_real64, 1.0e-320_real64, 1.0_real64]
+        call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (the key overflows)
+        print '(a,i0)', "unexpectedly ordered an unorderable weight: ", perm(1)
+    end subroutine scenario_weighted_perm_key_overflow
 
     !> An environment variable longer than the fixed buffer the reader uses is refused rather than
     !> applied truncated -- a truncated number is a plausible-looking wrong value, which is exactly

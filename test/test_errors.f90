@@ -457,6 +457,14 @@ contains
                 test_settings_env_not_an_integer_aborts), &
             new_unittest("settings: two numbers in one integer variable aborts", &
                 test_settings_env_two_numbers_aborts), &
+            new_unittest("a negative weight aborts", test_weighted_negative_weight_aborts), &
+            new_unittest("an all-zero weight vector aborts", test_weighted_all_zero_aborts), &
+            new_unittest("a NaN weight aborts rather than counting as zero", test_weighted_nan_aborts), &
+            new_unittest("%next on an uninitialised sampler aborts", test_weighted_uninit_aborts), &
+            new_unittest("a second %init aborts", test_weighted_init_twice_aborts), &
+            new_unittest("a WEIGHTED subset larger than its population aborts", test_weighted_subset_big_aborts), &
+            new_unittest("a mismatched permutation array aborts", test_weighted_perm_size_aborts), &
+            new_unittest("a weight whose key overflows aborts", test_weighted_key_overflow_aborts), &
             new_unittest("an environment value longer than the buffer aborts", &
                 test_settings_env_too_long_aborts), &
             new_unittest("an environment value beyond a default INTEGER's range aborts", &
@@ -4504,6 +4512,80 @@ contains
             failure_message="a non-numeric integer from the environment was expected to abort", &
             required_stderr="PARQUET_FORTRAN_SORT_THREADS='many' is not an integer")
     end subroutine test_settings_env_not_an_integer_aborts
+
+    !> A negative weight would be drawn FIRST, so it is refused at the door.
+    subroutine test_weighted_negative_weight_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_negative_weight", expect_abort=.true., &
+            failure_message="a negative weight was expected to abort, not to be drawn first", &
+            required_stderr="a weight is negative")
+    end subroutine test_weighted_negative_weight_aborts
+
+    !> An all-zero weight vector names no distribution.
+    subroutine test_weighted_all_zero_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_all_zero", expect_abort=.true., &
+            failure_message="an all-zero weight vector was expected to abort", &
+            required_stderr="every weight is zero")
+    end subroutine test_weighted_all_zero_aborts
+
+    !> The one that guards a SILENT failure: a NaN compares false against every bound, so a guard
+    !! written without an explicit NaN test files it as zero-weight and drops it to the tail.
+    subroutine test_weighted_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_nan_weight", expect_abort=.true., &
+            failure_message="a NaN weight was expected to abort, not to be treated as zero", &
+            required_stderr="a weight is NaN")
+    end subroutine test_weighted_nan_aborts
+
+    !> Drawing from a sampler that was never built reads uninitialised state.
+    subroutine test_weighted_uninit_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_next_uninitialised", expect_abort=.true., &
+            failure_message="%next on an uninitialised sampler was expected to abort", &
+            required_stderr="has not been initialised")
+    end subroutine test_weighted_uninit_aborts
+
+    !> A second %init would discard a sequence in progress without saying so.
+    subroutine test_weighted_init_twice_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_init_twice", expect_abort=.true., &
+            failure_message="a second %init was expected to abort and point at %reseed", &
+            required_stderr="already called for this sampler")
+    end subroutine test_weighted_init_twice_aborts
+
+    !> A subset drawn without replacement cannot exceed its population.
+    subroutine test_weighted_subset_big_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_subset_too_large", expect_abort=.true., &
+            failure_message="a subset larger than its population was expected to abort", &
+            required_stderr="more items requested than there are weights")
+    end subroutine test_weighted_subset_big_aborts
+
+    !> A permutation returns every item once, so its array must match the weights.
+    subroutine test_weighted_perm_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_perm_size_mismatch", expect_abort=.true., &
+            failure_message="a mismatched permutation array was expected to abort", &
+            required_stderr="must have the same size")
+    end subroutine test_weighted_perm_size_aborts
+
+    !> Several keys at +Inf would compare equal and a stable sort would order them by index --
+    !! a distributional change with no symptom, so the unorderable weight is refused instead.
+    subroutine test_weighted_key_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_perm_key_overflow", expect_abort=.true., &
+            failure_message="a weight whose key overflows was expected to abort", &
+            required_stderr="overflows")
+    end subroutine test_weighted_key_overflow_aborts
 
     subroutine test_settings_env_two_numbers_aborts(error)
         type(error_type), allocatable, intent(out) :: error

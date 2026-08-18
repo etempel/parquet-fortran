@@ -61,10 +61,23 @@
 module parquet_random
 
     use iso_fortran_env, only: int32, int64, real32, real64
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_is_finite
     ! parquet_settings_base, NOT parquet_settings: that one imports parquet_bindings to mirror the
-    ! C++-side knobs, so importing it here would make a program whose only dependency is this
-    ! pure-Fortran generator fail to link against the whole of parquet_wrapper.cpp. The leaf module
-    ! exists for exactly this, and parquet_strings reaches it the same way -- see its own header.
+    ! C++-side knobs. The leaf module exists for exactly this, and parquet_strings reaches it the
+    ! same way -- see its own header.
+    !
+    ! **This module is NO LONGER free of the Arrow link dependency, and that was a deliberate
+    ! decision rather than drift.** `pf_weighted_permutation` sorts its keys, and the project's one
+    ! sort lives in `parquet_sorting`, which imports `parquet_bindings` -- so a program whose only
+    ! dependency is this generator must now link `parquet_wrapper.cpp` and hence Arrow. Two things
+    ! make the trade defensible: no C++ actually RUNS for `pf_argsort`, whose engine has been the
+    ! Fortran one in `parquet_sorting_engine.f90` since the cutover, so this is a link-time cost
+    ! only; and the alternative was a second copy of a sorting algorithm inside this module, which
+    ! is a far worse thing to own than an unused link edge. The `parquet_settings_base` split above
+    ! is still worth keeping: it is what stops the SETTINGS half dragging the same edge in for
+    ! every program that merely draws a random number.
+    use parquet_sorting, only: pf_argsort
+    use parquet_expkey, only: exp_key, exp_key_contract_ok
     use parquet_settings_base, only: parquet_get_random_threads, &
                                      parquet_get_random_parallel_min_elements, &
                                      parquet_auto_thread_count, parquet_nested_team_unsafe
@@ -93,6 +106,8 @@ module parquet_random
     public :: pf_random_permutation
     public :: pf_random_subset
     public :: pf_random_resample
+    public :: pf_weighted_subset
+    public :: pf_weighted_permutation
 
     !> Identifies the algorithm together with every mapping this module freezes -- the cipher, the
     !! key and counter layout, the word order, the integer rule and its retry key. Its value changes
@@ -776,6 +791,226 @@ module parquet_random
         generic :: rewind => rewind_base, rewind_i32, rewind_i64
         procedure :: position => stream_position    !! Current 1-based word position.
     end type pf_random_stream
+
+    ! ================================================================================
+    ! Tier 2 -- the weighted sequential draw
+    ! ================================================================================
+
+    !> Successive sampling without replacement: draw one item with probability proportional to its
+    !> weight, remove it, renormalise over the survivors, repeat.
+    !>
+    !> **What this distribution is, and one thing it is not.** Drawn to exhaustion it is the
+    !> weighted shuffle, also called the Plackett-Luce order. The FIRST draw is exactly
+    !> proportional to weight; later draws are proportional among the survivors. It is **not**
+    !> inclusion-probability-proportional-to-size: an item with twice the weight is not twice as
+    !> likely to appear somewhere in the first `k`, and no construction with this interface can
+    !> make it so. Most callers who reach for "weighted sampling without replacement" want this
+    !> one, but the distinction is worth knowing before relying on it.
+    !>
+    !> ```fortran
+    !> type(pf_weighted_draw) :: d
+    !> integer :: item
+    !> logical :: ok
+    !>
+    !> call d%init(weights, seed)
+    !> do
+    !>     call d%next(item, ok)
+    !>     if (.not. ok) exit          ! the population is exhausted
+    !>     ! ... judge item; exit on acceptance ...
+    !> end do
+    !> ```
+    !>
+    !> **The tree is seed-independent, and that is the whole reason this type exists.** It is built
+    !> from the weights alone; the seed only steers the descent. So a second sequence over the same
+    !> weights costs `O(k log n)` to restore rather than an `O(n)` rebuild, which is what makes an
+    !> outer loop of many short sequences -- the shape this type was designed for -- nearly free.
+    !> Use `%reseed` for that, holding the seed fixed and passing the outer iteration as `stream`.
+    !>
+    !> **Cost**: `%init` is `O(n)`, `%next` is `O(log n)`, `%reset` and `%reseed` are `O(k log n)`
+    !> in the draws already taken.
+    !>
+    !> **Serial by nature, and there is no `threads=`.** Draw `k+1` cannot be produced until draw
+    !> `k` has been removed, so there is no parallelism inside one sequence to expose; an argument
+    !> that was accepted and ignored would be worse than its absence. Independent sequences ARE
+    !> parallel, and that is where the threads go -- see the note below.
+    !>
+    !> **To run many sequences in parallel, give each thread its own sampler, built inside the
+    !> parallel region.** `%next` mutates the tree, so one sampler cannot serve two threads.
+    !>
+    !> ```fortran
+    !> type(pf_weighted_draw), allocatable :: dd(:)
+    !> integer :: nt, tid, j
+    !>
+    !> nt = 1
+    !> !$ nt = omp_get_max_threads()
+    !> allocate(dd(nt))
+    !> !$omp parallel do default(shared) private(tid)
+    !> do tid = 1, nt
+    !>     call dd(tid)%init(weights, seed)     ! nt builds, wall-clock of ONE
+    !> end do
+    !>
+    !> !$omp parallel do default(shared) private(tid, item, ok) schedule(dynamic)
+    !> do j = 1, n_outer
+    !>     tid = 1
+    !>     !$ tid = omp_get_thread_num() + 1
+    !>     call dd(tid)%reseed(seed, stream=int(j, int64))
+    !>     do
+    !>         call dd(tid)%next(item, ok)
+    !>         if (.not. ok) exit
+    !>     end do
+    !> end do
+    !> ```
+    !>
+    !> **Never put this type in an OpenMP `private()` clause.** A private copy is a FRESH object,
+    !> not a copy of yours: measured on gfortran 15.2.1 and ifx 2026.1.1, the tree comes back
+    !> allocated to the right shape with UNINITIALISED contents and every scalar reset to its
+    !> default. Nothing aborts and every drawn item still looks valid, so the failure is a wrong
+    !> answer with no symptom. The shared per-thread array above avoids the privatisation machinery
+    !> entirely; `firstprivate()` also copies correctly on both compilers, if you prefer it.
+    !>
+    !> **Because each sequence is named by its coordinates, the result does not depend on the
+    !> schedule or the thread count.** `schedule(dynamic)` above costs nothing in reproducibility.
+    !>
+    !> **Zero-weight items are kept out of the tree and handed out last**, in uniform random order,
+    !> so draining a population is always a genuine permutation of every item. Keeping them out is
+    !> not an optimisation: a zero leaf would be indistinguishable from a spent one, and the
+    !> descent's liveness test reads exactly that.
+
+    !> Label deriving the zero-weight tail's own permutation seed. Any fixed value would do.
+    integer(int64), parameter :: wd_zero_label = 7965600847521931_int64
+
+    !> Journal entries allocated on first use; it doubles from there.
+    integer(int64), parameter :: wd_journal_min = 64_int64
+
+    type, public :: pf_weighted_draw
+        private
+        !> The segment tree: `2*p2` nodes, leaf `j` at `st(p2 + j - 1)`, every internal node the
+        !! sum of its two children. Node `1` is unused padding's parent -- the root is `st(1)`.
+        real(real64), allocatable :: st(:)
+        !> Leaf `j` holds the weight of item `leaf_item(j)`. **Unallocated when no weight is
+        !! zero**, which is the common case; leaf `j` is then item `j` and the map is skipped.
+        integer(int64), allocatable :: leaf_item(:)
+        !> The zero-weight items, in input order. Unallocated when there are none.
+        integer(int64), allocatable :: zero_item(:)
+        !> Undo journal: the leaf node zeroed by each draw so far, in order.
+        !!
+        !! **One entry per DRAW, not one per tree write.** Undoing a draw restores its leaf and
+        !! then recomputes that leaf's ancestors from their children, exactly as the forward
+        !! direction does -- so the `O(log n)` ancestor writes need not be journalled at all. That
+        !! is 1 entry where the obvious design has `1 + log2(n)`, which at `n = 10**6` is a 21x
+        !! difference in what a fully drained sampler holds, and it is why no capacity policy or
+        !! rebuild fallback is needed. It is exact rather than approximate: every node is a pure
+        !! function of its two children, so replaying the leaves reproduces the built tree bit for
+        !! bit -- `test_reset_restores_tree_exactly` asserts precisely that.
+        integer(int64), allocatable :: jr_pos(:)
+        !> Undo journal: the weight each of those leaves held.
+        real(real64), allocatable :: jr_val(:)
+        integer(int64) :: p2 = 0        !! leaves in the tree; the least power of two `>= npos`
+        integer(int64) :: npos = 0      !! items with a strictly positive weight
+        integer(int64) :: nzero = 0     !! items with weight exactly zero
+        integer(int64) :: live = 0      !! positive-weight items not yet drawn
+        integer(int64) :: ndrawn = 0    !! draws taken in this sequence, zero-weight tail included
+        integer(int64) :: jr_n = 0      !! journal entries in use
+        integer(int64) :: wseed = 0     !! the seed steering the descent
+        integer(int64) :: wstream = 0   !! which sequence of that seed
+        integer(int64) :: zkey = 0      !! derived seed ordering the zero-weight tail
+        logical :: ready = .false.      !! `%init` has run; guards every other entry point
+    contains
+        procedure, private :: init_base => wd_init_base  !! `%init` with no stream
+        procedure, private :: init_s32 => wd_init_s32    !! `%init` with an `int32` stream
+        procedure, private :: init_s64 => wd_init_s64    !! `%init` with an `int64` stream
+        !> Prepares the sampler over `weights`. `O(n)`. `stream` defaults to 0.
+        generic :: init => init_base, init_s32, init_s64
+        procedure, private :: next_i32 => wd_next_i32    !! `%next` into an `int32` item
+        procedure, private :: next_i64 => wd_next_i64    !! `%next` into an `int64` item
+        !> Draws the next item. `O(log n)`. `ok` is `.false.` once every item has been drawn.
+        generic :: next => next_i32, next_i64
+        procedure :: reset => wd_reset                   !! Restarts the SAME sequence. `O(k log n)`.
+        procedure, private :: reseed_base => wd_reseed_base !! `%reseed` with no stream
+        procedure, private :: reseed_s32 => wd_reseed_s32   !! `%reseed` with an `int32` stream
+        procedure, private :: reseed_s64 => wd_reseed_s64   !! `%reseed` with an `int64` stream
+        !> Starts a DIFFERENT sequence over the same weights. `O(k log n)`; `stream` defaults to 0.
+        generic :: reseed => reseed_base, reseed_s32, reseed_s64
+        procedure :: remaining => wd_remaining           !! Items not yet drawn; exact, `O(1)`.
+    end type pf_weighted_draw
+
+    !> Fills `idx` with the first `size(idx)` items of a weighted sequential draw over `weights`.
+    !!
+    !! **Defined as `size(idx)` calls to `pf_weighted_draw%next`, not as a second algorithm**, so a
+    !! subset of size `k` is a prefix of one of size `2k`, and stopping a `%next` loop after `k`
+    !! draws gives exactly this. That identity is asserted by the suite rather than intended.
+    !!
+    !! `idx` is a rank-1 `integer(int32)` or `integer(int64)` array, `intent(out)`; `weights` is
+    !! `real(real64)`, one per item; `seed` is `integer(int64)`; `stream` is optional and is
+    !! `integer(int32)` or `integer(int64)`. The population is `size(weights)` and the number drawn
+    !! is `size(idx)` -- note this differs from `pf_random_subset`, whose second argument is the
+    !! POPULATION, because here the population is carried by the weights themselves.
+    !!
+    !! **Preconditions, all of which abort** when `idx` is non-empty: `size(idx) <= size(weights)`;
+    !! every weight `>= 0`; at least one weight `> 0`; and, for an `integer(int32)` `idx`,
+    !! `size(weights) <= huge(1_int32)`. A zero-sized `idx` asks for nothing and is a defined no-op.
+    !!
+    !! **`O(n + k log n)`**, so it is the cheaper form whenever `k` is small against `n`; past
+    !! roughly `k = n/2` a caller wanting most of the population is better served by asking for the
+    !! whole weighted permutation.
+    !> Fills `perm` with a weighted random permutation of `1 .. size(weights)`.
+    !!
+    !! **The order family.** `perm(k)` is the item drawn `k`-th by successive sampling: the first
+    !! is proportional to weight, each later one proportional among the survivors. Drawn to
+    !! exhaustion, that is the weighted shuffle. Same distribution as `pf_weighted_draw` -- see the
+    !! note on realizations below.
+    !!
+    !! `perm` is a rank-1 `integer(int32)` or `integer(int64)` array, `intent(out)`, whose size
+    !! must equal `size(weights)`; `weights` is `real(real64)`; `seed` is `integer(int64)`;
+    !! `stream` is optional and `integer(int64)` -- note the asymmetry with `pf_weighted_draw`,
+    !! whose `%init`/`%reseed` take either kind. It is forced rather than chosen: an optional
+    !! `threads` and an `integer(int32)` `stream` are not distinguishable as a positional fourth
+    !! argument, so one generic cannot carry both, and `threads=` is worth more here than saving a
+    !! cast. Write `stream=int(j, int64)` in a loop. `threads` behaves as it does elsewhere in this
+    !! module, including the work floor.
+    !!
+    !! **It is a DIFFERENT REALIZATION from the sequential family, not a different distribution.**
+    !! `pf_weighted_permutation(perm, w, seed)` and a `pf_weighted_draw` drained under the same
+    !! seed both draw from successive sampling, and for one seed they give different draws from it
+    !! -- in the same way two different seeds would. There is no prefix identity across the two
+    !! families, and the suite asserts that they differ rather than leaving it to be discovered.
+    !! Within the sequential family the prefix identity does hold; see `pf_weighted_subset`.
+    !!
+    !! **Construction: the exponential race.** Give item `i` the key `-log(u_i)/w_i` for
+    !! independent uniforms, and sort ascending. That is exactly successive sampling, and unlike
+    !! the sequential form it is embarrassingly parallel and coordinate-addressed, so the answer is
+    !! **bit-identical at every thread count**. Use this when you want many whole shuffles; use
+    !! `pf_weighted_draw` when you want a few draws, or many short sequences over the same weights,
+    !! where it is thousands of times cheaper.
+    !!
+    !! **To produce many shuffles, parallelise ACROSS them rather than within one.** The key loop
+    !! is memory-bound and scales sub-linearly, whereas independent shuffles are perfectly
+    !! parallel. An OpenMP loop over sequences, each calling this with `threads=1`, beats a serial
+    !! loop over threaded calls; the module's own auto-threading already resolves to serial inside
+    !! an active parallel region, so this needs no special handling.
+    !!
+    !! **Zero-weight items come last, in uniform random order** -- they can never be drawn while a
+    !! positive weight remains, so a full shuffle is still a genuine permutation of every item.
+    !!
+    !! **Preconditions, all of which abort**: `size(perm) == size(weights)`; every weight finite
+    !! and `>= 0`; at least one weight `> 0`; no weight so small that `-log(u)/w` overflows (below
+    !! about `2e-307`, which no real weighting reaches and which would otherwise tie several items
+    !! at infinity); and, for an `integer(int32)` `perm`, `size(weights) <= huge(1_int32)`.
+    interface pf_weighted_permutation
+        module procedure wperm_i32_base
+        module procedure wperm_i32_s64
+        module procedure wperm_i64_base
+        module procedure wperm_i64_s64
+    end interface pf_weighted_permutation
+
+    interface pf_weighted_subset
+        module procedure wsub_i32_base
+        module procedure wsub_i32_s32
+        module procedure wsub_i32_s64
+        module procedure wsub_i64_base
+        module procedure wsub_i64_s32
+        module procedure wsub_i64_s64
+    end interface pf_weighted_subset
 
 contains
 
@@ -3835,5 +4070,627 @@ contains
             w = self%c3
         end select
     end subroutine word_at
+
+    ! ================================================================================
+    ! Tier 2 -- the weighted sequential draw
+    ! ================================================================================
+    !
+    ! Three properties of the descent are load-bearing, and each fails SILENTLY if it is dropped --
+    ! a wrong answer with nothing to report it, which is why all three are stated here rather than
+    ! left to be inferred from the code.
+    !
+    !  1. **An ancestor is RECOMPUTED from its two children, never decremented.** Subtracting the
+    !     drawn weight folds another rounding error into a running value at every draw, so the root
+    !     drifts away from the true remaining weight and the descent starts landing on spent
+    !     leaves. Measured during design at 16% duplicate draws over 18 decades of dynamic range --
+    !     and, less comfortably, at 100 duplicates with plain uniform(0,1) weights, so this is not
+    !     an exotic-input problem. Recomputing costs exactly the same and is exact to one ulp.
+    !
+    !  2. **Exhaustion is tested on a live integer COUNT, never on the root's weight.** This one is
+    !     REDUNDANT GIVEN (1) and is kept anyway, in the same way `column_has_nulls_from_footer`'s
+    !     two guards are individually redundant and jointly load-bearing: because ancestors are
+    !     recomputed, a drawn leaf is exactly `0.0` and any node above only-drawn leaves is an
+    !     exact sum of exact zeros, so `st(1) > 0` and `live > 0` are the same predicate. Mutating
+    !     the test to the root's weight duly survives the whole suite. It stops being redundant the
+    !     moment (1) is weakened, which is exactly when nothing else would notice -- and the count
+    !     is what makes `%remaining` an exact `O(1)` answer rather than a question about rounding.
+    !
+    !  3. **The descent may never enter a subtree whose sum is zero.** `st(p)` is the rounded sum
+    !     of its children and can exceed their exact total, so a `target` just below `st(p)` can
+    !     exceed `st(left) + st(right)`; a root-only clamp does not close that, because the excess
+    !     reappears at every level. `wd_draw` tests each child for liveness before descending.
+    !
+    !     **This is a DEFENSIVE branch and its mutation survives the suite -- deliberately, not for
+    !     want of trying.** The obvious route into a dead subtree is already closed by (1): a dead
+    !     subtree sums to EXACTLY zero, and `x + 0.0` is exact, so a node with one live child
+    !     equals that child exactly and `target < st(p)` implies `target < st(live child)`. What
+    !     remains is the case of two live children where the parent's rounding lets `target`
+    !     overshoot into the right subtree by up to an ulp, and that overshoot then cascades onto a
+    !     dead leaf further down. That needs `u` within about `2**-52` of 1 at a specific node, so
+    !     no fixture this repository can build will reach it. The guard costs two comparisons and
+    !     turns "vanishingly unlikely" into "cannot happen"; do not delete it on the strength of a
+    !     coverage report or a surviving mutant.
+    !
+    !     A zero-weight leaf would defeat this test -- it is indistinguishable from a spent one --
+    !     which is the real reason such items are held outside the tree rather than given a leaf.
+
+    !> Validates `weights` and builds the tree. The shared worker behind all three `%init` forms.
+    subroutine wd_build(self, weights)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler, freshly guarded
+        real(real64), intent(in) :: weights(:)          !! one weight per item; all finite, all `>= 0`
+        integer(int64) :: n, i, j, z, p, p2
+
+        n = size(weights, kind=int64)
+        if (n < 1_int64) error stop "pf_weighted_draw%init: weights must have at least one element"
+        self%npos = 0_int64
+        self%nzero = 0_int64
+        do i = 1_int64, n
+            if (ieee_is_nan(weights(i))) &
+                error stop "pf_weighted_draw%init: a weight is NaN; a NaN compares false against " // &
+                           "every bound and would silently be treated as zero"
+            if (.not. ieee_is_finite(weights(i))) &
+                error stop "pf_weighted_draw%init: a weight is infinite; the total weight would be " // &
+                           "infinite and every draw degenerate"
+            if (weights(i) < 0.0_real64) &
+                error stop "pf_weighted_draw%init: a weight is negative; a weight is a relative " // &
+                           "frequency and cannot be below zero"
+            if (weights(i) > 0.0_real64) then
+                self%npos = self%npos + 1_int64
+            else
+                self%nzero = self%nzero + 1_int64
+            end if
+        end do
+        if (self%npos == 0_int64) &
+            error stop "pf_weighted_draw%init: every weight is zero; there is no distribution to " // &
+                       "draw from"
+
+        p2 = 1_int64
+        do while (p2 < self%npos)
+            p2 = 2_int64 * p2
+        end do
+        self%p2 = p2
+        if (allocated(self%st)) deallocate(self%st)
+        allocate(self%st(2_int64 * p2 - 1_int64))
+        ! Only the PADDING leaves need clearing: every internal node is written by the sweep below
+        ! and every real leaf by the fill. Blanking the whole array first would double the build's
+        ! memory traffic, which is what the build costs.
+        self%st(p2 + self%npos : 2_int64 * p2 - 1_int64) = 0.0_real64
+
+        ! The item map exists only when a zero weight is present. Without one, leaf j IS item j,
+        ! and skipping the map saves an int64 per item -- worth having, since a parallel caller
+        ! holds one sampler per thread.
+        if (allocated(self%leaf_item)) deallocate(self%leaf_item)
+        if (allocated(self%zero_item)) deallocate(self%zero_item)
+        if (self%nzero > 0_int64) then
+            allocate(self%leaf_item(self%npos))
+            allocate(self%zero_item(self%nzero))
+        end if
+        j = 0_int64
+        z = 0_int64
+        do i = 1_int64, n
+            if (weights(i) > 0.0_real64) then
+                j = j + 1_int64
+                self%st(p2 + j - 1_int64) = weights(i)
+                if (self%nzero > 0_int64) self%leaf_item(j) = i
+            else
+                z = z + 1_int64
+                self%zero_item(z) = i
+            end if
+        end do
+        do p = p2 - 1_int64, 1_int64, -1_int64
+            self%st(p) = self%st(2_int64 * p) + self%st(2_int64 * p + 1_int64)
+        end do
+
+        self%live = self%npos
+        self%ndrawn = 0_int64
+        self%jr_n = 0_int64
+        self%ready = .true.
+    end subroutine wd_build
+
+    !> Installs the coordinates and derives the zero-weight tail's own seed from them.
+    pure subroutine wd_set_coords(self, seed, stream)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int64), intent(in) :: seed              !! the seed steering the descent
+        integer(int64), intent(in) :: stream            !! which sequence of that seed
+
+        self%wseed = seed
+        self%wstream = stream
+        ! Two derivations rather than one: the tail's order must vary with BOTH coordinates, and
+        ! folding the stream into a label instead could collide with an ordinary stream index.
+        self%zkey = pf_random_key(pf_random_key(seed, stream), wd_zero_label)
+    end subroutine wd_set_coords
+
+    !> Refuses a call on a sampler `%init` has not prepared.
+    subroutine wd_require_ready(self, proc)
+        class(pf_weighted_draw), intent(in) :: self     !! the sampler
+        character(len=*), intent(in) :: proc            !! the calling binding, for the message
+
+        if (.not. self%ready) &
+            error stop "pf_weighted_draw%" // proc // ": this sampler has not been initialised; " // &
+                       "call %init(weights, seed) first"
+    end subroutine wd_require_ready
+
+    !> Records one drawn leaf so `%reset`/`%reseed` can put it back. Doubles on overflow.
+    subroutine wd_push(self, pos, val)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int64), intent(in) :: pos               !! the leaf node just zeroed
+        real(real64), intent(in) :: val                 !! the weight it held
+        integer(int64), allocatable :: np(:)
+        real(real64), allocatable :: nv(:)
+        integer(int64) :: cap
+
+        if (.not. allocated(self%jr_pos)) then
+            allocate(self%jr_pos(wd_journal_min))
+            allocate(self%jr_val(wd_journal_min))
+        else
+            cap = size(self%jr_pos, kind=int64)
+            if (self%jr_n >= cap) then
+                allocate(np(2_int64 * cap))
+                allocate(nv(2_int64 * cap))
+                np(1:cap) = self%jr_pos
+                nv(1:cap) = self%jr_val
+                call move_alloc(np, self%jr_pos)
+                call move_alloc(nv, self%jr_val)
+            end if
+        end if
+        self%jr_n = self%jr_n + 1_int64
+        self%jr_pos(self%jr_n) = pos
+        self%jr_val(self%jr_n) = val
+    end subroutine wd_push
+
+    !> Puts every drawn leaf back and recomputes the paths above them.
+    !!
+    !! **The result is bit-identical to a fresh `%init`, and that is provable rather than hoped
+    !! for.** Every internal node is a pure function of its two children, and the last restore that
+    !! writes a given node necessarily writes it after both children have reached their final
+    !! values -- any restore touching a child touches that node too, so none can come later. So the
+    !! order entries are replayed in does not matter either.
+    subroutine wd_restore(self)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int64) :: t, p
+
+        do t = self%jr_n, 1_int64, -1_int64
+            p = self%jr_pos(t)
+            self%st(p) = self%jr_val(t)
+            p = p / 2_int64
+            do while (p >= 1_int64)
+                self%st(p) = self%st(2_int64 * p) + self%st(2_int64 * p + 1_int64)
+                p = p / 2_int64
+            end do
+        end do
+        self%jr_n = 0_int64
+        self%live = self%npos
+        self%ndrawn = 0_int64
+    end subroutine wd_restore
+
+    !> One draw: descend the tree by weight, remove the item, journal what was removed.
+    subroutine wd_draw(self, item, ok)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int64), intent(out) :: item             !! the item drawn, or 0 when exhausted
+        logical, intent(out) :: ok                      !! `.false.` once every item has been drawn
+        integer(int64) :: p, l, r, leaf
+        real(real64) :: u, target
+
+        item = 0_int64
+        ok = .false.
+        if (self%live > 0_int64) then
+            self%ndrawn = self%ndrawn + 1_int64
+            u = pf_random_at(self%wseed, self%wstream, draw=self%ndrawn)
+            target = u * self%st(1_int64)
+            ! `u` reaches 1 - 2**-53 and the product is rounded, so `target` can land exactly on
+            ! the root. Written as a negated `<` so a NaN -- which cannot arise here, the weights
+            ! having been validated, but which would otherwise walk the tree silently -- also lands
+            ! on the safe branch.
+            if (.not. (target < self%st(1_int64))) target = 0.0_real64
+            p = 1_int64
+            do while (p < self%p2)
+                l = 2_int64 * p
+                r = l + 1_int64
+                if (self%st(l) > 0.0_real64 .and. &
+                    (self%st(r) <= 0.0_real64 .or. target < self%st(l))) then
+                    if (target >= self%st(l)) target = 0.0_real64
+                    p = l
+                else
+                    target = target - self%st(l)
+                    if (target < 0.0_real64) target = 0.0_real64
+                    p = r
+                end if
+            end do
+            leaf = p - self%p2 + 1_int64
+            call wd_push(self, p, self%st(p))
+            self%st(p) = 0.0_real64
+            p = p / 2_int64
+            do while (p >= 1_int64)
+                self%st(p) = self%st(2_int64 * p) + self%st(2_int64 * p + 1_int64)
+                p = p / 2_int64
+            end do
+            self%live = self%live - 1_int64
+            if (allocated(self%leaf_item)) then
+                item = self%leaf_item(leaf)
+            else
+                item = leaf
+            end if
+            ok = .true.
+        else if (self%ndrawn < self%npos + self%nzero) then
+            ! The zero-weight tail. These can never be drawn while any positive weight remains, so
+            ! they necessarily land here; handing them out through the uniform permutation gets
+            ! Q5's "uniform random order" without a second construction and without state.
+            self%ndrawn = self%ndrawn + 1_int64
+            item = self%zero_item(pf_random_perm_at(self%zkey, self%nzero, self%ndrawn - self%npos))
+            ok = .true.
+        end if
+    end subroutine wd_draw
+
+    ! ---- pf_weighted_draw bindings ----
+
+    !> `%init` with no stream; the stream is 0.
+    subroutine wd_init_base(self, weights, seed)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        real(real64), intent(in) :: weights(:)          !! one weight per item
+        integer(int64), intent(in) :: seed              !! the seed
+
+        call wd_init_s64(self, weights, seed, 0_int64)
+    end subroutine wd_init_base
+
+    !> `%init` with an `integer(int32)` stream.
+    subroutine wd_init_s32(self, weights, seed, stream)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        real(real64), intent(in) :: weights(:)          !! one weight per item
+        integer(int64), intent(in) :: seed              !! the seed
+        integer(int32), intent(in) :: stream            !! which sequence; sign-extends
+
+        call wd_init_s64(self, weights, seed, int(stream, int64))
+    end subroutine wd_init_s32
+
+    !> `%init` with an `integer(int64)` stream. The form the other two delegate to.
+    !!
+    !! **Deliberately `intent(inout)` with an explicit called-twice guard, not `intent(out)`.**
+    !! `intent(out)` would reset the object on entry and make a second `%init` silently succeed,
+    !! quietly discarding a sequence in progress; `%reseed` is the supported way to reuse a
+    !! sampler and is `O(k log n)` where a rebuild is `O(n)`, so a caller reaching for `%init`
+    !! twice is nearly always reaching for the wrong one.
+    subroutine wd_init_s64(self, weights, seed, stream)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        real(real64), intent(in) :: weights(:)          !! one weight per item
+        integer(int64), intent(in) :: seed              !! the seed
+        integer(int64), intent(in) :: stream            !! which sequence
+
+        if (self%ready) &
+            error stop "pf_weighted_draw%init: already called for this sampler; use %reseed to " // &
+                       "start another sequence over the same weights"
+        call wd_build(self, weights)
+        call wd_set_coords(self, seed, stream)
+    end subroutine wd_init_s64
+
+    !> `%next` into an `integer(int32)` item index.
+    subroutine wd_next_i32(self, item, ok)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int32), intent(out) :: item             !! the item drawn, or 0 when exhausted
+        logical, intent(out), optional :: ok            !! `.false.` once exhausted
+        integer(int64) :: item64
+        logical :: got
+
+        call wd_require_ready(self, "next")
+        if (self%npos + self%nzero > int(huge(1_int32), int64)) &
+            error stop "pf_weighted_draw%next: the population exceeds huge(int32) and cannot be " // &
+                       "reported into an integer(int32) item; declare it integer(int64)"
+        call wd_draw(self, item64, got)
+        item = int(item64, int32)
+        if (present(ok)) ok = got
+    end subroutine wd_next_i32
+
+    !> `%next` into an `integer(int64)` item index.
+    subroutine wd_next_i64(self, item, ok)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int64), intent(out) :: item             !! the item drawn, or 0 when exhausted
+        logical, intent(out), optional :: ok            !! `.false.` once exhausted
+        logical :: got
+
+        call wd_require_ready(self, "next")
+        call wd_draw(self, item, got)
+        if (present(ok)) ok = got
+    end subroutine wd_next_i64
+
+    !> Restarts the SAME sequence: the next `%next` returns what the first one did.
+    subroutine wd_reset(self)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+
+        call wd_require_ready(self, "reset")
+        call wd_restore(self)
+    end subroutine wd_reset
+
+    !> `%reseed` with no stream; the stream is 0.
+    subroutine wd_reseed_base(self, seed)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int64), intent(in) :: seed              !! the new seed
+
+        call wd_reseed_s64(self, seed, 0_int64)
+    end subroutine wd_reseed_base
+
+    !> `%reseed` with an `integer(int32)` stream.
+    subroutine wd_reseed_s32(self, seed, stream)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int64), intent(in) :: seed              !! the new seed
+        integer(int32), intent(in) :: stream            !! the new stream; sign-extends
+
+        call wd_reseed_s64(self, seed, int(stream, int64))
+    end subroutine wd_reseed_s32
+
+    !> `%reseed` with an `integer(int64)` stream. The form the other two delegate to.
+    !!
+    !! **Works on a pristine sampler**, one that has never drawn: the journal is empty, the replay
+    !! is a no-op and only the coordinates change. That is not an edge case to tolerate but the
+    !! normal path for the per-thread-array idiom, where every sampler is freshly built and then
+    !! immediately reseeded on its first outer iteration.
+    subroutine wd_reseed_s64(self, seed, stream)
+        class(pf_weighted_draw), intent(inout) :: self  !! the sampler
+        integer(int64), intent(in) :: seed              !! the new seed
+        integer(int64), intent(in) :: stream            !! the new stream
+
+        call wd_require_ready(self, "reseed")
+        call wd_restore(self)
+        call wd_set_coords(self, seed, stream)
+    end subroutine wd_reseed_s64
+
+    !> Items not yet drawn, zero-weight ones included. Exact and `O(1)` -- never a weight sum.
+    function wd_remaining(self) result(r)
+        class(pf_weighted_draw), intent(in) :: self     !! the sampler
+        integer(int64) :: r                             !! items still available
+
+        call wd_require_ready(self, "remaining")
+        r = self%npos + self%nzero - self%ndrawn
+    end function wd_remaining
+
+    ! ---- pf_weighted_subset ----
+
+    !> The shared worker: `size(idx)` calls to `%next`, and nothing else.
+    subroutine wsub_impl(idx, weights, seed, stream)
+        integer(int64), intent(out) :: idx(:)   !! the items drawn, in order
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer(int64), intent(in) :: stream    !! which sequence
+        type(pf_weighted_draw) :: d
+        integer(int64) :: k
+        logical :: ok
+
+        if (size(idx, kind=int64) == 0_int64) return
+        if (size(idx, kind=int64) > size(weights, kind=int64)) &
+            error stop "pf_weighted_subset: more items requested than there are weights; a subset " // &
+                       "drawn without replacement cannot be larger than its population"
+        call d%init(weights, seed, stream)
+        do k = 1_int64, size(idx, kind=int64)
+            call d%next(idx(k), ok)
+            if (.not. ok) &
+                error stop "pf_weighted_subset: the sampler was exhausted early; this cannot " // &
+                           "happen once the population check has passed, and is a library defect"
+        end do
+    end subroutine wsub_impl
+
+    !> Refuses an `integer(int32)` result array for a population that cannot fit in one.
+    subroutine wsub_check_i32(weights)
+        real(real64), intent(in) :: weights(:)  !! the weights, whose size bounds every item index
+
+        if (size(weights, kind=int64) > int(huge(1_int32), int64)) &
+            error stop "pf_weighted_subset: the population exceeds huge(int32) and an item index " // &
+                       "has nowhere to go; declare idx as integer(int64)"
+    end subroutine wsub_check_i32
+
+    !> `pf_weighted_subset` into an `int32` array, no stream.
+    subroutine wsub_i32_base(idx, weights, seed)
+        integer(int32), intent(out) :: idx(:)   !! the items drawn, in order
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+
+        call wsub_i32_s64(idx, weights, seed, 0_int64)
+    end subroutine wsub_i32_base
+
+    !> `pf_weighted_subset` into an `int32` array, `int32` stream.
+    subroutine wsub_i32_s32(idx, weights, seed, stream)
+        integer(int32), intent(out) :: idx(:)   !! the items drawn, in order
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer(int32), intent(in) :: stream    !! which sequence; sign-extends
+
+        call wsub_i32_s64(idx, weights, seed, int(stream, int64))
+    end subroutine wsub_i32_s32
+
+    !> `pf_weighted_subset` into an `int32` array, `int64` stream.
+    subroutine wsub_i32_s64(idx, weights, seed, stream)
+        integer(int32), intent(out) :: idx(:)   !! the items drawn, in order
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer(int64), intent(in) :: stream    !! which sequence
+        integer(int64), allocatable :: tmp(:)
+
+        if (size(idx, kind=int64) == 0_int64) return
+        call wsub_check_i32(weights)
+        allocate(tmp(size(idx, kind=int64)))
+        call wsub_impl(tmp, weights, seed, stream)
+        idx = int(tmp, int32)
+    end subroutine wsub_i32_s64
+
+    !> `pf_weighted_subset` into an `int64` array, no stream.
+    subroutine wsub_i64_base(idx, weights, seed)
+        integer(int64), intent(out) :: idx(:)   !! the items drawn, in order
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+
+        call wsub_impl(idx, weights, seed, 0_int64)
+    end subroutine wsub_i64_base
+
+    !> `pf_weighted_subset` into an `int64` array, `int32` stream.
+    subroutine wsub_i64_s32(idx, weights, seed, stream)
+        integer(int64), intent(out) :: idx(:)   !! the items drawn, in order
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer(int32), intent(in) :: stream    !! which sequence; sign-extends
+
+        call wsub_impl(idx, weights, seed, int(stream, int64))
+    end subroutine wsub_i64_s32
+
+    !> `pf_weighted_subset` into an `int64` array, `int64` stream.
+    subroutine wsub_i64_s64(idx, weights, seed, stream)
+        integer(int64), intent(out) :: idx(:)   !! the items drawn, in order
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer(int64), intent(in) :: stream    !! which sequence
+
+        call wsub_impl(idx, weights, seed, stream)
+    end subroutine wsub_i64_s64
+
+    ! ---- pf_weighted_permutation: the exponential race ----
+
+    !> The shared worker: build the keys, sort them, then place the zero-weight tail.
+    subroutine wperm_impl(perm, weights, seed, stream, threads)
+        integer(int64), intent(out) :: perm(:)  !! the weighted permutation of `1 .. size(weights)`
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer(int64), intent(in) :: stream    !! which sequence
+        integer, intent(in), optional :: threads !! thread request; absent means auto
+        real(real64), allocatable :: u(:), key(:)
+        integer(int64), allocatable :: ord(:), pos_item(:), zero_item(:)
+        integer(int64) :: n, npos, nzero, i, j, z, zkey
+        real(real64) :: uu, k1
+
+        n = size(weights, kind=int64)
+        if (size(perm, kind=int64) /= n) &
+            error stop "pf_weighted_permutation: perm and weights must have the same size; a " // &
+                       "weighted permutation returns every item exactly once"
+        if (n == 0_int64) return
+        if (.not. exp_key_contract_ok()) &
+            error stop "pf_weighted_permutation: this build does not reproduce the frozen -log(u) " // &
+                       "transform, so its permutations would disagree with every other build. " // &
+                       "Rebuild without -ffast-math/-Ofast, or on ifx with -fp-model=precise " // &
+                       "(fpm --profile release and --profile debug both pass it)."
+
+        npos = 0_int64
+        nzero = 0_int64
+        do i = 1_int64, n
+            if (ieee_is_nan(weights(i))) &
+                error stop "pf_weighted_permutation: a weight is NaN; a NaN compares false against " // &
+                           "every bound and would silently be treated as zero"
+            if (.not. ieee_is_finite(weights(i))) &
+                error stop "pf_weighted_permutation: a weight is infinite; the key would be zero " // &
+                           "and that item drawn first every time"
+            if (weights(i) < 0.0_real64) &
+                error stop "pf_weighted_permutation: a weight is negative; the key would be " // &
+                           "negative and that item drawn FIRST, the opposite of any sane reading"
+            if (weights(i) > 0.0_real64) then
+                npos = npos + 1_int64
+            else
+                nzero = nzero + 1_int64
+            end if
+        end do
+        if (npos == 0_int64) &
+            error stop "pf_weighted_permutation: every weight is zero; there is no distribution to " // &
+                       "draw from"
+
+        ! Zero-weight items are held OUT of the race rather than given a sentinel key. A sentinel
+        ! would have to sort after every real key, and there is no such value: a denormal weight
+        ! makes `-log(u)/w` overflow to infinity, which would then sort after the sentinel and put
+        ! zero-weight items in the middle. Keeping them out removes the question, and it is also
+        ! what gets them into UNIFORM RANDOM order -- tied sentinel keys would come back in index
+        ! order, since every sort here is stable.
+        allocate(u(n), key(npos), pos_item(npos))
+        call pf_random_fill_draws(seed, stream, u)
+        j = 0_int64
+        do i = 1_int64, n
+            if (weights(i) > 0.0_real64) then
+                j = j + 1_int64
+                ! u is in [0,1); the race needs (0,1], and u = 0 would give the key exactly 0 and
+                ! draw that item first every time.
+                uu = 1.0_real64 - u(i)
+                k1 = exp_key(uu) / weights(i)
+                if (.not. ieee_is_finite(k1)) &
+                    error stop "pf_weighted_permutation: a weight is so small that its key " // &
+                               "overflows; weights below about 2e-307 cannot be ordered and " // &
+                               "would tie several items at infinity"
+                key(j) = k1
+                pos_item(j) = i
+            end if
+        end do
+        deallocate(u)
+
+        ! Ties break by item index for free: every sort in `parquet_sorting` is stable, so equal
+        ! keys keep their original order and `(key, index)` is a strict total order without a
+        ! second sort key. `test_race_tie_rule` asserts that rather than trusting it.
+        call pf_argsort(key, ord, threads=threads)
+        do i = 1_int64, npos
+            perm(i) = pos_item(ord(i))
+        end do
+
+        if (nzero > 0_int64) then
+            allocate(zero_item(nzero))
+            z = 0_int64
+            do i = 1_int64, n
+                if (.not. (weights(i) > 0.0_real64)) then
+                    z = z + 1_int64
+                    zero_item(z) = i
+                end if
+            end do
+            ! The same two derivations the sequential family uses, so both give the tail the same
+            ! kind of order from the same coordinates.
+            zkey = pf_random_key(pf_random_key(seed, stream), wd_zero_label)
+            do i = 1_int64, nzero
+                perm(npos + i) = zero_item(pf_random_perm_at(zkey, nzero, i))
+            end do
+        end if
+    end subroutine wperm_impl
+
+    !> Refuses an `integer(int32)` result array for a population that cannot fit in one.
+    subroutine wperm_check_i32(weights)
+        real(real64), intent(in) :: weights(:)  !! the weights, whose size bounds every item index
+
+        if (size(weights, kind=int64) > int(huge(1_int32), int64)) &
+            error stop "pf_weighted_permutation: the population exceeds huge(int32) and an item " // &
+                       "index has nowhere to go; declare perm as integer(int64)"
+    end subroutine wperm_check_i32
+
+    !> `pf_weighted_permutation` into an `int32` array, no stream.
+    subroutine wperm_i32_base(perm, weights, seed, threads)
+        integer(int32), intent(out) :: perm(:)  !! the weighted permutation
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer, intent(in), optional :: threads !! thread request; absent means auto
+
+        call wperm_i32_s64(perm, weights, seed, 0_int64, threads)
+    end subroutine wperm_i32_base
+
+    !> `pf_weighted_permutation` into an `int32` array, `int64` stream.
+    subroutine wperm_i32_s64(perm, weights, seed, stream, threads)
+        integer(int32), intent(out) :: perm(:)  !! the weighted permutation
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer(int64), intent(in) :: stream    !! which sequence
+        integer, intent(in), optional :: threads !! thread request; absent means auto
+        integer(int64), allocatable :: tmp(:)
+
+        if (size(perm, kind=int64) == 0_int64 .and. size(weights, kind=int64) == 0_int64) return
+        call wperm_check_i32(weights)
+        allocate(tmp(size(perm, kind=int64)))
+        call wperm_impl(tmp, weights, seed, stream, threads)
+        perm = int(tmp, int32)
+    end subroutine wperm_i32_s64
+
+    !> `pf_weighted_permutation` into an `int64` array, no stream.
+    subroutine wperm_i64_base(perm, weights, seed, threads)
+        integer(int64), intent(out) :: perm(:)  !! the weighted permutation
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer, intent(in), optional :: threads !! thread request; absent means auto
+
+        call wperm_impl(perm, weights, seed, 0_int64, threads)
+    end subroutine wperm_i64_base
+
+    !> `pf_weighted_permutation` into an `int64` array, `int64` stream.
+    subroutine wperm_i64_s64(perm, weights, seed, stream, threads)
+        integer(int64), intent(out) :: perm(:)  !! the weighted permutation
+        real(real64), intent(in) :: weights(:)  !! one weight per item
+        integer(int64), intent(in) :: seed      !! the seed
+        integer(int64), intent(in) :: stream    !! which sequence
+        integer, intent(in), optional :: threads !! thread request; absent means auto
+
+        call wperm_impl(perm, weights, seed, stream, threads)
+    end subroutine wperm_i64_s64
 
 end module parquet_random

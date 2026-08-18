@@ -667,6 +667,130 @@ or accepts a wrapping product under an assumption verified on that compiler rath
 `pf_random_algorithm` is the same either way. The choice is made at compile time from the compiler
 in use; there is nothing to configure, and deliberately no way to override it.
 
+## Weighted draws without replacement
+
+Sometimes items are not equally likely. `pf_weighted_draw` and `pf_weighted_permutation` draw
+without replacement from weights: the first draw is proportional to weight, and each later one is
+proportional among whatever is left.
+
+```fortran
+type(pf_weighted_draw) :: d
+integer :: item
+logical :: ok
+
+call d%init(weights, seed)
+do
+    call d%next(item, ok)
+    if (.not. ok) exit          ! every item has been drawn
+    ! ... judge item; exit on acceptance ...
+end do
+```
+
+`%remaining()` reports how many are left, `%reset()` restarts the same sequence, and
+`%reseed(seed [, stream])` starts a different one over the same weights. In signatures written out
+in prose here, square brackets mark an optional argument.
+
+### This is successive sampling, not proportional-to-size inclusion
+
+The distinction catches people out, so it is worth stating before anything else. An item with twice
+the weight is twice as likely to be drawn *first*. It is **not** twice as likely to appear somewhere
+in the first `k`, and no construction with this interface can make it so. What you get is the
+Plackett-Luce order; drawn to exhaustion it is the weighted shuffle. If you need exact
+inclusion-probability-proportional-to-size, this is not it, and the right tool is a different
+algorithm entirely.
+
+### Two families, one distribution, different realizations
+
+There are two constructions, and which one you want depends on how you consume the result.
+
+- **`pf_weighted_draw` and `pf_weighted_subset`** are backed by a segment tree. `%init` is `O(n)`,
+  `%next` is `O(log n)`, and `%reset`/`%reseed` are `O(k log n)` in the draws already taken. Serial
+  by nature, and there is no `threads=`.
+- **`pf_weighted_permutation`** is backed by an exponential race: every item gets a key and the keys
+  are sorted. `O(n)` plus a sort, parallel, and bit-identical at every thread count.
+
+**The two give different sequences from the same seed**, and that is not a defect to be tidied away.
+Both draw from successive sampling; for one seed they are two different draws from it, in the same
+way two different seeds would be. So there is no prefix identity across the families — a
+`pf_weighted_permutation` does not begin with what a `pf_weighted_draw` would have drawn.
+
+Within the sequential family the identity does hold, and it is the useful one:
+`pf_weighted_subset(idx, weights, seed)` **is** `size(idx)` calls to `%next`, so taking `k` and
+stopping equals asking for `k`, and a subset of size `k` is a prefix of one of size `2k`.
+
+Which to reach for: `pf_weighted_draw` when you want a few draws, or many short sequences over the
+same weights; `pf_weighted_permutation` when you want whole shuffles. The gap is not small — for
+many short sequences over a large population the tree is thousands of times cheaper, because it is
+built from the weights alone and a new sequence only has to undo the draws already made, while the
+race must rebuild every key from the new seed.
+
+### Zero weights
+
+A zero-weight item can never be drawn while any positive weight remains, so it lands at the end —
+in **uniform random order**, on both paths. That keeps a drained sampler a genuine permutation of
+every item rather than a truncated list. A zero weight is not an error; a negative one is.
+
+### Running many sequences at once
+
+`%next` mutates the sampler's tree, so **one sampler cannot serve two threads**. Give each thread
+its own, and build them inside a parallel region — the builds are independent, so `nt` of them cost
+the wall-clock of one:
+
+```fortran
+type(pf_weighted_draw), allocatable :: dd(:)
+integer :: nt, tid, j
+
+nt = 1
+!$ nt = omp_get_max_threads()
+allocate(dd(nt))
+!$omp parallel do default(shared) private(tid)
+do tid = 1, nt
+    call dd(tid)%init(weights, seed)
+end do
+
+!$omp parallel do default(shared) private(tid, item, ok) schedule(dynamic)
+do j = 1, n_outer
+    tid = 1
+    !$ tid = omp_get_thread_num() + 1
+    call dd(tid)%reseed(seed, stream=int(j, int64))
+    do
+        call dd(tid)%next(item, ok)
+        if (.not. ok) exit
+    end do
+end do
+```
+
+Because each sequence is named by its own `(seed, stream)`, the answer does not depend on the
+schedule or the thread count — `schedule(dynamic)` above costs nothing in reproducibility.
+
+**Never put a `pf_weighted_draw` in an OpenMP `private()` clause.** A private copy is a *fresh*
+object, not a copy of yours: on both gfortran and ifx the tree comes back allocated to the right
+shape with uninitialised contents and every scalar reset to its default. Nothing aborts, every
+drawn item still looks valid, and the answers are simply wrong. The per-thread array above avoids
+the privatisation machinery entirely; `firstprivate()` copies correctly on both compilers if you
+prefer it.
+
+For many whole shuffles, parallelise **across** them rather than within one: the race's key loop is
+memory-bound and scales sub-linearly, whereas independent shuffles are perfectly parallel. An
+OpenMP loop over sequences, each calling `pf_weighted_permutation` with `threads=1`, beats a serial
+loop over threaded calls. Nothing special is needed — the auto-threading rule already resolves to
+serial inside an active parallel region.
+
+### Reproducibility, and one build that is refused
+
+The race turns a uniform into an exponential key with `-log(u)`, and `log` from the runtime library
+is **not** reproducible: measured over two million inputs, 1.33% of values differ between gfortran
+and ifx at their default flags, and 0.083% still differ under strict floating-point settings. One
+differing key changes which items are drawn whenever it crosses its neighbour. So the transform is
+computed inside the library from IEEE `+ - * /` only, which are correctly rounded everywhere.
+
+Two build settings defeat that, because they license the compiler to abandon IEEE semantics
+altogether: `-ffast-math` / `-Ofast` on gfortran, and ifx's default `-fp-model=fast`. The second is
+the one to know about — `fpm --profile release` and `--profile debug` both pass `-fp-model=precise`
+and are fine, but a bare `fpm build` passes no floating-point flag at all. Rather than let such a
+build return quietly different permutations, `pf_weighted_permutation` checks on every call that it
+reproduces the frozen transform, and aborts naming the cause if it does not.
+
 ## See also
 
 - [Thread safety](../operating/thread-safety.html) — why this module needs no locking at all.

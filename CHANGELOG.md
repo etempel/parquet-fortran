@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Weighted sampling without replacement**, in two forms that share one distribution.
+  `pf_weighted_draw` (`%init` / `%next` / `%reset` / `%reseed` / `%remaining`) draws one item at a
+  time by successive sampling — the first draw proportional to weight, each later one proportional
+  among the survivors — over a segment tree built from the weights alone, so `%reseed` begins a
+  fresh sequence over the same weights in `O(k log n)` instead of rebuilding; that is what makes an
+  outer loop of many short sequences cheap. `pf_weighted_subset` is its bulk form and is *defined*
+  as repeated `%next`, so a subset of size `k` is a prefix of one of size `2k`.
+  `pf_weighted_permutation` is the whole weighted shuffle, built from an exponential race instead,
+  so it takes `threads=` and is bit-identical at every thread count. The two families draw from the
+  same distribution and give **different realizations** from one seed, in the same way two seeds
+  would; there is no prefix identity across them, and the suite asserts the difference rather than
+  leaving it to be discovered. Zero-weight items land last in uniform random order on both paths, so
+  a drained sampler is always a genuine permutation of every item. Weights that are negative, NaN,
+  infinite, all-zero, or (for the race) small enough to overflow a key are refused rather than
+  silently reinterpreted. The race's `-log(u)` is computed in-library from IEEE `+ - * /` rather
+  than from `log`, because libm is not reproducible across compilers and one differing key changes
+  which items are drawn; `pf_weighted_permutation` verifies at run time that its build reproduces
+  the frozen transform and aborts naming the flag if not, which catches `-ffast-math` builds and a
+  bare `fpm build` under ifx, whose default is `-fp-model=fast`.
+
 - **`call parquet_get_column_nullable(reader, name, is_nullable)`** reports whether a column's
   stored Arrow field is declared nullable — a schema-only query that reads no column data, and a
   different question from `parquet_column_has_nulls`, which answers whether the column actually

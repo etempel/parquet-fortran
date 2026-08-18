@@ -42,6 +42,8 @@ module parquet
     use parquet_temporal
     use parquet_sorting
     use parquet_random
+    ! Only the test hook: the transform itself and its contract check are internal.
+    use parquet_expkey, only: parquet_debug_exp_key
     use parquet_settings
     ! parquet_maml_base is the one sibling imported with an `only:` list rather than in full. Its
     ! other public names (get_parquet_maml and the parquet_maml_maml_example* accessors) return

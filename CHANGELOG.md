@@ -674,12 +674,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   form returns at the same coordinates; both take an optional `threads=`, capped by
   `parquet_set_random_threads` and floored by `parquet_set_random_parallel_min_elements`, and the
   result is **bit-identical at every thread count** because no element depends on any other — 87x on
-  192 cores, and about 2.4x over the scalar form on one. The construction is a four-round Feistel
-  network over `Z_a x Z_b` with cycle-walking, named separately by `pf_random_perm_algorithm`
-  (`feistel-mix2-4/zaxzb/v1`) so that a change to it cannot be confused with a change to the draws.
-  It is not uniform over all `m!` permutations and nothing with a 64-bit seed could be; what is
-  measured is that it is indistinguishable from uniform under fixed-point, cycle-structure,
-  position-uniformity, subset-membership and structural tests.
+  192 cores, and about 4.3x over the scalar form on one. The construction is piecewise, named
+  separately by `pf_random_perm_algorithm` (`feistel-mix2-16p/zaxzb/exact20/v2`) so that a change to
+  it cannot be confused with a change to the draws. For `m <= 20` it is **exactly uniform over all
+  `m!` permutations** — an exactly uniform rank in `[0, m!)`, unranked — which is a property of the
+  construction rather than a measurement, and 20 is where it stops because `20!` is the last
+  factorial an `integer(int64)` holds. Above that it is a sixteen-round Feistel network over
+  `Z_a x Z_b` with cycle-walking plus a seed-driven parity correction; exact uniformity is not
+  available to any construction with this signature there, since `m!` passes 2**64 at `m = 21`, and
+  what is measured instead is that it is indistinguishable from uniform under an order-4 tuple
+  statistic over the exact cell space, a parity test over the alternating group, an all-cells
+  chi-square, and fixed-point, cycle-structure, position-uniformity, subset-membership and
+  structural tests. Consecutive `m` are independent of each other.
   **`pf_random_resample(idx, m, seed [, stream [, threads]])` is the third of the family and draws
   WITH replacement** — the bootstrap's sample. It has no construction of its own: it *is*
   `pf_random_fill_draws(seed, stream, idx, 1, m)`, an identity the suite asserts, and what the name

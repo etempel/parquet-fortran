@@ -41,8 +41,34 @@ module test_random
     implicit none
     private
     public :: collect_tests_parquet_random
+    public :: collect_tests_parquet_random_perm
 
 contains
+
+    !> Registers the `random_perm` suite: the permutation's UNIFORMITY over `S_m`.
+    !!
+    !! **A separate suite because every test in it writes process-global state.** Each one drives
+    !! `parquet_debug_set_perm_rounds` and its siblings to measure a deliberately weakened kernel as
+    !! its own negative control, and those overrides are visible to every test running at the same
+    !! time -- so this suite is excluded from test-drive's per-test parallelism in
+    !! `run_tester.f90`'s `suite_is_safe_to_parallelize`, and `random` is not. Keeping the split
+    !! costs one collect routine and leaves the other 34 tests running concurrently.
+    subroutine collect_tests_parquet_random_perm(testsuite)
+        type(unittest_type), allocatable, intent(out) :: testsuite(:)   !! the suite's tests
+
+        testsuite = [ &
+            new_unittest("the permutation is uniform over ALL m! cells, swept over two ensembles", &
+                test_perm_all_cells), &
+            new_unittest("odd permutations are half of them, including at every odd square", &
+                test_perm_parity), &
+            new_unittest("every one of the 8! permutations is reached over 15 x 8! seeds", &
+                test_perm_coverage), &
+            new_unittest("an order-4 tuple statistic finds no structure above the exact threshold", &
+                test_perm_ktuple), &
+            new_unittest("the exact path: its boundary, its rank's uniformity, its bijectivity", &
+                test_perm_exact) &
+            ]
+    end subroutine collect_tests_parquet_random_perm
 
     !> Registers every test in the `random` suite.
     subroutine collect_tests_parquet_random(testsuite)
@@ -71,6 +97,7 @@ contains
             new_unittest("pf_random_resample draws WITH replacement, uniformly", test_resample_statistics), &
             new_unittest("the permutation carries no modular-domain structure a uniform one lacks", &
                 test_perm_structural), &
+
             new_unittest("pf_random_at is exactly to_real64(pf_random_bits_at)", test_bits_identity), &
             new_unittest("the integer draw shares a block with the real draw at one coordinate", &
                 test_int_shares_block), &
@@ -1095,28 +1122,56 @@ contains
     !! is precisely the case an arithmetic shift would get wrong.
     subroutine test_perm_golden(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
-        integer, parameter :: NV = 27
+        integer, parameter :: NV = 97
         integer(int64) :: sd(NV), mm(NV), kk(NV), ex(NV)
         integer :: j
         character(len=80) :: msg
 
-        sd = [20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, &
-              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, &
-              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 1_int64, 1_int64, &
-              1_int64, 1_int64, 1_int64, -7_int64, -7_int64, -7_int64, -7_int64, 20260816_int64, &
-              20260816_int64, 20260816_int64, 20260816_int64]
-        mm = [100_int64, 100_int64, 100_int64, 100_int64, 100_int64, 100_int64, 5_int64, 5_int64, &
-              5_int64, 5_int64, 5_int64, 7_int64, 7_int64, 7_int64, 1000_int64, 1000_int64, &
-              1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, &
-              4000000000_int64, 4000000000_int64, 4000000000_int64, 4000000000_int64]
-        kk = [1_int64, 2_int64, 3_int64, 50_int64, 99_int64, 100_int64, 1_int64, 2_int64, 3_int64, &
-              4_int64, 5_int64, 1_int64, 4_int64, 7_int64, 1_int64, 2_int64, 500_int64, 999_int64, &
-              1000_int64, 1_int64, 2_int64, 500_int64, 1000_int64, 1_int64, 2_int64, &
-              3999999999_int64, 4000000000_int64]
-        ex = [50_int64, 57_int64, 15_int64, 70_int64, 60_int64, 63_int64, 1_int64, 5_int64, &
-              4_int64, 2_int64, 3_int64, 7_int64, 1_int64, 6_int64, 879_int64, 530_int64, &
-              65_int64, 176_int64, 547_int64, 614_int64, 185_int64, 562_int64, 298_int64, &
-              2145434036_int64, 2404499848_int64, 2116569574_int64, 6342502_int64]
+        sd = [20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 20260816_int64, 1_int64,  &
+              1_int64, 1_int64, 1_int64, 1_int64, -7_int64, -7_int64, -7_int64, -7_int64, 20260816_int64, 20260816_int64,  &
+              20260816_int64, 20260816_int64]
+        mm = [5_int64, 5_int64, 5_int64, 5_int64, 5_int64, 7_int64, 7_int64, 7_int64, 7_int64, 7_int64, 7_int64, 7_int64,  &
+              20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64,  &
+              20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64, 20_int64,  &
+              21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64,  &
+              21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64, 21_int64,  &
+              21_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64,  &
+              25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64,  &
+              25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 25_int64, 100_int64, 100_int64, 100_int64, 100_int64,  &
+              100_int64, 100_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64, 1000_int64,  &
+              1000_int64, 1000_int64, 4000000000_int64, 4000000000_int64, 4000000000_int64, 4000000000_int64]
+        kk = [1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64, 7_int64,  &
+              1_int64, 2_int64, 3_int64, 4_int64, 5_int64, 6_int64, 7_int64, 8_int64, 9_int64, 10_int64, 11_int64,  &
+              12_int64, 13_int64, 14_int64, 15_int64, 16_int64, 17_int64, 18_int64, 19_int64, 20_int64, 1_int64, 2_int64,  &
+              3_int64, 4_int64, 5_int64, 6_int64, 7_int64, 8_int64, 9_int64, 10_int64, 11_int64, 12_int64, 13_int64,  &
+              14_int64, 15_int64, 16_int64, 17_int64, 18_int64, 19_int64, 20_int64, 21_int64, 1_int64, 2_int64, 3_int64,  &
+              4_int64, 5_int64, 6_int64, 7_int64, 8_int64, 9_int64, 10_int64, 11_int64, 12_int64, 13_int64, 14_int64,  &
+              15_int64, 16_int64, 17_int64, 18_int64, 19_int64, 20_int64, 21_int64, 22_int64, 23_int64, 24_int64,  &
+              25_int64, 1_int64, 2_int64, 3_int64, 50_int64, 99_int64, 100_int64, 1_int64, 2_int64, 500_int64, 999_int64,  &
+              1000_int64, 1_int64, 2_int64, 500_int64, 1000_int64, 1_int64, 2_int64, 3999999999_int64, 4000000000_int64]
+        ex = [3_int64, 2_int64, 1_int64, 5_int64, 4_int64, 6_int64, 2_int64, 1_int64, 7_int64, 4_int64, 3_int64, 5_int64,  &
+              19_int64, 11_int64, 15_int64, 10_int64, 17_int64, 20_int64, 2_int64, 18_int64, 4_int64, 13_int64, 5_int64,  &
+              3_int64, 8_int64, 14_int64, 6_int64, 16_int64, 12_int64, 7_int64, 9_int64, 1_int64, 14_int64, 11_int64,  &
+              20_int64, 21_int64, 5_int64, 17_int64, 15_int64, 18_int64, 3_int64, 16_int64, 1_int64, 19_int64, 6_int64,  &
+              7_int64, 10_int64, 4_int64, 2_int64, 12_int64, 9_int64, 8_int64, 13_int64, 14_int64, 11_int64, 24_int64,  &
+              21_int64, 5_int64, 17_int64, 15_int64, 22_int64, 3_int64, 16_int64, 1_int64, 19_int64, 6_int64, 7_int64,  &
+              10_int64, 4_int64, 2_int64, 12_int64, 9_int64, 25_int64, 13_int64, 23_int64, 18_int64, 20_int64, 8_int64,  &
+              19_int64, 72_int64, 46_int64, 37_int64, 35_int64, 4_int64, 29_int64, 762_int64, 923_int64, 152_int64,  &
+              630_int64, 397_int64, 111_int64, 255_int64, 552_int64, 2365426987_int64, 248549828_int64, 1963187087_int64,  &
+              469158413_int64]
 
         do j = 1, NV
             if (pf_random_perm_at(sd(j), mm(j), kk(j)) /= ex(j)) then
@@ -1485,8 +1540,17 @@ contains
     subroutine test_perm_bulk(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: SD = 20260817_int64
+        ! **63, 64, 65, 127, 128 and 129 are the bulk fill's BLOCK boundary** (`perm_block` = 64),
+        ! and they are here because the fill enciphers a block of elements at a time rather than one
+        ! element: a partial final block, an exactly-full one, and a full one followed by a
+        ! single-element remainder are three different paths through the same loop, and an off-by-one
+        ! among them produces an array that is still a permutation of a different seed's worth of
+        ! values. Every one of them is above `perm_exact_max`, so they exercise the Feistel; 5, 7 and
+        ! 16 are below it and exercise the exact path, which the same assertions cover unchanged.
         integer(int64), parameter :: ms(*) = [1_int64, 2_int64, 3_int64, 5_int64, 7_int64, &
-                                              16_int64, 100_int64, 999_int64, 1000_int64, 4096_int64]
+                                              16_int64, 20_int64, 21_int64, 63_int64, 64_int64, &
+                                              65_int64, 100_int64, 127_int64, 128_int64, 129_int64, &
+                                              999_int64, 1000_int64, 4096_int64]
         integer(int64), allocatable :: p64(:), s64(:), t64(:)
         integer(int32), allocatable :: p32(:), s32(:)
         integer(int64) :: m, k, n
@@ -1729,6 +1793,520 @@ contains
             end if
         end do
     end subroutine test_perm_structural
+
+    ! ==========================================================================================
+    ! The permutation's UNIFORMITY over S_m -- the layer that four rounds got past
+    ! ==========================================================================================
+    !
+    ! Everything below exists because `test_perm_structural` and its siblings cannot see the
+    ! defect that shipped: they are MARGINAL, asking about one position or one relation at a
+    ! time, and the four-round kernel was uniform in every margin while scoring z = 27729 over
+    ! the full cell space at m = 5. Two rules follow, and both are properties of the tests
+    ! rather than of the code:
+    !
+    !   * **Every test here carries a negative control**, run through the debug hooks in the
+    !     published `/v1` configuration -- four rounds, no parity correction, no exact path. A
+    !     uniformity test that only ever sees a clean kernel cannot distinguish a correct kernel
+    !     from a loose threshold, which is precisely the error that let four rounds through. The
+    !     control asserts the statistic FIRES there, so the threshold is calibrated by
+    !     construction rather than by hope.
+    !   * **Sizes are small, odd or odd-square, never an even square.** `test_perm_structural`
+    !     runs at m = 1024, where the parity lock does not exist and the mixing deficit is
+    !     invisible to the relation it measures. A test added at 1024 would pass against the
+    !     unfixed kernel.
+
+    !> `n!` for `n <= 20`, the sizes the exact path covers. Used to size the cell spaces below.
+    pure function fact_of(n) result(f)
+        integer, intent(in) :: n                    !! `0 <= n <= 20`
+        integer(int64) :: f                         !! `n!`, which fits an int64 up to n = 20
+        integer :: i
+        f = 1_int64
+        do i = 2, n
+            f = f * int(i, int64)
+        end do
+    end function fact_of
+
+    !> The Lehmer rank of a permutation of `1 .. m`, in `[0, m!)`. Inverse of the unranking.
+    pure function lehmer_rank(p, m) result(r)
+        integer(int64), intent(in) :: p(:)          !! a permutation of `1 .. m`
+        integer, intent(in) :: m                    !! its size, at most 20
+        integer(int64) :: r                         !! the rank, in `[0, m!)`
+        integer :: i, j, c
+        r = 0_int64
+        do i = 1, m
+            c = 0
+            do j = i + 1, m
+                if (p(j) < p(i)) c = c + 1
+            end do
+            r = r + int(c, int64) * fact_of(m - i)
+        end do
+    end function lehmer_rank
+
+    !> `.true.` when the permutation is ODD. `parity = (m - cycles) mod 2`, which is `O(m)`.
+    !!
+    !! The cycle form rather than counting inversions: inversions are `O(m**2)`, and this is
+    !! evaluated once per seed at m up to 81.
+    pure function perm_is_odd(p, m) result(odd)
+        integer(int64), intent(in) :: p(:)          !! a permutation of `1 .. m`
+        integer, intent(in) :: m                    !! its size
+        logical :: odd                              !! `.true.` when the permutation is odd
+        logical :: seen(m)
+        integer :: i, j, cycles
+        seen = .false.
+        cycles = 0
+        do i = 1, m
+            if (seen(i)) cycle
+            cycles = cycles + 1
+            j = i
+            do while (.not. seen(j))
+                seen(j) = .true.
+                j = int(p(j))
+            end do
+        end do
+        odd = mod(m - cycles, 2) == 1
+    end function perm_is_odd
+
+    !> The chi-square z-score of a count vector against a uniform expectation.
+    !!
+    !! `z = (chi2 - dof) / sqrt(2*dof)`, which is standard normal for large `dof`. **`z` grows
+    !! LINEARLY with the ensemble size for a fixed bias**, which is why every caller here sweeps
+    !! two ensemble sizes rather than trusting one: "clean at N" only ever means "biased below
+    !! this N's resolution", and reading a single N is how both 10 and 16 rounds were once
+    !! declared sufficient when they were not.
+    pure function chi2_z(counts, total) result(z)
+        integer, intent(in) :: counts(:)            !! observed counts, one per cell
+        integer(int64), intent(in) :: total         !! their sum
+        real(real64) :: z                           !! the standardised chi-square
+        real(real64) :: expect, chi2, d
+        integer :: i
+        expect = real(total, real64) / real(size(counts), real64)
+        chi2 = 0.0_real64
+        do i = 1, size(counts)
+            d = real(counts(i), real64) - expect
+            chi2 = chi2 + d * d / expect
+        end do
+        z = (chi2 - real(size(counts) - 1, real64)) / sqrt(2.0_real64 * real(size(counts) - 1, real64))
+    end function chi2_z
+
+    !> Puts the permutation kernel into the published `/v1` configuration, or back to the default.
+    !!
+    !! Four rounds, no parity correction and no exact path IS the kernel that shipped as
+    !! `feistel-mix2-4/zaxzb/v1`, confirmed by that release's own golden vectors reproducing
+    !! exactly under these three hooks. So a negative control taken here is a measurement of a
+    !! kernel that really existed, not of an invented straw man.
+    subroutine perm_legacy_mode(on)
+        logical, intent(in) :: on                   !! `.true.` selects the `/v1` kernel
+        if (on) then
+            call parquet_debug_set_perm_rounds(4)
+            call parquet_debug_set_perm_parity(.false.)
+            call parquet_debug_set_perm_force_feistel(.true.)
+        else
+            call parquet_debug_set_perm_rounds(0)
+            call parquet_debug_set_perm_parity(.true.)
+            call parquet_debug_set_perm_force_feistel(.false.)
+        end if
+    end subroutine perm_legacy_mode
+
+    !> One all-cells chi-square: every one of the `m!` permutations is a cell.
+    subroutine all_cells_z(m, nseed, z)
+        integer, intent(in) :: m                    !! population size, at most 8
+        integer(int64), intent(in) :: nseed         !! how many seeds to draw a permutation from
+        real(real64), intent(out) :: z              !! the standardised chi-square
+        integer, allocatable :: counts(:)
+        integer(int64) :: p(m), s
+        integer :: cell
+        allocate (counts(int(fact_of(m))))
+        counts = 0
+        do s = 1_int64, nseed
+            call pf_random_permutation(p, s * 2654435761_int64)
+            cell = int(lehmer_rank(p, m)) + 1
+            counts(cell) = counts(cell) + 1
+        end do
+        z = chi2_z(counts, nseed)
+        deallocate (counts)
+    end subroutine all_cells_z
+
+    !> The same statistic over a genuinely uniform permutation, as the calibration oracle.
+    !!
+    !! Fisher-Yates driven by `pf_random_int_at`, which is exactly uniform over any range, so this
+    !! arm is uniform over `S_m` by construction. **A null that is not itself verified will quietly
+    !! excuse a real failure**, which is why it is asserted rather than merely available.
+    subroutine all_cells_z_fisher_yates(m, nseed, z)
+        integer, intent(in) :: m                    !! population size, at most 8
+        integer(int64), intent(in) :: nseed         !! how many shuffles
+        real(real64), intent(out) :: z              !! the standardised chi-square
+        integer, allocatable :: counts(:)
+        integer(int64) :: p(m), s, tmp
+        integer :: i, j, cell
+        allocate (counts(int(fact_of(m))))
+        counts = 0
+        do s = 1_int64, nseed
+            do i = 1, m
+                p(i) = int(i, int64)
+            end do
+            do i = m, 2, -1
+                j = int(pf_random_int_at(s, int(i, int64), 1_int64, int(i, int64)))
+                tmp = p(i)
+                p(i) = p(j)
+                p(j) = tmp
+            end do
+            cell = int(lehmer_rank(p, m)) + 1
+            counts(cell) = counts(cell) + 1
+        end do
+        z = chi2_z(counts, nseed)
+        deallocate (counts)
+    end subroutine all_cells_z_fisher_yates
+
+    !> The ordered `k`-tuple statistic: the images of positions `1 .. k`, ranked exactly.
+    !!
+    !! Exhaustive at any `m` -- the cell space is `m(m-1)...(m-k+1)` rather than `m!` -- which is
+    !! what lets an ORDER-4 statistic reach the sizes the Feistel actually serves. `k = 2` is
+    !! computed from the same permutations in the same pass, and is the negative control: it must
+    !! fail to detect what `k = 4` catches, which is what shows the test's power comes from the
+    !! order of the statistic and not from the ensemble size.
+    subroutine ktuple_z(m, nseed, z4, z2)
+        integer, intent(in) :: m                    !! population size, at least 4
+        integer(int64), intent(in) :: nseed         !! how many permutations to draw
+        real(real64), intent(out) :: z4             !! the order-4 statistic
+        real(real64), intent(out) :: z2             !! the order-2 statistic, on the same data
+        integer, allocatable :: c4(:), c2(:)
+        integer(int64) :: p(4), s
+        integer :: avail(m), i, t, pos, idx4, idx2, nav
+        allocate (c4(m * (m - 1) * (m - 2) * (m - 3)), c2(m * (m - 1)))
+        c4 = 0
+        c2 = 0
+        do s = 1_int64, nseed
+            ! A subset IS a prefix of the permutation, so this is `p(1:4)` at a cost of four
+            ! elements rather than `m` -- which is what makes an order-4 statistic affordable at
+            ! m = 49 at all, and exercises the API a caller would actually reach for here.
+            call pf_random_subset(p, int(m, int64), s * 2654435761_int64)
+            do i = 1, m
+                avail(i) = i
+            end do
+            nav = m
+            idx4 = 0
+            idx2 = 0
+            do t = 1, 4
+                pos = 1
+                do i = 1, nav
+                    if (avail(i) == int(p(t))) pos = i
+                end do
+                idx4 = idx4 * nav + (pos - 1)
+                if (t <= 2) idx2 = idx2 * nav + (pos - 1)
+                do i = pos, nav - 1
+                    avail(i) = avail(i + 1)
+                end do
+                nav = nav - 1
+            end do
+            c4(idx4 + 1) = c4(idx4 + 1) + 1
+            c2(idx2 + 1) = c2(idx2 + 1) + 1
+        end do
+        z4 = chi2_z(c4, nseed)
+        z2 = chi2_z(c2, nseed)
+        deallocate (c4, c2)
+    end subroutine ktuple_z
+
+    !> The order-4 RELATIVE-ORDER pattern of positions 1..4: 24 cells, uniform at any `m`.
+    !!
+    !! The cheap sibling of `ktuple_z`, for sizes where the exact cell space is too large to fill.
+    !! It aggregates cells and so has less power, which is the trade -- it is here to give the
+    !! larger odd squares a standing order-4 check rather than to be the sharp instrument.
+    subroutine pattern_z(m, nseed, z)
+        integer, intent(in) :: m                    !! population size, at least 4
+        integer(int64), intent(in) :: nseed         !! how many permutations to draw
+        real(real64), intent(out) :: z              !! the standardised chi-square over 24 cells
+        integer, parameter :: FW(4) = [6, 2, 1, 1]  ! 3!, 2!, 1!, 0! -- the Lehmer place values
+        integer :: counts(24), i, j, c, idx
+        integer(int64) :: p(4), s
+        counts = 0
+        do s = 1_int64, nseed
+            call pf_random_subset(p, int(m, int64), s * 2654435761_int64)
+            idx = 0                                 ! the Lehmer rank of the 4-element pattern
+            do i = 1, 4
+                c = 0
+                do j = i + 1, 4
+                    if (p(j) < p(i)) c = c + 1
+                end do
+                idx = idx + c * FW(i)
+            end do
+            counts(idx + 1) = counts(idx + 1) + 1
+        end do
+        z = chi2_z(counts, nseed)
+    end subroutine pattern_z
+
+    !> **The all-cells uniformity test: the one that catches a mixing deficit.**
+    !!
+    !! Every one of the `m!` permutations is a cell, so this is the complete distribution rather
+    !! than a margin of it -- and it is the only statistic here that scores the shipped four-round
+    !! kernel at `z = 27729`. Three things are asserted together, and dropping any one of them
+    !! would leave the test unable to say what it currently says:
+    !!
+    !!   1. **The ensemble size is swept.** `z` grows linearly with N for a fixed bias, so a single
+    !!      N cannot tell a clean kernel from one two rounds short. Both sizes must pass.
+    !!   2. **A Fisher-Yates arm is measured on the same statistic.** It is exactly uniform by
+    !!      construction, so it calibrates the threshold; without it a failure could always be
+    !!      blamed on the statistic.
+    !!   3. **The `/v1` kernel is measured too, and must FAIL.** That is what demonstrates the
+    !!      threshold has power rather than merely being satisfiable.
+    subroutine test_perm_all_cells(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: z1, z2, zfy, zlegacy
+        character(len=160) :: msg
+
+        ! Fisher-Yates first: a null that is not verified will excuse a real failure.
+        call all_cells_z_fisher_yates(6, 60000_int64, zfy)
+        write (msg, '(a,f0.2)') "the Fisher-Yates calibration arm is not uniform at m=6, z=", zfy
+        call check(error, abs(zfy) < 5.0_real64, trim(msg))
+        if (allocated(error)) return
+
+        do_sizes: block
+            integer :: m
+            do m = 5, 7
+                call all_cells_z(m, 20_int64 * fact_of(m), z1)
+                call all_cells_z(m, 80_int64 * fact_of(m), z2)
+                write (msg, '(a,i0,a,f0.2)') "the permutation is not uniform over all m! cells at m=", &
+                    m, ", z=", z1
+                call check(error, abs(z1) < 5.0_real64, trim(msg))
+                if (allocated(error)) return
+                ! The sweep: a fixed bias makes z grow with N, so the larger ensemble is the test.
+                write (msg, '(a,i0,a,f0.2,a,f0.2)') "z grows with the ensemble at m=", m, &
+                    ": z=", z1, " at 20 m! seeds becomes ", z2
+                call check(error, abs(z2) < 5.0_real64, trim(msg))
+                if (allocated(error)) return
+            end do
+        end block do_sizes
+
+        ! The negative control. Without it this whole test could pass with a threshold of 10**6.
+        call perm_legacy_mode(.true.)
+        call all_cells_z(5, 20_int64 * fact_of(5), zlegacy)
+        call perm_legacy_mode(.false.)
+        write (msg, '(a,f0.2,a)') "the all-cells test does not fire against the /v1 kernel (z=", &
+            zlegacy, "), so it has no power"
+        call check(error, abs(zlegacy) > 50.0_real64, trim(msg))
+    end subroutine test_perm_all_cells
+
+    !> **The parity test: the one that catches a whole-coset loss.**
+    !!
+    !! At `m = q**2` with `q` odd the Feistel cannot reach a single odd permutation -- exactly half
+    !! of `S_m` is unreachable at any round count -- and nothing else in this suite can see it.
+    !! Fixed points, cycle counts, position marginals and inversions are all uniform on the half
+    !! that remains. Against the `/v1` kernel this reads exactly 0.0 %, so the control fails hard
+    !! rather than marginally.
+    !!
+    !! `m = 9` is included although it is answered exactly: the exact path has to be shown to reach
+    !! both cosets too, and it is the size where the lock was found.
+    subroutine test_perm_parity(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: SIZES(4) = [9, 25, 49, 81]
+        integer(int64), parameter :: NS = 40000_int64
+        real(real64) :: z
+        integer :: i, odd
+        character(len=160) :: msg
+
+        do i = 1, 4
+            call odd_fraction(SIZES(i), NS, odd)
+            z = (real(odd, real64) - 0.5_real64 * real(NS, real64)) / sqrt(0.25_real64 * real(NS, real64))
+            write (msg, '(a,i0,a,f0.4,a,f0.1)') "odd permutations are not half of them at m=", &
+                SIZES(i), ": fraction ", real(odd, real64) / real(NS, real64), ", z=", z
+            call check(error, abs(z) < 5.0_real64, trim(msg))
+            if (allocated(error)) return
+        end do
+
+        ! The control: every one of these four is an odd square, so /v1 reaches no odd permutation
+        ! at all and the fraction is exactly zero.
+        call perm_legacy_mode(.true.)
+        call odd_fraction(25, 2000_int64, odd)
+        call perm_legacy_mode(.false.)
+        write (msg, '(a,i0,a)') "the /v1 kernel produced ", odd, &
+            " odd permutations at m=25; it can produce none, so this test has no power"
+        call check(error, odd == 0, trim(msg))
+    end subroutine test_perm_parity
+
+    !> How many of `nseed` permutations of `1 .. m` are odd.
+    subroutine odd_fraction(m, nseed, odd)
+        integer, intent(in) :: m                    !! population size
+        integer(int64), intent(in) :: nseed         !! how many seeds
+        integer, intent(out) :: odd                 !! how many were odd permutations
+        integer(int64) :: p(m), s
+        odd = 0
+        do s = 1_int64, nseed
+            call pf_random_permutation(p, s * 2654435761_int64)
+            if (perm_is_odd(p, m)) odd = odd + 1
+        end do
+    end subroutine odd_fraction
+
+    !> **The coverage test: the sharpest binary statement available at a small `m`.**
+    !!
+    !! Over `15 x m!` seeds a uniform construction reaches every one of the `m!` permutations with
+    !! probability `1 - m! exp(-15)`, i.e. essentially always. `/v1` reaches 40.67 % of them at
+    !! m = 8, which is not a marginal failure but a structural one.
+    subroutine test_perm_coverage(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: frac, frac_legacy
+        character(len=160) :: msg
+
+        call coverage_fraction(8, 15_int64 * fact_of(8), frac)
+        write (msg, '(a,f0.2,a)') "the permutation reaches only ", 100.0_real64 * frac, &
+            " % of the 8! permutations over 15 x 8! seeds"
+        call check(error, frac >= 1.0_real64, trim(msg))
+        if (allocated(error)) return
+
+        call perm_legacy_mode(.true.)
+        call coverage_fraction(8, 15_int64 * fact_of(8), frac_legacy)
+        call perm_legacy_mode(.false.)
+        write (msg, '(a,f0.2,a)') "the /v1 kernel covered ", 100.0_real64 * frac_legacy, &
+            " % of S_8, so the coverage test cannot tell the two kernels apart"
+        call check(error, frac_legacy < 0.9_real64, trim(msg))
+    end subroutine test_perm_coverage
+
+    !> The fraction of the `m!` permutations reached over `nseed` seeds.
+    subroutine coverage_fraction(m, nseed, frac)
+        integer, intent(in) :: m                    !! population size, at most 8
+        integer(int64), intent(in) :: nseed         !! how many seeds
+        real(real64), intent(out) :: frac           !! the fraction of `m!` cells reached
+        logical, allocatable :: seen(:)
+        integer(int64) :: p(m), s
+        integer :: hit, i
+        allocate (seen(int(fact_of(m))))
+        seen = .false.
+        do s = 1_int64, nseed
+            call pf_random_permutation(p, s * 2654435761_int64)
+            seen(int(lehmer_rank(p, m)) + 1) = .true.
+        end do
+        hit = 0
+        do i = 1, size(seen)
+            if (seen(i)) hit = hit + 1
+        end do
+        frac = real(hit, real64) / real(size(seen), real64)
+        deallocate (seen)
+    end subroutine coverage_fraction
+
+    !> **The order-4 test: the only exhaustive instrument that reaches `m >= 21`.**
+    !!
+    !! Every size an all-cells test can enumerate is also a size the exact path answers, so above
+    !! the threshold the cell space has to be cut down rather than filled. Ranking the ordered
+    !! images of four positions does that exactly: `m(m-1)(m-2)(m-3)` cells, no approximation.
+    !!
+    !! **Its negative control is the ORDER of the statistic, not the ensemble size.** At eight
+    !! rounds `k = 4` fires and `k = 2` -- computed from the same permutations, in the same pass --
+    !! does not. That is the demonstration that a marginal test proves nothing even at a
+    !! well-chosen `m`, which is the amendment `feature_risks.md` records.
+    subroutine test_perm_ktuple(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: z4, z2, zp
+        character(len=160) :: msg
+
+        ! The shipped kernel, at the smallest population that reaches the Feistel at all.
+        call ktuple_z(21, 750000_int64, z4, z2)
+        write (msg, '(a,f0.2)') "the order-4 tuple statistic detects structure at m=21, z=", z4
+        call check(error, abs(z4) < 5.0_real64, trim(msg))
+        if (allocated(error)) return
+
+        ! Standing order-4 coverage at two larger odd squares, where the exact cell space is too
+        ! large to fill and the pattern statistic is what is affordable.
+        call pattern_z(25, 200000_int64, zp)
+        write (msg, '(a,f0.2)') "the order-4 pattern statistic detects structure at m=25, z=", zp
+        call check(error, abs(zp) < 5.0_real64, trim(msg))
+        if (allocated(error)) return
+        call pattern_z(49, 200000_int64, zp)
+        write (msg, '(a,f0.2)') "the order-4 pattern statistic detects structure at m=49, z=", zp
+        call check(error, abs(zp) < 5.0_real64, trim(msg))
+        if (allocated(error)) return
+
+        ! **The round count, validated at the hardest half-width the kernel can ever meet.**
+        ! The requirement is set by `min(a, b)`, not by `m`: m=8 gives a=b=3, and half-width 3 is
+        ! the class that needs 16 rounds. No `m >= 21` is that narrow -- the minimum over the whole
+        ! range is 5 -- so forcing the Feistel down to m=8 measures a strictly harder case than
+        ! anything the shipped kernel will be asked for, which is what the margin is anchored on.
+        call parquet_debug_set_perm_force_feistel(.true.)
+        call ktuple_z(8, 200000_int64, z4, z2)
+        write (msg, '(a,f0.2)') "16 rounds is not enough at half-width 3 (forced m=8), z=", z4
+        call check(error, abs(z4) < 5.0_real64, trim(msg))
+        if (allocated(error)) then
+            call perm_legacy_mode(.false.)
+            return
+        end if
+
+        ! The control, at that same size. Eight rounds is where the ORDER of the statistic matters:
+        ! k=4 sees the deficit and k=2, computed from the same permutations in the same pass, does
+        ! not. That is the demonstration that a marginal test proves nothing even at a well-chosen
+        ! `m` -- and note it has to be sited HERE and not at m=21, because at half-width 5 eight
+        ! rounds is genuinely clean (measured z=0.92), which is exactly why 16 leaves margin.
+        call parquet_debug_set_perm_rounds(8)
+        call ktuple_z(8, 200000_int64, z4, z2)
+        call perm_legacy_mode(.false.)
+        write (msg, '(a,f0.2,a)') "the order-4 statistic does not fire against 8 rounds at m=8 (z=", &
+            z4, "), so it has no power"
+        call check(error, abs(z4) > 20.0_real64, trim(msg))
+        if (allocated(error)) return
+        write (msg, '(a,f0.2,a,f0.2)') "the order-2 statistic ALSO fires at 8 rounds (z=", z2, &
+            "), so the control does not isolate the statistic's order; k=4 scored ", z4
+        call check(error, abs(z2) < 5.0_real64, trim(msg))
+    end subroutine test_perm_ktuple
+
+    !> The exact path: where its boundary is, and that its rank really is uniform.
+    !!
+    !! Different in kind from everything above. `m <= 20` is uniform **by construction** -- an
+    !! exactly uniform rank composed with a bijection -- so a distributional test there can only
+    !! confirm what the construction already guarantees. What is worth asserting instead is that
+    !! the two halves of the construction are the ones claimed: that the boundary sits exactly at
+    !! `perm_exact_max`, and that the rank driving it is uniform over `[0, 20!)` -- the largest
+    !! factorial an int64 holds, and the one case that reaches `pf_random_int_at`'s WIDE grid.
+    subroutine test_perm_exact(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: NB = 512
+        integer(int64), parameter :: NS = 200000_int64
+        integer :: counts(NB), rounds, exact_max, i, b
+        logical :: parity
+        integer(int64) :: p20a(20), p20b(20), p21a(21), p21b(21), s, rank
+        real(real64) :: z
+        character(len=160) :: msg
+
+        call parquet_debug_perm_config(rounds, parity, exact_max)
+        call check(error, exact_max == 20, "the exact path's threshold is not 20")
+        if (allocated(error)) return
+        call check(error, rounds == 16, "the compiled round count is not 16")
+        if (allocated(error)) return
+        call check(error, parity, "the parity correction is not enabled by default")
+        if (allocated(error)) return
+
+        ! Where the boundary is, observed rather than asserted from a constant: forcing the Feistel
+        ! must change m=20 and must leave m=21 alone, because 21 was never on the exact path.
+        call pf_random_permutation(p20a, 20260816_int64)
+        call pf_random_permutation(p21a, 20260816_int64)
+        call parquet_debug_set_perm_force_feistel(.true.)
+        call pf_random_permutation(p20b, 20260816_int64)
+        call pf_random_permutation(p21b, 20260816_int64)
+        call parquet_debug_set_perm_force_feistel(.false.)
+        call check(error, any(p20a /= p20b), "m=20 is not on the exact path: forcing the Feistel changed nothing")
+        if (allocated(error)) return
+        call check(error, all(p21a == p21b), "m=21 is on the exact path: forcing the Feistel changed it")
+        if (allocated(error)) return
+
+        ! The rank at the largest exact size, bucketed. 20! needs the wide grid, so this is also
+        ! the only place the exact path's draw exercises the 64-bit rejection rule.
+        counts = 0
+        do s = 1_int64, NS
+            call pf_random_permutation(p20a, s * 2654435761_int64)
+            rank = lehmer_rank(p20a, 20)
+            b = int(rank / (fact_of(20) / int(NB, int64))) + 1
+            if (b > NB) b = NB
+            counts(b) = counts(b) + 1
+        end do
+        z = chi2_z(counts, NS)
+        write (msg, '(a,f0.2)') "the exact path's rank is not uniform over [0, 20!), z=", z
+        call check(error, abs(z) < 5.0_real64, trim(msg))
+        if (allocated(error)) return
+
+        ! And it must be a permutation at every exact size, including the largest.
+        do i = 2, 20
+            call pf_random_permutation(p20a(1:i), 987654321_int64)
+            call check(error, sum(p20a(1:i)) == int(i, int64) * int(i + 1, int64) / 2_int64, &
+                "the exact path did not return a permutation")
+            if (allocated(error)) return
+        end do
+        call check(error, .true., "unreachable")
+    end subroutine test_perm_exact
 
     !> The four structural relations, over all pairs sharing an input component. `y` is 0-based.
     !!

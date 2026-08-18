@@ -57,6 +57,8 @@ CHECKS=(
     "python3 tools/generate_user_table_code.py --check"
     "python3 tools/generate_random_golden_vectors.py --self-test"
     "python3 tools/generate_random_golden_vectors.py --check"
+    "python3 tools/generate_random_perm_vectors.py --self-test"
+    "python3 tools/generate_random_perm_vectors.py --check"
 )
 
 if ! command -v python3 >/dev/null 2>&1; then

@@ -84,6 +84,10 @@ module parquet_random
     public :: parquet_debug_random_uses_int128
     public :: parquet_debug_random_bulk_threads
     public :: parquet_debug_random_block
+    public :: parquet_debug_set_perm_rounds
+    public :: parquet_debug_set_perm_parity
+    public :: parquet_debug_set_perm_force_feistel
+    public :: parquet_debug_perm_config
     public :: pf_random_perm_algorithm
     public :: pf_random_perm_at
     public :: pf_random_permutation
@@ -179,23 +183,86 @@ module parquet_random
     !! when only the permutation had. This one covers exactly five things and nothing else: the
     !! construction (a Feistel network with cycle-walking), the width rule (`Z_a x Z_b` with
     !! `a = ceil(sqrt(m))`), the round count, the round function, and the round-key derivation.
-    character(len=*), parameter :: pf_random_perm_algorithm = "feistel-mix2-4/zaxzb/v1"
+    !!
+    !! **The construction is piecewise and the identifier says so.** `exact20` records that
+    !! `m <= perm_exact_max` does not use the Feistel at all -- it is ranked and unranked, and is
+    !! therefore exactly uniform rather than approximately so -- while `16p` records the round count
+    !! and the parity correction the Feistel carries above that threshold. All four facts fix the
+    !! answer, so all four belong in the string; a program that recorded `feistel-mix2-4/zaxzb/v1`
+    !! must see a different string, because every value it stored has changed.
+    character(len=*), parameter :: pf_random_perm_algorithm = "feistel-mix2-16p/zaxzb/exact20/v2"
 
-    !> Feistel rounds. **Four, and it must stay even.**
+    !> Feistel rounds. **Sixteen, and it must stay even.**
     !!
     !! Even because the two factors swap places every round, so an odd count leaves the state in
     !! `Z_b x Z_a` and the output encoded against transposed factors -- the value would depend on the
     !! parity of the round count in a way nothing else in this module does.
     !!
-    !! Four because it is where the evidence puts the boundary, measured rather than assumed. A
-    !! structural distinguisher over the raw domain (all pairs sharing an input component, asking
-    !! whether the outputs share one, calibrated against a genuinely uniform permutation) detects
-    !! **two** rounds at |z| ~ 165-194 -- it is exactly 0, since the output's left component is then
-    !! `(l + F1(r)) mod a` and distinct `l` cannot collide -- and detects **three** rounds in every
-    !! one of six independent key sets, always in the same relation and always in the same direction.
-    !! At four rounds no relation is consistently off (|z| 1.05-4.03 with no repetition), and six
-    !! buys nothing measurable. Luby-Rackoff puts the theoretical boundary in the same place.
-    integer, parameter :: perm_rounds = 4
+    !! **Sixteen because four was measured wrong, and because the sizes that would have forced a
+    !! higher count no longer reach this kernel at all.** Four was chosen against a *marginal*
+    !! distinguisher -- pairs of inputs sharing a component, asking whether their outputs share one
+    !! -- and a marginal statistic cannot see the deficit that matters. An all-cells chi-square over
+    !! every one of the `m!` permutations scores **z = 27729 at m = 5** against four rounds: the
+    !! construction is a long way from uniform at small `m`, and nothing that looks at one position
+    !! at a time can tell.
+    !!
+    !! The requirement is set by the *narrower* Feistel half, not by `m`: exhaustively, half-width 2
+    !! needs 20 rounds, **half-width 3 needs 16**, and half-width 5 and above is clean at 8. Because
+    !! `m <= perm_exact_max` is answered exactly (see `perm_exact`), every `m` that reaches this
+    !! kernel has `min(a, b) >= 5` -- so 16 gives the network the count a strictly *harder* class
+    !! than any it can meet requires, two half-width classes of margin, anchored on an exhaustive
+    !! measurement rather than on an extrapolation.
+    !!
+    !! **This is correctness, not tuning, and it may not become a setting** -- see `perm_parity_bit`
+    !! for the other half of the same statement, and `feature_risks.md` for what fails silently if
+    !! either is lowered. `parquet_debug_set_perm_rounds` exists so a test can weaken it deliberately
+    !! and show that the gates have power; nothing in normal operation may vary it.
+    integer, parameter :: perm_rounds = 16
+
+    !> Largest `m` answered EXACTLY, by ranking rather than by enciphering. See `perm_exact`.
+    !!
+    !! `20! = 2432902008176640000` fits an `integer(int64)` and `21!` does not, so this is arithmetic
+    !! rather than policy: it is the largest population whose permutations can be addressed one-to-one
+    !! by a 64-bit rank. **It is not a tuning knob and must never become one** -- it fixes what the
+    !! library answers, which is why it appears in `pf_random_perm_algorithm`.
+    integer, parameter :: perm_exact_max = 20
+
+    !> `0!` through `perm_exact_max!`, for the ranking. Every entry is below `huge(int64)`.
+    integer(int64), parameter :: perm_fact(0:perm_exact_max) = [ &
+        1_int64, 1_int64, 2_int64, 6_int64, &
+        24_int64, 120_int64, 720_int64, 5040_int64, &
+        40320_int64, 362880_int64, 3628800_int64, 39916800_int64, &
+        479001600_int64, 6227020800_int64, 87178291200_int64, 1307674368000_int64, &
+        20922789888000_int64, 355687428096000_int64, 6402373705728000_int64, 121645100408832000_int64, &
+        2432902008176640000_int64]
+
+    !> `pf_random_key` label separating the permutation family's rank from every draw family.
+    !!
+    !! The exact path spends one `pf_random_int_at` draw on its rank. Taken at the caller's own seed
+    !! it would be the *same* value that caller gets from `pf_random_int_at(seed, 1, ...)`, so a
+    !! program using both would find its permutation locked to its first integer draw -- the same
+    !! class of defect as a shared grid, and invisible to every test that looks at one family alone.
+    integer(int64), parameter :: perm_family_label = 6813122891117395759_int64
+
+    !> Elements enciphered together in the bulk fill's transposed loop. **Speed only.**
+    !!
+    !! The round loop runs OUTSIDE this block and the element loop inside it, so each round is a
+    !! straight-line pass over `perm_block` independent values instead of one value's 16-round
+    !! dependency chain. That is the standard counter-mode shape and it is worth 2.07x on machine B
+    !! at plain `-O3` with **no vector instruction at all** -- pure instruction-level parallelism,
+    !! so the gain is not an ISA assumption -- and 10.77x once the compiler is allowed AVX-512.
+    !!
+    !! **It changes no value**, which is the property that lets it be chosen freely: the arithmetic
+    !! is identical and only its order is not. 64 is comfortably past the point where the chain is
+    !! hidden and still a 1.5 KB stack footprint.
+    integer, parameter :: perm_block = 64
+
+    !> Key-schedule index the parity bit is drawn from. **Fixed, and deliberately not `perm_rounds`.**
+    !!
+    !! Keying it on the effective round count would make `parquet_debug_set_perm_rounds` change two
+    !! things at once, so a round-count negative control could no longer say which of them it had
+    !! detected. A constant index one past the largest round keeps each hook to one variable.
+    integer, parameter :: perm_parity_key = perm_rounds + 1
 
     !> First `mix2` multiplier: the odd 32-bit golden-ratio constant, as used by xxHash and others.
     integer(int64), parameter :: perm_c1 = 2654435761_int64
@@ -206,9 +273,29 @@ module parquet_random
     !> Largest `a` whose square is representable, so `a * a` in `perm_factors` cannot overflow.
     integer(int64), parameter :: perm_a_max = 3037000499_int64
 
-    !> Process-wide call counter behind `pf_random_seed`, and the module's only mutable state.
-    !! Every other procedure here is a pure function of its arguments.
+    !> Process-wide call counter behind `pf_random_seed`.
     integer(int64), save :: seed_call_counter = 0_int64
+
+    ! ---- Test-only overrides of the permutation kernel ----
+    !
+    ! **These are the module's only other mutable state, they are process-global, and no library
+    ! code reads them outside the three accessors below.** They exist so a test can weaken the
+    ! kernel deliberately and demonstrate that a gate has power: a uniformity test asserting only
+    ! that the shipped configuration is clean cannot distinguish a correct kernel from a loose
+    ! test, which is exactly the error that let four rounds ship. See `parquet_debug_set_perm_rounds`.
+    !
+    ! They are read from `pure` procedures, which the standard permits -- purity forbids *defining*
+    ! a host- or use-associated variable, not referencing one. The consequence to keep in mind is
+    ! that a compiler may legally common up two calls with identical arguments across a change of
+    ! these values; every test that sets them therefore asserts the two configurations DISAGREE, so
+    ! a hoisted call fails loudly instead of quietly reporting a pass.
+
+    !> Forced Feistel round count; `0` means the compiled-in `perm_rounds`.
+    integer, save :: perm_dbg_rounds = 0
+    !> `.true.` suppresses the parity correction. See `perm_parity_bit`.
+    logical, save :: perm_dbg_no_parity = .false.
+    !> `.true.` sends `m <= perm_exact_max` through the Feistel instead of the exact path.
+    logical, save :: perm_dbg_force_feistel = .false.
 
     !> One uniform `real64` in `[0, 1)`: value `draw` (default 1) of stream `i` under `seed`.
     !!
@@ -397,10 +484,22 @@ module parquet_random
     !! the same convention `draw_or_1` uses and for the same reason: this is `pure elemental` and has
     !! no way to abort.
     !!
-    !! **It is not uniform over all `m!` permutations, and nothing with a 64-bit seed could be** --
-    !! `m!` passes `2**64` at `m = 21`. What is measured is that it is indistinguishable from a
-    !! uniform permutation under fixed-point, cycle-structure, position-uniformity, subset-membership
-    !! and structural tests; `pf_random_perm_algorithm` names the contract that fixes it.
+    !! **Uniformity comes in two grades, split at `m = 20`, and the split is visible in
+    !! `pf_random_perm_algorithm`.**
+    !!
+    !! For `m <= 20` the result is **exactly uniform over all `m!` permutations** -- one exactly
+    !! uniform rank in `[0, m!)` composed with a bijection onto `S_m`, so this is a property of the
+    !! construction rather than a measurement. 20 is where it stops because `20!` is the last
+    !! factorial an `integer(int64)` holds.
+    !!
+    !! For `m >= 21` a 64-bit seed cannot address `m!` permutations at all, so exact uniformity is
+    !! not available to *any* construction with this signature. What is measured instead is that the
+    !! result is indistinguishable from a uniform permutation under an all-cells chi-square, an
+    !! order-4 tuple statistic, a parity test over the alternating group, and fixed-point,
+    !! cycle-structure, position-uniformity, subset-membership and structural tests.
+    !!
+    !! **Consecutive `m` are independent, in both regimes.** Asking for a permutation of 5 and one of
+    !! 6 under the same seed gives two unrelated answers rather than two views of one draw.
     interface pf_random_perm_at
         module procedure pf_random_perm_at_i32
         module procedure pf_random_perm_at_i64
@@ -2394,19 +2493,32 @@ contains
         r = perm_at_impl(seed, m, k)
     end function pf_random_perm_at_i64
 
-    !> The permutation itself: split, encipher, cycle-walk, rejoin.
+    !> The permutation itself. **Two constructions, split at `perm_exact_max`.**
     !!
-    !! The walk is what turns a bijection on `[0, a*b)` into one on `[0, m)`: re-apply the network
-    !! while the value is out of range. It terminates because the network is a bijection, so every
-    !! orbit closes, and the orbit of a value below `m` must return to it. With `a*b` sitting on top
-    !! of `m` it is entered essentially never -- measured at 1.0000 applications per element at
-    !! m = 10**6, 10**7 and 10**8.
+    !! For `m <= perm_exact_max` the answer is *ranked*, not enciphered: one exactly-uniform draw in
+    !! `[0, m!)` and a Lehmer unranking, which is a bijection onto `S_m`. That composition is exactly
+    !! uniform over all `m!` permutations -- by construction, with no mixing question, no round count
+    !! and nothing to validate by measurement. See `perm_exact`.
+    !!
+    !! For `m >= perm_exact_max + 1` it is the Feistel network: split, encipher, cycle-walk, rejoin,
+    !! then the parity correction. The walk is what turns a bijection on `[0, a*b)` into one on
+    !! `[0, m)`: re-apply the network while the value is out of range. It terminates because the
+    !! network is a bijection, so every orbit closes, and the orbit of a value below `m` must return
+    !! to it. With `a*b` sitting on top of `m` it is entered essentially never -- measured at 1.0000
+    !! applications per element at m = 10**6, 10**7 and 10**8.
+    !!
+    !! **The boundary costs nothing in consistency, which is the reason it is affordable at all.**
+    !! Both sides are reached from here and from `perm_fill_i32`/`perm_fill_i64` through the *same*
+    !! two procedures, so `perm(k) == pf_random_perm_at(seed, m, k)` holds because there is one
+    !! computation rather than two that have to be kept equal by testing. And the boundary is a
+    !! compile-time constant fixed by `20! < huge(int64)`, so it cannot drift.
     pure function perm_at_impl(seed, m, k) result(r)
         integer(int64), intent(in) :: seed          !! the permutation family's seed
         integer(int64), intent(in) :: m             !! population size
         integer(int64), intent(in) :: k             !! 1-based position, not yet clamped
         integer(int64) :: r                         !! element `k`, in `[1, m]`
-        integer(int64) :: a, b, rk(perm_rounds), x, n
+        integer(int64) :: a, b, rk(perm_rounds), x, n, small(perm_exact_max)
+        integer :: nr
         n = m
         if (n < 1_int64) n = 1_int64                ! a degenerate population is one element
         x = k - 1_int64
@@ -2416,14 +2528,118 @@ contains
             r = 1_int64
             return
         end if
+        if (perm_use_exact(n)) then
+            call perm_exact(seed, n, small)
+            r = small(x + 1_int64)
+            return
+        end if
         call perm_factors(n, a, b)
-        call perm_round_keys(seed, rk)
+        nr = perm_round_count()
+        call perm_round_keys(seed, nr, rk)
         do
-            x = perm_feistel(rk, a, b, x)
+            x = perm_feistel(rk, nr, a, b, x)
             if (x < n) exit
         end do
-        r = x + 1_int64
+        r = perm_swap01(perm_parity_flip(seed), x) + 1_int64
     end function perm_at_impl
+
+    !> Whether population `m` takes the exact path. See `perm_exact` and `perm_exact_max`.
+    pure function perm_use_exact(m) result(yes)
+        integer(int64), intent(in) :: m             !! population size, at least 2
+        logical :: yes                              !! `.true.` when `m` is ranked rather than enciphered
+        yes = (m <= int(perm_exact_max, int64)) .and. .not. perm_dbg_force_feistel
+    end function perm_use_exact
+
+    !> Rounds the Feistel will actually run: `perm_rounds`, or whatever a test has forced.
+    pure function perm_round_count() result(nr)
+        integer :: nr                               !! effective round count, always at least 1
+        nr = perm_rounds
+        if (perm_dbg_rounds > 0) nr = perm_dbg_rounds
+    end function perm_round_count
+
+    !> The whole permutation of `1 .. m` for `m <= perm_exact_max`, EXACTLY uniform.
+    !!
+    !! **This is the only part of the module whose uniformity is a theorem rather than a
+    !! measurement, and it covers precisely the sizes where the Feistel was worst.** `pf_random_int_at`
+    !! is exactly uniform over any closed range -- that is what its rejection step buys -- and Lehmer
+    !! unranking is a bijection from `[0, m!)` onto `S_m`. The composition of an exactly uniform draw
+    !! with a bijection is exactly uniform, so there is nothing here for an ensemble test to find.
+    !!
+    !! **`m` is the STREAM index, not part of the key.** Reducing one candidate into `[0, 5!)` and
+    !! into `[0, 6!)` would give two ranks that are both monotone in the same 64-bit word, so a
+    !! program asking for a permutation of 5 and one of 6 under the same seed would get two strongly
+    !! correlated answers -- structure a uniform construction does not have. Separate streams are
+    !! separate Philox counters, so the ranks are independent.
+    !!
+    !! **`perm_family_label` is not optional either**: without it the rank is literally the value
+    !! `pf_random_int_at(seed, m, ...)` hands the same caller, so a program using both families would
+    !! find its permutation locked to its own integer draws.
+    !!
+    !! Cost is one draw plus `m-1` divisions and an `O(m**2)/2` selection scan, all bounded by
+    !! `perm_exact_max`; the pool lives on the stack and nothing is allocated.
+    pure subroutine perm_exact(seed, m, p)
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer(int64), intent(in) :: m             !! population size, `2 <= m <= perm_exact_max`
+        integer(int64), intent(out) :: p(perm_exact_max) !! `p(1:m)` is the permutation of `1 .. m`
+        integer(int64) :: rank, rem, d, pool(perm_exact_max)
+        integer :: i, j, mm, dd
+        mm = int(m)
+        rank = int_at_impl(key_from(seed, perm_family_label), m, 0_int64, perm_fact(mm) - 1_int64, 1_int64)
+        do i = 1, mm
+            pool(i) = int(i, int64)
+        end do
+        rem = rank
+        do i = 1, mm
+            ! `rem < (mm-i+1)!` on entry, so `d < mm-i+1` and the pool index is always in range.
+            d = rem / perm_fact(mm - i)
+            rem = rem - d * perm_fact(mm - i)
+            dd = int(d)
+            p(i) = pool(dd + 1)
+            do j = dd + 1, mm - i
+                pool(j) = pool(j + 1)
+            end do
+        end do
+        do i = mm + 1, perm_exact_max
+            p(i) = 0_int64                          ! never read; defined so nothing can read it
+        end do
+    end subroutine perm_exact
+
+    !> Whether this seed's permutation is composed with the transposition `(0 1)`.
+    !!
+    !! **This is the parity correction, and it is correctness rather than mixing.** A Feistel over
+    !! `Z_a x Z_b` cannot reach an odd permutation when `a == b` and `a` is odd: every round is a
+    !! product of `a` cyclic shifts of `Z_a` (or of `Z_b`), a cyclic shift of `Z_q` by `t` has parity
+    !! `(-1)**(q - gcd(q, t))` which is always even for odd `q`, and the half-swap between rounds is
+    !! likewise even. So at `m = 25, 49, 81, 121, ...` -- `q**2` with `q` odd -- **exactly half of
+    !! `S_m` is unreachable at any round count**, and the fraction of odd permutations reads 0.0 %.
+    !! No amount of mixing closes that; only composing with an odd permutation does.
+    !!
+    !! One transposition is enough because it flips the parity of whatever the network produced, and
+    !! the bit deciding it is unbiased: 0.4997 ones over 2 000 000 seeds, `z = -0.82`. Applying it
+    !! after the cycle walk keeps it a permutation of `[0, m)` for every `m >= 2`.
+    !!
+    !! **Do not "simplify" this away because every structural test still passes without it** -- they
+    !! all do. A whole-coset loss is invisible to fixed points, cycle counts, position marginals and
+    !! inversions alike; only a parity test sees it. See `feature_risks.md`.
+    pure function perm_parity_flip(seed) result(f)
+        integer(int64), intent(in) :: seed          !! the permutation family's seed
+        logical :: f                                !! `.true.` when outputs 0 and 1 are swapped
+        integer(int64) :: pk
+        f = .false.
+        if (perm_dbg_no_parity) return
+        pk = perm_mix2(int(perm_parity_key, int64) * perm_c1, iand(seed, M32))
+        pk = ieor(pk, perm_mix2(int(perm_parity_key, int64), iand(ishft(seed, -32), M32)))
+        f = iand(pk, 1_int64) == 1_int64
+    end function perm_parity_flip
+
+    !> Applies the parity correction to one already-walked output in `[0, m)`.
+    pure function perm_swap01(flip, y) result(z)
+        logical, intent(in) :: flip                 !! from `perm_parity_flip`
+        integer(int64), intent(in) :: y             !! an output in `[0, m)`, `m >= 2`
+        integer(int64) :: z                         !! `y`, with 0 and 1 exchanged when `flip`
+        z = y
+        if (flip .and. y <= 1_int64) z = 1_int64 - y
+    end function perm_swap01
 
     !> The width rule: `a = ceil(sqrt(m))`, `b = ceil(m/a)`, so `a*b` sits just above `m`.
     !!
@@ -2479,13 +2695,23 @@ contains
     end function perm_mix2
 
     !> The round keys, derived from the seed once per call.
-    pure subroutine perm_round_keys(seed, rk)
+    !!
+    !! Only the first `nr` are derived; the tail is zeroed rather than left undefined, so that a
+    !! forced round count cannot leave a sanitiser reading uninitialised stack. Two `perm_mix2`
+    !! evaluations per key, which is why the SCALAR path's cost is dominated by this schedule rather
+    !! than by the network -- 16 rounds is 32 evaluations of setup against 16 of work. The bulk forms
+    !! derive it once per call and so do not care.
+    pure subroutine perm_round_keys(seed, nr, rk)
         integer(int64), intent(in) :: seed          !! the permutation family's seed
-        integer(int64), intent(out) :: rk(perm_rounds)  !! one key per round
+        integer, intent(in) :: nr                   !! rounds actually to be run
+        integer(int64), intent(out) :: rk(perm_rounds)  !! one key per round; `rk(nr+1:)` is zero
         integer :: j
-        do j = 1, perm_rounds
+        do j = 1, nr
             rk(j) = perm_mix2(int(j, int64) * perm_c1, iand(seed, M32))
             rk(j) = ieor(rk(j), perm_mix2(int(j, int64), iand(ishft(seed, -32), M32)))
+        end do
+        do j = nr + 1, perm_rounds
+            rk(j) = 0_int64
         end do
     end subroutine perm_round_keys
 
@@ -2494,8 +2720,9 @@ contains
     !! Splits `x` into `(l, r)` -- the one integer division on the scalar path -- and hands off to
     !! `perm_feistel_lr`, which is where the rounds actually are. The bulk fill skips this split
     !! entirely because its loop indices already are `(l, r)`; see that function's own note.
-    pure function perm_feistel(rk, a, b, x) result(y)
+    pure function perm_feistel(rk, nr, a, b, x) result(y)
         integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
+        integer, intent(in) :: nr                   !! rounds to run
         integer(int64), intent(in) :: a             !! left factor
         integer(int64), intent(in) :: b             !! right factor
         integer(int64), intent(in) :: x             !! input in `[0, a*b)`
@@ -2503,47 +2730,81 @@ contains
         integer(int64) :: l, r
         l = x / b
         r = x - l * b
-        y = perm_feistel_lr(rk, a, b, l, r)
+        y = perm_feistel_lr(rk, nr, a, b, l, r)
     end function perm_feistel
 
     !> The rounds themselves, from an ALREADY-SPLIT input -- the shape the bulk fill uses.
     !!
-    !! **There is exactly one copy of the round loop in this module, and it is here.** The scalar
-    !! and bulk entry points differ only in how they obtain `(l, r)`, so sharing this makes their
-    !! agreement structural rather than something two implementations have to be kept equal by
-    !! testing. `feature_risks.md` Risk-109 is the rule that it stays that way.
-    !!
-    !! The factors swap every round, which is why `perm_rounds` must be even. Three details are
-    !! worth keeping: `t = l + F` needs at most **one** conditional subtraction because `l < p` and
-    !! `F < p`, so no division is needed to reduce it; that subtraction is also what makes the round
-    !! a bijection at all, and removing it makes the caller's cycle-walk **non-terminating** rather
-    !! than merely wrong; and the multiply-shift takes the mixed word down to 31 bits before
-    !! multiplying by `p`, which bounds that product below `2**63` for every `m` a caller can name --
-    !! shifting a full 32-bit word instead would overflow above `m ~ 2**62`.
-    pure function perm_feistel_lr(rk, a, b, l0, r0) result(y)
+    !! One element, expressed as a block of one, so that `perm_feistel_block` stays the module's
+    !! only copy of the round loop. The two `(1)`-shaped locals cost 24 bytes of stack against a
+    !! scalar path that already derives a 16-key schedule per call.
+    pure function perm_feistel_lr(rk, nr, a, b, l0, r0) result(y)
         integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
+        integer, intent(in) :: nr                   !! rounds to run
         integer(int64), intent(in) :: a             !! left factor
         integer(int64), intent(in) :: b             !! right factor
         integer(int64), intent(in) :: l0            !! left half of the input, in `[0, a)`
         integer(int64), intent(in) :: r0            !! right half of the input, in `[0, b)`
         integer(int64) :: y                         !! output in `[0, a*b)`
-        integer(int64) :: l, r, t, p, q, sw
-        integer :: j
+        integer(int64) :: l(1), r(1), yy(1)
+        l(1) = l0
+        r(1) = r0
+        call perm_feistel_block(rk, nr, a, b, 1, l, r, yy)
+        y = yy(1)
+    end function perm_feistel_lr
+
+    !> `nb` independent elements through `nr` rounds. **The module's only copy of the round loop.**
+    !!
+    !! **The scalar and bulk entry points differ only in how they obtain `(l, r)`**, and both reach
+    !! the rounds through here, so their agreement is structural rather than something two
+    !! implementations have to be kept equal by testing. `feature_risks.md` Risk-109 is the rule that
+    !! it stays that way, and it survived the transposition below intact.
+    !!
+    !! **The loops are ROUNDS OUTSIDE, ELEMENTS INSIDE, and that order is the whole point.** Run the
+    !! other way round -- all `nr` rounds for one element, then the next element -- each element is a
+    !! sequential dependency chain `nr` long and the loop runs at the latency of that chain instead
+    !! of at the throughput of the machine. This way every round is a straight-line pass over `nb`
+    !! independent values. Measured on machine B at `m = 10**6` and 16 rounds: **2.07x** at plain
+    !! `-O3`, in a build containing no vector instruction at all -- the gain is pure instruction-level
+    !! parallelism and needs no ISA assumption -- and **10.77x** with `-march=native`, which lands the
+    !! 16-round kernel below the cost of the old four-round one. Do not reorder these loops.
+    !!
+    !! Three arithmetic details are worth keeping. The factors swap every round, which is why
+    !! `perm_rounds` must be even -- an odd count leaves the output encoded against transposed
+    !! factors. `t = l + F` needs at most **one** conditional subtraction because `l < p` and `F < p`,
+    !! so no division is needed to reduce it; that subtraction is also what makes the round a
+    !! bijection at all, and removing it makes the caller's cycle-walk **non-terminating** rather than
+    !! merely wrong. And the multiply-shift takes the mixed word down to 31 bits before multiplying by
+    !! `p`, which bounds that product below `2**63` for every `m` a caller can name -- shifting a full
+    !! 32-bit word instead would overflow above `m ~ 2**62`.
+    pure subroutine perm_feistel_block(rk, nr, a, b, nb, l, r, y)
+        integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
+        integer, intent(in) :: nr                   !! rounds to run
+        integer(int64), intent(in) :: a             !! left factor
+        integer(int64), intent(in) :: b             !! right factor
+        integer, intent(in) :: nb                   !! elements in this block, at least 1
+        integer(int64), intent(inout) :: l(nb)      !! in: left halves in `[0, a)`; out: enciphered
+        integer(int64), intent(inout) :: r(nb)      !! in: right halves in `[0, b)`; out: enciphered
+        integer(int64), intent(out) :: y(nb)        !! the rejoined outputs, in `[0, a*b)`
+        integer(int64) :: t, p, q, sw
+        integer :: e, j
         p = a
         q = b
-        l = l0
-        r = r0
-        do j = 1, perm_rounds
-            t = l + ishft(iand(perm_mix2(rk(j), r), perm_m31) * p, -31)
-            if (t >= p) t = t - p
-            l = r
-            r = t
+        do j = 1, nr
+            do e = 1, nb
+                t = l(e) + ishft(iand(perm_mix2(rk(j), r(e)), perm_m31) * p, -31)
+                if (t >= p) t = t - p
+                l(e) = r(e)
+                r(e) = t
+            end do
             sw = p
             p = q
             q = sw
         end do
-        y = l * q + r
-    end function perm_feistel_lr
+        do e = 1, nb
+            y(e) = l(e) * q + r(e)
+        end do
+    end subroutine perm_feistel_block
 
     ! ---- The bulk forms ----
 
@@ -2917,6 +3178,60 @@ contains
         nth = random_threads(n, threads)
     end function parquet_debug_random_bulk_threads
 
+    !> Forces the Feistel round count. **Test-only.** `n <= 0` restores the compiled-in value.
+    !!
+    !! Public because it has to be: the value lives in Fortran, and this module reaches no `bind(C)`
+    !! surface, so the C++-side debug-hook convention the rest of the library uses is unavailable
+    !! here. See CLAUDE.md, "A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one".
+    !!
+    !! **It is load-bearing rather than convenient, and that is a consequence of the exact path.**
+    !! Every `m` small enough to enumerate all `m!` permutations of is also small enough to be
+    !! answered exactly, so the shipped kernel is uniform by construction at exactly the sizes an
+    !! exhaustive test can reach -- and an exhaustive test that can only ever confirm a construction
+    !! proves nothing about the round count. Forcing the count (with
+    !! `parquet_debug_set_perm_force_feistel`, which sends those sizes back through the network) is
+    !! the only way a test can still show that 16 rounds is clean where 4, 8 and 12 are not.
+    !!
+    !! It is excluded from README.md's API overview, no library code calls it, and it has no
+    !! counterpart in the public contract: `pf_random_perm_algorithm` names the compiled-in count,
+    !! and this does not change that string.
+    subroutine parquet_debug_set_perm_rounds(n)
+        integer, intent(in) :: n                    !! rounds to force; `<= 0` restores the default
+        if (n <= 0) then
+            perm_dbg_rounds = 0
+        else
+            perm_dbg_rounds = min(n, perm_rounds)
+        end if
+    end subroutine parquet_debug_set_perm_rounds
+
+    !> Enables or disables the parity correction. **Test-only**; see `parquet_debug_set_perm_rounds`.
+    subroutine parquet_debug_set_perm_parity(on)
+        logical, intent(in) :: on                   !! `.false.` suppresses the correction
+        perm_dbg_no_parity = .not. on
+    end subroutine parquet_debug_set_perm_parity
+
+    !> Sends `m <= perm_exact_max` through the Feistel. **Test-only**; see the two hooks above.
+    subroutine parquet_debug_set_perm_force_feistel(on)
+        logical, intent(in) :: on                   !! `.true.` bypasses the exact path
+        perm_dbg_force_feistel = on
+    end subroutine parquet_debug_set_perm_force_feistel
+
+    !> Reports the permutation kernel's effective configuration. **Test-only.**
+    !!
+    !! An observation hook rather than a fourth override, and it exists because the three setters
+    !! above have no readback: a test that restores the defaults cannot otherwise assert it really
+    !! did, and one suite leaking a forced round count into another would show up as an unrelated
+    !! golden-vector failure in whichever test happened to run next.
+    subroutine parquet_debug_perm_config(rounds, parity, exact_max)
+        integer, intent(out) :: rounds              !! rounds the kernel will actually run
+        logical, intent(out) :: parity              !! whether the parity correction is applied
+        integer, intent(out) :: exact_max           !! largest `m` answered exactly; 0 when forced off
+        rounds = perm_round_count()
+        parity = .not. perm_dbg_no_parity
+        exact_max = 0
+        if (.not. perm_dbg_force_feistel) exact_max = perm_exact_max
+    end subroutine parquet_debug_perm_config
+
     !> The bulk permutation fill, `integer(int32)` result. `perm_fill_i64` carries the design note.
     subroutine perm_fill_i32(seed, m, n, v, threads)
         integer(int64), intent(in) :: seed          !! the permutation family's seed
@@ -2924,18 +3239,29 @@ contains
         integer(int64), intent(in) :: n             !! how many elements to produce; `0 <= n <= m`
         integer(int32), intent(out) :: v(:)         !! filled with elements `1 .. n`
         integer, intent(in), optional :: threads    !! caller's request; absent means automatic
-        integer(int64) :: a, b, rk(perm_rounds), lo, hi, chunk
-        integer :: nth, t
+        integer(int64) :: a, b, rk(perm_rounds), lo, hi, chunk, small(perm_exact_max)
+        integer :: nth, t, nr, i
+        logical :: flip
         if (n <= 0_int64) return
         if (m <= 1_int64) then
             v(1) = 1_int32                          ! `n <= m` leaves only n == m == 1 here
             return
         end if
+        if (perm_use_exact(m)) then
+            ! `n <= m <= perm_exact_max`, so this is at most 20 elements and never worth threading.
+            call perm_exact(seed, m, small)
+            do i = 1, int(n)
+                v(i) = int(small(i), int32)
+            end do
+            return
+        end if
         call perm_factors(m, a, b)
-        call perm_round_keys(seed, rk)
+        nr = perm_round_count()
+        flip = perm_parity_flip(seed)
+        call perm_round_keys(seed, nr, rk)
         nth = random_threads(n, threads)
         if (nth <= 1) then
-            call perm_range_i32(m, a, b, rk, 1_int64, n, v)
+            call perm_range_i32(m, a, b, rk, nr, flip, 1_int64, n, v)
             return
         end if
         chunk = (n + int(nth, int64) - 1_int64) / int(nth, int64)
@@ -2952,7 +3278,7 @@ contains
         do t = 0, nth - 1
             lo = int(t, int64) * chunk + 1_int64
             hi = min(n, lo + chunk - 1_int64)
-            if (lo <= hi) call perm_range_i32(m, a, b, rk, lo, hi, v)
+            if (lo <= hi) call perm_range_i32(m, a, b, rk, nr, flip, lo, hi, v)
         end do
 #ifdef _OPENMP
         !$omp end parallel do
@@ -2960,50 +3286,72 @@ contains
     end subroutine perm_fill_i32
 
     !> Fills `v(lo:hi)` with elements `lo .. hi` of the permutation. `perm_range_i64` has the note.
-    pure subroutine perm_range_i32(m, a, b, rk, lo, hi, v)
+    pure subroutine perm_range_i32(m, a, b, rk, nr, flip, lo, hi, v)
         integer(int64), intent(in) :: m             !! population size, at least 2
         integer(int64), intent(in) :: a             !! left factor
         integer(int64), intent(in) :: b             !! right factor
         integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
+        integer, intent(in) :: nr                   !! rounds to run
+        logical, intent(in) :: flip                 !! the seed's parity correction
         integer(int64), intent(in) :: lo            !! first element index, 1-based
         integer(int64), intent(in) :: hi            !! last element index, 1-based
         integer(int32), intent(inout) :: v(:)       !! only `v(lo:hi)` is written
-        integer(int64) :: l, r0, rhi, y, k, r
+        integer(int64) :: lb(perm_block), rb(perm_block), yb(perm_block)
+        integer(int64) :: l, r, y, k
+        integer :: e, nb
         k = lo
         l = (lo - 1_int64) / b
-        r0 = (lo - 1_int64) - l * b
+        r = (lo - 1_int64) - l * b
         do while (k <= hi)
-            rhi = min(b - 1_int64, r0 + (hi - k))
-            do r = r0, rhi
-                y = perm_feistel_lr(rk, a, b, l, r)
-                do while (y >= m)
-                    y = perm_feistel(rk, a, b, y)
-                end do
-                v(k + (r - r0)) = int(y + 1_int64, int32)
+            nb = int(min(int(perm_block, int64), hi - k + 1_int64))
+            ! (1) The block's inputs. One branch per element, in a prologue rather than in the
+            !     rounds -- `l` advances only when `r` wraps at `b`.
+            do e = 1, nb
+                lb(e) = l
+                rb(e) = r
+                r = r + 1_int64
+                if (r >= b) then
+                    r = 0_int64
+                    l = l + 1_int64
+                end if
             end do
-            k = k + (rhi - r0 + 1_int64)
-            r0 = 0_int64
-            l = l + 1_int64
+            ! (2) The rounds, transposed: see `perm_feistel_block`.
+            call perm_feistel_block(rk, nr, a, b, nb, lb, rb, yb)
+            ! (3) The cycle walk, the parity correction and the store. The walk is a FIXUP pass
+            !     rather than part of the main loop, which is what lets (2) stay branch-free; it
+            !     touches only the `a*b - m` values that land outside `[0, m)`, about `sqrt(m)` of
+            !     `m` -- 0.1 % at m = 10**6 -- which is why that split is nearly free here.
+            do e = 1, nb
+                y = yb(e)
+                do while (y >= m)
+                    y = perm_feistel(rk, nr, a, b, y)
+                end do
+                v(k + int(e - 1, int64)) = int(perm_swap01(flip, y) + 1_int64, int32)
+            end do
+            k = k + int(nb, int64)
         end do
     end subroutine perm_range_i32
 
     !> The bulk permutation fill, `integer(int64)` result -- and the division-free `(l, r)` shape.
     !!
-    !! **Two things move out of the per-element path here, and the smaller one is the division.**
+    !! **Three things move out of the per-element path here, and the division is the smallest.**
     !!
     !! The division first, since it names the shape: `perm_at_impl` must compute `l = x/b` and
     !! `r = x - l*b` for each `k`, whereas walking `l` in the outer loop and `r` in the inner one
     !! enumerates `x = l*b + r` as `0, 1, 2, ...` -- exactly the sequence of `k - 1` the caller
     !! asked for, with the split already in hand.
     !!
-    !! **The larger saving is the SETUP, and it is easy to miss because it is not in this loop.**
+    !! **The SETUP is the larger saving, and it is easy to miss because it is not in this loop.**
     !! `pf_random_perm_at` is `pure elemental` and stateless, so every single call re-derives the
     !! width rule (`perm_factors`: a `sqrt` and two correction loops) and the whole key schedule
-    !! (`perm_round_keys`: **eight** `perm_mix2` evaluations, against the four the network itself
-    !! performs). Here both happen once per call, whatever `n` is. That is why the measured gap is
-    !! **2.4x** -- machine B, gfortran 14.2.1, `--profile release`: 24.1 ns per element scalar
-    !! against 9.9 ns bulk at `m = 10**8`, and the same ratio at 1000 -- rather than the ~20 % a
-    !! removed division on its own would explain.
+    !! (`perm_round_keys`: **32** `perm_mix2` evaluations at 16 rounds, against the 16 the network
+    !! itself performs). Here both happen once per call, whatever `n` is.
+    !!
+    !! **And the round loop is TRANSPOSED here, which the scalar form cannot do** -- one element has
+    !! nothing to interleave with. See `perm_feistel_block`; it is worth 2.07x on machine B with no
+    !! vector instruction involved, so the bulk-versus-scalar gap is wider than the 2.4x measured
+    !! before either change (machine B, gfortran 14.2.1, `--profile release`, four rounds: 24.1 ns
+    !! per element scalar against 9.9 ns bulk at `m = 10**8`).
     !!
     !! **The cycle-walk keeps the division and that is fine**, because it is entered essentially
     !! never -- 1.0000 applications per element at every size measured -- so it reuses the scalar
@@ -3024,18 +3372,29 @@ contains
         integer(int64), intent(in) :: n             !! how many elements to produce; `0 <= n <= m`
         integer(int64), intent(out) :: v(:)         !! filled with elements `1 .. n`
         integer, intent(in), optional :: threads    !! caller's request; absent means automatic
-        integer(int64) :: a, b, rk(perm_rounds), lo, hi, chunk
-        integer :: nth, t
+        integer(int64) :: a, b, rk(perm_rounds), lo, hi, chunk, small(perm_exact_max)
+        integer :: nth, t, nr, i
+        logical :: flip
         if (n <= 0_int64) return
         if (m <= 1_int64) then
             v(1) = 1_int64                          ! `n <= m` leaves only n == m == 1 here
             return
         end if
+        if (perm_use_exact(m)) then
+            ! `n <= m <= perm_exact_max`, so this is at most 20 elements and never worth threading.
+            call perm_exact(seed, m, small)
+            do i = 1, int(n)
+                v(i) = small(i)
+            end do
+            return
+        end if
         call perm_factors(m, a, b)
-        call perm_round_keys(seed, rk)
+        nr = perm_round_count()
+        flip = perm_parity_flip(seed)
+        call perm_round_keys(seed, nr, rk)
         nth = random_threads(n, threads)
         if (nth <= 1) then
-            call perm_range_i64(m, a, b, rk, 1_int64, n, v)
+            call perm_range_i64(m, a, b, rk, nr, flip, 1_int64, n, v)
             return
         end if
         chunk = (n + int(nth, int64) - 1_int64) / int(nth, int64)
@@ -3052,7 +3411,7 @@ contains
         do t = 0, nth - 1
             lo = int(t, int64) * chunk + 1_int64
             hi = min(n, lo + chunk - 1_int64)
-            if (lo <= hi) call perm_range_i64(m, a, b, rk, lo, hi, v)
+            if (lo <= hi) call perm_range_i64(m, a, b, rk, nr, flip, lo, hi, v)
         end do
 #ifdef _OPENMP
         !$omp end parallel do
@@ -3068,33 +3427,58 @@ contains
     !!
     !! **One division per CALL, not per element.** Entering at `lo` needs `(l, r)` for
     !! `x = lo - 1`, which costs a division once; from there the pair advances by the loop
-    !! structure exactly as the whole-array walk does. The inner loop is a counted loop with an
-    !! affine store and no early exit -- `rhi` is computed up front so the `hi` bound never becomes
-    !! a branch inside it, which is what a compiler needs to have any chance of vectorising it.
-    pure subroutine perm_range_i64(m, a, b, rk, lo, hi, v)
+    !! structure exactly as the whole-array walk does.
+    !!
+    !! **Three passes per block, and the split into three is what buys the speed.** The inputs are
+    !! gathered first, so the `r`-wraps-at-`b` branch sits in a prologue; then `perm_feistel_block`
+    !! runs every round over the whole block with no branch and no carried dependency; then the
+    !! cycle walk, the parity correction and the store happen in a fixup pass. Folding the walk
+    !! back into the middle pass would undo the transposition, because it is a `do while` whose
+    !! trip count differs per element -- and it can be a fixup precisely because it is entered
+    !! essentially never (1.0000 applications per element at every size measured).
+    pure subroutine perm_range_i64(m, a, b, rk, nr, flip, lo, hi, v)
         integer(int64), intent(in) :: m             !! population size, at least 2
         integer(int64), intent(in) :: a             !! left factor
         integer(int64), intent(in) :: b             !! right factor
         integer(int64), intent(in) :: rk(perm_rounds)   !! the round keys
+        integer, intent(in) :: nr                   !! rounds to run
+        logical, intent(in) :: flip                 !! the seed's parity correction
         integer(int64), intent(in) :: lo            !! first element index, 1-based
         integer(int64), intent(in) :: hi            !! last element index, 1-based
         integer(int64), intent(inout) :: v(:)       !! only `v(lo:hi)` is written
-        integer(int64) :: l, r0, rhi, y, k, r
+        integer(int64) :: lb(perm_block), rb(perm_block), yb(perm_block)
+        integer(int64) :: l, r, y, k
+        integer :: e, nb
         k = lo
         l = (lo - 1_int64) / b
-        r0 = (lo - 1_int64) - l * b
+        r = (lo - 1_int64) - l * b
         do while (k <= hi)
-            rhi = min(b - 1_int64, r0 + (hi - k))
-            do r = r0, rhi
-                y = perm_feistel_lr(rk, a, b, l, r)
-                do while (y >= m)
-                    y = perm_feistel(rk, a, b, y)
-                end do
-                v(k + (r - r0)) = y + 1_int64
+            nb = int(min(int(perm_block, int64), hi - k + 1_int64))
+            ! (1) The block's inputs. One branch per element, in a prologue rather than in the
+            !     rounds -- `l` advances only when `r` wraps at `b`.
+            do e = 1, nb
+                lb(e) = l
+                rb(e) = r
+                r = r + 1_int64
+                if (r >= b) then
+                    r = 0_int64
+                    l = l + 1_int64
+                end if
             end do
-            k = k + (rhi - r0 + 1_int64)
-            r0 = 0_int64
-            l = l + 1_int64
+            ! (2) The rounds, transposed: see `perm_feistel_block`.
+            call perm_feistel_block(rk, nr, a, b, nb, lb, rb, yb)
+            ! (3) The cycle walk, the parity correction and the store. The walk is a FIXUP pass
+            !     rather than part of the main loop, which is what lets (2) stay branch-free; it
+            !     touches only the `a*b - m` values that land outside `[0, m)`, about `sqrt(m)` of
+            !     `m` -- 0.1 % at m = 10**6 -- which is why that split is nearly free here.
+            do e = 1, nb
+                y = yb(e)
+                do while (y >= m)
+                    y = perm_feistel(rk, nr, a, b, y)
+                end do
+                v(k + int(e - 1, int64)) = perm_swap01(flip, y) + 1_int64
+            end do
+            k = k + int(nb, int64)
         end do
     end subroutine perm_range_i64
 

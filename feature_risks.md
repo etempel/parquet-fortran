@@ -174,12 +174,15 @@ something a reader is expected to have.
 | [Risk-107](#risk-107--a-queue-shaped-stream-buffer-would-pull-the-buffer-state-into-the-contract) | A queue-shaped stream buffer would pull the buffer state into the contract | 4 — covered |
 | [Risk-108](#risk-108--an-integer-draw-taken-off-a-pair-boundary-re-reads-a-word-already-handed-out) | An integer draw taken off a pair boundary re-reads a word already handed out | 4 — covered |
 | [Risk-109](#risk-109--the-bulk-permutation-and-the-scalar-entry-point-compute-the-same-function-by-different-routes) | The bulk permutation and the scalar entry point compute the same function by different routes | 4 — covered |
-| [Risk-110](#risk-110--the-permutations-round-count-round-function-and-width-rule-are-frozen-and-three-rounds-looks-free) | The permutation's round count, round function and width rule are frozen, and three rounds looks free | 4 — covered |
+| [Risk-110](#risk-110--the-permutations-round-count-round-function-and-width-rule-are-frozen-and-a-lower-count-looks-free) | The permutation's round count, round function and width rule are frozen, and a lower count looks free | 4 — covered |
 | [Risk-111](#risk-111--a-bulk-fill-that-silently-stopped-threading-would-fail-no-test) | A bulk fill that silently stopped threading would fail no test | 3 — not testable |
 | [Risk-112](#risk-112--a-fills-position-arithmetic-overflows-at-the-boundary-the-suite-tests-and-still-answers-correctly) | A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly | 4 — covered |
 | [Risk-113](#risk-113--the-coordinate-addressed-generics-read-one-word-sequence-and-real32-walks-a-finer-grid) | The coordinate-addressed generics read one word sequence, and `real32` walks a finer grid | 4 — covered |
 | [Risk-114](#risk-114--a-bulk-fills-loop-shape-can-silently-de-optimise-the-scalar-draw-that-shares-its-reduction) | A bulk fill's loop shape can silently de-optimise the SCALAR draw that shares its reduction | 4 — covered |
 | [Risk-115](#risk-115--the-integer-rules-two-grids-are-one-contract-and-its-inlining-shape-is-load-bearing) | The integer rule's two grids are one contract, and its inlining shape is load-bearing | 4 — covered |
+| [Risk-116](#risk-116--the-parity-correction-is-one-branch-and-removing-it-loses-half-of-s_m-with-nothing-failing) | The parity correction is one branch, and removing it loses HALF of `S_m` with nothing failing | 4 — covered |
+| [Risk-117](#risk-117--a-permutation-test-sited-at-an-even-square-or-using-only-marginal-statistics-proves-nothing) | A permutation test sited at an even square, or using only marginal statistics, proves nothing | 4 — covered |
+| [Risk-118](#risk-118--a-chi-square-threshold-chosen-at-one-ensemble-size-is-not-a-threshold) | A chi-square threshold chosen at ONE ensemble size is not a threshold | 4 — covered |
 
 ---
 
@@ -4756,15 +4759,25 @@ what makes it the outermost binding of the whole construction. This test may not
 redundant on the grounds that the identity holds by construction: that is precisely the reason it
 must be kept, since a restructure is what would break it.
 
-### Risk-110 — The permutation's round count, round function and width rule are frozen, and three rounds looks free
+### Risk-110 — The permutation's round count, round function and width rule are frozen, and a lower count looks free
 
-`pf_random_perm_algorithm` (`feistel-mix2-4/zaxzb/v1`) covers five things: the construction, the width
-rule (`a = ceil(sqrt(m))`, `b = ceil(m/a)`), the round count (4), the round function (`perm_mix2`) and
+`pf_random_perm_algorithm` (`feistel-mix2-16p/zaxzb/exact20/v2`) covers six things: the two
+constructions, the threshold between them (`m <= 20`), the width rule (`a = ceil(sqrt(m))`,
+`b = ceil(m/a)`), the round count (16), the parity correction, the round function (`perm_mix2`) and
 the key derivation. Changing any of them changes every value the module can produce for every seed.
 
-**A future contributor optimising this will find three rounds tempting, and every marginal statistic
-will agree with them.** Three rounds is 25 % cheaper and passes fixed-point chi-square, cycle counts,
-position uniformity and subset membership. It is caught only by a **structural** distinguisher —
+**This entry originally recorded the round count as 4, and that was WRONG — which is the most useful
+thing in it.** Four was chosen against the structural distinguisher described below, and the
+distinguisher is *marginal*: it asks about one relation between pairs at a time. An all-cells
+chi-square, which scores every one of the `m!` permutations as its own cell, puts the four-round
+kernel at **z = 27729 at m = 5**. Every marginal test in the suite passed on that kernel, for as long
+as it shipped. The rule to carry forward is not "16 is the right number" but **"a marginal statistic
+cannot license a round count, however carefully it was measured"** — see Risk-117.
+
+**A future contributor optimising this will find a lower round count tempting, and every marginal
+statistic will agree with them.** The historical instance is three rounds against four: 25 % cheaper,
+and it passes fixed-point chi-square, cycle counts, position uniformity and subset membership. It is
+caught only by a **structural** distinguisher —
 asking whether two inputs sharing a coordinate produce outputs sharing one, enumerated exhaustively
 over the raw domain and calibrated against a Fisher–Yates control. Under that test three rounds leaks
 in **every one of six independent key sets, always in the same relation and always in the same
@@ -4841,6 +4854,84 @@ appears in this entry's own measurements **only as a control**, and that is the 
 have. The same applies to key-and-argsort, which is reproducible but costs `O(m)` draws and `O(m)`
 memory whatever `size(idx)` is; `feature_random_phase2.md` §11 item 2 measured both and the shipped
 form is 1.9x-7.2x cheaper than either, serially, before any threading.
+
+### Risk-116 — The parity correction is one branch, and removing it loses HALF of S_m with nothing failing
+
+At `m = q**2` with `q` odd — 9, 25, 49, 81, 121, … — a Feistel over `Z_q x Z_q` **cannot reach a
+single odd permutation, at any round count**. Each round is a product of `q` cyclic shifts of `Z_q`,
+a cyclic shift of `Z_q` by `t` has parity `(-1)**(q - gcd(q, t))` which is always even for odd `q`,
+and the half-swap between rounds is even too. So exactly half of `S_m` is unreachable, and no amount
+of mixing closes it; only composing with an odd permutation does.
+
+**`perm_parity_flip` plus `perm_swap01` is that composition, and it is two lines that look like
+tuning.** Delete them and the result is still a bijection, still passes fixed points, cycle counts,
+position marginals, inversions, the structural distinguisher **and the all-cells chi-square at every
+size that test can enumerate** — because 5, 6, 7 and 8 are not odd squares. The library would go on
+returning correct-looking permutations from half the space forever.
+
+**Two ways to site a test here so that it proves nothing**, both of which this repository had:
+`test_perm_structural` runs at `m = 1024`, an **even** square, where the lock does not exist; and
+every statistic in the suite before this work was marginal, and the lock is invisible to all of them.
+A parity test is the only instrument that sees it.
+
+**Test — `test_perm_parity` (`test/test_random.f90`, suite `random_perm`).** Asserts the fraction of
+odd permutations is within `|z| < 5` of one half at `m = 9, 25, 49, 81`, every one an odd square. Its
+negative control is the published `/v1` kernel through the three debug hooks, where the count is
+**exactly zero** rather than merely low — so the control fails hard, and a threshold loose enough to
+excuse it could not exist. `m = 9` is included although it is now answered exactly: the exact path has
+to be shown to reach both cosets too, and it is the size where the lock was found.
+
+### Risk-117 — A permutation test sited at an even square, or using only marginal statistics, proves nothing
+
+Two independent siting errors, each of which let a defect ship, and neither of which looks like an
+error when you read the test.
+
+**The even square.** `test_perm_structural` runs at `m = 1024`, chosen because `a = b = 32` makes
+`a*b == m` exactly so the cycle walk never runs and the public output is the raw bijection. That is a
+good reason, and it also happens to be the one family of sizes where the parity lock of Risk-116 does
+not exist — 32 is even. A test added at 1024 passes against a kernel that has lost half of `S_m`.
+
+**The marginal statistic.** Fixed points, cycle counts, position uniformity, subset membership and
+the pair-relation distinguisher are all statements about *one* coordinate or *one* relation. The
+four-round kernel satisfied every one of them while scoring z = 27729 over the full cell space. The
+sharper form of the rule is about the **order** of the statistic rather than about marginality as
+such: measured on the same data at m = 8 and 8 rounds, an order-2 tuple statistic reads |z| < 5 where
+an order-4 statistic reads well past 20.
+
+**So a new permutation test needs a small, non-square or odd-square `m`, and an order high enough to
+see what it claims to see.** Every size an all-cells test can enumerate is at most 8, and every size
+at most 20 is now answered exactly — so above the threshold the only exhaustive instrument left is a
+`k`-tuple ranker over `m(m-1)(m-2)(m-3)` cells, which is why `ktuple_z` exists.
+
+**Test — `test_perm_ktuple` (`test/test_random.f90`, suite `random_perm`).** Runs the order-4 ranker
+at `m = 21` (the smallest population that reaches the Feistel at all) and the 24-cell order-4 pattern
+statistic at `m = 25` and `m = 49`. Its power control is at `m = 8` with the Feistel forced down to
+it: **half-width 3, the narrowest class the kernel could ever meet**, where 16 rounds is clean and 8
+rounds is caught by `k = 4` and missed by `k = 2` on the same permutations in the same pass. Note the
+control cannot be sited at `m = 21`: at half-width 5 eight rounds is genuinely clean (measured
+z = 0.92), which is exactly why 16 leaves two classes of margin.
+
+### Risk-118 — A chi-square threshold chosen at ONE ensemble size is not a threshold
+
+`z = (chi2 - dof) / sqrt(2 dof)` grows **linearly with N** for a fixed bias. So "clean at N" means
+only "biased below this N's resolution", and a round count validated at one ensemble size is a round
+count validated against an arbitrary constant.
+
+**This has produced two different wrong answers in this repository's own analysis**, four rounds
+apart: a first pass concluded 10 rounds was sufficient from a single-N battery, and a second read
+16 rounds as marginal from a table that had not been swept. Both would have been caught by running
+the same statistic at 4N and asking whether `z` had grown.
+
+**The guard is to sweep N and require flatness, not to raise the threshold.** Raising it converts the
+test into one that cannot fail; sweeping it converts a fixed bias into a growing signal, which is
+what distinguishes bias from noise.
+
+**Test — `test_perm_all_cells` (`test/test_random.f90`, suite `random_perm`).** Runs the all-cells
+chi-square at `20 x m!` and `80 x m!` seeds for `m = 5, 6, 7` and requires `|z| < 5` at both. It
+carries two further arms for the reason Risk-117 gives: a Fisher-Yates arm on the same statistic,
+uniform by construction, so the threshold is *calibrated* rather than asserted; and the `/v1` kernel,
+which must exceed 50 so the gate is shown to have power. **Do not delete the smaller ensemble as
+redundant** — it is not there to test the kernel, it is there so the larger one means something.
 
 ### Risk-112 — A fill's position arithmetic overflows at the boundary the suite tests, and still answers correctly
 

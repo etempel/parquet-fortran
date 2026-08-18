@@ -442,19 +442,39 @@ Because it draws with replacement, expect duplicates: drawing `m` values from `1
 
 ### What the permutation is, and what it is not
 
-The construction is a four-round Feistel network over `Z_a × Z_b` with cycle-walking, where
-`a = ceil(sqrt(m))`. `pf_random_perm_algorithm` names that contract — `feistel-mix2-4/zaxzb/v1` —
+**The construction is piecewise, and which half you get depends only on `m`.**
+
+For **`m ≤ 20`** the permutation is drawn by its *rank*: one exactly uniform integer in `[0, m!)`,
+then unranked into a permutation. Both steps are exact — `pf_random_int_at` is exactly uniform over
+any range by construction, and unranking is a one-to-one map onto the `m!` permutations — so the
+result is **exactly uniform over every one of the `m!` permutations**. 20 is where this stops
+because `20!` is the last factorial that fits a 64-bit integer.
+
+For **`m ≥ 21`** it is a sixteen-round Feistel network over `Z_a × Z_b` with cycle-walking, where
+`a = ceil(sqrt(m))`, followed by a seed-driven parity correction. Exact uniformity is not available
+to *any* construction with this signature there: `m!` passes 2⁶⁴ at `m = 21`, so a 64-bit seed
+cannot index the possibilities. What is measured instead is that the result is indistinguishable
+from a uniform permutation under an order-4 tuple statistic over the exact cell space, a parity test
+over the alternating group, an all-cells chi-square at the sizes it can be forced down to, and
+fixed-point counts, cycle structure, position uniformity, subset membership and a structural test
+asking whether sharing an input coordinate makes two outputs share one.
+
+`pf_random_perm_algorithm` names that whole contract — `feistel-mix2-16p/zaxzb/exact20/v2` —
 **separately from `pf_random_algorithm`**, so a program that recorded the draw contract is not told
-its draws changed when only the permutation did.
+its draws changed when only the permutation did. All four facts are in the string because all four
+fix the answer: the round count, the parity correction (`p`), the width rule, and the threshold
+below which the Feistel is not used at all.
 
-**It is not uniform over all `m!` permutations, and nothing with a 64-bit seed could be**: `m!`
-passes 2⁶⁴ at `m = 21`, so a 64-bit seed cannot even index the possibilities. What is measured is
-that it is indistinguishable from a uniform permutation under fixed-point counts, cycle structure,
-position uniformity, subset membership, and a structural test that asks whether sharing an input
-coordinate makes two outputs share one. The round count of four is where that last test puts the
-boundary: three rounds leak detectably in every replicate, and six buy nothing measurable.
+**Consecutive `m` are independent.** A permutation of 5 and a permutation of 6 under the same seed
+are unrelated, rather than two views of one underlying draw.
 
-If you need a uniform shuffle of a small array with a large seed space, this is not that tool.
+**What it costs.** A whole permutation is about 30 ns per element on one thread and falls to well
+under 1 ns per element once it is threaded, because element `k` depends on no other element. The
+random-access form is about 130 ns per element, and that gap is the price of statelessness: it
+re-derives the width rule and the whole key schedule on every call, which the bulk form does once.
+Where the coordinate addressing pays for itself is a *subset* — the first `n` elements of a
+permutation of `m` cost `O(n)`, not `O(m)`, so drawing 1000 rows out of a billion does not touch
+the other billion.
 
 ## What is guaranteed, and what is not
 

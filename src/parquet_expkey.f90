@@ -43,6 +43,11 @@ module parquet_expkey
     public :: exp_key
     public :: exp_key_contract_ok
     public :: parquet_debug_exp_key
+    public :: parquet_debug_set_exp_key_contract
+
+    !> Forces `exp_key_contract_ok` to report failure. **Test-only**, and the only writer is the
+    !! debug hook below.
+    logical, save :: ek_dbg_force_fail = .false.
 
     !> `1/sqrt(2)`, the point the mantissa is folded about so that `|f|` stays under 0.1716.
     real(real64), parameter :: ek_sqrt_half = 0.70710678118654752440_real64
@@ -185,8 +190,24 @@ contains
             fp = ieor(fp, transfer(exp_key(u), 0_int64))
             fp = fp * 6364136223846793005_int64 + 1442695040888963407_int64
         end do
-        exp_key_contract_ok = fp == ek_contract_fp
+        exp_key_contract_ok = fp == ek_contract_fp .and. .not. ek_dbg_force_fail
     end function exp_key_contract_ok
 
+
+    !> Forces the frozen-transform check to fail. **Test-only.**
+    !!
+    !! Public only because it has to be: this module reaches no `bind(C)` surface, so the C++-side
+    !! debug-hook convention is unavailable to it. It exists to give `exp_key_contract_ok` a
+    !! negative control -- without one, a check that returned `.true.` unconditionally would pass
+    !! every test ever written for it, which is exactly the failure mode a guard cannot afford.
+    !! Reaching the real failure needs a build with `-ffast-math` or ifx's default `-fp-model=fast`,
+    !! which no in-process test can produce.
+    !!
+    !! It is excluded from README.md's API overview and no library code calls it.
+    subroutine parquet_debug_set_exp_key_contract(ok)
+        logical, intent(in) :: ok   !! `.false.` makes the contract check report failure
+
+        ek_dbg_force_fail = .not. ok
+    end subroutine parquet_debug_set_exp_key_contract
 
 end module parquet_expkey

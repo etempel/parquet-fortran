@@ -172,6 +172,7 @@ test:
     # the default for a manual run, where the failure is information. The script refuses a gfortran
     # below the project's floor rather than reporting its miscompilations as findings.
     - tools/check_random_kernels.sh --shipped-only
+    - tools/check_exp_key.sh
     # --exclude-lines-by-pattern auto-excludes every standalone report_fatal_error(...) call
     # site in src/parquet_wrapper.cpp (present and future -- no per-call-site source comment
     # needed) without needing GCOVR_EXCL_LINE comments at each one: std::abort() there discards

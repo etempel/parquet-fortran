@@ -525,6 +525,7 @@ scenarios=(
     "settings_env_bad_token:1"
     "settings_env_not_an_integer:1"
     "settings_env_two_numbers:1"
+    "weighted_contract_failure:1"
     "weighted_negative_weight:1"
     "weighted_all_zero:1"
     "weighted_nan_weight:1"

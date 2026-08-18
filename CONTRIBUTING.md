@@ -310,6 +310,29 @@ tools/check_random_kernels.sh --shipped-only  # only the kernel this compiler sh
 FC=ifx tools/check_random_kernels.sh          # ifx ships the wrapping kernel; nothing to force
 ```
 
+`tools/check_exp_key.sh` is the same idea for a different contract: it standalone-compiles
+`src/parquet_expkey.f90` — the frozen `-log(u)` transform behind `pf_weighted_permutation` — across
+seven gfortran settings and four ifx ones, and requires every build to reproduce one fingerprint.
+It exists because a weighted permutation is decided by the *order* of `-log(u)/w`, so a single
+differing key changes which items are drawn, silently, and only a cross-BUILD comparison can see
+that; a unit test runs in one build by construction. It is not hypothetical: an earlier design note
+concluded FMA contraction was harmless on the strength of four builds that never enabled FMA, and
+`gfortran -O3 -march=native` duly changed the answer. That is also why `parquet_expkey` is a leaf
+module depending on `iso_fortran_env` alone — `parquet_random` itself can no longer be compiled
+standalone, having gained `parquet_sorting` and hence Arrow, so a dependency added to the leaf
+would silently disable this check. Two configurations are excluded by design and named in the
+script: gfortran `-Ofast`/`-ffast-math` and ifx *without* `-fp-model=precise`, both of which abandon
+IEEE semantics outright. The second matters in practice — `fpm --profile release`/`debug` pass
+`-fp-model=precise`, but a bare `fpm build` passes no floating-point flag at all — so
+`pf_weighted_permutation` additionally re-derives the transform at run time and aborts naming the
+cause rather than returning quietly different permutations.
+
+```bash
+tools/check_exp_key.sh                        # gfortran, seven settings
+FC=ifx tools/check_exp_key.sh                 # ifx, four settings
+```
+
+
 `tools/check_philox_compliance.sh` sweeps the **shipped** Philox kernel against `tools/philox_reference.py`, an independent philox4x32-10 written from the Random123 specification in Python's arbitrary-precision integers. It complements rather than duplicates `test_kat_vectors`: that test pins the kernel at the three published vectors and the golden vectors pin a grid of the public surface, both exact and both narrow, whereas this sweeps thousands of arbitrary 64-bit `(key, stream, index)` coordinates. It goes through `parquet_debug_random_block`, so it reaches counter values no draw index can produce — which is where two of the three published vectors sit — and exercises whichever arm of the route (e) fork the build took. The dump opens with the full cross product of a table of awkward values (zero, all-ones, single bits, either side of the 32-bit boundary), because that is where a shift or half-swap defect lives; a uniformly random coordinate would merely turn into another random-looking one.
 
 **Four vacuity guards run before the sweep, and each must fire**, because "0 mismatches" is equally what a comparison that never happened reports: the oracle must reproduce the three published vectors; a deliberately mutated oracle (`--mutate=rounds`, `--mutate=multiplier`) must be *rejected* rather than used; an empty input must be refused rather than passed; and a correct-cipher-but-mis-packed oracle (`--mutate=packing`, which passes the first guard by construction) must produce mismatches, proving the comparison can detect a wrong kernel at all. A guard that does not fire exits 3 and the run is reported as worthless rather than as a pass.

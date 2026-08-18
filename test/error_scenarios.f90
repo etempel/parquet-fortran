@@ -356,6 +356,8 @@ program error_scenarios
         call scenario_strings_copy_buffers_offsets_too_short()
     case ("strings_copy_buffers_data_too_short")
         call scenario_strings_copy_buffers_data_too_short()
+    case ("weighted_contract_failure")
+        call scenario_weighted_contract_failure()
     case ("weighted_negative_weight")
         call scenario_weighted_negative_weight()
     case ("weighted_all_zero")
@@ -4269,6 +4271,27 @@ contains
         call parquet_settings_from_env()   ! -> aborts (not an integer)
         print '(a)', "unexpectedly accepted two numbers as one integer from the environment"
     end subroutine scenario_settings_env_two_numbers
+
+    !> A build that cannot reproduce the frozen transform is refused rather than returning
+    !> quietly different permutations.
+    !!
+    !! **The negative control is the first call and is the point of the scenario.** A guard that
+    !! fired unconditionally would pass every abort test ever written for it; running the same call
+    !! successfully before the hook is set is what proves the abort is caused by the forced failure
+    !! and not by the call itself.
+    !!
+    !! The real trigger is a build with `-ffast-math`, or ifx at its default `-fp-model=fast`, which
+    !! no in-process test can produce -- hence the hook.
+    subroutine scenario_weighted_contract_failure()
+        real(real64) :: w(4)
+        integer :: perm(4)
+
+        w = 1.0_real64
+        call pf_weighted_permutation(perm, w, 1_int64)   ! negative control: must SUCCEED
+        call parquet_debug_set_exp_key_contract(.false.)
+        call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (frozen transform not reproduced)
+        print '(a)', "unexpectedly accepted a build that fails the frozen-transform check"
+    end subroutine scenario_weighted_contract_failure
 
     !> A negative weight is refused rather than silently drawn FIRST.
     !!

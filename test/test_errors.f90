@@ -457,6 +457,8 @@ contains
                 test_settings_env_not_an_integer_aborts), &
             new_unittest("settings: two numbers in one integer variable aborts", &
                 test_settings_env_two_numbers_aborts), &
+            new_unittest("a build failing the frozen-transform check aborts", &
+                test_weighted_contract_failure_aborts), &
             new_unittest("a negative weight aborts", test_weighted_negative_weight_aborts), &
             new_unittest("an all-zero weight vector aborts", test_weighted_all_zero_aborts), &
             new_unittest("a NaN weight aborts rather than counting as zero", test_weighted_nan_aborts), &
@@ -4512,6 +4514,21 @@ contains
             failure_message="a non-numeric integer from the environment was expected to abort", &
             required_stderr="PARQUET_FORTRAN_SORT_THREADS='many' is not an integer")
     end subroutine test_settings_env_not_an_integer_aborts
+
+    !> The negative control for `exp_key_contract_ok`, without which that guard could be vacuous.
+    !!
+    !! The scenario runs the same call successfully BEFORE forcing the check to fail, so a guard
+    !! that fired unconditionally would abort on the first call and never reach the second — and
+    !! this assertion would still see an abort. That is why the scenario, not the wrapper, carries
+    !! the control: the exit status alone cannot tell the two apart, but the stderr text can, and
+    !! the message asserted here is only reachable from the forced failure.
+    subroutine test_weighted_contract_failure_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_contract_failure", expect_abort=.true., &
+            failure_message="a build that cannot reproduce the frozen transform was expected to abort", &
+            required_stderr="does not reproduce the frozen -log(u) transform")
+    end subroutine test_weighted_contract_failure_aborts
 
     !> A negative weight would be drawn FIRST, so it is refused at the door.
     subroutine test_weighted_negative_weight_aborts(error)

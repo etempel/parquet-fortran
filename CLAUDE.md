@@ -650,8 +650,8 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and stands at
-**36** as of 2026-08-15 (14 `public ::` re-exports in `parquet_core.f90`, 20 `private ::`
-names in the `parquet` facade, and 2 `public ::` re-exports in `parquet_settings`). **It is stable
+**38** as of 2026-08-18 (14 `public ::` re-exports in `parquet_core.f90`, 20 `private ::`
+names in the `parquet` facade, and 4 `public ::` re-exports in `parquet_settings`). **It is stable
 only in the sense that it moves for a reason** — it rises by one for each name any module re-exports
 or hides with an accessibility statement naming a **use-associated** name, which is the expected cost
 of keeping a sibling module's plumbing out of `use parquet`'s namespace, and a rise of exactly that
@@ -760,8 +760,8 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **36** of
-  them as of 2026-08-15 and the one FORD number worth tracking across a change. Three independent
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **38** of
+  them as of 2026-08-18 and the one FORD number worth tracking across a change. Three independent
   groups:
   **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
@@ -779,8 +779,9 @@ Keep new code to the same standard:
   `src/parquet.f90` carries 11 statements for those 20 names. Its twelfth, `private :: cversion`,
   warns about nothing — `cversion` is defined in the facade rather than use-associated, which is
   exactly the distinction this warning is about.
-  The third group is **2 `public ::`** re-exports in `parquet_settings`
-  (`parquet_get_string_threads`, `parquet_output_is_suppressed`, both defined in
+  The third group is **4 `public ::`** re-exports in `parquet_settings`
+  (`parquet_get_string_threads`, `parquet_output_is_suppressed`, `parquet_get_random_threads` and
+  `parquet_get_random_parallel_min_elements`, all four defined in
   `parquet_settings_base`), and it is worth knowing about mainly because it shows **the rule is not
   about the facade at all** — an earlier version of this note said the number "rises by one for each
   name a future `private ::` in the facade hides", which is too narrow. Any module that re-exports or
@@ -789,8 +790,14 @@ Keep new code to the same standard:
   **This number rises by one for each such name**, which is
   the expected cost of keeping a sibling module's internal plumbing out of the public namespace —
   a rise of exactly that size is not a regression, and is exactly what took this figure from the
-  23 recorded here before the typed accessor tier added its nine names at once, and from 32 to 34
-  when the read-ordering guards added their two. **Confirmed not
+  23 recorded here before the typed accessor tier added its nine names at once, from 32 to 34
+  when the read-ordering guards added their two, and from 36 to 38 when `parquet_random`'s two
+  settings getters were re-exported. That last step is also the sharpest available illustration of
+  what the warning keys on: their matching **setters** (`parquet_set_random_threads`,
+  `parquet_set_random_parallel_min_elements`) sit on the *same* `public ::` statements and warn
+  about nothing, because they are defined in `parquet_settings` itself while only the getters live
+  in `parquet_settings_base`. Use-association is the whole trigger — the same distinction
+  `private :: cversion` makes in the facade. **Confirmed not
   fixable from
   source**: for the `public ::` group, neither adding a `!>` doc-comment directly on the line, nor
   an explicit `use ..., only: name1, name2` import list (already how these modules are imported),

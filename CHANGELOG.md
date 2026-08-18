@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pf_weighted_permutation` is the whole weighted shuffle, built from an exponential race instead,
   so it takes `threads=` and is bit-identical at every thread count. The two families draw from the
   same distribution and give **different realizations** from one seed, in the same way two seeds
-  would; there is no prefix identity across them, and the suite asserts the difference rather than
-  leaving it to be discovered. Zero-weight items land last in uniform random order on both paths, so
+  would, and are **independent at matched coordinates** — each family derives its own seed through
+  `pf_random_key`, so neither shares a uniform with the other or with a caller drawing at
+  coordinates it chose itself. There is no prefix identity across them, and the suite asserts both
+  the difference and the independence rather than leaving either to be discovered. Zero-weight items land last in uniform random order on both paths, so
   a drained sampler is always a genuine permutation of every item. Weights that are negative, NaN,
   infinite, all-zero, or (for the race) small enough to overflow a key are refused rather than
   silently reinterpreted. The race's `-log(u)` is computed in-library from IEEE `+ - * /` rather

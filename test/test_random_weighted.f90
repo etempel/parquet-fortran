@@ -69,7 +69,9 @@ contains
             new_unittest("a race returns every item exactly once", test_race_is_a_permutation), &
             new_unittest("the race is bit-identical at every thread count", test_race_thread_identity), &
             new_unittest("zero-weight items come last in the race too", test_race_zero_weight_tail), &
-            new_unittest("the two families differ in realization", test_families_differ) &
+            new_unittest("the two families differ in realization", test_families_differ), &
+            new_unittest("the two families are independent at one coordinate", &
+                         test_families_independent) &
             ]
     end subroutine collect_tests_parquet_random_weighted
 
@@ -752,5 +754,96 @@ contains
                    "the two families are different realizations and must not agree position " // &
                    "for position; near-agreement means one call is quietly serving both")
     end subroutine test_families_differ
+
+    !> The two weighted families must be INDEPENDENT at matched coordinates, not merely different.
+    !!
+    !! `test_families_differ` above asserts they disagree, which is a much weaker claim and passed
+    !! throughout the period this test exists to close. Both families were driven from the same
+    !! `(seed, stream)`, so both read draw 1: the race gives item `i` the key `-log(1-u_i)/w_i`,
+    !! smallest when `u_1` is near zero, and the sequential descent scales that same `u_1` into
+    !! `[0, total)`, where a near-zero value lands on the leftmost leaf -- item 1. So both chose the
+    !! lowest-weight item together and nowhere else. Measured over 500 000 seeds with weights
+    !! `1 .. 50`: 264 of the 399 seeds where the race chose item 1 (**66 %**) had the tree choose it
+    !! too, against **0.078 %** by chance. Every marginal was clean, which is why nothing saw it.
+    !!
+    !! **The control arm is what makes this a test rather than a hopeful assertion.** It rebuilds
+    !! the pre-fix pair from the public generator alone -- a linear descent on
+    !! `pf_random_at(seed, 0, 1)`, and an exponential race over `pf_random_at(seed, 0, i)` -- so it
+    !! is coupled by construction. It must fire; a run where BOTH arms look independent proves only
+    !! that the fixture is too small to resolve anything, which is exactly how a statistic like this
+    !! rots into a pass. See CLAUDE.md's "Every `check()` call needs its own message" for the
+    !! shape, and `feature_risks.md` Risk-123 for what the separation forbids.
+    subroutine test_families_independent(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error carrier
+        integer, parameter :: n = 10                    !! small, so item 1 is reached often enough
+        integer(int64), parameter :: nseed = 20000_int64 !! enough to resolve a 66 % cell from a 1.8 % one
+        type(pf_weighted_draw) :: d
+        real(real64) :: w(n), total, u, acc, key, best
+        integer(int64) :: s, nrace1, nboth, nctl_a1, nctl_both
+        integer :: perm(n), item, i, tree1, race1, ctl_a, ctl_b
+        logical :: ok
+
+        do i = 1, n
+            w(i) = real(i, real64)
+        end do
+        total = sum(w)
+        nrace1 = 0_int64; nboth = 0_int64; nctl_a1 = 0_int64; nctl_both = 0_int64
+        call d%init(w, 1_int64)                         ! %init once; it refuses a second call
+        do s = 1_int64, nseed
+            call pf_weighted_permutation(perm, w, s)
+            race1 = perm(1)
+            call d%reseed(s)
+            call d%next(item, ok)
+            tree1 = item
+            if (race1 == 1) then
+                nrace1 = nrace1 + 1_int64
+                if (tree1 == 1) nboth = nboth + 1_int64
+            end if
+
+            ! ---- control: the same two rules, deliberately sharing one uniform axis ----
+            u = pf_random_at(s, 0_int64, draw=1_int64) * total
+            acc = 0.0_real64
+            ctl_a = n
+            do i = 1, n
+                acc = acc + w(i)
+                if (u < acc) then
+                    ctl_a = i
+                    exit
+                end if
+            end do
+            best = huge(1.0_real64)
+            ctl_b = 1
+            do i = 1, n
+                key = -log(1.0_real64 - pf_random_at(s, 0_int64, draw=int(i, int64))) / w(i)
+                if (key < best) then
+                    best = key
+                    ctl_b = i
+                end if
+            end do
+            if (ctl_b == 1) then
+                nctl_a1 = nctl_a1 + 1_int64
+                if (ctl_a == 1) nctl_both = nctl_both + 1_int64
+            end if
+        end do
+
+        ! Vacuity guard first: a cell nothing landed in cannot report either verdict.
+        call check(error, nrace1 > 50_int64, "the race must choose item 1 often enough to " // &
+                   "resolve the cell; too few means the fixture, not the library, is being tested")
+        if (allocated(error)) return
+        call check(error, nctl_a1 > 50_int64, "the control race must choose item 1 often enough too")
+        if (allocated(error)) return
+
+        ! The control MUST fire -- it is coupled by construction.
+        call check(error, real(nctl_both, real64) > 0.25_real64 * real(nctl_a1, real64), &
+                   "the deliberately coupled control must show item 1 agreeing far above chance; " // &
+                   "if it does not, this test has no power and its verdict below means nothing")
+        if (allocated(error)) return
+
+        ! And the real pair must not. Chance is w(1)/total; allow a wide Poisson margin.
+        call check(error, real(nboth, real64) < 0.10_real64 * real(nrace1, real64), &
+                   "pf_weighted_permutation and pf_weighted_draw must be independent at the same " // &
+                   "(seed, stream): item 1 agreeing far above w(1)/sum(w) means the two families " // &
+                   "share a uniform again -- see wd_family_label")
+    end subroutine test_families_independent
 
 end module test_random_weighted

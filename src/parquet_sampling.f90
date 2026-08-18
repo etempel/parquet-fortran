@@ -420,6 +420,28 @@ module parquet_sampling
     !> Label deriving the zero-weight tail's own permutation seed. Any fixed value would do.
     integer(int64), parameter :: wd_zero_label = 7965600847521931_int64
 
+    !> Labels separating the two weighted families' uniforms from each other, and from the caller's.
+    !!
+    !! **The two families are DIFFERENT REALIZATIONS, so they must not share a uniform**, and
+    !! without these labels they shared the first one exactly: the race reads draw 1 of
+    !! `(seed, stream)` as item 1's key while the sequential descent reads the same draw and scales
+    !! it into `[0, total)`. A key near zero and a descent landing on the leftmost leaf are then the
+    !! same event, so both families chose item 1 together. Measured over 500 000 seeds with weights
+    !! `1 .. 50`: the race chose item 1 on 399 seeds and the tree agreed on **264 of them (66 %)**,
+    !! against an independent expectation of **0.078 %** -- an 844x enrichment, in that one cell and
+    !! nowhere else. Every marginal was clean (2.72 % overall agreement against 2.64 % by chance),
+    !! and so was the different-stream control, which is why nothing caught it: it is invisible to
+    !! any test of one family, and the suite's own cross-family test asserts only that the two
+    !! DIFFER. See `feature_risks.md` Risk-113 for the same class found in the stride axis.
+    !!
+    !! Deriving each family's seed through `pf_random_key` costs one mix per call and separates
+    !! three things at once -- the two families from each other, and both from a caller drawing
+    !! `pf_random_at(seed, stream, ...)` at coordinates it chose itself. This is what
+    !! `perm_family_label` already does for the exact permutation path's rank draw.
+    integer(int64), parameter :: wd_family_label = 3168215062744167237_int64
+    !> The race's own label. See `wd_family_label`; the two values need only differ.
+    integer(int64), parameter :: wperm_family_label = 8402337155096104909_int64
+
     !> Journal entries allocated on first use; it doubles from there.
     integer(int64), parameter :: wd_journal_min = 64_int64
 
@@ -573,8 +595,14 @@ module parquet_sampling
     !! **It is a DIFFERENT REALIZATION from the sequential family, not a different distribution.**
     !! `pf_weighted_permutation(perm, w, seed)` and a `pf_weighted_draw` drained under the same
     !! seed both draw from successive sampling, and for one seed they give different draws from it
-    !! -- in the same way two different seeds would. There is no prefix identity across the two
-    !! families, and the suite asserts that they differ rather than leaving it to be discovered.
+    !! -- in the same way two different seeds would. **They are INDEPENDENT at matched coordinates,
+    !! not merely different**, which is a stronger claim and one the two families had to be
+    !! domain-separated to earn: each derives its own seed through `pf_random_key`, so neither
+    !! shares a uniform with the other or with a caller drawing at coordinates it chose itself.
+    !! Before that separation both read draw 1 of `(seed, stream)` and chose the lowest-weight item
+    !! together on 66 % of the seeds where either did, against 0.078 % by chance -- with every
+    !! marginal clean. `test_families_independent` is what holds this now; see `wd_family_label`.
+    !! There is no prefix identity across the two families.
     !! Within the sequential family the prefix identity does hold; see `pf_weighted_subset`.
     !!
     !! **Construction: the exponential race.** Give item `i` the key `-log(u_i)/w_i` for
@@ -1789,11 +1817,15 @@ contains
         integer(int64), intent(in) :: seed              !! the seed steering the descent
         integer(int64), intent(in) :: stream            !! which sequence of that seed
 
-        self%wseed = seed
+        ! Domain separation, not decoration: without it this family and the race read the SAME
+        ! draw 1 of (seed, stream) and chose the lowest-weight item together. See `wd_family_label`.
+        self%wseed = pf_random_key(seed, wd_family_label)
         self%wstream = stream
         ! Two derivations rather than one: the tail's order must vary with BOTH coordinates, and
-        ! folding the stream into a label instead could collide with an ordinary stream index.
-        self%zkey = pf_random_key(pf_random_key(seed, stream), wd_zero_label)
+        ! folding the stream into a label instead could collide with an ordinary stream index. It
+        ! starts from the family-derived seed, so the two families' tails are separated too -- they
+        ! were previously identical, which is the same coupling in its most extreme form.
+        self%zkey = pf_random_key(pf_random_key(self%wseed, stream), wd_zero_label)
     end subroutine wd_set_coords
 
     !> Refuses a call on a sampler `%init` has not prepared.
@@ -2145,6 +2177,7 @@ contains
         integer, intent(in), optional :: threads !! thread request; absent means auto
         real(real64), allocatable :: u(:), key(:)
         integer(int64), allocatable :: ord(:), pos_item(:), zero_item(:)
+        integer(int64) :: rseed                 !! this family's own seed; see `wperm_family_label`
         integer(int64) :: n, npos, nzero, i, j, z, zkey
         real(real64) :: uu, k1
 
@@ -2187,8 +2220,11 @@ contains
         ! zero-weight items in the middle. Keeping them out removes the question, and it is also
         ! what gets them into UNIFORM RANDOM order -- tied sentinel keys would come back in index
         ! order, since every sort here is stable.
+        ! Domain separation, exactly as `wd_set_coords` does for the sequential family and for the
+        ! same reason: sharing draw 1 with it made both choose the lowest-weight item together.
+        rseed = pf_random_key(seed, wperm_family_label)
         allocate(u(n), key(npos), pos_item(npos))
-        call pf_random_fill_draws(seed, stream, u)
+        call pf_random_fill_draws(rseed, stream, u)
         j = 0_int64
         do i = 1_int64, n
             if (weights(i) > 0.0_real64) then
@@ -2224,9 +2260,9 @@ contains
                     zero_item(z) = i
                 end if
             end do
-            ! The same two derivations the sequential family uses, so both give the tail the same
-            ! kind of order from the same coordinates.
-            zkey = pf_random_key(pf_random_key(seed, stream), wd_zero_label)
+            ! The same two derivations the sequential family uses, from this family's own seed --
+            ! so the tail is ordered the same WAY and not in the same ORDER.
+            zkey = pf_random_key(pf_random_key(rseed, stream), wd_zero_label)
             do i = 1_int64, nzero
                 perm(npos + i) = zero_item(pf_random_perm_at(zkey, nzero, i))
             end do

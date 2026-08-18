@@ -950,6 +950,51 @@ Every entry here has a test behind it. What keeps it in the document is the seco
 whoever edits the area next. Read the entry for the area you are about to touch before you touch
 it — that is what this section is for, and it is why "covered" is not the same as "finished".
 
+### Risk-123 — Two families over one coordinate space couple in the rarest cell, and every marginal stays clean
+
+**Covered** by `test_families_independent` (`test/test_random_weighted.f90`), which carries a
+deliberately coupled control arm alongside the real measurement.
+
+`pf_weighted_permutation` and `pf_weighted_draw` were both driven from the caller's `(seed, stream)`
+directly, so both consumed **draw 1** of that sequence. The race gives item `i` the key
+`-log(1-u_i)/w_i`, smallest when `u_1` is near zero; the sequential descent scales that same `u_1`
+into `[0, total)`, where a near-zero value lands on the leftmost leaf — item 1. A near-zero first
+uniform is therefore the same event for both, and they chose the lowest-weight item *together*.
+
+Measured over 500 000 seeds, 50 items, weights `1 .. 50`: of the 399 seeds where the race chose item
+1, the tree chose it too on **264 (66 %)**, against `w(1)/sum(w) = 0.078 %` — an **844× enrichment**,
+in that one cell and nowhere else (every other item sat at ~1×). The zero-weight tails were worse
+still: both families derived the tail seed from the raw `(seed, stream)`, so at matched coordinates
+their tails were **identical**.
+
+**What makes this the register's business rather than a bug report is how thoroughly it hides.**
+Overall agreement was 2.72 % against 2.64 % by chance — a `z` of +1.9, indistinguishable from noise.
+The different-stream control was clean. Each family is *individually exact*, verified against exact
+rational arithmetic. Nothing about either family's own distribution is wrong, so no test of one
+family can see it, and the suite's own cross-family test (`test_families_differ`) asserts only that
+the two **differ** — which a perfectly coupled pair also does.
+
+**What this forbids.**
+
+- **Two constructions that may be used at the same coordinates must not read the same draw axis.**
+  Each derives its own seed through `pf_random_key` with a fixed family label — `wd_family_label`,
+  `wperm_family_label`, and `perm_family_label` before them. A new construction over the same
+  generator needs its own label, and the cost is one mix per call.
+- **The separation also protects the CALLER**, who may be drawing `pf_random_at(seed, stream, ...)`
+  at coordinates chosen independently and has no way to know a sampler is reading them too. That
+  half is not covered by a test; it follows from the same labels.
+- **A test that asserts two things DIFFER has not asserted they are INDEPENDENT**, and the gap is
+  invisible at the margin. Where two families share a generator, test the joint distribution in the
+  cell where the coupling would concentrate — for these two, the lowest-weight item.
+- **The control arm is load-bearing and must not be dropped.** It rebuilds the pre-fix pair from
+  public API, so it is coupled by construction and must fire. Without it, a fixture too small to
+  resolve anything reports a pass. Confirmed by mutation: reverting **both** derivations fails the
+  test; reverting **either one alone** does not, because either separation alone suffices — so a
+  mutation test here must revert both, or it will wrongly report the test as powerless.
+
+This is the same class as [Risk-113](#risk-113--the-coordinate-addressed-generics-read-one-word-sequence-and-real32-walks-a-finer-grid):
+two things sharing one coordinate space, invisible to every marginal, visible only jointly.
+
 ### Risk-119 — A weighted segment tree maintained by SUBTRACTION stops being a permutation
 
 `pf_weighted_draw`'s tree removes an item by zeroing its leaf and **recomputing** each ancestor from

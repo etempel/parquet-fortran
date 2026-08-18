@@ -42,6 +42,7 @@ module parquet
     use parquet_temporal
     use parquet_sorting
     use parquet_random
+    use parquet_sampling
     ! Only the test hook: the transform itself and its contract check are internal.
     use parquet_expkey, only: parquet_debug_exp_key, parquet_debug_set_exp_key_contract
     use parquet_settings

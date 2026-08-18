@@ -9,6 +9,15 @@ last, alone, or spread across 384 cores under a dynamic schedule.
 
 Everything here is reachable from `use parquet`.
 
+**Two modules sit behind that, and the split matters only if you import them directly.**
+`parquet_random` is the generator — draws, bits, integers, streams and derived seeds — and it
+depends on `iso_fortran_env` and nothing else, so a program that wants nothing but reproducible
+random numbers can use it without the Arrow/Parquet C++ stack. `parquet_sampling` is everything
+that draws from a *population*: `pf_random_perm_at`, `pf_random_permutation`, `pf_random_subset`,
+`pf_random_resample`, and the whole weighted family. It needs a sort, and this project's sort
+brings the C++ stack with it, which is precisely why the two are separate — the dependency stays
+with the callers who need it. `use parquet` gives you both and the distinction never arises.
+
 ## The problem it solves
 
 An ordinary generator carries state. The value you get depends on how many draws came before it,

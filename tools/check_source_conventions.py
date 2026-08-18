@@ -951,6 +951,48 @@ def check_parquet_strings_stays_leaf():
     ]
 
 
+def check_parquet_random_stays_leaf():
+    """`parquet_random` must import NOTHING that has a file in src/ -- `iso_fortran_env` and no more.
+
+    This is a stronger rule than the one above it, and deliberately so. `parquet_strings` merely has
+    to stay clear of `parquet_bindings`; `parquet_random` has to compile completely alone, because
+    two standalone checks build it that way. `tools/check_random_kernels.sh` compiles the module
+    against several compilers and flag sets with no dependency resolver and no Arrow install, and it
+    is the ONLY evidence that the two arms of the route (e) `#ifdef` fork agree -- the fork that
+    exists because gfortran has been observed miscompiling the unprotected Philox round at -O3,
+    silently. `tools/check_exp_key.sh` does the same for the frozen `-log(u)` transform.
+
+    **The failure this closes has already happened.** The weighted draw briefly lived in
+    `parquet_random`, which put `use parquet_sorting` in it -- hence `parquet_bindings`, hence the
+    whole of `parquet_wrapper.cpp` and Arrow. Every configuration in the kernel check then died on a
+    missing `parquet_sorting.mod`, and the script exited saying it proved nothing. `fpm build` and
+    `fpm test` were both perfectly green throughout, because the library obviously has Arrow; the
+    only signal was a check that had stopped being able to run, which is the quietest kind there is.
+
+    So the fix, if this fires, is NOT to add the module to that script's SRC list -- that would make
+    the check pass while destroying the property it exists to measure. It is to move whatever needed
+    the import into `src/parquet_sampling.f90`, which is free to depend on anything precisely
+    because this module does not. `parquet_settings_base` is the one exception worth considering,
+    and only if a setting is genuinely needed by the generator itself.
+    """
+    use_re = re.compile(r"^\s*use\s*(?:,\s*intrinsic\s*)?(?:::)?\s*([A-Za-z_]\w*)", re.M)
+    path = SRC / "parquet_random.f90"
+    if not path.is_file():
+        return ["tools/check_source_conventions.py: src/parquet_random.f90 is missing, so the "
+                "leaf check cannot run -- this check must never pass by finding nothing"]
+    bad = sorted({m.lower() for m in use_re.findall(path.read_text())
+                  if (SRC / (m.lower() + ".f90")).is_file()})
+    if not bad:
+        return []
+    return [
+        "src/parquet_random.f90: imports %s, so the module no longer compiles alone and "
+        "tools/check_random_kernels.sh / tools/check_exp_key.sh cannot build the kernel standalone "
+        "-- the only check that compares the two arms of the route (e) fork. Move whatever needs "
+        "the import into src/parquet_sampling.f90 rather than adding a module to that script's SRC"
+        % ", ".join(bad)
+    ]
+
+
 def check_no_per_element_shared_ptr():
     """A per-ELEMENT helper in parquet_wrapper.cpp must take `const arrow::Array *`, never a
     `const std::shared_ptr<arrow::Array> &`.
@@ -1880,7 +1922,8 @@ def check_fill_size_kind():
     static check is the cheap guard, and `tools/test_random_large_fill.sh` is the end-to-end proof
     that has to be run by hand.
 
-    **Scoped to `src/parquet_random.f90` on purpose.** Within that file the match is by SHAPE -- any
+    **Scoped to `src/parquet_random.f90` and `src/parquet_sampling.f90` on purpose** (the bulk fills
+    live in one, the permutation/resample fills in the other). Within them the match is by SHAPE -- any
     bare `size(x)` at all -- so a bulk routine added later is covered without editing this check.
     It is NOT repo-wide: `src/` carries about 200 other bare `size(...)` calls, nearly all of them
     on arrays whose length is bounded by construction (a column's width, a field count, a schema's
@@ -1888,19 +1931,22 @@ def check_fill_size_kind():
     would be worse than leaving them alone. Whether any of them takes an unbounded caller array is
     a separate question worth its own pass.
     """
-    path = SRC / "parquet_random.f90"
-    if not path.is_file():
-        return ["tools/check_source_conventions.py: src/parquet_random.f90 not found -- this check "
-                "has gone stale and is silently testing nothing"]
+    paths = [SRC / "parquet_random.f90", SRC / "parquet_sampling.f90"]
+    missing = [p.name for p in paths if not p.is_file()]
+    if missing:
+        return ["tools/check_source_conventions.py: src/%s not found -- this check has gone stale "
+                "and is silently testing part of its scope or none of it" % ", src/".join(missing)]
     problems = []
-    text = path.read_text(encoding="utf-8", errors="replace")
-    for lineno, line in enumerate(text.splitlines(), 1):
-        code = line.split("!", 1)[0]
-        for m in re.finditer(r"\bsize\s*\(\s*([A-Za-z_]\w*)\s*\)", code):
-            problems.append("%s:%d: size(%s) has no kind= -- a default-kind length wraps above "
-                            "2**31 elements" % (path.relative_to(REPO_ROOT), lineno, m.group(1)))
+    for path in paths:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            code = line.split("!", 1)[0]
+            for m in re.finditer(r"\bsize\s*\(\s*([A-Za-z_]\w*)\s*\)", code):
+                problems.append("%s:%d: size(%s) has no kind= -- a default-kind length wraps above "
+                                "2**31 elements" % (path.relative_to(REPO_ROOT), lineno, m.group(1)))
     if problems:
-        return ["a bulk array length in parquet_random must be taken as size(v, kind=int64): a",
+        return ["a bulk array length in parquet_random/parquet_sampling must be taken as",
+                "size(v, kind=int64): a",
                 "default-kind result wraps above 2**31 elements and fails SILENTLY, writing nothing",
                 "or writing a short prefix of the caller's intent(out) array:"] + problems
     return []
@@ -2009,6 +2055,7 @@ CHECKS = (
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
     ("every setting has an environment variable", check_env_covers_every_setting),
     ("parquet_strings does not reach parquet_bindings", check_parquet_strings_stays_leaf),
+    ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),

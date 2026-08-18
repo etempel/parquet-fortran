@@ -656,8 +656,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pf_random_bits_at`, `pf_random_int_at`, `pf_random_fill_draws`, `pf_random_fill_streams`,
   `pf_random_seed`, `pf_random_key`, `pf_random_perm_at`, `pf_random_permutation`,
   `pf_random_subset`, `pf_random_resample`,
-  `pf_random_algorithm`, `pf_random_perm_algorithm`), re-exported by `use parquet` and usable on its own as
-  `use parquet_random`. Every value is a pure function of `(seed, i [, draw])` rather than of call
+  `pf_random_algorithm`, `pf_random_perm_algorithm`), re-exported by `use parquet`. It splits in two
+  for anyone importing a module directly: `parquet_random` is the generator and depends on
+  `iso_fortran_env` alone, so it links without the Arrow/Parquet C++ stack, while `parquet_sampling`
+  holds everything that draws from a *population* — `pf_random_perm_at`, `pf_random_permutation`,
+  `pf_random_subset`, `pf_random_resample` and the weighted family below — and carries the sort
+  dependency they need. Every value is a pure function of `(seed, i [, draw])` rather than of call
   order, so a parallel loop returns the same numbers under `schedule(static)`,
   `schedule(dynamic)`, one thread or three hundred — something no stateful generator can offer at
   any speed, and which locking does not fix. The generator is Philox4x32-10; `pf_random_algorithm`

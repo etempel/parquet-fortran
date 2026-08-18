@@ -45,6 +45,7 @@ working rules).
   - [Group interface bodies into commented `interface` blocks](#group-interface-bodies-into-commented-interface-blocks)
   - [A module procedure cannot implement its own submodule's spec-declared interface](#a-module-procedure-cannot-implement-its-own-submodules-spec-declared-interface)
   - [Naming conventions](#naming-conventions)
+  - [`parquet_random` is a LEAF; `parquet_sampling` is where anything more goes](#parquet_random-is-a-leaf-parquet_sampling-is-where-anything-more-goes)
   - [Public numeric arguments: provide both int32 and int64 kinds](#public-numeric-arguments-provide-both-int32-and-int64-kinds)
   - [A new process-global parameter goes in `parquet_settings`](#a-new-process-global-parameter-goes-in-parquet_settings-and-a-design-doc-must-say-so)
   - [Role-A MAMLs live in `table_types/`, not `schemas/`](#role-a-mamls-live-in-table_types-not-schemas)
@@ -953,6 +954,10 @@ parquet_core                    (module — core API + cross-subtree private-hel
 parquet_bindings                (module — independent C++ interop)
 parquet_strings                 (module — independent element domain)
 parquet_temporal                (module — independent element domain)
+parquet_random                  (module — LEAF: iso_fortran_env and nothing else, enforced)
+parquet_expkey                  (module — LEAF: the frozen -log(u) transform, likewise)
+parquet_sampling                (module — permutations/subsets/resampling/weighted draws;
+                                 uses parquet_random + parquet_sorting + parquet_expkey)
 parquet_maml_base               (module — generated)
 └─ parquet_maml_base_add_col_qc (submodule)
 parquet_wrapper.cpp             (C++ TU)
@@ -1063,11 +1068,16 @@ Follow these when adding new public API, types, or internal helpers:
   one.** `parquet_` is for the parquet-file-facing modules (the reader/writer/schema/table/element
   domains: everything listed under "Nested submodule tree"). **`pf_`** — for parquet-fortran, the
   library as a whole — is for *library-wide utility* modules whose subject is not a parquet file at
-  all. There are two: `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays),
+  all. There are three: `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays),
   whose procedures are `pf_sort`, `pf_argsort`, `pf_permute`, … and whose type is `pf_sort_keys`;
-  and `parquet_random` (counter-based random numbers over nothing but a seed and an index), whose
+  `parquet_random` (counter-based random numbers over nothing but a seed and an index), whose
   procedures are `pf_random_at`, `pf_random_int_at`, `pf_random_fill_draws`, … with the frozen contract
-  identifier `pf_random_algorithm`. Note the one deliberate exception in each: a **test-only debug
+  identifier `pf_random_algorithm`; and `parquet_sampling` (drawing from a population rather than
+  drawing a number), whose procedures are `pf_random_perm_at`, `pf_random_subset`,
+  `pf_random_resample`, `pf_weighted_subset`, `pf_weighted_permutation`, … with the type
+  `pf_weighted_draw` and the second frozen identifier `pf_random_perm_algorithm`. **The
+  `parquet_random`/`parquet_sampling` split is a dependency boundary, not a filing decision** —
+  see the leaf rule below. Note the one deliberate exception in each: a **test-only debug
   hook keeps the project-wide `parquet_debug_*` spelling** rather than the module's own prefix
   (`parquet_debug_random_uses_int128`), because that convention is what marks a procedure as a debug
   hook across the whole codebase and is the more useful signal at the call site.
@@ -1119,6 +1129,50 @@ Follow these when adding new public API, types, or internal helpers:
   the type. Check the pair whenever you name a module after what it holds.
 
 When in doubt, grep for an existing analogous name before inventing a new convention.
+
+### `parquet_random` is a LEAF; `parquet_sampling` is where anything more goes
+
+**`src/parquet_random.f90` imports `iso_fortran_env` and nothing else, and that is a hard
+constraint rather than a tidy accident.** Two checks compile that one file standalone — with no
+dependency resolver, no fpm, and no Arrow install anywhere — and they are the only evidence for two
+properties nothing else can reach:
+
+- **`tools/check_random_kernels.sh`** builds both arms of the route (e) `#ifdef` fork and asserts
+  they agree. The fork exists because gfortran 14 and 15 have both been observed *miscompiling* the
+  unprotected Philox round at `-O3`, silently, with no warning under `-Wall -Wextra`. The wrapping
+  arm ships wherever the compiler has no 128-bit integer kind (ifx), and **no other check compiles
+  it at all**, because every other compiler in the fleet takes the protected arm.
+- **`tools/check_exp_key.sh`** does the same for `src/parquet_expkey.f90`'s frozen `-log(u)`
+  transform, which is a leaf for the identical reason.
+
+**The failure mode is a check that quietly stops being able to run, which is the worst kind.** When
+the weighted draw was first written it went into `parquet_random`, bringing `use parquet_sorting`
+with it — hence `parquet_bindings`, hence the whole of `parquet_wrapper.cpp` and Arrow. Every
+configuration in the kernel check then died on a missing `parquet_sorting.mod` and the script
+exited saying it proved nothing, while `fpm build` and `fpm test` stayed perfectly green throughout
+(the library obviously has Arrow). Nothing else noticed, and nothing else could have.
+
+So:
+
+- **A `use` added to `parquet_random` is a design decision, not a detail.** Enforced by
+  `check_parquet_random_stays_leaf` (`tools/check_source_conventions.py`), which fails on any
+  import naming a module with a file in `src/`.
+- **If that check fires, adding the module to the script's `SRC` list is the WRONG fix** — it makes
+  the check pass while destroying the property it measures. Move whatever needed the import into
+  `src/parquet_sampling.f90` instead. `parquet_settings_base` is the only import worth even
+  considering, and only if the *generator itself* needs a setting.
+- **`parquet_sampling` carries the Arrow link edge, deliberately, and confines it.**
+  `pf_weighted_permutation` sorts its keys and the project's one sort is `parquet_sorting`. No C++
+  actually *runs* for `pf_argsort` — the engine has been Fortran since the cutover — so the cost is
+  a link edge, not a call, and the alternative was a second copy of a sorting algorithm.
+- **The split is a dependency boundary, so it decides placement**: anything drawing a *number* goes
+  in `parquet_random`, anything drawing from a *population* goes in `parquet_sampling`. A new
+  procedure that needs a thread-count rule, a sort or a settings knob belongs in the latter by
+  construction.
+- **A sibling module sees only PUBLIC names**, so `parquet_sampling` reaches the generator through
+  `pf_random_int_at`/`pf_random_key`/`pf_random_fill_draws` rather than the private
+  `int_at_impl`/`key_from`/`fill_draws_i32` those wrap. Each is an exact pass-through; keep it that
+  way, or a value changes with only the golden vectors to report it.
 
 ### Public numeric arguments: provide both int32 and int64 kinds
 

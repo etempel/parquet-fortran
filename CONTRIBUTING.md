@@ -318,9 +318,10 @@ differing key changes which items are drawn, silently, and only a cross-BUILD co
 that; a unit test runs in one build by construction. It is not hypothetical: an earlier design note
 concluded FMA contraction was harmless on the strength of four builds that never enabled FMA, and
 `gfortran -O3 -march=native` duly changed the answer. That is also why `parquet_expkey` is a leaf
-module depending on `iso_fortran_env` alone — `parquet_random` itself can no longer be compiled
-standalone, having gained `parquet_sorting` and hence Arrow, so a dependency added to the leaf
-would silently disable this check. Two configurations are excluded by design and named in the
+module depending on `iso_fortran_env` alone — the same property `parquet_random` has and for the
+same reason, so that neither check can be disabled by an import added somewhere else. Anything
+needing more than `iso_fortran_env` belongs in `parquet_sampling`, which is where the weighted draw
+lives and which is deliberately compiled by neither script. Two configurations are excluded by design and named in the
 script: gfortran `-Ofast`/`-ffast-math` and ifx *without* `-fp-model=precise`, both of which abandon
 IEEE semantics outright. The second matters in practice — `fpm --profile release`/`debug` pass
 `-fp-model=precise`, but a bare `fpm build` passes no floating-point flag at all — so
@@ -499,8 +500,9 @@ other on one compiler** — the 128-bit kernel (`#ifdef PF_INT128`) and the wrap
 — driving `tools/benchmark_random_kernels.f90`. Like `tools/check_random_kernels.sh`, and for the
 same reason, it cannot go through fpm and its driver is not under `app/`: forcing the other kernel
 needs `-U__GFORTRAN__`, which also flips `src/parquet.f90`'s stringify branch, so the package will
-not build that way at all. Only a standalone compile of `parquet_random` plus `parquet_settings_base`
-works.
+not build that way at all. Only a standalone compile of `parquet_random` works — which it does
+because that module imports nothing but `iso_fortran_env`, a property
+`check_parquet_random_stays_leaf` enforces.
 
 Two gates decide whether it reports anything, and both exist because their failure mode is a
 plausible-looking number rather than an error. The **vacuity guard** requires the two halves to

@@ -23,8 +23,9 @@
 program probe_random_perm
 
     use iso_fortran_env, only: int32, int64, real64, output_unit
-    use parquet_random, only: pf_random_perm_at, pf_random_permutation, pf_random_subset, &
-                              pf_random_perm_algorithm, pf_random_stream, pf_random_fill_draws
+    use parquet_random, only: pf_random_stream, pf_random_fill_draws
+    use parquet_sampling, only: pf_random_perm_at, pf_random_permutation, pf_random_subset, &
+                                pf_random_perm_algorithm
     use parquet_sorting, only: pf_argsort
     use parquet_settings, only: parquet_set_random_parallel_min_elements, parquet_reset_settings
 

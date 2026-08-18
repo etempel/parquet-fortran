@@ -190,6 +190,16 @@ module parquet_random
     !! and the parity correction the Feistel carries above that threshold. All four facts fix the
     !! answer, so all four belong in the string; a program that recorded `feistel-mix2-4/zaxzb/v1`
     !! must see a different string, because every value it stored has changed.
+    !!
+    !! **`/v2`'s values changed once, after this string existed, and the string deliberately did not
+    !! move -- read this before concluding the identifier is unreliable.** Folding `m` into the
+    !! parity key (`perm_parity_flip`) changed what `/v2` answers for the populations where the
+    !! network is parity-locked. The maintainer's decision was to apply that fix under `/v2` rather
+    !! than bump to `/v3`, on the grounds that `/v2` was found and corrected inside internal testing
+    !! and never reached a released version or an outside user, so no stored value anywhere
+    !! disagrees with the current one. **That reasoning expires the moment `/v2` ships**: from the
+    !! first release carrying it, any change to what it answers requires a new string, and the
+    !! exception recorded here is not a precedent for one taken afterwards.
     character(len=*), parameter :: pf_random_perm_algorithm = "feistel-mix2-16p/zaxzb/exact20/v2"
 
     !> Feistel rounds. **Sixteen, and it must stay even.**
@@ -2540,7 +2550,7 @@ contains
             x = perm_feistel(rk, nr, a, b, x)
             if (x < n) exit
         end do
-        r = perm_swap01(perm_parity_flip(seed), x) + 1_int64
+        r = perm_swap01(perm_parity_flip(seed, n), x) + 1_int64
     end function perm_at_impl
 
     !> Whether population `m` takes the exact path. See `perm_exact` and `perm_exact_max`.
@@ -2618,17 +2628,36 @@ contains
     !! the bit deciding it is unbiased: 0.4997 ones over 2 000 000 seeds, `z = -0.82`. Applying it
     !! after the cycle walk keeps it a permutation of `[0, m)` for every `m >= 2`.
     !!
+    !! **`m` IS FOLDED INTO THE KEY, and dropping it re-creates a defect no single-`m` test can
+    !! see.** Where the network is parity-locked its own contribution is *constant*, so the answer's
+    !! parity is exactly this bit -- and if the bit depended on the seed alone, every locked size
+    !! would share one parity under a given seed. Measured before the fold: pairwise agreement
+    !! **1.0000** across m = 25, 49, 81, 121, 169, where a uniform pair agrees half the time; after
+    !! it, 0.4984-0.5046. Each size on its own looked perfectly uniform in both cases, which is why
+    !! `test_perm_parity` cannot see this and `test_perm_parity_cross_m` exists.
+    !!
+    !! The locked set is wider than the exact squares, which is worth knowing before deciding this
+    !! is a corner case: sweeping raw network parity over m = 21..400 finds a band below each odd
+    !! square -- 80-81, 119-121, 166-169, 221-225, 284-289, 354-361 -- exactly locked at `q**2` and
+    !! 98-99 % determined just below it, where the cycle walk perturbs it without freeing it. That
+    !! band grows as `sqrt(m)`.
+    !!
     !! **Do not "simplify" this away because every structural test still passes without it** -- they
     !! all do. A whole-coset loss is invisible to fixed points, cycle counts, position marginals and
-    !! inversions alike; only a parity test sees it. See `feature_risks.md`.
-    pure function perm_parity_flip(seed) result(f)
+    !! inversions alike; only a parity test sees it. See `feature_risks.md` Risk-116.
+    pure function perm_parity_flip(seed, m) result(f)
         integer(int64), intent(in) :: seed          !! the permutation family's seed
+        integer(int64), intent(in) :: m             !! population size; see the note above
         logical :: f                                !! `.true.` when outputs 0 and 1 are swapped
         integer(int64) :: pk
         f = .false.
         if (perm_dbg_no_parity) return
-        pk = perm_mix2(int(perm_parity_key, int64) * perm_c1, iand(seed, M32))
-        pk = ieor(pk, perm_mix2(int(perm_parity_key, int64), iand(ishft(seed, -32), M32)))
+        ! `m` rides in on the key material of the two evaluations that were already happening, so
+        ! this costs two `ieor`s and no extra `perm_mix2`. Both halves of `m` are folded, or two
+        ! populations differing only above bit 32 would share a bit.
+        pk = perm_mix2(ieor(int(perm_parity_key, int64) * perm_c1, m), iand(seed, M32))
+        pk = ieor(pk, perm_mix2(ieor(int(perm_parity_key, int64), ishft(m, -32)), &
+                                iand(ishft(seed, -32), M32)))
         f = iand(pk, 1_int64) == 1_int64
     end function perm_parity_flip
 
@@ -3257,7 +3286,7 @@ contains
         end if
         call perm_factors(m, a, b)
         nr = perm_round_count()
-        flip = perm_parity_flip(seed)
+        flip = perm_parity_flip(seed, m)
         call perm_round_keys(seed, nr, rk)
         nth = random_threads(n, threads)
         if (nth <= 1) then
@@ -3390,7 +3419,7 @@ contains
         end if
         call perm_factors(m, a, b)
         nr = perm_round_count()
-        flip = perm_parity_flip(seed)
+        flip = perm_parity_flip(seed, m)
         call perm_round_keys(seed, nr, rk)
         nth = random_threads(n, threads)
         if (nth <= 1) then

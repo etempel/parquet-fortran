@@ -685,7 +685,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what is measured instead is that it is indistinguishable from uniform under an order-4 tuple
   statistic over the exact cell space, a parity test over the alternating group, an all-cells
   chi-square, and fixed-point, cycle-structure, position-uniformity, subset-membership and
-  structural tests. Consecutive `m` are independent of each other.
+  structural tests. **Permutations of different `m` under one seed are independent of each other**,
+  including in parity — which is not automatic, because at `m = 25, 49, 81, ...` the network can only
+  produce even permutations and the parity is decided entirely by a seed-derived correction.
   **`pf_random_resample(idx, m, seed [, stream [, threads]])` is the third of the family and draws
   WITH replacement** — the bootstrap's sample. It has no construction of its own: it *is*
   `pf_random_fill_draws(seed, stream, idx, 1, m)`, an identity the suite asserts, and what the name

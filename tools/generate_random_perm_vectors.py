@@ -69,14 +69,20 @@ def round_keys(seed, rounds):
     return [mix2((j * C1), s & M32) ^ mix2(j, (s >> 32) & M32) for j in range(1, rounds + 1)]
 
 
-def parity_flip(seed):
+def parity_flip(seed, m):
     """The parity correction's bit: one key from the same schedule, at a FIXED index.
 
     Without it a Feistel over `Z_q x Z_q` with `q` odd cannot reach an odd permutation at any round
     count, so exactly half of `S_m` is unreachable at m = 25, 49, 81, ...
+
+    `m` is folded in because where the network is parity-locked its contribution is constant, so
+    this bit alone decides the answer's parity -- and keyed on the seed alone it would give every
+    locked size the SAME parity under one seed (measured: pairwise agreement 1.0000 across
+    m = 25, 49, 81, 121, 169). Invisible to any single-`m` test.
     """
     s = seed & MASK64
-    pk = mix2(PARITY_KEY * C1, s & M32) ^ mix2(PARITY_KEY, (s >> 32) & M32)
+    pk = (mix2((PARITY_KEY * C1) ^ m, s & M32)
+          ^ mix2(PARITY_KEY ^ (m >> 32), (s >> 32) & M32))
     return (pk & 1) == 1
 
 
@@ -144,7 +150,7 @@ def perm_at(seed, m, k, rounds=None, parity=True, exact_max=None):
         x = feistel(rk, rounds, a, b, x)
         if x < n:
             break
-    if parity and parity_flip(seed) and x <= 1:
+    if parity and parity_flip(seed, n) and x <= 1:
         x = 1 - x
     return x + 1
 
@@ -199,7 +205,7 @@ def self_test():
         return 1
 
     # And the parity bit has to be balanced, or the correction trades one skew for another.
-    ones = sum(1 for s in range(200000) if parity_flip(s * 2654435761))
+    ones = sum(1 for s in range(200000) if parity_flip(s * 2654435761, 25))
     z = (ones - 100000) / (200000 * 0.25) ** 0.5
     if abs(z) > 4.0:
         print("SELF-TEST FAILED: the parity bit is biased, z = %.2f" % z, file=sys.stderr)

@@ -466,7 +466,11 @@ fix the answer: the round count, the parity correction (`p`), the width rule, an
 below which the Feistel is not used at all.
 
 **Consecutive `m` are independent.** A permutation of 5 and a permutation of 6 under the same seed
-are unrelated, rather than two views of one underlying draw.
+are unrelated, rather than two views of one underlying draw. That holds for their parity too, which
+is less automatic than it sounds: at `m = 25, 49, 81, …` — an odd number squared — the network can
+only ever produce an *even* permutation, so the parity is decided entirely by the seed-driven
+correction, and permutations of two such sizes would share it unless `m` were part of what decides
+it. It is.
 
 **What it costs.** A whole permutation is about 30 ns per element on one thread and falls to well
 under 1 ns per element once it is threaded, because element `k` depends on no other element. The

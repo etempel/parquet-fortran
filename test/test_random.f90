@@ -61,6 +61,8 @@ contains
                 test_perm_all_cells), &
             new_unittest("odd permutations are half of them, including at every odd square", &
                 test_perm_parity), &
+            new_unittest("parity is independent ACROSS m, not just balanced within each one", &
+                test_perm_parity_cross_m), &
             new_unittest("every one of the 8! permutations is reached over 15 x 8! seeds", &
                 test_perm_coverage), &
             new_unittest("an order-4 tuple statistic finds no structure above the exact threshold", &
@@ -1167,8 +1169,8 @@ contains
               3_int64, 8_int64, 14_int64, 6_int64, 16_int64, 12_int64, 7_int64, 9_int64, 1_int64, 14_int64, 11_int64,  &
               20_int64, 21_int64, 5_int64, 17_int64, 15_int64, 18_int64, 3_int64, 16_int64, 1_int64, 19_int64, 6_int64,  &
               7_int64, 10_int64, 4_int64, 2_int64, 12_int64, 9_int64, 8_int64, 13_int64, 14_int64, 11_int64, 24_int64,  &
-              21_int64, 5_int64, 17_int64, 15_int64, 22_int64, 3_int64, 16_int64, 1_int64, 19_int64, 6_int64, 7_int64,  &
-              10_int64, 4_int64, 2_int64, 12_int64, 9_int64, 25_int64, 13_int64, 23_int64, 18_int64, 20_int64, 8_int64,  &
+              21_int64, 5_int64, 17_int64, 15_int64, 22_int64, 3_int64, 16_int64, 2_int64, 19_int64, 6_int64, 7_int64,  &
+              10_int64, 4_int64, 1_int64, 12_int64, 9_int64, 25_int64, 13_int64, 23_int64, 18_int64, 20_int64, 8_int64,  &
               19_int64, 72_int64, 46_int64, 37_int64, 35_int64, 4_int64, 29_int64, 762_int64, 923_int64, 152_int64,  &
               630_int64, 397_int64, 111_int64, 255_int64, 552_int64, 2365426987_int64, 248549828_int64, 1963187087_int64,  &
               469158413_int64]
@@ -2134,6 +2136,81 @@ contains
             if (perm_is_odd(p, m)) odd = odd + 1
         end do
     end subroutine odd_fraction
+
+    !> **Parity must be independent ACROSS `m`, not merely balanced within each one.**
+    !!
+    !! Where the network is parity-locked -- `m = q**2` with `q` odd, and a band below it -- its own
+    !! contribution to the answer's parity is *constant*, so the parity is exactly
+    !! `perm_parity_flip`'s bit. Key that bit on the seed alone and every locked size shares one
+    !! parity under a given seed: measured, pairwise agreement **1.0000** across
+    !! m = 25, 49, 81, 121, 169, where a uniform pair agrees half the time.
+    !!
+    !! **`test_perm_parity` cannot see this and no single-`m` test can.** Each size on its own is
+    !! perfectly balanced either way, because the flip bit is an unbiased coin; what is wrong is
+    !! that it is the *same* coin. This is the same class of defect as two populations sharing one
+    !! rank on the exact path, which `perm_exact` avoids by making `m` the stream index.
+    !!
+    !! **The control is `parquet_debug_set_perm_parity(.false.)`, and it is the right one because it
+    !! reproduces the BUG'S OWN SIGNATURE**: with the correction off, both locked sizes are always
+    !! even, so agreement reads exactly 1.0000 -- which is what dropping `m` from the key would also
+    !! produce. A control that merely failed some other way would not show this statistic can catch
+    !! the regression it exists for.
+    subroutine test_perm_parity_cross_m(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer, parameter :: SQ(5) = [25, 49, 81, 121, 169]
+        integer(int64), parameter :: NS = 20000_int64
+        logical, allocatable :: bits(:, :)
+        real(real64) :: p, z
+        integer :: i, j, n
+        character(len=160) :: msg
+
+        ! Each size's parities once, then every pair for free -- 5 sweeps rather than 10.
+        allocate (bits(NS, 5))
+        do i = 1, 5
+            call parity_bits(SQ(i), NS, bits(:, i))
+        end do
+        do i = 1, 4
+            do j = i + 1, 5
+                n = count(bits(:, i) .eqv. bits(:, j))
+                p = real(n, real64) / real(NS, real64)
+                z = (p - 0.5_real64) * 2.0_real64 * sqrt(real(NS, real64))
+                write (msg, '(a,i0,a,i0,a,f6.4,a,f0.1,a)') "parity is correlated across m=", SQ(i), &
+                    " and m=", SQ(j), ": agreement ", p, " (z=", z, &
+                    "); is m still folded into perm_parity_flip's key?"
+                call check(error, abs(z) < 5.0_real64, trim(msg))
+                if (allocated(error)) then
+                    deallocate (bits)
+                    return
+                end if
+            end do
+        end do
+        deallocate (bits)
+
+        ! The control, at the same two sizes: correction off leaves both locked, so agreement is
+        ! exactly 1 -- the signature a seed-only parity key would produce.
+        allocate (bits(2000, 2))
+        call parquet_debug_set_perm_parity(.false.)
+        call parity_bits(25, 2000_int64, bits(:, 1))
+        call parity_bits(49, 2000_int64, bits(:, 2))
+        call parquet_debug_set_perm_parity(.true.)
+        n = count(bits(:, 1) .eqv. bits(:, 2))
+        write (msg, '(a,i0,a)') "with the parity correction off, m=25 and m=49 agreed on only ", n, &
+            " of 2000 seeds; both are parity-locked so they must agree on all of them"
+        call check(error, n == 2000, trim(msg))
+        deallocate (bits)
+    end subroutine test_perm_parity_cross_m
+
+    !> The parity of the permutation of `1 .. m` under each of `nseed` seeds.
+    subroutine parity_bits(m, nseed, bits)
+        integer, intent(in) :: m                    !! population size
+        integer(int64), intent(in) :: nseed         !! how many seeds
+        logical, intent(out) :: bits(:)             !! `.true.` where the permutation is odd
+        integer(int64) :: p(m), s
+        do s = 1_int64, nseed
+            call pf_random_permutation(p, s * 2654435761_int64)
+            bits(s) = perm_is_odd(p, m)
+        end do
+    end subroutine parity_bits
 
     !> **The coverage test: the sharpest binary statement available at a small `m`.**
     !!

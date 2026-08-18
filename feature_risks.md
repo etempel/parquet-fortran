@@ -4913,12 +4913,35 @@ returning correct-looking permutations from half the space forever.
 every statistic in the suite before this work was marginal, and the lock is invisible to all of them.
 A parity test is the only instrument that sees it.
 
-**Test — `test_perm_parity` (`test/test_random.f90`, suite `random_perm`).** Asserts the fraction of
-odd permutations is within `|z| < 5` of one half at `m = 9, 25, 49, 81`, every one an odd square. Its
-negative control is the published `/v1` kernel through the three debug hooks, where the count is
-**exactly zero** rather than merely low — so the control fails hard, and a threshold loose enough to
-excuse it could not exist. `m = 9` is included although it is now answered exactly: the exact path has
-to be shown to reach both cosets too, and it is the size where the lock was found.
+**The correction's key must include `m`, and leaving it out is a SECOND defect that the parity test
+cannot see.** Where the network is locked its own contribution is constant, so the answer's parity is
+exactly the correction's bit — and keyed on the seed alone, every locked size shares one parity under
+a given seed. Measured before this was fixed: pairwise agreement **1.0000** across
+m = 25, 49, 81, 121, 169, against 0.4945–0.5040 for unlocked controls. Each size on its own stayed
+perfectly balanced, so `test_perm_parity` passed throughout — confirmed by mutation, where dropping
+`m` from the key leaves that test green and moves `test_perm_parity_cross_m` to z = 141.4.
+
+**The locked set is wider than the exact squares**, which matters when judging whether this is a
+corner case. Sweeping raw network parity (correction off) over m = 21..400 finds a band below each
+odd square — 80–81, 119–121, 166–169, 221–225, 284–289, 354–361 — exactly locked at `q**2` and
+98–99 % determined just below it, where the cycle walk perturbs without freeing it. The band grows as
+`sqrt(m)`.
+
+**This was fixed under the `/v2` identifier rather than by bumping to `/v3`**, by maintainer decision:
+`/v2` was found and corrected inside internal testing and never reached a release or an outside user,
+so no stored value disagrees with the current one. **That exception expires when `/v2` ships** and is
+not a precedent for a change made afterwards; see `pf_random_perm_algorithm`'s own doc-comment.
+
+**Test — `test_perm_parity` and `test_perm_parity_cross_m` (`test/test_random.f90`, suite
+`random_perm`), and neither is redundant.** The first asserts the fraction of odd permutations is
+within `|z| < 5` of one half at `m = 9, 25, 49, 81`, every one an odd square; its negative control is
+the published `/v1` kernel through the three debug hooks, where the count is **exactly zero** rather
+than merely low — so the control fails hard, and a threshold loose enough to excuse it could not
+exist. `m = 9` is included although it is now answered exactly: the exact path has to be shown to
+reach both cosets too, and it is the size where the lock was found. The second asserts pairwise
+parity agreement across five odd squares is within `|z| < 5` of one half; its control is
+`parquet_debug_set_perm_parity(.false.)`, chosen because it reproduces **the bug's own signature** —
+agreement exactly 1.0000 — rather than failing some other way.
 
 ### Risk-117 — A permutation test sited at an even square, or using only marginal statistics, proves nothing
 

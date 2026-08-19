@@ -1043,10 +1043,11 @@ chain, and `-march=native` is an entirely ordinary thing to build with. `exp_key
 add, which costs 2.53x on the polynomial and cannot be `pure` — both compilers reject a `volatile`
 local in a pure procedure.
 
-**Covered** by `tools/check_exp_key.sh`, which sweeps twenty-four configurations on x86 (gfortran
-at nine including `-march=native`, `-mfma`, `-flto`, `-ffast-math` and `-Ofast`; ifx at seven,
-being four `-fp-model=precise` arms plus its own no-flag defaults and `-Ofast`; flang at eight)
-against one frozen fingerprint. `exp_key_contract_ok` re-derives 32 values at run time — but
+**Covered** by `tools/check_exp_key.sh`, which sweeps ten configurations per gfortran or flang
+build — eleven on x86, which adds `-mfma` — plus seven under ifx, being four `-fp-model=precise`
+arms and its own no-flag defaults, all against one frozen fingerprint. **It is run on both
+architectures now, and that is load-bearing rather than thorough**: one class below fires only
+where FMA is baseline, so an x86-only sweep reported clean while arm64 failed. `exp_key_contract_ok` re-derives 32 values at run time — but
 **it is not coverage for this entry and an earlier version of this paragraph implied it was.**
 32 inputs is a sparse sample: when the barrier was actually lost, it reproduced `ek_contract_fp`
 exactly while the script's 13824-input sweep caught the divergence. The script is the cover. The
@@ -1062,6 +1063,20 @@ is back and `exp_key` is impure again. Two things generalise from it — a direc
 compiler may decline, so it may never be the *only* thing holding a contract; and the compiler that
 declines it may warn about one spelling while silently dropping the other, so a clean build log is
 no evidence at all.
+
+**A THIRD instance, found on arm64 and invisible to every x86 machine.** With the reassociation
+above already barriered, `flang -O3 -ffast-math` on machine A moved the fingerprint to
+7108262605301466839 — 148 of 13824 inputs, 1 ulp each. The last Horner coefficient `ek_c(0)` is
+exactly **1.0**, so `logm = ek_rnd((f + f) * poly)` is `g * (t + 1.0)`; under `reassoc` that
+distributes to `g*t + g` at no cost, because multiplying by one vanishes, and the result is a
+single FMA. **The barriers on the two products either side did not help — the unbarriered add
+BETWEEN them was the target.** Fixed by `logm = ek_rnd((f + f) * ek_rnd(poly))`, which leaves the
+frozen fingerprint and `ek_contract_fp` unchanged. Changing `ek_c(0)` to 0.9 in a scratch copy
+removes the FMA, which is what identifies the mechanism rather than merely correlating with it.
+**Why it is architecture-gated**: the rewrite fires only where the result becomes one instruction,
+so the same flags emit it on aarch64 and on x86-64 under an FMA-bearing `-march=`, and not on
+baseline x86-64. gfortran does not perform the rewrite at all — it is LLVM's — so on this one a
+green gfortran run says nothing about flang.
 
 **What it still forbids**, and none of it is visible in the source:
 
@@ -1085,6 +1100,16 @@ no evidence at all.
   on the EXPRESSION**: each `ek_rnd` stops an FMA spanning an add, none of them stops the adds
   being regrouped among themselves. Where a value is a large term plus a small correction, the
   grouping is the algorithm and needs its own barrier.
+- **A SUM feeding a PRODUCT needs its own barrier, and a coefficient of exactly 1.0 is what makes
+  the optimiser want the rewrite.** This is the second shape of the "barrier on every PRODUCT is
+  not a barrier on the EXPRESSION" rule above and it is not implied by it: the first is about adds
+  being regrouped among themselves, this one about a multiply being distributed over an add. A new
+  coefficient table whose last entry is 1.0, or any new `a * (b + c)` in this file, needs the same
+  treatment.
+- **Every fast-math arm in the sweep must be paired with `-march=native`.** Without it, baseline
+  x86-64 has no FMA to contract into, the distribution is not profitable, it never fires, and the
+  arm reports clean while proving nothing. This is the same trap as the original `-mfma` omission,
+  one level down — and it is the reason the class survived a full x86 sweep.
 - **Do not diagnose a floating-point divergence from the flag that exposes it.** `-fp-model=fast`
   licenses several transformations at once; naming the plausible one without bisecting cost this
   entry a wrong root cause that stood for some time and made a fixable problem look unfixable.

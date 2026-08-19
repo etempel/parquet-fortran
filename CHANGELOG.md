@@ -30,8 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all-zero are refused rather than silently reinterpreted. The race's `-log(u)` is computed in-library from IEEE `+ - * /` rather
   than from `log`, because libm is not reproducible across compilers and one differing key changes
   which items are drawn; `pf_weighted_permutation` verifies at run time that its build reproduces
-  the frozen transform and aborts naming the flag if not, which catches `-ffast-math` builds and a
-  bare `fpm build` under ifx, whose default is `-fp-model=fast`.
+  the frozen transform and aborts naming the flag if not, so a build whose compiler or flags have
+  left IEEE semantics cannot quietly produce a different draw order.
 
 - **`call parquet_get_column_nullable(reader, name, is_nullable)`** reports whether a column's
   stored Arrow field is declared nullable — a schema-only query that reads no column data, and a

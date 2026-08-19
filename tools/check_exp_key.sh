@@ -22,6 +22,19 @@
 #     and not advice a compiler may decline -- and `exp_key` is no longer `pure`.
 #     Note the runtime guard `exp_key_contract_ok` did NOT see that divergence: it samples 32
 #     inputs and none of the four were among them. This script is the only thing that catches it.
+#   * A THIRD instance, and the one that makes the pairing below load-bearing. `flang -O3
+#     -ffast-math` on machine A (arm64) moved the fingerprint to 7108262605301466839, on 148 of
+#     13824 inputs by 1 ulp each: under `reassoc` the final `g * (t + 1.0)` distributes to
+#     `g*t + g` -- free, because the last Horner coefficient is exactly 1.0 -- and that form is a
+#     single FMA. The barriers on the two products either side did not help, because the
+#     unbarriered add BETWEEN them was the target. Fixed by barriering it; see `exp_key`.
+#     **It is ARCHITECTURE-GATED and that is why one machine can pass while another fails on the
+#     same compiler and flags.** The rewrite fires only where the result becomes one instruction:
+#     the same `-O3 -ffast-math` emits the FMA on aarch64, where FMA is baseline, and on x86-64
+#     only under an FMA-bearing `-march=`. Machine C reported clean purely because its fast-math
+#     arms were baseline x86-64, which has no FMA to contract into. **That is why every fast-math
+#     arm below is ALSO swept with `-march=native`** -- without it the whole class is invisible on
+#     x86, which is exactly how it reached a shipped build.
 #
 # FAST-MATH IS NOW IN SCOPE AND IS SWEPT LIKE EVERYTHING ELSE. Both `-Ofast`/`-ffast-math` and
 # ifx's default `-fp-model=fast` used to differ, and this file used to record them as unfixable on
@@ -112,13 +125,21 @@ case "$($FC --version 2>&1 | head -1)" in
     # either way: `-march=native` already implies FMA wherever the hardware has it, and is exactly
     # the configuration that exposed the lost barrier described above.
     *flang*)       PP="-cpp"; MD="-J$WORK"
+                   # The last two pair fast-math with an FMA-bearing target on purpose: on
+                   # baseline x86-64 the distribution described above cannot become one
+                   # instruction, so it never fires and the arm proves nothing there.
                    CONFIGS=("-O0" "-O2" "-O3 -funroll-loops" "-O3 -march=native" \
                             "-O3 -flto" "-O3 -ffp-contract=fast" \
-                            "-O3 -ffast-math" "-Ofast") ;;
+                            "-O3 -ffast-math" "-Ofast" \
+                            "-O3 -ffast-math -march=native" "-Ofast -march=native") ;;
     *)             PP="-cpp"; MD="-J$WORK"
+                   # As on flang, the fast-math arms are swept both bare and with an FMA-bearing
+                   # target -- the rewrite that needs the pairing is a property of the TARGET, not
+                   # of the compiler.
                    CONFIGS=("-O0" "-O2" "-O3 -funroll-loops" "-O3 -march=native" \
                             "-O3 -flto" "-O3 -ffp-contract=fast" \
-                            "-O3 -ffast-math" "-Ofast")
+                            "-O3 -ffast-math" "-Ofast" \
+                            "-O3 -ffast-math -march=native" "-Ofast -march=native")
                    # `-mfma` is an x86-only GCC option, so this arm is gated on the target rather
                    # than on the compiler: the aarch64 backend has no such flag and the driver
                    # rejects it outright, which reports as a [BUILD FAIL] and reads like the

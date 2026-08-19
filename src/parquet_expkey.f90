@@ -148,6 +148,25 @@ contains
     !! adds being re-grouped among themselves. When a value is built as a large term plus a small
     !! correction, the grouping IS the algorithm, and it needs its own barrier.
     !!
+    !! **A SUM feeding a PRODUCT is the second shape, and `ek_c(0)` being exactly 1.0 is what makes
+    !! the optimiser want it.** The last Horner step is `poly = t + ek_c(0)`, which `logm` then
+    !! multiplies by `f + f`. Under `reassoc`, `g * (t + 1.0)` distributes to `g*t + g` -- free,
+    !! because multiplying by one vanishes -- and that form is a single FMA. The barriers on the two
+    !! products either side did not help, because the unbarriered add BETWEEN them was the target;
+    !! `ek_rnd(poly)` is what closes it. **Measured on machine A (arm64): `flang -O3 -ffast-math`
+    !! and `-Ofast` moved the fingerprint to 7108262605301466839, differing on 148 of 13824 inputs
+    !! by 1 ulp each.** Changing `ek_c(0)` from 1.0 to 0.9 in a scratch copy removes the FMA, which
+    !! is what identifies the mechanism rather than merely correlating with it.
+    !!
+    !! **That one is ARCHITECTURE-gated, so the same compiler and flags can pass on one machine and
+    !! fail on another.** The rewrite fires only where the result becomes one instruction: the same
+    !! `-O3 -ffast-math` emits the FMA on aarch64, where FMA is baseline, and on x86-64 under
+    !! `-march=haswell` -- and does NOT emit it on baseline x86-64, which has no FMA to contract
+    !! into. That is why machine C reported clean while machine A failed, and it is the same trap as
+    !! the original `-mfma` discovery: a hazard hidden by builds that happen not to enable FMA. Note
+    !! `-ffp-contract=off` does not undo it, because flang stamps `contract` on the IR from
+    !! `-ffast-math` and the later flag does not clear it.
+    !!
     !! **NOT `pure`, and the impurity is the price of the barrier being GUARANTEED.** A `volatile`
     !! local is standard Fortran and every compiler must honour it; `!GCC$`/`!DIR$ ATTRIBUTES
     !! NOINLINE` are directives a compiler is free to ignore. This transform was built on the
@@ -206,7 +225,7 @@ contains
         do i = 10, 0, -1
             poly = ek_rnd(poly * s) + ek_c(i)
         end do
-        logm = ek_rnd((f + f) * poly)
+        logm = ek_rnd((f + f) * ek_rnd(poly))
         en = real(-k, real64)
         big = ek_rnd(en * ek_log2_hi)
         small = ek_rnd(en * ek_log2_lo)

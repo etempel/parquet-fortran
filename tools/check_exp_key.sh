@@ -50,8 +50,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 # The contract. Reproduced by gfortran 15.2.1 at -O0/-O2/-O3/-march=native/-mfma/-flto (machines
-# B and C), by ifx 2026.1.1 at -fp-model=precise (machine B), and by flang 22.1.8 at
-# -O0/-O2/-funroll-loops/-march=native/-flto/-ffp-contract=fast (machine C).
+# B and C, both x86-64), by gfortran 15.2.0 at -O0/-O2/-O3/-march=native/-flto/-ffp-contract=fast
+# (machine A, arm64 -- no -mfma arm there; see the note on the generic branch below for why its
+# absence costs no coverage), by ifx 2026.1.1 at -fp-model=precise (machine B), and by flang
+# 22.1.8 at -O0/-O2/-funroll-loops/-march=native/-flto/-ffp-contract=fast (machines A and C).
 EXPECTED_FP="-9123008136727752159"
 
 FC="${FC:-gfortran}"
@@ -67,25 +69,41 @@ WORK="$(mktemp -d)"
 finished=0
 trap '[ "$finished" = "1" ] || { echo "check_exp_key.sh: TERMINATED EARLY -- this run proves nothing" >&2; rm -rf "$WORK"; exit 2; }' EXIT
 
+SKIP_NOTE=""
 case "$($FC --version 2>&1 | head -1)" in
     *ifx*|*ifort*) PP="-fpp"; MD="-module $WORK"
                    CONFIGS=("-O0 -fp-model=precise" "-O2 -fp-model=precise" \
                             "-O3 -xHost -fp-model=precise" "-O3 -fp-model=precise -ipo") ;;
-    # flang's driver has no `-mfma` at all (`unknown argument`), unlike gfortran, which accepts
-    # and ignores it even on a target with no FMA. Dropping it costs no coverage: `-march=native`
-    # already implies FMA wherever the hardware has it -- and is exactly the configuration that
-    # exposed the lost barrier described above.
+    # flang's driver has no `-mfma` at all (`unknown argument`). gfortran has it only on x86 --
+    # it is one of GCC's x86 options, not a generic one -- so the generic branch below gates it on
+    # the TARGET rather than assuming every gfortran takes it. Dropping it costs no coverage
+    # either way: `-march=native` already implies FMA wherever the hardware has it, and is exactly
+    # the configuration that exposed the lost barrier described above.
     *flang*)       PP="-cpp"; MD="-J$WORK"
                    CONFIGS=("-O0" "-O2" "-O3 -funroll-loops" "-O3 -march=native" \
                             "-O3 -flto" "-O3 -ffp-contract=fast") ;;
     *)             PP="-cpp"; MD="-J$WORK"
                    CONFIGS=("-O0" "-O2" "-O3 -funroll-loops" "-O3 -march=native" \
-                            "-O3 -mfma" "-O3 -flto" "-O3 -ffp-contract=fast") ;;
+                            "-O3 -flto" "-O3 -ffp-contract=fast")
+                   # `-mfma` is an x86-only GCC option, so this arm is gated on the target rather
+                   # than on the compiler: the aarch64 backend has no such flag and the driver
+                   # rejects it outright, which reports as a [BUILD FAIL] and reads like the
+                   # frozen transform having moved when it is nothing of the kind. Skipping it
+                   # there costs no coverage -- FMA is baseline ARMv8-A, so plain `-O2` already
+                   # emits `fmadd` and EVERY arm above is an FMA-capable build, making arm64 a
+                   # stricter test of the rounding barrier than the x86 `-mfma` arm it stands in
+                   # for. The skip is announced below: a probe that did not run must never look
+                   # like one that passed.
+                   case "$($FC -dumpmachine 2>/dev/null)" in
+                       i?86-*|x86_64-*) CONFIGS+=("-O3 -mfma") ;;
+                       *) SKIP_NOTE="  [skip] -O3 -mfma -- x86-only flag, unavailable on target $($FC -dumpmachine 2>/dev/null)" ;;
+                   esac ;;
 esac
 
 echo "check_exp_key.sh: $FC -- $($FC --version 2>&1 | head -1)"
 echo "expected fingerprint: $EXPECTED_FP"
 echo
+if [ -n "$SKIP_NOTE" ]; then echo "$SKIP_NOTE"; fi
 
 fails=0
 ran=0

@@ -108,19 +108,50 @@ contains
     !! them even with the barriers (it is at least stable *within* fast-math, with and without
     !! FMA). `fpm --profile release` passes `-O3 -funroll-loops`, so nothing shipped is affected.
     !!
-    !! **Not `pure`, and it cannot be**: both gfortran and ifx reject a `volatile` local in a pure
-    !! procedure. That is a deliberate trade of `pure elemental` for a contract that actually
-    !! holds; nothing in the library needs it in a pure context.
+    !! **`pure`, via a `noinline` identity helper rather than a `volatile` local.** `volatile` was
+    !! the original barrier and is standard Fortran, but both gfortran and ifx reject a `volatile`
+    !! local in a `pure` procedure -- which would have made every distribution built on this
+    !! transform impure too, and so unusable from `do concurrent` or from a caller's own `pure`
+    !! procedure. `ek_rnd` replaces it: an opaque call boundary the optimiser may not fuse across,
+    !! so the product is rounded to `real64` before the add exactly as the volatile store was.
+    !!
+    !! **The trade this makes, stated plainly, because it is a real weakening.** `volatile` is
+    !! standard and every compiler must honour it; `!GCC$`/`!DIR$ ATTRIBUTES NOINLINE` are
+    !! directives a compiler is free to ignore, and a compiler that ignores both silently loses the
+    !! barrier. That is categorically different from this project's other `noinline` sites (see
+    !! `int_reduce_retry` in `parquet_random`), where being ignored costs only speed -- here it
+    !! would cost the contract. Two things make the residual risk loud rather than silent:
+    !! `tools/check_exp_key.sh` compares the fingerprint across 11 configurations per compiler
+    !! (including `-mfma`, `-ffp-contract=fast`, `-flto` and `-ipo`, all of which move the
+    !! fingerprint without a barrier), and `exp_key_contract_ok` re-checks it at run time. Verified
+    !! on gfortran 15.2.1 (7/7) and ifx 2026.1.1 (4/4). **NOT yet verified on flang**, which the
+    !! same script covers on a machine that has it -- run it there before relying on this.
     !!
     !! **The domain is not general and the guard is the caller's.** The race feeds this `1 - u` for
     !! a uniform `u` in `[0, 1)`, so the argument lies in `[2**-53, 1]` and is never zero, never
     !! denormal and never above 1. `exponent`/`fraction` are exact bit operations on a normal
     !! number, so nothing rounds before the polynomial does. `u = 1` gives exactly `0`.
-    function exp_key(u) result(e)
+    !> The rounding barrier: an identity that the optimiser may not fuse across.
+    !!
+    !! **Keeping this out of line is the whole point of it.** Inlined, `ek_rnd(a * b) + c` is just
+    !! `a * b + c` and a compiler with FMA will contract it, which changes the result and moves the
+    !! frozen fingerprint. Both directive spellings are given because gfortran and ifx use
+    !! different ones; a compiler that knows neither loses the barrier, which is why
+    !! `exp_key_contract_ok` exists and why `tools/check_exp_key.sh` must be run on any new
+    !! compiler before its build is trusted. Do not delete either line, and do not "simplify" the
+    !! call sites back to bare arithmetic.
+    pure function ek_rnd(x) result(y)
+!GCC$ ATTRIBUTES noinline :: ek_rnd
+!DIR$ ATTRIBUTES NOINLINE :: ek_rnd
+        real(real64), intent(in) :: x   !! the product to round
+        real(real64) :: y               !! the same value, rounded to real64
+        y = x
+    end function ek_rnd
+
+    pure function exp_key(u) result(e)
         real(real64), intent(in) :: u   !! a uniform in `[2**-53, 1]`; nothing validates this
         real(real64) :: e               !! `-log(u)`, in `[0, 36.74]`
         real(real64) :: m, f, s, poly, en, big, small, logm
-        real(real64), volatile :: vt    !! the rounding barrier; see the note above
         integer :: k, i
 
         k = exponent(u)
@@ -133,18 +164,12 @@ contains
         s = f * f
         poly = ek_c(11)
         do i = 10, 0, -1
-            vt = poly * s               ! rounded to real64 here, so no FMA can span the add
-            poly = vt + ek_c(i)
+            poly = ek_rnd(poly * s) + ek_c(i)
         end do
-        ! `f + f` is exact and feeds a multiply rather than an add, so it needs no barrier; the
-        ! three products that DO feed an add each get one.
-        vt = (f + f) * poly
-        logm = vt
+        logm = ek_rnd((f + f) * poly)
         en = real(-k, real64)
-        vt = en * ek_log2_hi
-        big = vt
-        vt = en * ek_log2_lo
-        small = vt
+        big = ek_rnd(en * ek_log2_hi)
+        small = ek_rnd(en * ek_log2_lo)
         e = big + (small - logm)
     end function exp_key
 

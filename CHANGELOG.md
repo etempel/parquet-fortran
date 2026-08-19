@@ -686,7 +686,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the range passed as two further arguments (`call pf_random_fill_draws(seed, i, v, lo, hi)`); and
   `pf_random_key` derives independent seed families that compose by nesting; and
   `pf_random_stream` is a stateful walk along one stream — `%seed`, `%uniform`, `%uniform32`,
-  `%bits`, `%int_range`, `%fill`, `%jump`, `%rewind`, `%position` — for programs whose draw count is
+  `%bits`, `%int_range`, `%fill`, `%rewind`, `%position` — for programs whose draw count is
   data-dependent (a rejection sampler, a random walk), handing out exactly the values the
   coordinate-addressed calls give at the same positions, so the two forms are interchangeable; it
   holds no allocatable components and no finalizer, which is what makes a per-thread instance safe

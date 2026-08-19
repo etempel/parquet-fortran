@@ -86,7 +86,7 @@ contains
             new_unittest("the stream-axis fill agrees with the scalar draws on every shape", test_fill_streams), &
             new_unittest("the integer bulk fills agree with pf_random_int_at on both axes", test_fill_int), &
             new_unittest("a stream walks exactly the tier-0 grid, on every producer", test_stream_values), &
-            new_unittest("stream positioning: jump, rewind, position, and the block-aligned draw", &
+            new_unittest("stream positioning: rewind, position, and the block-aligned draw", &
                          test_stream_position), &
             new_unittest("stream fills equal the scalar bindings, aligned and unaligned", test_stream_fill), &
             new_unittest("golden vectors: pf_random_perm_at", test_perm_golden), &
@@ -910,7 +910,7 @@ contains
             "a %uniform spanning a block boundary did not read word 3 then word 0 of the next block")
     end subroutine test_stream_values
 
-    !> `%jump`, `%rewind`, `%position`, and the block alignment `%int_range` performs.
+    !> `%rewind`, `%position`, and the block alignment `%int_range` performs.
     subroutine test_stream_position(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         type(pf_random_stream) :: rng, ref
@@ -950,26 +950,31 @@ contains
             "an aligned %int_range must equal the integer draw of the pair it landed on")
         if (allocated(error)) return
 
-        ! %jump(n) equals discarding n words' worth of draws.
+        ! Seeking forward by a word count equals discarding that many words' worth of draws.
+        ! This used to be written with %jump, which was removed as the relative twin of %rewind
+        ! (see feature_random_phase3.md section 3.5); the property it tested is unchanged, and
+        ! `%rewind(%position() + n)` is what a caller writes now.
         call rng%seed(5_int64, 2_int64)
-        call rng%jump(6_int64)                       ! six words == three real64 draws
+        call rng%rewind(rng%position() + 6_int64)    ! six words == three real64 draws
         call rng%uniform(x)
         call check(error, x == pf_random_at(5_int64, 2_int64, 4_int64), &
-            "%jump by six words did not land on draw 4")
+            "a forward %rewind by six words did not land on draw 4")
         if (allocated(error)) return
         call ref%seed(5_int64, 2_int64)
         do k = 1, 3
             call ref%uniform(a(1))
         end do
         call ref%uniform(a(2))
-        call check(error, a(2) == x, "%jump does not equal discarding the same number of words")
+        call check(error, a(2) == x, &
+            "seeking forward does not equal discarding the same number of words")
         if (allocated(error)) return
 
-        ! A negative jump seeks backwards; the int32 specific agrees with the int64 one.
-        call rng%jump(-2_int32)
+        ! Seeking backwards, through the int32 specific -- which nothing else exercises now that
+        ! the int32 %jump specific is gone.
+        call rng%rewind(int(rng%position() - 2_int64, int32))
         call rng%uniform(x)
         call check(error, x == pf_random_at(5_int64, 2_int64, 4_int64), &
-            "a backward %jump did not return to the draw just taken")
+            "a backward %rewind did not return to the draw just taken")
         if (allocated(error)) return
 
         ! %rewind round-trips through whatever %position gave.

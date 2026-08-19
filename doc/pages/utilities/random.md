@@ -252,7 +252,6 @@ The producers, with what each costs in words (positions are counted in 32-bit wo
 | `call rng%int_range(lo, hi, r)` | exactly-unbiased integer in `[lo, hi]` | 2 |
 | `call rng%fill(v)` | the next `size(v)` values | 2 or 1 each |
 | `call rng%fill(v, lo, hi)` | the next `size(v)` integers | 2 each |
-| `call rng%jump(n)` | seeks `n` words, in O(1); negative seeks back | — |
 | `call rng%rewind([pos])` | sets the position; no argument means 1 | — |
 | `rng%position()` | the current position | — |
 

@@ -1155,12 +1155,26 @@ exited saying it proved nothing, while `fpm build` and `fpm test` stayed perfect
 So:
 
 - **A `use` added to `parquet_random` is a design decision, not a detail.** Enforced by
-  `check_parquet_random_stays_leaf` (`tools/check_source_conventions.py`), which fails on any
-  import naming a module with a file in `src/`.
-- **If that check fires, adding the module to the script's `SRC` list is the WRONG fix** — it makes
-  the check pass while destroying the property it measures. Move whatever needed the import into
-  `src/parquet_sampling.f90` instead. `parquet_settings_base` is the only import worth even
-  considering, and only if the *generator itself* needs a setting.
+  `check_parquet_random_stays_leaf` (`tools/check_source_conventions.py`), in two clauses: every
+  project module reached, transitively, must itself reach nothing but **compiler-supplied** modules
+  (`iso_fortran_env`, `iso_c_binding`, `ieee_arithmetic`, `omp_lib`); and every such module must
+  appear in **both** standalone scripts' `SRC` lists.
+- **The rule is NOT "imports nothing outside `iso_fortran_env`", and that wording is a trap.**
+  `parquet_settings_base` imports `omp_lib` inside `#ifdef _OPENMP` — and was the FIRST entry in
+  `check_random_kernels.sh`'s `SRC` list for months, passing throughout, because that script
+  compiles with no `-fopenmp` so the import never happens. The strict wording condemns a module with
+  a demonstrated track record for a reason unrelated to the hazard, which is reaching
+  `parquet_bindings` and hence Arrow. So the walk stops at compiler-supplied modules, not at
+  `iso_fortran_env` alone.
+- **The second clause exists because a module can be admissible and still break the scripts.** They
+  are plain ordered compiles with no dependency resolver, so a missing `SRC` entry is a hard failure
+  and a stale one is worse — the script then silently compiles a different set than the rule
+  believes. Having the check derive the closure and compare it against both lists is what stops the
+  rule and the scripts drifting apart.
+- **If the FIRST clause fires, adding the module to the script's `SRC` list is the WRONG fix** — it
+  makes the check pass while destroying the property it measures. Move whatever needed the import
+  into `src/parquet_sampling.f90` instead. (If the *second* clause fires, adding to both `SRC` lists
+  is exactly the right fix — that is what it is asking for.)
 - **`parquet_sampling` carries the Arrow link edge, deliberately, and confines it.**
   `pf_weighted_permutation` sorts its keys and the project's one sort is `parquet_sorting`. No C++
   actually *runs* for `pf_argsort` — the engine has been Fortran since the cutover — so the cost is

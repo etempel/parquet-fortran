@@ -394,7 +394,7 @@ module parquet_random
     !! not a limitation of this one; the answer to it is that `%seed` costs nothing.
     !!
     !! **Position is measured in 32-bit words, 1-based, and the word cost of each producer is
-    !! contract** -- `%jump`, `%position` and `%rewind` are denominated in it: `%uniform` 2,
+    !! contract** -- `%position` and `%rewind` are denominated in it: `%uniform` 2,
     !! `%uniform32` 1, `%bits` 2, `%int_range` 2. `%int_range` additionally starts on a word PAIR
     !! boundary, advancing one word first if a `%uniform32` has left the cursor odd. This is what
     !! keeps an `%int_range` equal to the `pf_random_int_at` at the same coordinate rather than
@@ -446,10 +446,6 @@ module parquet_random
         procedure, private :: fill_arr_i64 => stream_fill_i64        !! `%fill`, `int64`
         !> Fills `v` with the next `size(v)` values; an integer `v` also takes `lo` and `hi`.
         generic :: fill => fill_arr_r64, fill_arr_r32, fill_arr_i32, fill_arr_i64
-        procedure, private :: jump_i32 => stream_jump_i32            !! `%jump`, `int32`
-        procedure, private :: jump_i64 => stream_jump_i64            !! `%jump`, `int64`
-        !> Seeks `n` words, in O(1). Negative seeks backwards; the result must stay in range.
-        generic :: jump => jump_i32, jump_i64
         procedure, private :: rewind_base => stream_rewind_base      !! `%rewind` to position 1
         procedure, private :: rewind_i32 => stream_rewind_i32        !! `%rewind`, `int32`
         procedure, private :: rewind_i64 => stream_rewind_i64        !! `%rewind`, `int64`
@@ -2188,7 +2184,7 @@ contains
     ! derivable state that either matches or is replaced. A queue-shaped buffer would compute the
     ! same values while putting a buffer state into everything `%position` means.
     !
-    ! The POSITION GUARDS (`advance_by`, `seek_by`) exist so that no arithmetic on `pos` can
+    ! The POSITION GUARDS (`advance_by`, `set_pos`) exist so that no arithmetic on `pos` can
     ! overflow. This module has already been caught once with a compiler using an overflowing
     ! expression's undefinedness to delete a branch far away (`feature_risks.md` Risk-94), so an
     ! unguarded `pos + 2` on the hot path would be a real regression rather than a theoretical one.
@@ -2242,20 +2238,6 @@ contains
         integer(int64), intent(in) :: pos               !! 1-based word position
         call set_pos(self, pos)
     end subroutine stream_rewind_i64
-
-    !> `%jump` by an `integer(int32)` word count.
-    pure subroutine stream_jump_i32(self, n)
-        class(pf_random_stream), intent(inout) :: self  !! the stream to seek
-        integer(int32), intent(in) :: n                 !! words to seek; negative seeks backwards
-        call seek_by(self, int(n, int64))
-    end subroutine stream_jump_i32
-
-    !> `%jump` by an `integer(int64)` word count.
-    pure subroutine stream_jump_i64(self, n)
-        class(pf_random_stream), intent(inout) :: self  !! the stream to seek
-        integer(int64), intent(in) :: n                 !! words to seek; negative seeks backwards
-        call seek_by(self, n)
-    end subroutine stream_jump_i64
 
     !> The next `real64` in `[0, 1)`, advancing two words.
     pure subroutine stream_uniform(self, x)
@@ -2406,25 +2388,6 @@ contains
         end if
         self%pos = pos - 1_int64
     end subroutine set_pos
-
-    !> Seeks `n` words, forwards or backwards, refusing to leave the addressable range.
-    !!
-    !! Both comparisons are written as subtractions from the bound rather than as `pos + n`,
-    !! precisely so that the check itself cannot overflow the thing it is checking.
-    pure subroutine seek_by(self, n)
-        class(pf_random_stream), intent(inout) :: self  !! the stream to seek
-        integer(int64), intent(in) :: n                 !! words to seek; negative seeks backwards
-        if (n >= 0_int64) then
-            if (self%pos > stream_pos_max - n) then
-                error stop "pf_random_stream%jump: seek would pass the last addressable word of the stream"
-            end if
-        else
-            if (self%pos < -n) then
-                error stop "pf_random_stream%jump: backward seek would pass position 1"
-            end if
-        end if
-        self%pos = self%pos + n
-    end subroutine seek_by
 
     !> Reserves the next `w` words and advances past them; the reads then use `pos-w .. pos-1`.
     !!

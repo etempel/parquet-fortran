@@ -952,45 +952,110 @@ def check_parquet_strings_stays_leaf():
 
 
 def check_parquet_random_stays_leaf():
-    """`parquet_random` must import NOTHING that has a file in src/ -- `iso_fortran_env` and no more.
+    """`parquet_random` may import a project module only if that module is itself standalone-
+    compilable, and only if both standalone scripts already list it.
 
-    This is a stronger rule than the one above it, and deliberately so. `parquet_strings` merely has
-    to stay clear of `parquet_bindings`; `parquet_random` has to compile completely alone, because
-    two standalone checks build it that way. `tools/check_random_kernels.sh` compiles the module
-    against several compilers and flag sets with no dependency resolver and no Arrow install, and it
-    is the ONLY evidence that the two arms of the route (e) `#ifdef` fork agree -- the fork that
-    exists because gfortran has been observed miscompiling the unprotected Philox round at -O3,
-    silently. `tools/check_exp_key.sh` does the same for the frozen `-log(u)` transform.
+    Two checks compile single files with no dependency resolver and no Arrow install, and they are
+    the only evidence for properties nothing else can reach. `tools/check_random_kernels.sh` builds
+    both arms of the route (e) `#ifdef` fork and asserts they agree — the fork exists because
+    gfortran has been observed miscompiling the unprotected Philox round at -O3, silently, and no
+    other check compiles the wrapping arm at all. `tools/check_exp_key.sh` does the same for the
+    frozen `-log(u)` transform.
 
     **The failure this closes has already happened.** The weighted draw briefly lived in
-    `parquet_random`, which put `use parquet_sorting` in it -- hence `parquet_bindings`, hence the
-    whole of `parquet_wrapper.cpp` and Arrow. Every configuration in the kernel check then died on a
-    missing `parquet_sorting.mod`, and the script exited saying it proved nothing. `fpm build` and
-    `fpm test` were both perfectly green throughout, because the library obviously has Arrow; the
-    only signal was a check that had stopped being able to run, which is the quietest kind there is.
+    `parquet_random`, which put `use parquet_sorting` in it — hence `parquet_bindings`, hence Arrow.
+    Every configuration in the kernel check then died on a missing `parquet_sorting.mod` and the
+    script exited saying it proved nothing, while `fpm build` and `fpm test` stayed green. The only
+    signal was a check that had quietly stopped being able to run.
 
-    So the fix, if this fires, is NOT to add the module to that script's SRC list -- that would make
-    the check pass while destroying the property it exists to measure. It is to move whatever needed
-    the import into `src/parquet_sampling.f90`, which is free to depend on anything precisely
-    because this module does not. `parquet_settings_base` is the one exception worth considering,
-    and only if a setting is genuinely needed by the generator itself.
+    **The rule is NOT "imports nothing outside `iso_fortran_env`", and that wording was wrong.**
+    `parquet_settings_base` imports `omp_lib` inside `#ifdef _OPENMP` — yet it was the FIRST entry
+    in `check_random_kernels.sh`'s SRC list until the `parquet_sampling` split, and that script
+    passed throughout, because it compiles with no `-fopenmp` so the import never happens. The
+    literal wording would have condemned a module with a demonstrated track record, for a reason
+    unrelated to the hazard. The hazard is a dependency the scripts cannot satisfy, which in
+    practice means reaching `parquet_bindings`.
+
+    So this checks two things:
+
+    1. Every project module `parquet_random` reaches, transitively, must itself reach nothing but
+       COMPILER-SUPPLIED modules. That admits `parquet_expkey`, a future `parquet_ziggurat`, and
+       `parquet_settings_base`; it rejects `parquet_sorting`, which reaches `parquet_bindings`.
+    2. Every such module must appear in BOTH scripts' `SRC` lists. They are plain ordered compiles,
+       so a missing entry is a hard failure and a stale one is worse — the script then silently
+       compiles a different set than this rule believes.
+
+    If clause 1 fires, the fix is to move whatever needed the import into `src/parquet_sampling.f90`
+    — never to add the offending module to a script's SRC list, which would make this check pass
+    while destroying the property it measures. If clause 2 fires, add the module to both scripts.
     """
     use_re = re.compile(r"^\s*use\s*(?:,\s*intrinsic\s*)?(?:::)?\s*([A-Za-z_]\w*)", re.M)
-    path = SRC / "parquet_random.f90"
-    if not path.is_file():
+    # Modules the compiler supplies. A dependency on one of these is not a dependency the
+    # standalone scripts have to satisfy, so the walk stops here rather than at iso_fortran_env.
+    SUPPLIED = {"iso_fortran_env", "iso_c_binding", "ieee_arithmetic", "ieee_exceptions",
+                "ieee_features", "omp_lib", "omp_lib_kinds"}
+    root = SRC / "parquet_random.f90"
+    if not root.is_file():
         return ["tools/check_source_conventions.py: src/parquet_random.f90 is missing, so the "
                 "leaf check cannot run -- this check must never pass by finding nothing"]
-    bad = sorted({m.lower() for m in use_re.findall(path.read_text())
-                  if (SRC / (m.lower() + ".f90")).is_file()})
-    if not bad:
-        return []
-    return [
-        "src/parquet_random.f90: imports %s, so the module no longer compiles alone and "
-        "tools/check_random_kernels.sh / tools/check_exp_key.sh cannot build the kernel standalone "
-        "-- the only check that compares the two arms of the route (e) fork. Move whatever needs "
-        "the import into src/parquet_sampling.f90 rather than adding a module to that script's SRC"
-        % ", ".join(bad)
-    ]
+
+    def imports_of(mod):
+        f = SRC / (mod + ".f90")
+        return sorted({m.lower() for m in use_re.findall(f.read_text())}) if f.is_file() else []
+
+    # Transitive closure of PROJECT modules reachable from parquet_random, keeping one shortest
+    # chain per module: "it is reachable" is not actionable when the offending edge is several
+    # modules away, which is the same reasoning check_parquet_strings_stays_leaf gives.
+    trail = {m: ["parquet_random", m] for m in imports_of("parquet_random")}
+    frontier, reached = list(trail), set()
+    while frontier:
+        mod = frontier.pop(0)
+        if mod in SUPPLIED or mod in reached or not (SRC / (mod + ".f90")).is_file():
+            continue
+        reached.add(mod)
+        for nxt in imports_of(mod):
+            if nxt not in trail:
+                trail[nxt] = trail[mod] + [nxt]
+                frontier.append(nxt)
+
+    problems = []
+    # The hazard, stated once with the chain that causes it.
+    if "parquet_bindings" in reached:
+        problems.append(
+            "src/parquet_random.f90 reaches parquet_bindings through %s, so it can no longer be "
+            "compiled standalone and tools/check_random_kernels.sh / tools/check_exp_key.sh cannot "
+            "build the kernel alone -- the only check comparing the two arms of the route (e) fork. "
+            "Move whatever needs the import into src/parquet_sampling.f90; do NOT add a module to a "
+            "script's SRC list to silence this" % " -> ".join(trail["parquet_bindings"]))
+    # An import that is neither compiler-supplied nor a file in src/ is a dependency the scripts
+    # have no way to satisfy at all.
+    for mod in sorted(reached):
+        outside = sorted({m for m in imports_of(mod)
+                          if m not in SUPPLIED and not (SRC / (m + ".f90")).is_file()})
+        if outside:
+            problems.append(
+                "src/parquet_random.f90 reaches %s (via %s), which imports %s -- neither a "
+                "compiler-supplied module nor a file in src/, so the standalone scripts cannot "
+                "satisfy it" % (mod, " -> ".join(trail[mod]), ", ".join(outside)))
+    if problems:
+        return problems
+
+    # Clause 2: the scripts must actually compile everything the closure names.
+    for script in ("check_random_kernels.sh", "check_exp_key.sh"):
+        sp = REPO_ROOT / "tools" / script
+        if not sp.is_file():
+            problems.append("tools/%s is missing, so the leaf rule's SRC cross-check cannot run"
+                            % script)
+            continue
+        text = sp.read_text()
+        for mod in sorted(reached):
+            if ("src/%s.f90" % mod) not in text:
+                problems.append(
+                    "src/parquet_random.f90 reaches %s, but tools/%s does not list "
+                    "src/%s.f90 in SRC -- that script is a plain ordered compile with no "
+                    "dependency resolver, so it will fail to build or will silently compile a "
+                    "different set than this rule assumes" % (mod, script, mod))
+    return problems
 
 
 def check_no_per_element_shared_ptr():

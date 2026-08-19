@@ -635,8 +635,6 @@ scenarios=(
     "sorting_column_no_kind:1"
     "sorting_merge_unsorted:1"
     "random_stream_exhausted:1"
-    "random_stream_jump_overflow:1"
-    "random_stream_jump_before_start:1"
     "random_stream_rewind_below_one:1"
     "random_resample_empty_population:1"
     "random_resample_int32_too_narrow:1"

@@ -562,10 +562,6 @@ program error_scenarios
         call scenario_sorting_merge_unsorted()
     case ("random_stream_exhausted")
         call scenario_random_stream_exhausted()
-    case ("random_stream_jump_overflow")
-        call scenario_random_stream_jump_overflow()
-    case ("random_stream_jump_before_start")
-        call scenario_random_stream_jump_before_start()
     case ("random_stream_rewind_below_one")
         call scenario_random_stream_rewind_below_one()
     case ("random_resample_empty_population")
@@ -14899,30 +14895,6 @@ contains
         call rng%uniform(x)   ! -> aborts (no words left)
         print '(a,f8.5)', "unexpectedly drew past the end of the stream: ", x
     end subroutine scenario_random_stream_exhausted
-
-    !> `%jump` past the last addressable word is refused rather than wrapped, and the check is
-    !! written as a subtraction from the bound so that the check itself cannot overflow.
-    subroutine scenario_random_stream_jump_overflow()
-        type(pf_random_stream) :: rng
-        call rng%seed(1_int64, 1_int64)
-        call rng%jump(huge(1_int64) - 1_int64)    ! control: lands exactly on the last word
-        print '(a,i0)', "jumped to the last addressable word, position ", rng%position()
-        call rng%jump(8_int64)   ! -> aborts
-        print '(a,i0)', "unexpectedly jumped past the end, position ", rng%position()
-    end subroutine scenario_random_stream_jump_overflow
-
-    !> A backward `%jump` is legal -- it is how a caller re-reads what it just drew -- but not
-    !! past the start, where there is no position 0 to land on.
-    subroutine scenario_random_stream_jump_before_start()
-        type(pf_random_stream) :: rng
-        real(real64) :: x
-        call rng%seed(1_int64, 1_int64)
-        call rng%uniform(x)
-        call rng%jump(-2_int64)                   ! control: back to the start, which is valid
-        print '(a,i0)', "seeked back to position ", rng%position()
-        call rng%jump(-1_int64)   ! -> aborts
-        print '(a,i0)', "unexpectedly seeked before the start, position ", rng%position()
-    end subroutine scenario_random_stream_jump_before_start
 
     !> Positions are 1-based, so `%rewind` accepts exactly what `%position` gives and nothing
     !! below it. Absorbing a 0 would silently answer from position 1 and hide a caller's

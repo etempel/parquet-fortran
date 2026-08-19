@@ -8,6 +8,7 @@
 !> text formatting (shared by numeric and string qc: reports), and the
 !> write_maml=.true. sidecar .maml.
 submodule (parquet_core) parquet_write
+    use parquet_bindings
     implicit none
 contains
 

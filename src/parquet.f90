@@ -121,17 +121,28 @@ contains
 ! Accept solution from https://stackoverflow.com/questions/31649691/stringify-macro-with-gnu-gfortran
 ! which provides the easiest way to pass a macro to a string in Fortran complying with both
 ! gfortran traditional cpp and the standard cpp syntaxes
-#ifdef __GFORTRAN__
-#  define STRINGIFY_START(X) "&
-#  define STRINGIFY_END(X) &X"
+#ifdef NAGFOR
+! NAG drives -fpp, a Fortran preprocessor implementing NEITHER the standard cpp `#`
+! stringification operator NOR gfortran's traditional-cpp continuation trick, so no spelling of
+! the macro pair below compiles here (confirmed against NAG 7.2: the first gives
+! "Invalid character '#'", the second "Unrecognised statement"). Take the release number from
+! cversion instead. The consequence is deliberate rather than a gap: the development-build remark
+! below compares ver_string against that same substring, so it can never fire under NAG -- the
+! question it asks, "did fpm substitute RELEASE_VERSION?", is one this preprocessor cannot answer.
+        ver_string = cversion(2:index(cversion, " ") - 1)
 #else
-#  define STRINGIFY_(X) #X
-#  define STRINGIFY_START(X) &
-#  define STRINGIFY_END(X) STRINGIFY_(X)
-#endif
+#  ifdef __GFORTRAN__
+#    define STRINGIFY_START(X) "&
+#    define STRINGIFY_END(X) &X"
+#  else
+#    define STRINGIFY_(X) #X
+#    define STRINGIFY_START(X) &
+#    define STRINGIFY_END(X) STRINGIFY_(X)
+#  endif
 
         ver_string = STRINGIFY_START(RELEASE_VERSION)
         STRINGIFY_END(RELEASE_VERSION)
+#endif
         !
         i = index(cversion, " ")
         !

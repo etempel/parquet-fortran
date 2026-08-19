@@ -7,7 +7,8 @@
 !> parquet_parse_maml_lines parser, plus the private MAML-section helpers
 !> (keyarray:/DOI/depends/keywords/col_map/protected_cols) it depends on.
 submodule (parquet_core) parquet_metadata
-    use iso_fortran_env, only: output_unit
+    use iso_fortran_env, only: output_unit, real64
+    use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
     implicit none
 
     !> Maximum length, in characters, of one MAML source line -- shared by parquet_append_line's

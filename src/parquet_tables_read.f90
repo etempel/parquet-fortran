@@ -916,13 +916,13 @@ contains
         use iso_c_binding, only : c_int64_t
         integer(int64), intent(in) :: n !! threads the region was given.
         interface
-            subroutine set_used(k) bind(C, name="parquet_debug_set_colread_threads_used")
+            subroutine set_colread_used(k) bind(C, name="parquet_debug_set_colread_threads_used")
                 import :: c_int64_t
                 integer(c_int64_t), value :: k
-            end subroutine set_used
+            end subroutine set_colread_used
         end interface
         !
-        call set_used(int(n, c_int64_t))
+        call set_colread_used(int(n, c_int64_t))
     end subroutine parquet_debug_note_colread_threads
     !
     !> How many threads a parallel prefetch may use: as many as OpenMP offers, capped by
@@ -965,13 +965,13 @@ contains
         use iso_c_binding, only : c_int64_t
         integer(int64), intent(in) :: n !! threads the region was given.
         interface
-            subroutine set_used(k) bind(C, name="parquet_debug_set_prefetch_threads_used")
+            subroutine set_prefetch_used(k) bind(C, name="parquet_debug_set_prefetch_threads_used")
                 import :: c_int64_t
                 integer(c_int64_t), value :: k
-            end subroutine set_used
+            end subroutine set_prefetch_used
         end interface
         !
-        call set_used(int(n, c_int64_t))
+        call set_prefetch_used(int(n, c_int64_t))
     end subroutine parquet_debug_note_prefetch_threads
 
     !> Counts the distinct top-level names this pass will read. Slots are in file schema order, so

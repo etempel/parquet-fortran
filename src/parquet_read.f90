@@ -18,6 +18,7 @@ submodule (parquet_core) parquet_read
     ! so c_loc/c_null_ptr/c_int/c_int8_t all arrive by host association, and naming them again is
     ! a symbol conflict rather than a clarification.
     use parquet_sorting, only: pf_sort_threads, pf_sort_keys, pf_argsort
+    use parquet_bindings
     implicit none
 
     !> Expression-node kinds in the postfix (RPN) node list a parsed filter becomes: one LEAF per

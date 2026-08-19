@@ -44,6 +44,7 @@ working rules).
   - [Nested submodule tree](#nested-submodule-tree)
   - [Group interface bodies into commented `interface` blocks](#group-interface-bodies-into-commented-interface-blocks)
   - [A module procedure cannot implement its own submodule's spec-declared interface](#a-module-procedure-cannot-implement-its-own-submodules-spec-declared-interface)
+  - [A separate module procedure must be IMPLEMENTED before it is CALLED in the same submodule](#a-separate-module-procedure-must-be-implemented-before-it-is-called-in-the-same-submodule)
   - [Naming conventions](#naming-conventions)
   - [`parquet_random` is a LEAF; `parquet_sampling` is where anything more goes](#parquet_random-is-a-leaf-parquet_sampling-is-where-anything-more-goes)
   - [Public numeric arguments: provide both int32 and int64 kinds](#public-numeric-arguments-provide-both-int32-and-int64-kinds)
@@ -1058,6 +1059,52 @@ for both a module→submodule and a submodule→sub-submodule chain). This is in
 does not need, the interface remaining declared anywhere — see `parquet_parse_col_map`
 (`parquet_metadata.f90`) and `parquet_check_read_row_count` (`parquet_read.f90`) for worked
 examples.
+
+### A separate module procedure must be IMPLEMENTED before it is CALLED in the same submodule
+
+NAG 7.2 binds a separate module procedure's name to an implicit **external** procedure at the first
+call site, so the later `module procedure` statement implementing that same name is rejected:
+
+```
+Error: MAKE is not the interface of a separate module procedure
+       detected at MAKE@<end-of-statement>
+```
+
+**gfortran, ifx and flang all accept either order**, so nothing in the ordinary fleet enforces this
+and a violation can sit in the tree indefinitely. Confirmed instance: `parquet_metadata_maml.f90`'s
+`parquet_validate_maml_file` called `parquet_load_maml_file` 64 lines above where that procedure was
+implemented. Moving the implementation above its caller is the entire fix and costs the other
+compilers nothing -- it is a pure relocation, with no line of the body changed.
+
+Reproducer (fails under NAG; compiles when the two bodies are swapped):
+
+```fortran
+submodule (mm:mid) leaf
+contains
+    module procedure driver
+        out = make(fn)          ! CALLS make ...
+    end procedure driver
+
+    module procedure make       ! ... and implements it LATER: rejected
+        r = len_trim(fn)
+    end procedure make
+end submodule leaf
+```
+
+**This does NOT apply to an ordinary contained procedure.** A plain `subroutine`/`function` defined
+inside the same submodule is reached by host association and may appear in any order -- which is why
+`parquet_load_maml_file` may still sit above `parquet_read_maml_source_lines` and call it. The rule
+is specific to a *separate module procedure*, i.e. one whose interface is declared in an ancestor.
+
+**The error names the implementing statement, never the call that caused it**, so the first move on
+seeing it is to grep the file for earlier references to that name. More generally, when a submodule
+error resists explanation, compile a **minimal leaf submodule implementing only the failing
+procedure** against the real module files: if that compiles, the ancestors, the interface and the
+procedure's result type are all exonerated in one step and the cause is elsewhere in the file.
+Growing a synthetic reproducer toward the real code proved nothing across five rounds here (the
+result type, its allocatable components, its submodule-implemented type-bound procedure, the
+ancestor's re-export, and the parent calling it all compile clean); the minimal-leaf test found it
+immediately.
 
 ### Naming conventions
 

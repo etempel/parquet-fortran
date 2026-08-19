@@ -631,6 +631,33 @@ contains
         end if
     end procedure parquet_validate_maml_internal
 
+    module procedure parquet_load_maml_file
+        character(len=maml_max_line_len), allocatable :: lines(:)
+        integer :: nlines, i, max_len
+
+        ! gcov attribution artifact: this call is the first executable statement of this
+        ! abbreviated module procedure body, right after its declarations. Confirmed exercised
+        ! (test_load_maml_file in test/test_maml.f90; tools/coverage.sh shows this file at 100%
+        ! locally) -- only GitLab CI's toolchain misattributes this one entry line, consistently
+        ! across separate runs, same as the module-procedure-header shape documented in
+        ! CLAUDE.md's "Fortran gcov attribution artifacts".
+        call parquet_read_maml_source_lines(filename, "parquet_load_maml_file", lines, nlines) ! GCOVR_EXCL_LINE
+
+        maml%name = trim(filename)
+
+        max_len = 1
+        do i = 1, nlines
+            max_len = max(max_len, len_trim(lines(i)))
+        end do
+
+        allocate(character(len=max_len) :: maml%lines(nlines))
+        do i = 1, nlines
+            maml%lines(i) = lines(i)(1:max_len)
+        end do
+
+        call parquet_validate_maml(maml)
+    end procedure parquet_load_maml_file
+
     !> Loads maml (a filename) from disk and validates it (parquet_load_maml_file
     !> already validates internally, but this keeps that requirement explicit
     !> and self-contained here rather than depending on that side effect).
@@ -700,33 +727,6 @@ contains
         close(unit)
         !$omp end critical (parquet_read_maml_source_lines_critical)
     end subroutine parquet_read_maml_source_lines
-
-    module procedure parquet_load_maml_file
-        character(len=maml_max_line_len), allocatable :: lines(:)
-        integer :: nlines, i, max_len
-
-        ! gcov attribution artifact: this call is the first executable statement of this
-        ! abbreviated module procedure body, right after its declarations. Confirmed exercised
-        ! (test_load_maml_file in test/test_maml.f90; tools/coverage.sh shows this file at 100%
-        ! locally) -- only GitLab CI's toolchain misattributes this one entry line, consistently
-        ! across separate runs, same as the module-procedure-header shape documented in
-        ! CLAUDE.md's "Fortran gcov attribution artifacts".
-        call parquet_read_maml_source_lines(filename, "parquet_load_maml_file", lines, nlines) ! GCOVR_EXCL_LINE
-
-        maml%name = trim(filename)
-
-        max_len = 1
-        do i = 1, nlines
-            max_len = max(max_len, len_trim(lines(i)))
-        end do
-
-        allocate(character(len=max_len) :: maml%lines(nlines))
-        do i = 1, nlines
-            maml%lines(i) = lines(i)(1:max_len)
-        end do
-
-        call parquet_validate_maml(maml)
-    end procedure parquet_load_maml_file
 
     module procedure parquet_load_qc_maml_file
         character(len=maml_max_line_len), allocatable :: lines(:)

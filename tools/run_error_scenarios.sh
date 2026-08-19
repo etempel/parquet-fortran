@@ -533,7 +533,6 @@ scenarios=(
     "weighted_init_twice:1"
     "weighted_subset_too_large:1"
     "weighted_perm_size_mismatch:1"
-    "weighted_perm_key_overflow:1"
     "settings_env_too_long:1"
     "settings_env_int32_out_of_range:1"
     "settings_env_long_value_preview:1"

@@ -129,10 +129,24 @@ contains
     !! table of `log(m_i)` brings `|f|` under `2**-5` and the series down to six terms, halving the
     !! barriers -- not deleting the barriers.
     !!
-    !! **`-ffast-math` / `-Ofast` are out of scope, and no library can bring them in.** They
-    !! license the compiler to violate IEEE semantics outright, and the fingerprint moves under
-    !! them even with the barriers (it is at least stable *within* fast-math, with and without
-    !! FMA). `fpm --profile release` passes `-O3 -funroll-loops`, so nothing shipped is affected.
+    !! **`-ffast-math` / `-Ofast` / ifx's default `-fp-model=fast` ARE in scope, and the barrier on
+    !! the final sum is what brings them in.** An earlier version of this note said the opposite --
+    !! that no library could survive them -- on the strength of a build that broke. The diagnosis
+    !! behind that was wrong: the failure was blamed on reciprocal approximation of `(m-1)/(m+1)`,
+    !! and it is not division at all. Measured on ifx 2026.1.1 at `-O2` with the default fast model:
+    !! `-prec-div` does NOT fix it, `-no-fma` does NOT fix it, and `-assume protect_parens` DOES.
+    !! The transformation was **reassociation**, and it had exactly one place to bite -- `e = big +
+    !! (small - logm)`, where the parentheses were the only thing holding the grouping and
+    !! fast-math is licensed to ignore them. `big` is about `k * 0.693` and `small` about
+    !! `k * 1.9e-10`, so regrouping to `(big + small) - logm` annihilates the low-order correction.
+    !! Wrapping that subtraction in `ek_rnd` makes the grouping a memory fact rather than a
+    !! syntactic one, and the fingerprint then holds at every level on both compilers, `-Ofast`
+    !! included. It also repaired gfortran `-Ofast`, which was silently wrong before.
+    !!
+    !! **The lesson generalises past this file: a barrier on every PRODUCT is not a barrier on the
+    !! expression.** Each `ek_rnd` here stops an FMA from spanning an add; none of them stops the
+    !! adds being re-grouped among themselves. When a value is built as a large term plus a small
+    !! correction, the grouping IS the algorithm, and it needs its own barrier.
     !!
     !! **NOT `pure`, and the impurity is the price of the barrier being GUARANTEED.** A `volatile`
     !! local is standard Fortran and every compiler must honour it; `!GCC$`/`!DIR$ ATTRIBUTES
@@ -196,7 +210,7 @@ contains
         en = real(-k, real64)
         big = ek_rnd(en * ek_log2_hi)
         small = ek_rnd(en * ek_log2_lo)
-        e = big + (small - logm)
+        e = big + ek_rnd(small - logm)
     end function exp_key
 
     !> `exp_key` under a public name. **Test-only.**
@@ -215,17 +229,18 @@ contains
 
     !> Re-derives the frozen transform over 32 fixed inputs and compares against `ek_contract_fp`.
     !!
-    !! **Why a run-time check for a compile-time property.** `exp_key` is reproducible under every
-    !! IEEE-conforming build (`tools/check_exp_key.sh` sweeps eleven of them), but `-ffast-math` and
-    !! ifx's `-fp-model=fast` are not IEEE: they may compute `(m-1)/(m+1)` by reciprocal
-    !! approximation, which no rounding barrier can undo. A build like that produces a DIFFERENT
-    !! permutation from every other build, and nothing anywhere would say so.
+    !! **Why a run-time check for a compile-time property.** The barriers now cover every build
+    !! this project can test, fast-math included, so this check is expected to pass everywhere --
+    !! which is exactly why it must stay. It is the only thing that would report a compiler, a
+    !! version or a flag nobody has swept doing something no barrier anticipated. A build that
+    !! diverges produces a DIFFERENT permutation from every other build, silently, and a weighted
+    !! permutation is decided by the ORDER of the keys, so one differing key changes which items
+    !! are drawn.
     !!
-    !! **The exposure is not theoretical and it is not exotic.** `fpm --profile release` and
-    !! `--profile debug` both pass `-fp-model=precise`, so anything shipped or benchmarked is fine
-    !! -- but a bare `fpm build`/`fpm test` passes no fp-model flag at all and therefore takes ifx's
-    !! default. That is the ordinary development command. This check turns an invisible divergence
-    !! into a loud one naming the cause.
+    !! **It has already earned its place once.** Before the final sum was barriered, a bare
+    !! `fpm build`/`fpm test` under ifx -- which passes no fp-model flag, so ifx takes its own
+    !! `-O2` and `-fp-model=fast` defaults -- produced exactly that divergence, and this check is
+    !! what reported it instead of letting the permutations quietly disagree.
     !!
     !! Costs 32 `exp_key` calls, some hundreds of nanoseconds, against a permutation that is at
     !! best `O(n log n)`. That is cheap enough to run on every call rather than caching in a saved

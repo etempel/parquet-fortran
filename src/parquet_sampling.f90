@@ -445,6 +445,36 @@ module parquet_sampling
     !> Journal entries allocated on first use; it doubles from there.
     integer(int64), parameter :: wd_journal_min = 64_int64
 
+    !> The smallest weight that takes part in a draw; below this an item is treated as zero-weight.
+    !!
+    !! **Two problems have one answer here, and the threshold is set by the second.**
+    !!
+    !! **1. The classification must not depend on the floating-point model.** A build with
+    !! `-ffast-math`, or ifx at its own defaults, runs with denormals flushed to zero, so
+    !! `w > 0.0` is `.false.` for a denormal weight while a `-fp-model=precise` build says
+    !! `.true.` -- measured on ifx 2026.1.1, where `1.0e-320 > 0.0` differs between `-O2` and
+    !! `-O2 -fp-model=precise`. That put the SAME item in the race under one build and in the
+    !! zero-weight tail under another. Comparing against a normal constant agrees under both,
+    !! because a flushed denormal reads as `0.0`.
+    !!
+    !! **2. A key must not be able to overflow, and that is what fixes the VALUE.** The key is
+    !! `-log(u)/w` and the numerator reaches `53*log(2) = 36.7368` (the domain is `u >= 2**-53`),
+    !! so `w` must satisfy `36.7368/w <= huge(1.0_real64)`, i.e. `w >= 2.043552e-307`. This
+    !! constant is that bound rounded up, giving a maximum key of `1.7920e308` against a `huge` of
+    !! `1.7977e308`. **It is 9.2x `tiny`, and `tiny` would NOT have been enough**: weights in
+    !! `[tiny, 2.0436e-307)` are ordinary normal numbers that no model flushes, and their keys
+    !! overflow for a small but nonzero fraction of draws -- which would have made the abort
+    !! DRAW-DEPENDENT, firing for some seeds and not others on identical weights.
+    !!
+    !! **Nothing observable is lost by calling such an item zero-weight.** Against weights of order
+    !! one, a weight of `2e-307` has a chance of order `1e-307` of being drawn first; no finite
+    !! sample can distinguish that from zero, and the item is still returned -- last, in uniform
+    !! random order, like every other zero-weight item.
+    !!
+    !! Keep this in step with `exp_key`'s domain: if that transform's range ever grows, this bound
+    !! grows with it, and the overflow guard in `wperm_impl` stops being unreachable.
+    real(real64), parameter :: wd_min_weight = 2.05e-307_real64
+
     !> Successive sampling without replacement: draw one item with probability proportional to its
     !> weight, remove it, renormalise over the survivors, repeat.
     !>
@@ -519,6 +549,12 @@ module parquet_sampling
     !>
     !> **Because each sequence is named by its coordinates, the result does not depend on the
     !> schedule or the thread count.** `schedule(dynamic)` above costs nothing in reproducibility.
+    !>
+    !> **"Zero-weight" means a weight below `wd_min_weight` (2.05e-307), not exactly zero.** Below
+    !> that bound `-log(u)/w` would overflow, so such a weight cannot be ordered at all; and against
+    !> weights of order one its draw chance is of order `1e-307`, which no finite sample can tell
+    !> from zero. Thresholding rather than testing `> 0` also makes the classification independent
+    !> of the floating-point model, since a build that flushes denormals reads them as `0.0`.
     !>
     !> **Zero-weight items are kept out of the tree and handed out last**, in uniform random order,
     !> so draining a population is always a genuine permutation of every item. Keeping them out is
@@ -1758,7 +1794,7 @@ contains
             if (weights(i) < 0.0_real64) &
                 error stop "pf_weighted_draw%init: a weight is negative; a weight is a relative " // &
                            "frequency and cannot be below zero"
-            if (weights(i) > 0.0_real64) then
+            if (weights(i) >= wd_min_weight) then
                 self%npos = self%npos + 1_int64
             else
                 self%nzero = self%nzero + 1_int64
@@ -1792,7 +1828,7 @@ contains
         j = 0_int64
         z = 0_int64
         do i = 1_int64, n
-            if (weights(i) > 0.0_real64) then
+            if (weights(i) >= wd_min_weight) then
                 j = j + 1_int64
                 self%st(p2 + j - 1_int64) = weights(i)
                 if (self%nzero > 0_int64) self%leaf_item(j) = i
@@ -2189,8 +2225,10 @@ contains
         if (.not. exp_key_contract_ok()) &
             error stop "pf_weighted_permutation: this build does not reproduce the frozen -log(u) " // &
                        "transform, so its permutations would disagree with every other build. " // &
-                       "Rebuild without -ffast-math/-Ofast, or on ifx with -fp-model=precise " // &
-                       "(fpm --profile release and --profile debug both pass it)."
+                       "Every configuration tools/check_exp_key.sh sweeps -- gfortran and ifx, " // &
+                       "-O0 to -Ofast, fast-math included -- reproduces it, so this is a compiler, " // &
+                       "version or flag combination nobody has swept. Run that script with FC set " // &
+                       "to this compiler; it prints which configurations differ."
 
         npos = 0_int64
         nzero = 0_int64
@@ -2204,7 +2242,7 @@ contains
             if (weights(i) < 0.0_real64) &
                 error stop "pf_weighted_permutation: a weight is negative; the key would be " // &
                            "negative and that item drawn FIRST, the opposite of any sane reading"
-            if (weights(i) > 0.0_real64) then
+            if (weights(i) >= wd_min_weight) then
                 npos = npos + 1_int64
             else
                 nzero = nzero + 1_int64
@@ -2227,16 +2265,21 @@ contains
         call pf_random_fill_draws(rseed, stream, u)
         j = 0_int64
         do i = 1_int64, n
-            if (weights(i) > 0.0_real64) then
+            if (weights(i) >= wd_min_weight) then
                 j = j + 1_int64
                 ! u is in [0,1); the race needs (0,1], and u = 0 would give the key exactly 0 and
                 ! draw that item first every time.
                 uu = 1.0_real64 - u(i)
                 k1 = exp_key(uu) / weights(i)
-                if (.not. ieee_is_finite(k1)) &
+                ! DEFENSIVE AND UNREACHABLE: `wd_min_weight` is the overflow bound rounded up, so
+                ! every weight reaching this loop gives a key of at most 1.7920e308 against a
+                ! `huge` of 1.7977e308. It is kept because the bound is derived from `exp_key`'s
+                ! range, and a change there would make it reachable again with nothing else to
+                ! notice. See wd_min_weight; no fixture this repository can build reaches it.
+                if (.not. ieee_is_finite(k1)) &                                  ! GCOVR_EXCL_LINE
                     error stop "pf_weighted_permutation: a weight is so small that its key " // &
-                               "overflows; weights below about 2e-307 cannot be ordered and " // &
-                               "would tie several items at infinity"
+                               "overflows; this cannot happen for a weight at or above " // &
+                               "wd_min_weight, so exp_key's range has changed"    ! GCOVR_EXCL_LINE
                 key(j) = k1
                 pos_item(j) = i
             end if
@@ -2255,7 +2298,7 @@ contains
             allocate(zero_item(nzero))
             z = 0_int64
             do i = 1_int64, n
-                if (.not. (weights(i) > 0.0_real64)) then
+                if (.not. (weights(i) >= wd_min_weight)) then
                     z = z + 1_int64
                     zero_item(z) = i
                 end if

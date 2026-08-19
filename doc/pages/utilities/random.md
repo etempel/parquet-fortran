@@ -738,6 +738,13 @@ A zero-weight item can never be drawn while any positive weight remains, so it l
 in **uniform random order**, on both paths. That keeps a drained sampler a genuine permutation of
 every item rather than a truncated list. A zero weight is not an error; a negative one is.
 
+"Zero-weight" means **a weight below `2.05e-307`**, not exactly zero. Below that bound the key
+`-log(u)/w` would overflow, so such a weight cannot be ordered at all — and against weights of
+order one its chance of being drawn is of order `10**-307`, which no finite sample distinguishes
+from zero. The threshold is also what keeps the answer independent of your build's floating-point
+model: a build that flushes denormals to zero (`-ffast-math`, or ifx at its defaults) would
+otherwise classify the same weight differently from an IEEE build.
+
 ### Running many sequences at once
 
 `%next` mutates the sampler's tree, so **one sampler cannot serve two threads**. Give each thread

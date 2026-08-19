@@ -462,7 +462,6 @@ contains
             new_unittest("a second %init aborts", test_weighted_init_twice_aborts), &
             new_unittest("a WEIGHTED subset larger than its population aborts", test_weighted_subset_big_aborts), &
             new_unittest("a mismatched permutation array aborts", test_weighted_perm_size_aborts), &
-            new_unittest("a weight whose key overflows aborts", test_weighted_key_overflow_aborts), &
             new_unittest("an environment value longer than the buffer aborts", &
                 test_settings_env_too_long_aborts), &
             new_unittest("an environment value beyond a default INTEGER's range aborts", &
@@ -4568,16 +4567,6 @@ contains
             failure_message="a mismatched permutation array was expected to abort", &
             required_stderr="must have the same size")
     end subroutine test_weighted_perm_size_aborts
-
-    !> Several keys at +Inf would compare equal and a stable sort would order them by index --
-    !! a distributional change with no symptom, so the unorderable weight is refused instead.
-    subroutine test_weighted_key_overflow_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-
-        call check_scenario_exit_status_and_stderr(error, "weighted_perm_key_overflow", expect_abort=.true., &
-            failure_message="a weight whose key overflows was expected to abort", &
-            required_stderr="overflows")
-    end subroutine test_weighted_key_overflow_aborts
 
     subroutine test_settings_env_two_numbers_aborts(error)
         type(error_type), allocatable, intent(out) :: error

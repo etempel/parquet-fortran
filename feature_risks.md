@@ -1043,15 +1043,15 @@ chain, and `-march=native` is an entirely ordinary thing to build with. `exp_key
 add, which costs 2.53x on the polynomial and cannot be `pure` — both compilers reject a `volatile`
 local in a pure procedure.
 
-**Covered** by `tools/check_exp_key.sh`, which sweeps seventeen configurations (gfortran at seven
-including `-march=native`, `-mfma` and `-flto`; ifx at four including `-xHost` and `-ipo`; flang at
-six including `-march=native`, `-flto` and `-ffp-contract=fast`) against one frozen fingerprint.
-`exp_key_contract_ok` re-derives 32 values at run time so that a build which has left IEEE
-semantics wholesale aborts instead of returning quietly different permutations — but **it is not
-coverage for the FMA half of this entry, and an earlier version of this paragraph implied it was.**
-32 inputs is a sparse sample: when the barrier was actually lost (see below), it reproduced
-`ek_contract_fp` exactly while the script's 13824-input sweep caught the divergence. The script is
-the cover; the run-time check covers `-ffast-math`/`-fp-model=fast` and nothing finer.
+**Covered** by `tools/check_exp_key.sh`, which sweeps twenty-four configurations on x86 (gfortran
+at nine including `-march=native`, `-mfma`, `-flto`, `-ffast-math` and `-Ofast`; ifx at seven,
+being four `-fp-model=precise` arms plus its own no-flag defaults and `-Ofast`; flang at eight)
+against one frozen fingerprint. `exp_key_contract_ok` re-derives 32 values at run time — but
+**it is not coverage for this entry and an earlier version of this paragraph implied it was.**
+32 inputs is a sparse sample: when the barrier was actually lost, it reproduced `ek_contract_fp`
+exactly while the script's 13824-input sweep caught the divergence. The script is the cover. The
+run-time check is a backstop for a compiler, version or flag combination nobody has swept —
+which is all it can be now that fast-math is swept rather than excused.
 
 **The barrier was lost once, in shipped code, and the script is what found it.** To keep `exp_key`
 `pure`, the `volatile` was replaced for a while by an identity helper carrying `!GCC$ ATTRIBUTES
@@ -1074,9 +1074,21 @@ no evidence at all.
   keeps `pure` and does block the fusion on both compilers — and costs **1787 ns per call** on
   flang against 23.8 ns for the `volatile`, so it is not an option either. Impurity costs nothing:
   the only caller is an ordinary serial `do` loop.
-- **`-ffast-math` / `-fp-model=fast` are out of scope and cannot be brought in** — they may compute
-  `(m-1)/(m+1)` by reciprocal approximation, which no rounding barrier can undo. The run-time check
-  is the answer to that, not a source change.
+- **`-ffast-math` / `-fp-model=fast` ARE in scope, and the claim that they could not be was based
+  on a wrong diagnosis.** They were blamed on reciprocal approximation of `(m-1)/(m+1)`. Falsified
+  by flag bisection on ifx at `-O2` with the default model: `-prec-div` does not fix it, `-no-fma`
+  does not fix it, `-assume protect_parens` does. The transformation was **reassociation**, and it
+  had one place to bite — `e = big + (small - logm)`, where the parentheses were the only thing
+  keeping a term of order `k*0.693` apart from a correction of order `k*1.9e-10`. Barriering that
+  subtraction brought every fast-math configuration into line on both compilers and repaired
+  gfortran `-Ofast`, which had been silently wrong. **A barrier on every PRODUCT is not a barrier
+  on the EXPRESSION**: each `ek_rnd` stops an FMA spanning an add, none of them stops the adds
+  being regrouped among themselves. Where a value is a large term plus a small correction, the
+  grouping is the algorithm and needs its own barrier.
+- **Do not diagnose a floating-point divergence from the flag that exposes it.** `-fp-model=fast`
+  licenses several transformations at once; naming the plausible one without bisecting cost this
+  entry a wrong root cause that stood for some time and made a fixable problem look unfixable.
+  The bisection is three builds.
 - **Never quote a flag sweep that omits the flag under test.** That is precisely how the original
   four-build conclusion went wrong.
 

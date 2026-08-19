@@ -23,9 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pf_random_key`, so neither shares a uniform with the other or with a caller drawing at
   coordinates it chose itself. There is no prefix identity across them, and the suite asserts both
   the difference and the independence rather than leaving either to be discovered. Zero-weight items land last in uniform random order on both paths, so
-  a drained sampler is always a genuine permutation of every item. Weights that are negative, NaN,
-  infinite, all-zero, or (for the race) small enough to overflow a key are refused rather than
-  silently reinterpreted. The race's `-log(u)` is computed in-library from IEEE `+ - * /` rather
+  a drained sampler is always a genuine permutation of every item. Weights below `2.05e-307` count
+  as zero-weight — below that the exponential race's key would overflow, and such a weight is
+  indistinguishable from zero in any finite sample; the threshold also keeps the classification
+  identical under a build that flushes denormals. Weights that are negative, NaN, infinite or
+  all-zero are refused rather than silently reinterpreted. The race's `-log(u)` is computed in-library from IEEE `+ - * /` rather
   than from `log`, because libm is not reproducible across compilers and one differing key changes
   which items are drawn; `pf_weighted_permutation` verifies at run time that its build reproduces
   the frozen transform and aborts naming the flag if not, which catches `-ffast-math` builds and a

@@ -71,7 +71,9 @@ contains
             new_unittest("zero-weight items come last in the race too", test_race_zero_weight_tail), &
             new_unittest("the two families differ in realization", test_families_differ), &
             new_unittest("the two families are independent at one coordinate", &
-                         test_families_independent) &
+                         test_families_independent), &
+            new_unittest("an unorderably small weight is treated as zero-weight", &
+                         test_subnormal_weight_is_zero) &
             ]
     end subroutine collect_tests_parquet_random_weighted
 
@@ -845,5 +847,56 @@ contains
                    "(seed, stream): item 1 agreeing far above w(1)/sum(w) means the two families " // &
                    "share a uniform again -- see wd_family_label")
     end subroutine test_families_independent
+
+    !> A weight below `wd_min_weight` is treated as zero-weight, on BOTH weighted families.
+    !!
+    !! **This replaces an error scenario, and the replacement is stronger than what it replaced.**
+    !! `pf_weighted_permutation` used to abort on a weight whose key `-log(u)/w` overflowed, and the
+    !! scenario proved it by passing a denormal. Two things were wrong with that. A build with
+    !! denormals flushed to zero -- `-ffast-math`, or ifx at its own defaults -- classified the same
+    !! denormal as zero-weight instead, so the scenario asserted nothing there while passing
+    !! elsewhere. And the abort was DRAW-DEPENDENT for the normal weights just above `tiny`, since
+    !! whether `-log(u)/w` overflows depends on `u`: identical weights would abort under one seed
+    !! and not another.
+    !!
+    !! Thresholding at the overflow bound removes both. A weight below it cannot be ordered against
+    !! weights of order one by any finite sample anyway, so calling it zero-weight is the honest
+    !! reading, and the item is still returned -- last, in uniform random order. What this test
+    !! asserts is exactly that, and it is fp-model-independent because `wd_min_weight` is a normal
+    !! number that nothing flushes.
+    subroutine test_subnormal_weight_is_zero(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error carrier
+        integer, parameter :: n = 4
+        type(pf_weighted_draw) :: d
+        real(real64) :: w(n)
+        integer :: perm(n), item, i, seen(n)
+        logical :: ok
+
+        ! Item 2 is denormal (flushed to zero under fast-math); item 3 is a NORMAL number below the
+        ! overflow bound, which no model flushes. Both must be treated the same way.
+        w = [1.0_real64, 1.0e-320_real64, 1.0e-307_real64, 1.0_real64]
+
+        call pf_weighted_permutation(perm, w, 20260819_int64)
+        seen = 0
+        do i = 1, n
+            seen(perm(i)) = seen(perm(i)) + 1
+        end do
+        call check(error, all(seen == 1), &
+                   "a weighted permutation must still return every item exactly once")
+        if (allocated(error)) return
+        call check(error, (perm(3) == 2 .or. perm(3) == 3) .and. (perm(4) == 2 .or. perm(4) == 3), &
+                   "both unorderably small weights must land in the zero-weight tail, i.e. in " // &
+                   "the last two positions, whatever the floating-point model")
+        if (allocated(error)) return
+
+        call d%init(w, 20260819_int64)
+        call d%next(item, ok)
+        call check(error, item == 1 .or. item == 4, &
+                   "the sequential family must draw a real weight first, not an unorderable one")
+        if (allocated(error)) return
+        call d%next(item, ok)
+        call check(error, item == 1 .or. item == 4, &
+                   "the sequential family must exhaust the real weights before the tail")
+    end subroutine test_subnormal_weight_is_zero
 
 end module test_random_weighted

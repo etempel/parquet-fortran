@@ -326,17 +326,22 @@ flang 22.1.8 — which ignores both spellings — inlined it and fused, moving t
 module depending on `iso_fortran_env` alone — the same property `parquet_random` has and for the
 same reason, so that neither check can be disabled by an import added somewhere else. Anything
 needing more than `iso_fortran_env` belongs in `parquet_sampling`, which is where the weighted draw
-lives and which is deliberately compiled by neither script. Two configurations are excluded by design and named in the
-script: gfortran `-Ofast`/`-ffast-math` and ifx *without* `-fp-model=precise`, both of which abandon
-IEEE semantics outright. The second matters in practice — `fpm --profile release`/`debug` pass
-`-fp-model=precise`, but a bare `fpm build` passes no floating-point flag at all — so
-`pf_weighted_permutation` additionally re-derives the transform at run time and aborts naming the
-cause rather than returning quietly different permutations.
+lives and which is deliberately compiled by neither script. **Nothing is excluded: fast-math is
+swept like everything else**, including gfortran `-Ofast`/`-ffast-math` and ifx's own no-flag
+defaults, so a failure in any arm is a real finding rather than a known exposure. That was not
+always so — both were once recorded as unfixable, on the diagnosis that fast-math computes
+`(m-1)/(m+1)` by reciprocal approximation. The diagnosis was wrong: `-prec-div` does not fix it,
+`-no-fma` does not fix it, and `-assume protect_parens` does, so the transformation was
+*reassociation* of `e = big + (small - logm)` — a large term plus a tiny correction, held apart
+only by parentheses that fast-math may ignore. Barriering that subtraction brought every
+configuration into line and repaired gfortran `-Ofast`, which had been silently wrong.
+`pf_weighted_permutation` still re-derives the transform at run time, now as a backstop for a
+compiler or flag combination nobody has swept rather than for fast-math specifically.
 
 ```bash
-tools/check_exp_key.sh                        # gfortran, seven settings
-FC=ifx tools/check_exp_key.sh                 # ifx, four settings
-FC=flang tools/check_exp_key.sh               # flang, six settings (no -mfma; its driver has none)
+tools/check_exp_key.sh                        # gfortran, nine settings on x86 (eight elsewhere)
+FC=ifx tools/check_exp_key.sh                 # ifx, seven settings incl. its own defaults and -Ofast
+FC=flang tools/check_exp_key.sh               # flang, eight settings (no -mfma; its driver has none)
 ```
 
 

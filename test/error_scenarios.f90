@@ -372,8 +372,6 @@ program error_scenarios
         call scenario_weighted_subset_too_large()
     case ("weighted_perm_size_mismatch")
         call scenario_weighted_perm_size_mismatch()
-    case ("weighted_perm_key_overflow")
-        call scenario_weighted_perm_key_overflow()
     case ("settings_env_two_numbers")
         call scenario_settings_env_two_numbers()
     case ("settings_env_out_of_range")
@@ -4370,19 +4368,6 @@ contains
         call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (4 slots for 6 items)
         print '(a,i0)', "unexpectedly returned a short permutation: ", perm(1)
     end subroutine scenario_weighted_perm_size_mismatch
-
-    !> A weight small enough to overflow its key is refused rather than tying at infinity.
-    !!
-    !! `-log(u)/w` overflows below about `2e-307`. Several items at `+Inf` would compare equal, and
-    !! a stable sort would then order them by index -- a distributional change with no symptom.
-    subroutine scenario_weighted_perm_key_overflow()
-        real(real64) :: w(3)
-        integer :: perm(3)
-
-        w = [1.0_real64, 1.0e-320_real64, 1.0_real64]
-        call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (the key overflows)
-        print '(a,i0)', "unexpectedly ordered an unorderable weight: ", perm(1)
-    end subroutine scenario_weighted_perm_key_overflow
 
     !> An environment variable longer than the fixed buffer the reader uses is refused rather than
     !> applied truncated -- a truncated number is a plausible-looking wrong value, which is exactly

@@ -80,6 +80,7 @@ working rules).
   - [`-fPIC` blocks inlining on ELF](#-fpic-blocks-inlining-on-elf-so-the-same-fortran-can-be-twice-as-slow-on-linux-as-on-macos)
   - [Verifying the bind(C) boundary](#verifying-the-bindc-boundary)
   - [If `src/parquet_wrapper.cpp` is ever split into multiple translation units](#if-srcparquet_wrappercpp-is-ever-split-into-multiple-translation-units)
+  - [A hand-run `gfortran` without `-J` leaves a `.mod` in the repo root](#a-hand-run-gfortran-without--j-leaves-a-mod-in-the-repo-root-and-a-global-gitignore-hides-it)
   - [Stale `fpm` build cache](#stale-fpm-build-cache)
   - [Keeping `tools/prep_fpm_publish.sh` in sync](#keeping-toolsprep_fpm_publishsh-in-sync)
   - [Manual (never-`fpm test`) large-scale/benchmark tools](#manual-never-fpm-test-large-scalebenchmark-tools)
@@ -3182,6 +3183,28 @@ error scenario to confirm the override still takes effect, re-run `test/test_set
 observed-effect tests to confirm each mirrored setting still reaches the code that reads it, and
 re-run both `concurrent_calls_into_shared_*` scenarios to confirm the guard still fires **and that
 exactly one message reaches stderr**.
+
+### A hand-run `gfortran` without `-J` leaves a `.mod` in the repo root, and a global gitignore hides it
+
+Compiling a source file by hand to check something — `gfortran -O2 src/parquet_expkey.f90 tools/x.f90
+-o /tmp/x` — writes the `.mod` into the **current directory**, which is normally the repository root.
+It is a build artifact nobody notices, because `*.mod` is commonly covered by a user's *global*
+gitignore (`~/.gitignore_global`), so `git status` stays clean and the file can sit there for days.
+
+**What it then breaks is a standalone check, and the error blames the library.** gfortran searches the
+cwd for modules, so a stray root `.mod` shadows a script's own `-J<workdir>` output. If the stray was
+built by a different gfortran, every configuration fails with `Cannot read module file ... created by
+a different version of GNU Fortran`, pointing at a `use` line in the check's own driver. Confirmed on
+`tools/check_exp_key.sh`, where all nine configurations failed this way and the script correctly
+reported "NO configuration built -- this run proves nothing".
+
+- **Always pass `-J<dir>` when compiling by hand from the repo root**, or run the compile from a
+  temporary directory.
+- **A `tools/` script that compiles sources must run the compiler from its OWN work directory with
+  ABSOLUTE source paths** — `(cd "$WORK" && $FC ... $ABS_SRC)`. `check_random_kernels.sh` and
+  `benchmark_random_kernels.sh` always did; `check_exp_key.sh` did not and was fixed to match.
+- **`ls *.mod *.smod` in the repo root** is the one-command check when a standalone build fails for
+  no reason; `git status` will not show them.
 
 ### Stale `fpm` build cache
 

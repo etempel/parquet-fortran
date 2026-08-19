@@ -4776,12 +4776,12 @@ contains
     function merge_threads_used() result(n)
         integer(int64) :: n !! 1 means that round ran on one thread.
         interface
-            function get_used() bind(C, name="parquet_debug_get_sort_merge_threads_used") result(k)
+            function get_merge_used() bind(C, name="parquet_debug_get_sort_merge_threads_used") result(k)
                 use iso_c_binding, only : c_int64_t
                 integer(c_int64_t) :: k !! threads that worked the final merge round.
-            end function get_used
+            end function get_merge_used
         end interface
-        n = int(get_used(), int64)
+        n = int(get_merge_used(), int64)
     end function merge_threads_used
     !
     !> **The single highest-value test of the co-ranked merge**, and the reason it is a *dense* sweep

@@ -280,7 +280,9 @@ contains
                 test_string_column_first_class), &
             new_unittest("a row handle can write: %set and %ref", test_row_set_and_ref), &
             new_unittest("found= reaches every name-taking procedure", test_found_everywhere), &
-            new_unittest("extra: remap: shadows, swaps and duplicates as documented", test_remap_shadow_duplicate), &
+            new_unittest("extra: remap: shadows, swaps and duplicates as documented", test_remap_shadow_duplicate) &
+            ]
+        testsuite = [ testsuite, &
             new_unittest("rename_column on a remapped column keeps its file column", test_remap_then_rename), &
             new_unittest("open with filter= narrows every column, in internal names", test_open_filter), &
             new_unittest("open with sort= orders every column, in internal names", test_open_sort), &
@@ -2332,7 +2334,7 @@ contains
         call write_basic_fixture(f)
         call parquet_open_table(t, f)
         do i = 1, NROW
-            repl(i) = real(i, real64) * -3.0_real64
+            repl(i) = real(i, real64) * (-3.0_real64)
         end do
         call t%set("f64", repl)
         call t%get("f64", g)

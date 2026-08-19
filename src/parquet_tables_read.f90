@@ -272,20 +272,34 @@ contains
             ! a bitmap nobody needed costs one bit per row.
             needs_bitmap = parquet_column_has_nulls(cache%reader, slot%file_name, 0_int64, 0_int64)
             if (needs_bitmap) call slot%values%ensure_validity()
-            !$omp parallel do default(shared) private(rg, t) schedule(dynamic) num_threads(nslots)
-            do rg = 1_int64, nrg
-                block
-                    ! Plain locals ONLY -- a derived type with allocatable components declared in a
-                    ! block lexically inside a parallel region segfaults ifx at -O1+
-                    ! (feature_risks.md Risk-45), which is why `readers` and `chunks` are arrays
-                    ! allocated before the region instead.
-                    integer(int64) :: rows_rg
-                    !
-                    rows_rg = bounds(2, rg) - bounds(1, rg) + 1_int64
-                    ! A row group a filter or sample emptied contributes nothing and must be
-                    ! stepped over -- pasting a zero-row chunk is not merely wasteful, it would
-                    ! ask %paste for an empty range at a valid position.
-                    if (rows_rg > 0_int64) then
+        end associate
+        ! THE ASSOCIATE ABOVE MUST END BEFORE THE REGION, AND THE ONE BELOW IS ITS REPLACEMENT --
+        ! do not merge them back into a single associate spanning the `!$omp parallel do`. NAG 7.2
+        ! (Build 7244) generates invalid intermediate C for an ASSOCIATE name referenced inside an
+        ! OpenMP construct when the association was established outside it: the association's
+        ! temporary is used in the outlined region but never declared there, so the host C compiler
+        ! rejects nagfor's OWN output ("error: use of undeclared identifier 'slot_'"), which reads
+        ! like a defect in this file and is not. nagfor warns first -- "ASSOCIATE name SLOT used in
+        ! nested OpenMP construct" -- and that warning is the only tell. gfortran, ifx and flang all
+        ! accept the spanning form, so this split is a NAG workaround rather than a correctness
+        ! requirement; it costs nothing (identical indentation, one extra association per iteration
+        ! that every compiler folds away) and a pointer would work equally well. See
+        ! feature_nag_associate.md for the minimal reproducer and the NAG support report.
+        !$omp parallel do default(shared) private(rg, t) schedule(dynamic) num_threads(nslots)
+        do rg = 1_int64, nrg
+            block
+                ! Plain locals ONLY -- a derived type with allocatable components declared in a
+                ! block lexically inside a parallel region segfaults ifx at -O1+
+                ! (feature_risks.md Risk-45), which is why `readers` and `chunks` are arrays
+                ! allocated before the region instead.
+                integer(int64) :: rows_rg
+                !
+                rows_rg = bounds(2, rg) - bounds(1, rg) + 1_int64
+                ! A row group a filter or sample emptied contributes nothing and must be
+                ! stepped over -- pasting a zero-row chunk is not merely wasteful, it would
+                ! ask %paste for an empty range at a valid position.
+                if (rows_rg > 0_int64) then
+                    associate (slot => cache%cols(idx))
                         t = omp_get_thread_num() + 1
                         if (.not. reader_open(t)) then
                             ! Through the same helper parquet_open_table uses, so this thread's
@@ -302,11 +316,11 @@ contains
                         call paste_row_group_safely(slot%values, chunks(t), bounds(1, rg), &
                             bounds(2, rg), int(slot%width, int64), needs_bitmap)
                         call chunks(t)%clear()
-                    end if
-                end block
-            end do
-            !$omp end parallel do
-        end associate
+                    end associate
+                end if
+            end block
+        end do
+        !$omp end parallel do
         do t = 1, nslots
             if (reader_open(t)) call parquet_close_reader(readers(t))
         end do

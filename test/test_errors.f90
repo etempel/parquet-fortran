@@ -262,7 +262,9 @@ contains
             new_unittest("array-mode element_mode (unfiltered) with an out-of-range col_index (int32) aborts", &
                 test_read_array_em_int32_oob_aborts), &
             new_unittest("reading an out-of-int32-range uint32 value aborts", &
-                test_extended_uint32_overflow_int32_aborts), &
+                test_extended_uint32_overflow_int32_aborts) &
+            ]
+        testsuite = [ testsuite, &
             new_unittest("reading an out-of-int32-range uint64 value aborts", &
                 test_extended_uint64_overflow_int32_aborts), &
             new_unittest("reading an out-of-int64-range uint64 value aborts", &
@@ -461,7 +463,9 @@ contains
             new_unittest("%next on an uninitialised sampler aborts", test_weighted_uninit_aborts), &
             new_unittest("a second %init aborts", test_weighted_init_twice_aborts), &
             new_unittest("a WEIGHTED subset larger than its population aborts", test_weighted_subset_big_aborts), &
-            new_unittest("a mismatched permutation array aborts", test_weighted_perm_size_aborts), &
+            new_unittest("a mismatched permutation array aborts", test_weighted_perm_size_aborts) &
+            ]
+        testsuite = [ testsuite, &
             new_unittest("an environment value longer than the buffer aborts", &
                 test_settings_env_too_long_aborts), &
             new_unittest("an environment value beyond a default INTEGER's range aborts", &
@@ -661,7 +665,9 @@ contains
             new_unittest("parquet_open_reader(nrows=) with a filter matching zero rows aborts", &
                 test_open_reader_nrows_zero_rows_aborts), &
             new_unittest("opening a writer at a bad path aborts", &
-                test_open_writer_bad_path_aborts), &
+                test_open_writer_bad_path_aborts) &
+            ]
+        testsuite = [ testsuite, &
             new_unittest("writing an over-length string into a fixed-size string matrix column aborts", &
                 test_write_string_matrix_exceeds_array_size_aborts), &
             new_unittest("writing an over-length string into a fixed-size string vector column (flat form) aborts", &
@@ -861,7 +867,9 @@ contains
             new_unittest("%get_element past the last row aborts, naming get_element", &
                 test_table_get_element_row_out_of_range_aborts), &
             new_unittest("%get_element on a mismatched kind aborts through the shared body", &
-                test_table_get_element_kind_mismatch_aborts), &
+                test_table_get_element_kind_mismatch_aborts) &
+            ]
+        testsuite = [ testsuite, &
             new_unittest("table: %get_element into an int32 vector of the wrong kind aborts", &
                 test_table_get_element_kind_mismatch_i32v_aborts), &
             new_unittest("table: %get_element into an int64 vector of the wrong kind aborts", &
@@ -1061,7 +1069,9 @@ contains
             new_unittest("cast between a scalar and a vector kind aborts", &
                 test_table_cast_rank_change_aborts), &
             new_unittest("cast narrowing an out-of-range integer aborts", &
-                test_table_cast_int_overflow_aborts), &
+                test_table_cast_int_overflow_aborts) &
+            ]
+        testsuite = [ testsuite, &
             new_unittest("cast of a fractional value to an integer kind aborts", &
                 test_table_cast_fractional_aborts), &
             new_unittest("cast overflowing float32 aborts", &
@@ -1260,7 +1270,9 @@ contains
                 test_temporal_ts_set_invalid_month_aborts), &
             new_unittest("parquet_timestamp set with an invalid nanosecond aborts", &
                 test_temporal_ts_set_invalid_nanosecond_aborts), &
-            new_unittest("parquet_timestamp get on a null element aborts", test_temporal_ts_get_null_aborts), &
+            new_unittest("parquet_timestamp get on a null element aborts", test_temporal_ts_get_null_aborts) &
+            ]
+        testsuite = [ testsuite, &
             new_unittest("parquet_timestamp get_date beyond parquet_date's range aborts", &
                 test_temporal_ts_get_date_range_exceeded_aborts), &
             new_unittest("parquet_timestamp to_unix negative-branch overflow aborts", &

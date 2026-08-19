@@ -240,7 +240,9 @@ contains
             new_unittest("auto chunk-size schema estimate covers boolean/string/temporal (unrecognized-by-name) " // &
                 "column types", test_chunk_size_estimate_boolean_string_temporal), &
             new_unittest("parquet_get_chunk_size(writer) with an explicit chunk_size= returns it before any " // &
-                "column is written", test_chunk_size_explicit_before_write), &
+                "column is written", test_chunk_size_explicit_before_write) &
+            ]
+        testsuite = [ testsuite, &
             new_unittest("streaming row-group write: every type/shape (incl. logical/string) round-trips " // &
                 "with is_valid+qc branches exercised", test_streaming_write_all_types_roundtrip), &
             new_unittest("streaming row-group write: col_size>1 string column via a flat rank-1 array round-trips", &

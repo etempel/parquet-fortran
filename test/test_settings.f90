@@ -583,13 +583,13 @@ contains
     integer function parquet_debug_table_threads() result(n)
         use iso_c_binding, only : c_int64_t
         interface
-            function got() bind(C, name="parquet_debug_get_table_threads_used") result(kk)
+            function got_table_threads() bind(C, name="parquet_debug_get_table_threads_used") result(kk)
                 import :: c_int64_t
                 integer(c_int64_t) :: kk
-            end function got
+            end function got_table_threads
         end interface
         !
-        n = int(got())
+        n = int(got_table_threads())
     end function parquet_debug_table_threads
 
     !> Clears the mutation thread counter, so a test observes its own mutation rather than an
@@ -598,13 +598,13 @@ contains
     subroutine parquet_debug_reset_table_threads()
         use iso_c_binding, only : c_int64_t
         interface
-            subroutine put(kk) bind(C, name="parquet_debug_set_table_threads_used")
+            subroutine put_table_threads(kk) bind(C, name="parquet_debug_set_table_threads_used")
                 import :: c_int64_t
                 integer(c_int64_t), value :: kk
-            end subroutine put
+            end subroutine put_table_threads
         end interface
         !
-        call put(0_c_int64_t)
+        call put_table_threads(0_c_int64_t)
     end subroutine parquet_debug_reset_table_threads
 
     !> Two writes of the same data, differing only in the setting. Equal sizes mean the setting was
@@ -806,39 +806,39 @@ contains
     integer function parquet_debug_last_use_threads() result(n)
         use iso_c_binding, only : c_int
         interface
-            function got() bind(C, name="parquet_debug_get_last_use_threads") result(k)
+            function got_last_use_threads() bind(C, name="parquet_debug_get_last_use_threads") result(k)
                 import :: c_int
                 integer(c_int) :: k
-            end function got
+            end function got_last_use_threads
         end interface
         !
-        n = int(got())
+        n = int(got_last_use_threads())
     end function parquet_debug_last_use_threads
 
     !> Threads the last parallel prefetch was given; 0 if it ran serially.
     integer function parquet_debug_prefetch_threads() result(n)
         use iso_c_binding, only : c_int64_t
         interface
-            function got() bind(C, name="parquet_debug_get_prefetch_threads_used") result(k)
+            function got_prefetch_threads() bind(C, name="parquet_debug_get_prefetch_threads_used") result(k)
                 import :: c_int64_t
                 integer(c_int64_t) :: k
-            end function got
+            end function got_prefetch_threads
         end interface
         !
-        n = int(got())
+        n = int(got_prefetch_threads())
     end function parquet_debug_prefetch_threads
 
     !> Clears the prefetch counter, so a test observes its own prefetch rather than an earlier one.
     subroutine parquet_debug_reset_prefetch_threads()
         use iso_c_binding, only : c_int64_t
         interface
-            subroutine put(k) bind(C, name="parquet_debug_set_prefetch_threads_used")
+            subroutine put_prefetch_threads(k) bind(C, name="parquet_debug_set_prefetch_threads_used")
                 import :: c_int64_t
                 integer(c_int64_t), value :: k
-            end subroutine put
+            end subroutine put_prefetch_threads
         end interface
         !
-        call put(0_c_int64_t)
+        call put_prefetch_threads(0_c_int64_t)
     end subroutine parquet_debug_reset_prefetch_threads
 
     ! ==================================================================================
@@ -1224,12 +1224,12 @@ contains
     !> How many row groups the most recent statistics screen ruled out.
     integer(int64) function row_groups_pruned() result(n)
         interface
-            function got() bind(C, name="parquet_debug_get_row_groups_pruned") result(k)
+            function got_row_groups_pruned() bind(C, name="parquet_debug_get_row_groups_pruned") result(k)
                 use iso_c_binding, only : c_long_long
                 integer(c_long_long) :: k !! pruned row groups of the last screen.
-            end function got
+            end function got_row_groups_pruned
         end interface
-        n = int(got(), int64)
+        n = int(got_row_groups_pruned(), int64)
     end function row_groups_pruned
 
     !> A key the counting path always declines (real, not integer), so a comparison count is

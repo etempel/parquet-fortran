@@ -98,7 +98,7 @@ contains
             idx(i) = i
             flag(i) = mod(i, 2) == 1
             ra(i) = real(i, real64) * 15.0_real64
-            dec(i) = real(i, real64) * -3.5_real64
+            dec(i) = real(i, real64) * (-3.5_real64)
             obsdate(i) = parquet_date(2026, 3, i)
             obstime(i) = parquet_time(10, 20, i)
             obsstamp(i) = parquet_timestamp(2026, 3, i, 1, 2, 3)

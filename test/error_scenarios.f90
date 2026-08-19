@@ -10160,8 +10160,8 @@ contains
             subroutine parquet_debug_write_list_fixture(path, variant) &
                     bind(C, name="parquet_debug_write_list_fixture")
                 use iso_c_binding, only : c_char
-                character(kind=c_char) :: path(*)
-                character(kind=c_char) :: variant(*)
+                character(kind=c_char), intent(in) :: path(*) !! NUL-terminated output path.
+                character(kind=c_char), intent(in) :: variant(*) !! NUL-terminated fixture variant.
             end subroutine parquet_debug_write_list_fixture
         end interface
         type(parquet_reader) :: reader

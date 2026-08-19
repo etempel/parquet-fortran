@@ -1035,6 +1035,31 @@ The app also takes `--threads=N`, which caps `parquet_set_string_threads` for th
 over `1 2 4 8` is how the internally-threaded operations' scaling is measured, and it is the
 only way to see the serial path and the threaded path of the same operation side by side.
 
+`tools/nagfor_fpm_shim/` holds a single executable script named exactly `nagfor`, which makes
+`fpm build` work with the NAG compiler (`FPM_FC=nagfor`) despite fpm 0.13's broken NAG link-line
+construction: fpm appends the `openmp` metapackage's `-openmp` link flag twice (NAG refuses a
+repeated option, where gfortran silently tolerates the equally-doubled `-fopenmp` it gets), emits
+external libraries as `-Wl,arrow` instead of `-larrow` (nagfor's `-Wl,` forwards the bare word to
+the host C compiler, which reads it as an input filename), and passes the gcc-style macOS
+`-Wl,-headerpad,0x200`, which clang rejects when it arrives via nagfor. The shim rewrites those
+three shapes and execs the real `nagfor` found further along `PATH`; being named `nagfor` keeps
+fpm's compiler identification unaffected. To use it, prepend the directory to `PATH` in whatever
+script activates the NAG environment:
+
+```bash
+export PATH="/path/to/parquet-fortran/tools/nagfor_fpm_shim:$PATH"
+```
+
+Note a NAG build is **serial** regardless: fpm's compile-side OpenMP probe fails under NAG
+(fpm hands nagfor `-fPIC`, whose NAG spelling is `-PIC`), so no `-openmp` reaches any compile and
+every `#ifdef _OPENMP` block compiles out — the same situation as a flang build (see CLAUDE.md's
+machine notes). The shim deliberately does not translate `-fPIC`: that would flip fpm's probe to
+passing and silently turn every NAG build into an untested threaded one. The shim's header
+comment carries the full defect list; `feature_fpm_nagfor_issue.md` (git-ignored, repo root)
+holds the drafted upstream report, and fpm PR #1312 tracks the headerpad half. Remove the shim
+once fpm's NAG link-line construction is fixed upstream. Maintainer-only (stripped from the
+fpm-published package, see `tools/prep_fpm_publish.sh`).
+
 ### Testing genuine OpenMP concurrency
 
 This repository's own OpenMP-dependent tests (the `openmp`/`openmp_write` test suites, plus the `concurrent_calls_into_shared_reader`/`writer` error scenarios) need OpenMP to actually be active to exercise concurrency:

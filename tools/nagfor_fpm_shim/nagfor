@@ -1,0 +1,83 @@
+#!/bin/bash
+# nagfor shim for building this project with fpm + NAG (FPM_FC=nagfor).
+#
+# fpm 0.13's NAG support mis-builds the link line in three independent ways
+# (verified against fpm 0.13.0 alpha; feature_fpm_nagfor_issue.md holds the
+# upstream report draft with fpm source citations):
+#
+#   1. The `openmp = "*"` metapackage's link flag is appended to the build
+#      model TWICE -- fpm's build_model resolves metapackages once before and
+#      once after the dependency tree is built, and each pass appends. Every
+#      compiler gets the doubled flag; gfortran silently tolerates
+#      `-fopenmp -fopenmp`, NAG hard-errors
+#      "Option error: -openmp option specified twice".
+#   2. External libraries (fpm.toml's `link = [...]` and fpm's own C++
+#      runtime `c++`) are emitted as `-Wl,<name>` instead of `-l<name>` for
+#      NAG. nagfor's -Wl, forwards the bare word to the host C compiler
+#      (clang on macOS), which reads it as an input filename:
+#      "clang: error: no such file or directory: 'arrow'".
+#   3. The macOS-only `-Wl,-headerpad,0x200` (gcc syntax for handing ld an
+#      option) reaches clang as a raw ld option through nagfor's -Wl, and is
+#      rejected. It only reserves Mach-O header padding for a later
+#      install_name_tool edit, so dropping it is safe. Upstream fix pending:
+#      fortran-lang/fpm PR #1312.
+#
+# Usage: prepend this directory to PATH before running fpm with FPM_FC=nagfor
+# (e.g. from the shell script that activates the NAG environment):
+#
+#   export PATH="/path/to/parquet-fortran/tools/nagfor_fpm_shim:$PATH"
+#
+# The file is named exactly `nagfor` so fpm's compiler identification (which
+# keys on the command name) is unaffected; the shim execs the real nagfor
+# found further along PATH. Remove the PATH line once fpm's link-line
+# construction is fixed upstream.
+#
+# Known and deliberately NOT worked around: fpm's compile-side OpenMP probe
+# fails under NAG (fpm hands nagfor `-fPIC`, which NAG rejects -- its
+# spelling is `-PIC`), so no `-openmp` reaches any compile and a NAG build of
+# this project is SERIAL: every `#ifdef _OPENMP` block compiles out, the same
+# situation as the flang build documented in CLAUDE.md. Translating -fPIC to
+# -PIC here would flip that probe to passing and silently turn every NAG
+# build into an untested threaded one -- if a threaded NAG build is ever
+# wanted, do that deliberately, not via this shim.
+
+# Resolve the real nagfor: first PATH entry whose nagfor is not this script.
+real_nagfor=""
+self="$0"
+oldIFS=$IFS
+IFS=':'
+for dir in $PATH; do
+    [ -z "$dir" ] && dir="."
+    cand="$dir/nagfor"
+    [ -f "$cand" ] && [ -x "$cand" ] || continue
+    [ "$cand" -ef "$self" ] && continue
+    real_nagfor="$cand"
+    break
+done
+IFS=$oldIFS
+
+if [ -z "$real_nagfor" ]; then
+    echo "tools/nagfor_fpm_shim/nagfor: no real nagfor found on PATH beyond this shim" >&2
+    exit 127
+fi
+
+args=()
+seen_openmp=0
+for a in "$@"; do
+    case "$a" in
+        -openmp)
+            [ "$seen_openmp" = "1" ] && continue
+            seen_openmp=1
+            ;;
+        -Wl,-headerpad,0x200)
+            continue
+            ;;
+        -Wl,-*)
+            : ;;                 # other dash passthroughs: leave untouched
+        -Wl,*)
+            a="-l${a#-Wl,}" ;;   # bare name: fpm meant an external library
+    esac
+    args+=("$a")
+done
+
+exec "$real_nagfor" "${args[@]}"

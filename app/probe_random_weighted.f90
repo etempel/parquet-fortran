@@ -1053,14 +1053,27 @@ contains
     !!
     !! The reference is a `real128` running remainder: the exact sum of the weights not yet drawn,
     !! maintained by subtracting each removed weight in 113-bit precision. Comparing the `real64`
-    !! tree root against it isolates the error the tree itself introduces.
+    !! tree root against it isolates the error the tree itself introduces. **Where the compiler has
+    !! no 128-bit real kind this sweep is skipped rather than downgraded** -- see the note on `RKQ`.
     !!
     !! `unreachable` counts items whose weight is below the unit in the last place of the TOTAL, so
     !! that adding them to it changes nothing. Those are lost to `real64` no matter how the tree is
     !! updated -- an inherent limit of the representation, not of the algorithm, and the reason this
     !! sweep separates the two columns.
     subroutine run_range()
-        integer, parameter :: RK = selected_real_kind(30)
+        ! A 128-bit real kind is NOT universally available: flang 22.1.8 answers
+        ! `selected_real_kind(30)` with -1 (no such kind), and `real(x, -1)` is a semantic error
+        ! rather than a fallback. Naming it unconditionally made this file unbuildable there --
+        ! and with it every other `app/` target, since fpm stops the whole build on one failed
+        ! object, so a maintainer-only probe took down the library's flang build. Resolve the kind
+        ! at compile time and REFUSE the sweep where there is none: this routine exists to measure
+        ! the error a `real64` tree introduces against a higher-precision reference, so falling
+        ! back to `real64` would compare real64 against real64, report zero error, and claim the
+        ! tree is perfect on exactly the compiler that cannot measure it. `tools/check_exp_key.f90`
+        ! carries the same guard for the same compiler, and for the same reason.
+        integer, parameter :: RKQ = selected_real_kind(30)
+        integer, parameter :: RK = merge(RKQ, real64, RKQ > 0)
+        logical, parameter :: have_quad = (RKQ > 0)
         integer(int64), parameter :: MR = 200000_int64
         integer :: dk, rule, unreach
         integer(int64) :: sz, i, item, ndrawn, dup, zeroleaf
@@ -1071,6 +1084,14 @@ contains
 
         write(output_unit, '(a)') '=========================================================='
         write(output_unit, '(a)') 'DYNAMIC RANGE -- does tree accuracy depend on the weights?'
+        if (.not. have_quad) then
+            write(output_unit, '(a)') 'SKIPPED: this compiler has no 128-bit real kind, so there'
+            write(output_unit, '(a)') '  is no reference to measure the real64 tree against. A'
+            write(output_unit, '(a)') '  real64 reference would report zero error and prove'
+            write(output_unit, '(a)') '  nothing; every other mode of this probe still runs.'
+            flush(output_unit)
+            return
+        end if
         write(output_unit, '(a,i0,a)') 'm = ', MR, ', full drain, reference in real128'
         write(output_unit, '(a)') 'rule: subtract = st(p) -= w   |   recompute = st(p) = st(2p)' // &
             ' + st(2p+1)'

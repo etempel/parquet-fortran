@@ -1043,10 +1043,25 @@ chain, and `-march=native` is an entirely ordinary thing to build with. `exp_key
 add, which costs 2.53x on the polynomial and cannot be `pure` — both compilers reject a `volatile`
 local in a pure procedure.
 
-**Covered** by `tools/check_exp_key.sh`, which sweeps eleven configurations (gfortran at seven
-including `-march=native`, `-mfma` and `-flto`; ifx at four including `-xHost` and `-ipo`) against
-one frozen fingerprint, and by `exp_key_contract_ok`, which re-derives 32 values at run time so a
-build that cannot honour the contract aborts instead of returning quietly different permutations.
+**Covered** by `tools/check_exp_key.sh`, which sweeps seventeen configurations (gfortran at seven
+including `-march=native`, `-mfma` and `-flto`; ifx at four including `-xHost` and `-ipo`; flang at
+six including `-march=native`, `-flto` and `-ffp-contract=fast`) against one frozen fingerprint.
+`exp_key_contract_ok` re-derives 32 values at run time so that a build which has left IEEE
+semantics wholesale aborts instead of returning quietly different permutations — but **it is not
+coverage for the FMA half of this entry, and an earlier version of this paragraph implied it was.**
+32 inputs is a sparse sample: when the barrier was actually lost (see below), it reproduced
+`ek_contract_fp` exactly while the script's 13824-input sweep caught the divergence. The script is
+the cover; the run-time check covers `-ffast-math`/`-fp-model=fast` and nothing finer.
+
+**The barrier was lost once, in shipped code, and the script is what found it.** To keep `exp_key`
+`pure`, the `volatile` was replaced for a while by an identity helper carrying `!GCC$ ATTRIBUTES
+noinline` / `!DIR$ ATTRIBUTES NOINLINE`. flang 22.1.8 warns on the second spelling, ignores the
+first **in silence**, inlines the helper and fuses: `flang -O3 -march=native` on machine C moved the
+fingerprint to -8585622607960331921, differing on 4 of 13824 inputs by 1 ulp each. The `volatile`
+is back and `exp_key` is impure again. Two things generalise from it — a directive is advice a
+compiler may decline, so it may never be the *only* thing holding a contract; and the compiler that
+declines it may warn about one spelling while silently dropping the other, so a clean build log is
+no evidence at all.
 
 **What it still forbids**, and none of it is visible in the source:
 
@@ -1054,7 +1069,11 @@ build that cannot honour the contract aborts instead of returning quietly differ
   can compile it standalone*; `parquet_random` itself cannot be compiled that way any more, having
   gained `parquet_sorting` and hence Arrow. A dependency here silently disables the check.
 - **Do not restore `pure`, and do not remove the barriers to get it back.** The mutation is
-  invisible to every in-process test.
+  invisible to every in-process test, and the `noinline`-helper route that was tried in order to
+  regain purity is exactly what failed on flang. `transfer(transfer(x, 0_int64), 0.0_real64)` also
+  keeps `pure` and does block the fusion on both compilers — and costs **1787 ns per call** on
+  flang against 23.8 ns for the `volatile`, so it is not an option either. Impurity costs nothing:
+  the only caller is an ordinary serial `do` loop.
 - **`-ffast-math` / `-fp-model=fast` are out of scope and cannot be brought in** — they may compute
   `(m-1)/(m+1)` by reciprocal approximation, which no rounding barrier can undo. The run-time check
   is the answer to that, not a source change.

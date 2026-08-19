@@ -74,6 +74,29 @@ module parquet_expkey
 
 contains
 
+    !> The rounding barrier: an identity that the optimiser may not fuse across.
+    !!
+    !! **The `volatile` local is the entire content of this procedure.** Without it,
+    !! `ek_rnd(a * b) + c` is just `a * b + c` -- the exact shape a compiler with FMA contracts,
+    !! rounding once where IEEE rounds twice, which changes the result and moves the frozen
+    !! fingerprint. `volatile` obliges the compiler to store `x` to memory and read it back, so the
+    !! product is a rounded `real64` by the time the add sees it, on every conforming compiler.
+    !! Unlike a `noinline` directive this is not advice the optimiser may decline, which is why the
+    !! procedure is written this way and not that way -- see `exp_key`'s doc-comment for the flang
+    !! build that made the difference concrete.
+    !!
+    !! Do not make this `pure` (a pure procedure may not have a `volatile` local -- that
+    !! restriction is what the directive form was working around), do not drop the `volatile`, and
+    !! do not "simplify" the call sites back to bare arithmetic.
+    function ek_rnd(x) result(y)
+        real(real64), intent(in) :: x   !! the product to round
+        real(real64) :: y               !! the same value, rounded to real64
+        real(real64), volatile :: t     !! the barrier: forces a store and a reload
+
+        t = x
+        y = t
+    end function ek_rnd
+
     !> `-log(u)` for `u` in `[2**-53, 1]`, using only IEEE `+ - * /`. **Not a general-purpose log.**
     !!
     !! **The construction.** Split `u = m * 2**k` with `m` in `[1/sqrt(2), sqrt(2))`, so
@@ -97,58 +120,61 @@ contains
     !! An earlier design note concluded FMA was harmless on the strength of four builds that
     !! happened not to enable it on gfortran; `tools/check_exp_key.sh` now sweeps for it.
     !!
-    !! **The cost is 2.53x on the polynomial** (6.58 -> 16.68 ns per call, gfortran 15.2.1 `-O3
-    !! -funroll-loops`, machine B) and it buys a contract that holds under every IEEE-conforming
-    !! flag set. If the key loop ever dominates a real workload, the way to recover it is a
-    !! table-driven reduction -- a 16-entry table of `log(m_i)` brings `|f|` under `2**-5` and the
-    !! series down to six terms, halving the barriers -- not deleting the barriers.
+    !! **The cost is about 2x on the polynomial** and it buys a contract that holds under every
+    !! IEEE-conforming flag set. Measured over 5M calls at `-O3 -funroll-loops -march=native` on
+    !! machine C, best of 3: gfortran 10.58 ns unbarriered -> 21.86 ns (2.07x), flang 12.46 ->
+    !! 23.80 ns (1.91x). (An earlier figure here, 6.58 -> 16.68 ns / 2.53x, was the `noinline`
+    !! barrier on machine B; the shape of the conclusion is unchanged.) If the key loop ever
+    !! dominates a real workload, the way to recover it is a table-driven reduction -- a 16-entry
+    !! table of `log(m_i)` brings `|f|` under `2**-5` and the series down to six terms, halving the
+    !! barriers -- not deleting the barriers.
     !!
     !! **`-ffast-math` / `-Ofast` are out of scope, and no library can bring them in.** They
     !! license the compiler to violate IEEE semantics outright, and the fingerprint moves under
     !! them even with the barriers (it is at least stable *within* fast-math, with and without
     !! FMA). `fpm --profile release` passes `-O3 -funroll-loops`, so nothing shipped is affected.
     !!
-    !! **`pure`, via a `noinline` identity helper rather than a `volatile` local.** `volatile` was
-    !! the original barrier and is standard Fortran, but both gfortran and ifx reject a `volatile`
-    !! local in a `pure` procedure -- which would have made every distribution built on this
-    !! transform impure too, and so unusable from `do concurrent` or from a caller's own `pure`
-    !! procedure. `ek_rnd` replaces it: an opaque call boundary the optimiser may not fuse across,
-    !! so the product is rounded to `real64` before the add exactly as the volatile store was.
+    !! **NOT `pure`, and the impurity is the price of the barrier being GUARANTEED.** A `volatile`
+    !! local is standard Fortran and every compiler must honour it; `!GCC$`/`!DIR$ ATTRIBUTES
+    !! NOINLINE` are directives a compiler is free to ignore. This transform was built on the
+    !! directives for a while, precisely so that `exp_key` could stay `pure` -- and flang 22.1.8
+    !! then proved that unsound: it warns on the `!DIR$` spelling, ignores the `!GCC$` one in
+    !! silence, inlines the helper and fuses. **Measured on machine C (x86-64, i7-10700K),
+    !! `flang -O3 -march=native` moved the full fingerprint** to -8585622607960331921, differing on
+    !! 4 of 13824 swept inputs by 1 ulp each. So the directive form did not merely risk losing the
+    !! barrier; it had already lost it on a compiler this project builds under.
     !!
-    !! **The trade this makes, stated plainly, because it is a real weakening.** `volatile` is
-    !! standard and every compiler must honour it; `!GCC$`/`!DIR$ ATTRIBUTES NOINLINE` are
-    !! directives a compiler is free to ignore, and a compiler that ignores both silently loses the
-    !! barrier. That is categorically different from this project's other `noinline` sites (see
-    !! `int_reduce_retry` in `parquet_random`), where being ignored costs only speed -- here it
-    !! would cost the contract. Two things make the residual risk loud rather than silent:
-    !! `tools/check_exp_key.sh` compares the fingerprint across 11 configurations per compiler
-    !! (including `-mfma`, `-ffp-contract=fast`, `-flto` and `-ipo`, all of which move the
-    !! fingerprint without a barrier), and `exp_key_contract_ok` re-checks it at run time. Verified
-    !! on gfortran 15.2.1 (7/7) and ifx 2026.1.1 (4/4). **NOT yet verified on flang**, which the
-    !! same script covers on a machine that has it -- run it there before relying on this.
+    !! **Purity cost nothing to give up and the barrier got FASTER.** Nothing needs `exp_key` to be
+    !! pure: its only caller is `wperm_impl`'s ordinary serial `do` loop, and the two other
+    !! entry points here (`exp_key_contract_ok`, `parquet_debug_exp_key`) were never pure either.
+    !! A stack store/reload also beats an out-of-line call -- measured over 5M calls at `-O3
+    !! -funroll-loops -march=native` on machine C, best of 3:
+    !!
+    !! | barrier | gfortran | flang | reproduces the fingerprint |
+    !! |---|---|---|---|
+    !! | `noinline` helper (former) | 30.30 ns | 13.87 ns | **flang: NO** |
+    !! | `transfer` round trip | 35.12 ns | 1787.45 ns | yes, at 129x the cost on flang |
+    !! | `volatile` local (current) | **21.91 ns** | **23.83 ns** | yes |
+    !!
+    !! The `transfer(transfer(x, 0_int64), 0.0_real64)` row is recorded because it looks like the
+    !! obvious way to keep `pure`: it does block the fusion on both compilers, and it is
+    !! unaffordable on flang, which lowers it through memory per call. Do not re-adopt it.
+    !!
+    !! Inlining is now harmless -- an inlined `volatile` store and reload is still a store and a
+    !! reload -- so the directives are gone, and with them flang's `-Wignored-directive` warning.
+    !! `tools/check_exp_key.sh` remains the thing that would notice a lost barrier: it compares the
+    !! fingerprint across every configuration a compiler supports. Verified on gfortran 15.2.1
+    !! (7/7, machines B and C), ifx 2026.1.1 (4/4, machine B) and flang 22.1.8 (6/6, machine C).
+    !!
+    !! **`exp_key_contract_ok` is NOT a second line of defence against this** -- see its own
+    !! doc-comment. It samples 32 inputs and reproduced the frozen value under the diverging flang
+    !! build, so it did not see the divergence at all. The script is the check that works.
     !!
     !! **The domain is not general and the guard is the caller's.** The race feeds this `1 - u` for
     !! a uniform `u` in `[0, 1)`, so the argument lies in `[2**-53, 1]` and is never zero, never
     !! denormal and never above 1. `exponent`/`fraction` are exact bit operations on a normal
     !! number, so nothing rounds before the polynomial does. `u = 1` gives exactly `0`.
-    !> The rounding barrier: an identity that the optimiser may not fuse across.
-    !!
-    !! **Keeping this out of line is the whole point of it.** Inlined, `ek_rnd(a * b) + c` is just
-    !! `a * b + c` and a compiler with FMA will contract it, which changes the result and moves the
-    !! frozen fingerprint. Both directive spellings are given because gfortran and ifx use
-    !! different ones; a compiler that knows neither loses the barrier, which is why
-    !! `exp_key_contract_ok` exists and why `tools/check_exp_key.sh` must be run on any new
-    !! compiler before its build is trusted. Do not delete either line, and do not "simplify" the
-    !! call sites back to bare arithmetic.
-    pure function ek_rnd(x) result(y)
-!GCC$ ATTRIBUTES noinline :: ek_rnd
-!DIR$ ATTRIBUTES NOINLINE :: ek_rnd
-        real(real64), intent(in) :: x   !! the product to round
-        real(real64) :: y               !! the same value, rounded to real64
-        y = x
-    end function ek_rnd
-
-    pure function exp_key(u) result(e)
+    function exp_key(u) result(e)
         real(real64), intent(in) :: u   !! a uniform in `[2**-53, 1]`; nothing validates this
         real(real64) :: e               !! `-log(u)`, in `[0, 36.74]`
         real(real64) :: m, f, s, poly, en, big, small, logm
@@ -204,6 +230,15 @@ contains
     !! Costs 32 `exp_key` calls, some hundreds of nanoseconds, against a permutation that is at
     !! best `O(n log n)`. That is cheap enough to run on every call rather than caching in a saved
     !! flag -- which would need thread-safety reasoning to save nothing worth saving.
+    !!
+    !! **What this canNOT do, because 32 inputs is a sparse sample.** It catches a build that has
+    !! left IEEE semantics wholesale, which is what it is for and what the wording above describes.
+    !! It does NOT reliably catch a barrier that has gone missing: measured on machine C, the
+    !! former `noinline` barrier was lost entirely under `flang -O3 -march=native`, and this check
+    !! still reproduced `ek_contract_fp` exactly, because the divergence touched 4 of the 13824
+    !! inputs `tools/check_exp_key.sh` sweeps and none of the 32 sampled here (this check varies
+    !! only 8 distinct mantissas). So do not cite it as a second line of defence for the barrier --
+    !! the script is what found that, and the script is what would find the next one.
     logical function exp_key_contract_ok()
         integer(int64) :: fp
         real(real64) :: u

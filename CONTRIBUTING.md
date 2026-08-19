@@ -313,12 +313,16 @@ FC=ifx tools/check_random_kernels.sh          # ifx ships the wrapping kernel; n
 
 `tools/check_exp_key.sh` is the same idea for a different contract: it standalone-compiles
 `src/parquet_expkey.f90` — the frozen `-log(u)` transform behind `pf_weighted_permutation` — across
-seven gfortran settings and four ifx ones, and requires every build to reproduce one fingerprint.
+seven gfortran settings, four ifx ones and six flang ones, and requires every build to reproduce one
+fingerprint.
 It exists because a weighted permutation is decided by the *order* of `-log(u)/w`, so a single
 differing key changes which items are drawn, silently, and only a cross-BUILD comparison can see
 that; a unit test runs in one build by construction. It is not hypothetical: an earlier design note
 concluded FMA contraction was harmless on the strength of four builds that never enabled FMA, and
-`gfortran -O3 -march=native` duly changed the answer. That is also why `parquet_expkey` is a leaf
+`gfortran -O3 -march=native` duly changed the answer. It has since caught the same class a second
+time: the rounding barrier had been a `noinline` directive pair rather than a `volatile` local, and
+flang 22.1.8 — which ignores both spellings — inlined it and fused, moving the fingerprint under
+`-march=native`. Run it under any compiler newly added to the fleet before trusting that build. That is also why `parquet_expkey` is a leaf
 module depending on `iso_fortran_env` alone — the same property `parquet_random` has and for the
 same reason, so that neither check can be disabled by an import added somewhere else. Anything
 needing more than `iso_fortran_env` belongs in `parquet_sampling`, which is where the weighted draw
@@ -332,6 +336,7 @@ cause rather than returning quietly different permutations.
 ```bash
 tools/check_exp_key.sh                        # gfortran, seven settings
 FC=ifx tools/check_exp_key.sh                 # ifx, four settings
+FC=flang tools/check_exp_key.sh               # flang, six settings (no -mfma; its driver has none)
 ```
 
 

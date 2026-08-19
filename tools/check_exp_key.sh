@@ -12,8 +12,16 @@
 #     concluded FMA contraction was harmless, on the strength of four builds -- none of which
 #     enabled FMA on gfortran. `gfortran -O3 -march=native` changes the fingerprint of an
 #     unbarriered Horner chain, and `-march=native` is an entirely ordinary thing to build with.
-#     `exp_key` now rounds every product through a `volatile` to prevent the fusion; this script is
+#     `exp_key` rounds every product through a `volatile` to prevent the fusion; this script is
 #     what keeps that true when a compiler version moves.
+#   * It has now caught the same class a SECOND time, which is the reason to keep running it on
+#     every new compiler. The barrier was a `noinline` identity helper for a while, so that
+#     `exp_key` could stay `pure`; flang 22.1.8 ignores both directive spellings, inlines it and
+#     fuses, and `flang -O3 -march=native` on machine C moved the fingerprint. Four of the 13824
+#     swept inputs differed, by 1 ulp each. The barrier is a `volatile` local again -- standard,
+#     and not advice a compiler may decline -- and `exp_key` is no longer `pure`.
+#     Note the runtime guard `exp_key_contract_ok` did NOT see that divergence: it samples 32
+#     inputs and none of the four were among them. This script is the only thing that catches it.
 #
 # TWO CONFIGURATIONS ARE KNOWN TO DIFFER AND ARE NOT DEFECTS IN THIS LIBRARY. Both switch the
 # compiler out of IEEE semantics altogether, which no source-level device can undo -- in
@@ -41,8 +49,9 @@ set -u
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# The contract. Reproduced by gfortran 15.2.1 at -O0/-O2/-O3/-march=native/-mfma/-flto and by
-# ifx 2026.1.1 at -fp-model=precise, both on machine B.
+# The contract. Reproduced by gfortran 15.2.1 at -O0/-O2/-O3/-march=native/-mfma/-flto (machines
+# B and C), by ifx 2026.1.1 at -fp-model=precise (machine B), and by flang 22.1.8 at
+# -O0/-O2/-funroll-loops/-march=native/-flto/-ffp-contract=fast (machine C).
 EXPECTED_FP="-9123008136727752159"
 
 FC="${FC:-gfortran}"
@@ -62,6 +71,13 @@ case "$($FC --version 2>&1 | head -1)" in
     *ifx*|*ifort*) PP="-fpp"; MD="-module $WORK"
                    CONFIGS=("-O0 -fp-model=precise" "-O2 -fp-model=precise" \
                             "-O3 -xHost -fp-model=precise" "-O3 -fp-model=precise -ipo") ;;
+    # flang's driver has no `-mfma` at all (`unknown argument`), unlike gfortran, which accepts
+    # and ignores it even on a target with no FMA. Dropping it costs no coverage: `-march=native`
+    # already implies FMA wherever the hardware has it -- and is exactly the configuration that
+    # exposed the lost barrier described above.
+    *flang*)       PP="-cpp"; MD="-J$WORK"
+                   CONFIGS=("-O0" "-O2" "-O3 -funroll-loops" "-O3 -march=native" \
+                            "-O3 -flto" "-O3 -ffp-contract=fast") ;;
     *)             PP="-cpp"; MD="-J$WORK"
                    CONFIGS=("-O0" "-O2" "-O3 -funroll-loops" "-O3 -march=native" \
                             "-O3 -mfma" "-O3 -flto" "-O3 -ffp-contract=fast") ;;

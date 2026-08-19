@@ -39,8 +39,16 @@ contains
         integer :: status
         !> Collection of tests
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
+        ! Built in parts and concatenated ONCE at the end. Neither obvious alternative works:
+        ! a single array constructor exceeds the standard's 255-continuation-line limit (this
+        ! list is far longer than that), and the self-referential append form
+        ! `testsuite = [testsuite, ...]` compiles everywhere but makes nagfor 7.2 double-free
+        ! each entry's allocatable name string at run time ("Invalid deallocation of size N:
+        ! block was already deallocated"), aborting the suite. Both traps are invisible under
+        ! gfortran, so keep this shape: assign each part, then concatenate once.
+        type(unittest_type), allocatable :: p1(:), p2(:)
         !
-        testsuite = [ &
+        p1 = [ &
             new_unittest("write extensive parquet file", test_write_parquet_file), &
             new_unittest("write simple parquet file", test_write_simple_parquet), &
             new_unittest("write_maml=.true. saves a sidecar .maml file", test_write_maml_sidecar), &
@@ -242,7 +250,7 @@ contains
             new_unittest("parquet_get_chunk_size(writer) with an explicit chunk_size= returns it before any " // &
                 "column is written", test_chunk_size_explicit_before_write) &
             ]
-        testsuite = [ testsuite, &
+        p2 = [ &
             new_unittest("streaming row-group write: every type/shape (incl. logical/string) round-trips " // &
                 "with is_valid+qc branches exercised", test_streaming_write_all_types_roundtrip), &
             new_unittest("streaming row-group write: col_size>1 string column via a flat rank-1 array round-trips", &
@@ -317,6 +325,7 @@ contains
                 test_reconciled_array_size_reaches_file_metadata) &
             ]
         !
+        testsuite = [p1, p2]
     end subroutine collect_tests_parquet_writing
     !
     subroutine test_write_simple_parquet(error)

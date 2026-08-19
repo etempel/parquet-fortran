@@ -283,8 +283,8 @@ contains
         ! nested OpenMP construct" -- and that warning is the only tell. gfortran, ifx and flang all
         ! accept the spanning form, so this split is a NAG workaround rather than a correctness
         ! requirement; it costs nothing (identical indentation, one extra association per iteration
-        ! that every compiler folds away) and a pointer would work equally well. See
-        ! feature_nag_associate.md for the minimal reproducer and the NAG support report.
+        ! that every compiler folds away) and a pointer would work equally well. Reported to NAG
+        ! support with a standalone reproducer on 2026-08-19.
         !$omp parallel do default(shared) private(rg, t) schedule(dynamic) num_threads(nslots)
         do rg = 1_int64, nrg
             block

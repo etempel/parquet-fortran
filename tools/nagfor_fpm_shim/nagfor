@@ -2,8 +2,8 @@
 # nagfor shim for building this project with fpm + NAG (FPM_FC=nagfor).
 #
 # fpm 0.13's NAG support mis-builds the link line in three independent ways
-# (verified against fpm 0.13.0 alpha; feature_fpm_nagfor_issue.md holds the
-# upstream report draft with fpm source citations):
+# (verified against fpm 0.13.0 alpha; reported upstream to fortran-lang/fpm
+# on 2026-08-19):
 #
 #   1. The `openmp = "*"` metapackage's link flag is appended to the build
 #      model TWICE -- fpm's build_model resolves metapackages once before and

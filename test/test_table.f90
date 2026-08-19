@@ -80,7 +80,15 @@ contains
     !
     subroutine collect_tests_parquet_table(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
-        testsuite = [ &
+        ! Built in parts and concatenated ONCE at the end. Neither obvious alternative works:
+        ! a single array constructor exceeds the standard's 255-continuation-line limit (this
+        ! list is far longer than that), and the self-referential append form
+        ! `testsuite = [testsuite, ...]` compiles everywhere but makes nagfor 7.2 double-free
+        ! each entry's allocatable name string at run time ("Invalid deallocation of size N:
+        ! block was already deallocated"), aborting the suite. Both traps are invisible under
+        ! gfortran, so keep this shape: assign each part, then concatenate once.
+        type(unittest_type), allocatable :: p1(:), p2(:)
+        p1 = [ &
             new_unittest("open reports rows, columns and names in file order", test_open_basics), &
             new_unittest("scalar numeric kinds round-trip through get/col/set/write", &
                 test_roundtrip_scalar_numeric), &
@@ -282,7 +290,7 @@ contains
             new_unittest("found= reaches every name-taking procedure", test_found_everywhere), &
             new_unittest("extra: remap: shadows, swaps and duplicates as documented", test_remap_shadow_duplicate) &
             ]
-        testsuite = [ testsuite, &
+        p2 = [ &
             new_unittest("rename_column on a remapped column keeps its file column", test_remap_then_rename), &
             new_unittest("open with filter= narrows every column, in internal names", test_open_filter), &
             new_unittest("open with sort= orders every column, in internal names", test_open_sort), &
@@ -432,6 +440,7 @@ contains
             new_unittest("a slice answers has_nulls and row_group_bounds in its own scope", &
                 test_slice_has_nulls_and_bounds) &
             ]
+        testsuite = [p1, p2]
     end subroutine collect_tests_parquet_table
     !
     !> Writes the shared numeric/string fixture used by most tests below.
@@ -3386,10 +3395,18 @@ contains
         type(parquet_table) :: t
         type(parquet_slice) :: s
         integer, parameter :: PICK(3) = [4, 2, 4]
+        ! pick_rows is a VARIABLE copy of PICK, used wherever PICK would be a vector subscript
+        ! (full(pick_rows), full(:, pick_rows)) -- never fold it back to PICK. nagfor 7.2 (Build
+        ! 7244) dies with an internal compiler error ("Panic: Unexpected leaf array") on a named
+        ! CONSTANT array used as a vector subscript in this procedure, while the same subscript
+        ! through a variable compiles fine; PICK itself stays a parameter for every non-subscript
+        ! use. Reported to NAG support; see feature_nag_ice_leaf_array.md for the reproducer.
+        integer :: pick_rows(3)
         character(len=*), parameter :: f = "test_run/table_slice_every_kind.parquet"
 
         call write_matrix_fixture(f)
         call parquet_open_table(t, f)
+        pick_rows = PICK
         s = parquet_slice_list(PICK)
         ! Row 4 is picked TWICE, which is deliberate on both halves. On the read it proves the
         ! body follows the selection rather than a row range; on the write it means the LAST
@@ -3400,7 +3417,7 @@ contains
             integer(int32), allocatable :: full(:), sl(:)
             call t%get("s_i32", full)
             call t%get_slice("s_i32", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl == full(pick_rows)), &
                 "s_i32 %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             call t%set_slice("s_i32", s, [sl(1), sl(2), 4242_int32])
@@ -3412,7 +3429,7 @@ contains
             integer(int64), allocatable :: full(:), sl(:)
             call t%get("s_i64", full)
             call t%get_slice("s_i64", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl == full(pick_rows)), &
                 "s_i64 %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             call t%set_slice("s_i64", s, [sl(1), sl(2), 4242000000000_int64])
@@ -3424,7 +3441,7 @@ contains
             real(real32), allocatable :: full(:), sl(:)
             call t%get("s_f32", full)
             call t%get_slice("s_f32", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl == full(pick_rows)), &
                 "s_f32 %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             call t%set_slice("s_f32", s, [sl(1), sl(2), 12.5_real32])
@@ -3436,7 +3453,7 @@ contains
             real(real64), allocatable :: full(:), sl(:)
             call t%get("s_f64", full)
             call t%get_slice("s_f64", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl == full(pick_rows)), &
                 "s_f64 %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             call t%set_slice("s_f64", s, [sl(1), sl(2), 12.25_real64])
@@ -3448,7 +3465,7 @@ contains
             logical, allocatable :: full(:), sl(:)
             call t%get("s_bool", full)
             call t%get_slice("s_bool", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl .eqv. full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl .eqv. full(pick_rows)), &
                 "s_bool %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             call t%set_slice("s_bool", s, [sl(1), sl(2), .true.])
@@ -3460,7 +3477,7 @@ contains
             type(parquet_date), allocatable :: full(:), sl(:)
             call t%get("s_date", full)
             call t%get_slice("s_date", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl == full(pick_rows)), &
                 "s_date %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             call t%set_slice("s_date", s, [sl(1), sl(2), parquet_date(2031, 5, 6)])
@@ -3472,7 +3489,7 @@ contains
             type(parquet_time), allocatable :: full(:), sl(:)
             call t%get("s_time", full)
             call t%get_slice("s_time", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl == full(pick_rows)), &
                 "s_time %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             call t%set_slice("s_time", s, [sl(1), sl(2), parquet_time(11, 12, 13)])
@@ -3484,7 +3501,7 @@ contains
             type(parquet_timestamp), allocatable :: full(:), sl(:)
             call t%get("s_ts", full)
             call t%get_slice("s_ts", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl == full(pick_rows)), &
                 "s_ts %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             call t%set_slice("s_ts", s, [sl(1), sl(2), parquet_timestamp(2031, 5, 6, 7, 8, 9)])
@@ -3497,7 +3514,7 @@ contains
             integer(int32) :: nv(NVEC, 3)
             call t%get("v_i32", full)
             call t%get_slice("v_i32", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, pick_rows)), &
                 "v_i32 %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl
@@ -3513,7 +3530,7 @@ contains
             integer(int64) :: nv(NVEC, 3)
             call t%get("v_i64", full)
             call t%get_slice("v_i64", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, pick_rows)), &
                 "v_i64 %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl
@@ -3529,7 +3546,7 @@ contains
             real(real32) :: nv(NVEC, 3)
             call t%get("v_f32", full)
             call t%get_slice("v_f32", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, pick_rows)), &
                 "v_f32 %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl
@@ -3545,7 +3562,7 @@ contains
             real(real64) :: nv(NVEC, 3)
             call t%get("v_f64", full)
             call t%get_slice("v_f64", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, pick_rows)), &
                 "v_f64 %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl
@@ -3561,7 +3578,7 @@ contains
             logical :: nv(NVEC, 3)
             call t%get("v_bool", full)
             call t%get_slice("v_bool", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl .eqv. full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl .eqv. full(:, pick_rows)), &
                 "v_bool %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl
@@ -3577,7 +3594,7 @@ contains
             type(parquet_date) :: nv(NVEC, 3)
             call t%get("v_date", full)
             call t%get_slice("v_date", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, pick_rows)), &
                 "v_date %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl
@@ -3593,7 +3610,7 @@ contains
             type(parquet_time) :: nv(NVEC, 3)
             call t%get("v_time", full)
             call t%get_slice("v_time", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, pick_rows)), &
                 "v_time %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl
@@ -3609,7 +3626,7 @@ contains
             type(parquet_timestamp) :: nv(NVEC, 3)
             call t%get("v_ts", full)
             call t%get_slice("v_ts", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, pick_rows)), &
                 "v_ts %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl
@@ -3628,7 +3645,7 @@ contains
             character(len=:), allocatable :: one
             call t%get("s_str", full)
             call t%get_slice("s_str", s, sl)
-            call check(error, size(sl) == 3 .and. all(sl == full(PICK)), &
+            call check(error, size(sl) == 3 .and. all(sl == full(pick_rows)), &
                 "s_str %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             ! The parquet_string_column form of the same call -- a third specific, not a variant.
@@ -3647,7 +3664,7 @@ contains
             character(len=8) :: nv(NVEC, 3)
             call t%get("v_str", full)
             call t%get_slice("v_str", s, sl)
-            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, PICK)), &
+            call check(error, size(sl, 2) == 3 .and. all(sl == full(:, pick_rows)), &
                 "v_str %get_slice must pick exactly the listed rows, in the listed order")
             if (allocated(error)) return
             nv = sl

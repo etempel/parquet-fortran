@@ -1055,10 +1055,10 @@ Note a NAG build is **serial** regardless: fpm's compile-side OpenMP probe fails
 every `#ifdef _OPENMP` block compiles out — the same situation as a flang build (see CLAUDE.md's
 machine notes). The shim deliberately does not translate `-fPIC`: that would flip fpm's probe to
 passing and silently turn every NAG build into an untested threaded one. The shim's header
-comment carries the full defect list; `feature_fpm_nagfor_issue.md` (git-ignored, repo root)
-holds the drafted upstream report, and fpm PR #1312 tracks the headerpad half. Remove the shim
-once fpm's NAG link-line construction is fixed upstream. Maintainer-only (stripped from the
-fpm-published package, see `tools/prep_fpm_publish.sh`).
+comment carries the full defect list; the defects were reported upstream to fortran-lang/fpm on
+2026-08-19, and fpm PR #1312 tracks the headerpad half. Remove the shim once fpm's NAG link-line
+construction is fixed upstream. Maintainer-only (stripped from the fpm-published package, see
+`tools/prep_fpm_publish.sh`).
 
 ### Testing genuine OpenMP concurrency
 

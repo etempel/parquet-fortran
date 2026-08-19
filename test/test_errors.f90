@@ -62,8 +62,16 @@ contains
     !
     subroutine collect_tests_parquet_errors(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
+        ! Built in parts and concatenated ONCE at the end. Neither obvious alternative works:
+        ! a single array constructor exceeds the standard's 255-continuation-line limit (this
+        ! list is far longer than that), and the self-referential append form
+        ! `testsuite = [testsuite, ...]` compiles everywhere but makes nagfor 7.2 double-free
+        ! each entry's allocatable name string at run time ("Invalid deallocation of size N:
+        ! block was already deallocated"), aborting the suite. Both traps are invisible under
+        ! gfortran, so keep this shape: assign each part, then concatenate once.
+        type(unittest_type), allocatable :: p1(:), p2(:), p3(:), p4(:), p5(:), p6(:), p7(:)
 
-        testsuite = [ &
+        p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
             new_unittest("write to undeclared column aborts", test_write_undeclared_column_aborts), &
             new_unittest("writing an undeclared int64 column aborts", &
@@ -264,7 +272,7 @@ contains
             new_unittest("reading an out-of-int32-range uint32 value aborts", &
                 test_extended_uint32_overflow_int32_aborts) &
             ]
-        testsuite = [ testsuite, &
+        p2 = [ &
             new_unittest("reading an out-of-int32-range uint64 value aborts", &
                 test_extended_uint64_overflow_int32_aborts), &
             new_unittest("reading an out-of-int64-range uint64 value aborts", &
@@ -465,7 +473,7 @@ contains
             new_unittest("a WEIGHTED subset larger than its population aborts", test_weighted_subset_big_aborts), &
             new_unittest("a mismatched permutation array aborts", test_weighted_perm_size_aborts) &
             ]
-        testsuite = [ testsuite, &
+        p3 = [ &
             new_unittest("an environment value longer than the buffer aborts", &
                 test_settings_env_too_long_aborts), &
             new_unittest("an environment value beyond a default INTEGER's range aborts", &
@@ -667,7 +675,7 @@ contains
             new_unittest("opening a writer at a bad path aborts", &
                 test_open_writer_bad_path_aborts) &
             ]
-        testsuite = [ testsuite, &
+        p4 = [ &
             new_unittest("writing an over-length string into a fixed-size string matrix column aborts", &
                 test_write_string_matrix_exceeds_array_size_aborts), &
             new_unittest("writing an over-length string into a fixed-size string vector column (flat form) aborts", &
@@ -869,7 +877,7 @@ contains
             new_unittest("%get_element on a mismatched kind aborts through the shared body", &
                 test_table_get_element_kind_mismatch_aborts) &
             ]
-        testsuite = [ testsuite, &
+        p5 = [ &
             new_unittest("table: %get_element into an int32 vector of the wrong kind aborts", &
                 test_table_get_element_kind_mismatch_i32v_aborts), &
             new_unittest("table: %get_element into an int64 vector of the wrong kind aborts", &
@@ -1071,7 +1079,7 @@ contains
             new_unittest("cast narrowing an out-of-range integer aborts", &
                 test_table_cast_int_overflow_aborts) &
             ]
-        testsuite = [ testsuite, &
+        p6 = [ &
             new_unittest("cast of a fractional value to an integer kind aborts", &
                 test_table_cast_fractional_aborts), &
             new_unittest("cast overflowing float32 aborts", &
@@ -1272,7 +1280,7 @@ contains
                 test_temporal_ts_set_invalid_nanosecond_aborts), &
             new_unittest("parquet_timestamp get on a null element aborts", test_temporal_ts_get_null_aborts) &
             ]
-        testsuite = [ testsuite, &
+        p7 = [ &
             new_unittest("parquet_timestamp get_date beyond parquet_date's range aborts", &
                 test_temporal_ts_get_date_range_exceeded_aborts), &
             new_unittest("parquet_timestamp to_unix negative-branch overflow aborts", &
@@ -1368,6 +1376,7 @@ contains
             new_unittest("parquet_column_exists with a blank types= filter aborts", &
                 test_column_exists_empty_type_filter_aborts) &
             ]
+        testsuite = [p1, p2, p3, p4, p5, p6, p7]
     end subroutine collect_tests_parquet_errors
 
     !

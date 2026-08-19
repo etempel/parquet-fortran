@@ -23,7 +23,7 @@
 module test_string_parallel
     use parquet
     use iso_fortran_env, only : int64
-    use testdrive, only : new_unittest, unittest_type, error_type, check
+    use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads, omp_set_num_threads
 #endif
@@ -145,7 +145,37 @@ contains
     !! `!$omp parallel do` in `run_tester.f90`. Do not copy this into a parallelized suite.
     !!
     !! Under a build without OpenMP this is a no-op and the threaded path does not exist to be
-    !! tested — see `collect_tests_string_parallel` for how that case is handled.
+    !! tested. That case is handled by `threading_unavailable` above, which every A/B test calls
+    !! before this one. (An earlier version of this note pointed at `collect_tests_string_parallel`
+    !! instead; that collector registers all nine tests unconditionally and never did handle it, so
+    !! the eight A/B tests simply failed their negative controls on a no-OpenMP build.)
+    !> Whether this build can reach the threaded rebuilds at all; skips the calling test if not.
+    !!
+    !! **Every A/B test in this suite must call this before `borrow_threads`.** Each of them forces
+    !! one arm serial and leaves the other automatic, then asserts the two agree AND that the second
+    !! arm really threaded. Without OpenMP every `!$omp` block in `parquet_strings` is preprocessed
+    !! away, so both arms run the same serial rebuild: the equality holds trivially and the
+    !! `ever_threaded` negative control -- the only thing keeping the equality honest -- fires. That
+    !! is a build which cannot run the test, not a broken rebuild, and the two must not look alike.
+    !!
+    !! `borrow_threads` is not enough on its own and is not a substitute: it raises the thread
+    !! ceiling, which fixes a machine whose ICV sits below `STRING_MIN_THREADS`, but no ICV exists
+    !! to raise when the directives are not compiled in.
+    !!
+    !! Only `_OPENMP` is tested here, deliberately. `parquet_strings` resolves its team from
+    !! `omp_get_max_threads()` and never clamps to `omp_get_num_procs()`, so a low processor count
+    !! cannot defeat these tests the way it can the sort-engine ones in `test_sorting.f90`.
+    logical function threading_unavailable(error) result(skipped)
+        type(error_type), allocatable, intent(out) :: error !! set to a skip when threading is absent.
+        skipped = .false.
+#ifndef _OPENMP
+        skipped = .true.
+        call skip_test(error, "needs OpenMP: without it every !$omp block in parquet_strings is " // &
+            "preprocessed out, so the threaded arm runs the serial rebuild and this test would " // &
+            "compare serial with serial")
+#endif
+    end function threading_unavailable
+    !
     integer function borrow_threads() result(saved)
         saved = 1
 #ifdef _OPENMP
@@ -189,6 +219,7 @@ contains
         integer :: saved_threads
         !
         ever_threaded = .false.
+        if (threading_unavailable(error)) return
         saved_threads = borrow_threads()
         do n = 1000_int64, 1007_int64
             call build(src, n, 0_int64)
@@ -255,6 +286,7 @@ contains
         integer :: saved_threads
         !
         ever_threaded = .false.
+        if (threading_unavailable(error)) return
         saved_threads = borrow_threads()
         do stride = 3_int64, 7_int64, 2_int64
             do n = 1000_int64, 1005_int64
@@ -349,6 +381,7 @@ contains
         integer :: saved_threads
         !
         ever_threaded = .false.
+        if (threading_unavailable(error)) return
         saved_threads = borrow_threads()
         do stride = 3_int64, 7_int64, 2_int64
             do n = 997_int64, 1000_int64
@@ -404,6 +437,7 @@ contains
         integer :: saved_threads
         !
         ever_threaded = .false.
+        if (threading_unavailable(error)) return
         saved_threads = borrow_threads()
         do stride = 0_int64, 5_int64, 5_int64      ! 0 = no nulls, 5 = every 5th null
             do n = 1021_int64, 1024_int64
@@ -461,6 +495,7 @@ contains
         integer :: saved_threads
         !
         ever_threaded = .false.
+        if (threading_unavailable(error)) return
         saved_threads = borrow_threads()
         do stride = 0_int64, 3_int64, 3_int64
             do mode = 1_int64, 3_int64
@@ -532,6 +567,7 @@ contains
         integer :: saved_threads
         !
         ever_threaded = .false.
+        if (threading_unavailable(error)) return
         saved_threads = borrow_threads()
         do stride = 0_int64, 3_int64, 3_int64
             do n = 1021_int64, 1024_int64
@@ -617,6 +653,7 @@ contains
         integer :: saved_threads
         !
         ever_threaded = .false.
+        if (threading_unavailable(error)) return
         saved_threads = borrow_threads()
         do stride = 0_int64, 5_int64, 5_int64
             do op = 1, 2
@@ -677,6 +714,7 @@ contains
         integer :: saved_threads
         !
         ever_threaded = .false.
+        if (threading_unavailable(error)) return
         saved_threads = borrow_threads()
         do stride = 0_int64, 3_int64, 3_int64
             do mode = 1, 4

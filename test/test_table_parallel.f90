@@ -1357,40 +1357,49 @@ contains
         character(len=:), allocatable :: s(:)
         character(len=12) :: buf
         integer :: i, e, row
+        ! **The six messages are built ONCE, above the loop, and that is required rather than tidy.**
+        ! The loop makes about `NROW * (3 + 2*VW)` `check` calls -- 19 per row here -- and each used
+        ! to take a freshly concatenated `"%" // what // ": ..."`. flang 22.1.8 gives every such
+        ! temporary its own stack slot and does not reclaim them until the procedure returns, so the
+        ! frame grew by about 90 bytes per call and the suite died of stack exhaustion at row 4500 -- a
+        ! SIGSEGV in test-drive's own `check_logical`, naming nothing in this file. Hoisting removes
+        ! the temporary rather than enlarging the stack, so it needs no flag and no ulimit, and it is
+        ! faster on every compiler. Keep any new message in this loop hoisted too.
+        character(len=:), allocatable :: m_key, m_anull, m_a, m_vnull, m_v, m_s
         !
         call t%get("n", n)
         call t%get("k", k)
         call t%get("a", a, is_valid=am)
         call t%get("fv", v, is_valid=vm)
         call t%get("s", s)
+        m_key   = "%" // what // ": the key column is out of step with the row identity"
+        m_anull = "%" // what // ": the scalar column's nulls are out of step with the row identity"
+        m_a     = "%" // what // ": the scalar column is out of step with the row identity"
+        m_vnull = "%" // what // ": the vector column's element nulls are out of step with the row identity"
+        m_v     = "%" // what // ": the vector column is out of step with the row identity"
+        m_s     = "%" // what // ": the string column is out of step with the row identity"
         do i = 1, size(n)
             row = int(n(i))
-            call check(error, k(i) == key_for(row, NROW), &
-                "%" // what // ": the key column is out of step with the row identity")
+            call check(error, k(i) == key_for(row, NROW), m_key)
             if (allocated(error)) return
-            call check(error, am(i) .eqv. (mod(row, 11) /= 0), &
-                "%" // what // ": the scalar column's nulls are out of step with the row identity")
+            call check(error, am(i) .eqv. (mod(row, 11) /= 0), m_anull)
             if (allocated(error)) return
             ! Only where valid: a null row's stored value is unspecified by parquet_column's own
             ! contract, so asserting on it would be testing an implementation detail.
             if (am(i)) then
-                call check(error, a(i) == real(row, real64) * 0.5_real64, &
-                    "%" // what // ": the scalar column is out of step with the row identity")
+                call check(error, a(i) == real(row, real64) * 0.5_real64, m_a)
                 if (allocated(error)) return
             end if
             do e = 1, VW
-                call check(error, vm(e, i) .eqv. .not. (mod(row, 13) == 0 .and. e == 3), &
-                    "%" // what // ": the vector column's element nulls are out of step with the row identity")
+                call check(error, vm(e, i) .eqv. .not. (mod(row, 13) == 0 .and. e == 3), m_vnull)
                 if (allocated(error)) return
                 if (vm(e, i)) then
-                    call check(error, v(e, i) == real(100*row + e, real64), &
-                        "%" // what // ": the vector column is out of step with the row identity")
+                    call check(error, v(e, i) == real(100*row + e, real64), m_v)
                     if (allocated(error)) return
                 end if
             end do
             write(buf, '(i12.12)') NROW - row
-            call check(error, s(i) == buf, &
-                "%" // what // ": the string column is out of step with the row identity")
+            call check(error, s(i) == buf, m_s)
             if (allocated(error)) return
         end do
     end subroutine check_rows_consistent

@@ -34,9 +34,13 @@ module test_sorting
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_is_nan, ieee_positive_inf, ieee_negative_inf
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
 #ifdef _OPENMP
-    ! Only `test_nested_team_guard` needs this, to state its own precondition: the guard it checks
-    ! is about teams, and a build or a machine that can never open one has nothing to prove.
-    use omp_lib, only : omp_get_max_threads, omp_in_parallel
+    ! Used by every test that states its own precondition: a guard, or a threaded design, that is
+    ! about teams has nothing to prove on a build or a machine that can never open one.
+    ! `omp_get_num_procs` rather than `omp_get_max_threads` for the engine tests below, because that
+    ! is the quantity the engine clamps an explicit `threads=` against (see
+    ! `sort_build_permutation_threaded`, src/parquet_sorting_engine.f90): on a one-processor machine
+    ! `threads=4` resolves to 1 and no threaded design is entered.
+    use omp_lib, only : omp_get_max_threads, omp_in_parallel, omp_get_num_procs
 #endif
     ! For the Stage 1 conformance oracle only: it builds a C++ key set of its own so that both
     ! engines can be asked about the same rows. These are ordinary library bindings, not debug
@@ -297,6 +301,27 @@ contains
         integer(int64), allocatable :: ref(:), got_shipped(:), got_forced(:)
         integer(int64) :: shipped_buckets, forced_buckets, shipped_design
         integer(int64) :: i, g
+        ! **Preconditions, declared rather than assumed.** The floor under test is measured against the team size
+        ! (`SORT_REFINE_ELEMS_PER_THREAD * nt`), and both arms below compare bucket counts that only a
+        ! team produces.
+        ! Where no team can be opened the assertions are not merely untestable but VACUOUS:
+        ! they would pass just as happily against a library that had stopped threading
+        ! altogether. Skipping says so out loud, which a silent pass would not. Same reasoning
+        ! and same shape as `test_nested_team_guard`.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
+            "preprocessed out entirely -- the Design A/B dispatch in " // &
+            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "ever opened and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and no " // &
+                "threaded design is entered")
+            return
+        end if
+#endif
         !
         ! Group 0 takes 6000 rows, groups 1 and 2 the rest. With four threads the shipped floor is
         ! 2048*4 = 8192 and `nv/team` is 4096, so the target is 8192 and the largest bucket (6000)
@@ -421,6 +446,26 @@ contains
         integer(int64) :: v(40000)
         integer(int64), allocatable :: ref(:), got2(:), got4(:), gotold(:)
         integer(int64) :: d2, d4, dold, i
+        ! **Preconditions, declared rather than assumed.** The question here is which design a SMALL team reaches;
+        ! without a team, no design is entered at all.
+        ! Where no team can be opened the assertions are not merely untestable but VACUOUS:
+        ! they would pass just as happily against a library that had stopped threading
+        ! altogether. Skipping says so out loud, which a silent pass would not. Same reasoning
+        ! and same shape as `test_nested_team_guard`.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
+            "preprocessed out entirely -- the Design A/B dispatch in " // &
+            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "ever opened and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and no " // &
+                "threaded design is entered")
+            return
+        end if
+#endif
         !
         ! 40000 rows clears the engine's own floor (max(32768, 2048*nt)) so a team really opens, and
         ! ten distinct values put the range six orders of magnitude below the n/100 the rule allows
@@ -480,6 +525,27 @@ contains
         type(pf_sort_keys) :: keys
         integer(int64), allocatable :: ref(:), got(:)
         integer(int64) :: d_serial, d_threaded, i
+        ! **Preconditions, declared rather than assumed.** The assertion is that a multi-key STRING radix runs ON THE
+        ! TEAM. Design 1 is also what the shared serial chain produces, so without a team the check
+        ! cannot tell the two apart -- it would pass for the wrong reason.
+        ! Where no team can be opened the assertions are not merely untestable but VACUOUS:
+        ! they would pass just as happily against a library that had stopped threading
+        ! altogether. Skipping says so out loud, which a silent pass would not. Same reasoning
+        ! and same shape as `test_nested_team_guard`.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
+            "preprocessed out entirely -- the Design A/B dispatch in " // &
+            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "ever opened and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and no " // &
+                "threaded design is entered")
+            return
+        end if
+#endif
         !
         ! 40000 rows clears the engine's own threading floor (max(32768, 2048*nt)) at four threads.
         ! The two keys tie often enough that the second one really is consulted.
@@ -527,6 +593,26 @@ contains
         character(len=12) :: many(n), one(n)
         integer(int64), allocatable :: ref(:), got(:)
         integer(int64) :: d_many, d_one, d_serial, i, q
+        ! **Preconditions, declared rather than assumed.** The assertion is that the run-level and the within-run loops
+        ! both thread; neither loop exists without a team.
+        ! Where no team can be opened the assertions are not merely untestable but VACUOUS:
+        ! they would pass just as happily against a library that had stopped threading
+        ! altogether. Skipping says so out loud, which a silent pass would not. Same reasoning
+        ! and same shape as `test_nested_team_guard`.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
+            "preprocessed out entirely -- the Design A/B dispatch in " // &
+            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "ever opened and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and no " // &
+                "threaded design is entered")
+            return
+        end if
+#endif
         !
         ! `many`: 4 shared leading characters, so the 8-byte radix window still splits the column
         ! into thousands of small runs. `one`: 8 shared, covering the whole window, so every row
@@ -6412,6 +6498,28 @@ contains
         integer(int64) :: threads_seen(size(arms))    !! what the policy resolved on each arm.
         integer :: k
         character(len=96) :: kstr !! long enough for the longest message below, plus the arm number.
+        ! **Preconditions, declared rather than assumed.** Every assertion here is about a team: the threaded designs,
+        ! the split bucket counts, and the threaded-equals-serial comparisons -- which without a team
+        ! compare serial with serial, and so hold for the wrong reason. That is why this is skipped
+        ! whole rather than split: nothing in it keeps its meaning serially.
+        ! Where no team can be opened the assertions are not merely untestable but VACUOUS:
+        ! they would pass just as happily against a library that had stopped threading
+        ! altogether. Skipping says so out loud, which a silent pass would not. Same reasoning
+        ! and same shape as `test_nested_team_guard`.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
+            "preprocessed out entirely -- the Design A/B dispatch in " // &
+            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "ever opened and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and no " // &
+                "threaded design is entered")
+            return
+        end if
+#endif
         !
         ! Ties every seventh row, and no pre-existing order: a chunk boundary falling inside a run
         ! of equal keys is where a split that loses stability would show, and the tiebreaker is what

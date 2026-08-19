@@ -255,7 +255,6 @@ scenarios=(
     "table_append_row_validates_first:1"
     "table_reserve_negative:1"
     "table_reserve_columns_negative:1"
-    "table_reserve_columns_shared_in_parallel:1"
     "table_key_direction_conflict:1"
     "table_key_list_long_preview:1"
     "table_key_list_empty:1"
@@ -955,14 +954,20 @@ scenarios=(
 # so they are what actually cover table_touch's/table_resolve_width's guard
 # body lines (parquet_tables_read.f90) reliably under a real -fopenmp build.
 #
-# The four table_*_shared_in_parallel / table_set_null_no_validity_in_parallel
+# The five table_*_shared_in_parallel / table_set_null_no_validity_in_parallel
 # scenarios are milestone 3d's own guards, and belong in this bucket for
 # exactly the same reason: each opens a table OUTSIDE a parallel region and
 # then changes it inside one, which is only detectable when there is a real
 # region to be inside. Without an OpenMP flag the change simply succeeds and
-# the scenario exits 0. All four use !$omp single, so exactly one thread runs
+# the scenario exits 0. All five use !$omp single, so exactly one thread runs
 # the abort -- they are deterministic when OpenMP is active, unlike the two
-# racy scenarios above.
+# racy scenarios above. Because they ARE deterministic under a real -fopenmp
+# build, `table_reserve_columns_shared_in_parallel` additionally keeps a strict
+# test-drive wrapper (`test_table_reserve_columns_shared_aborts`,
+# test/test_errors.f90) that asserts the exact abort and skips itself without
+# OpenMP -- so moving it out of the strict list here costs no coverage on any
+# build that can actually run it. It had been in the strict list alone among
+# the five, which is why a no-OpenMP build (flang) reported it as a failure.
 concurrency_scenarios=(
     "concurrent_calls_into_shared_reader"
     "concurrent_calls_into_shared_writer"
@@ -976,6 +981,7 @@ concurrency_scenarios=(
     "table_add_column_shared_in_parallel"
     "table_set_null_no_validity_in_parallel"
     "table_string_write_shared_in_parallel"
+    "table_reserve_columns_shared_in_parallel"
 )
 
 echo "Building error_scenarios..."

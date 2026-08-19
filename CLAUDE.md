@@ -95,6 +95,7 @@ working rules).
   - [Every `check()` call needs its own message](#every-check-call-needs-its-own-message)
   - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
   - [A test that asserts a REFUSAL must say what to assert when the refusal lifts](#a-test-that-asserts-a-refusal-must-say-what-to-assert-when-the-refusal-lifts)
+  - [A test that asserts THREADING must skip without OpenMP](#a-test-that-asserts-threading-must-skip-without-openmp)
   - [A static check that enumerates names goes stale silently](#a-static-check-that-enumerates-names-goes-stale-silently)
   - [A `tools/*.sh` check must run under bash 3.2, and must never exit 0 having stopped early](#a-toolssh-check-must-run-under-bash-32-and-must-never-exit-0-having-stopped-early)
   - [Measuring test coverage](#measuring-test-coverage)
@@ -2135,13 +2136,24 @@ on machines A and C:
   `nm` finds no `materialize_marked_parallel` in the object, against 2 occurrences in the gfortran
   one.
 
-**Building is not passing, and the suite does not finish under flang.** `fpm test` reaches
-**1608 passed, 4 failed**, then **exits 11 (signal 11) inside the `table_parallel` suite**, so four
-suites never run at all. The four failures are all legitimately OpenMP-dependent — Design B cannot be
-reached serially, and the shared-table mutation guard has no parallel region to fire in — but the
-crash is unexplained and undiagnosed. **Do not describe flang as supported on the strength of a
-successful build**; "compiles and links" and "runs the suite" are different claims, and only the
-first is currently true.
+**The suite does now pass under flang, serially: `fpm test` reaches 1768 passed, 0 failed, 15
+skipped, exit 0.** Getting there needed two unrelated fixes and both generalise, so read them before
+concluding that a future flang failure is a portability defect in this library:
+
+- **Fifteen tests assert that something THREADED, and now skip rather than fail** — the sort
+  engine's Design A/B tests, `string_parallel`'s eight A/B rebuilds, and one shared-table error
+  scenario. Their assertions are not merely untestable without OpenMP, they are *vacuous*: both arms
+  run the same serial code and the equality holds for the wrong reason. See
+  [A test that asserts THREADING must skip without OpenMP](#a-test-that-asserts-threading-must-skip-without-openmp).
+- **The `table_parallel` crash was stack exhaustion, not a race**, and it is fixed at the root — see
+  the character-temporary bullet under "Compiler & language gotchas". Earlier versions of this note
+  called it "unexplained and undiagnosed"; it is neither, and nothing about it was specific to
+  threading despite the suite it appeared in.
+
+**"Compiles and links", "runs the suite" and "is supported" are still three different claims**, and
+only the first two are now true. Every flang run here is of the SERIAL paths, so it exercises none of
+the threading this library ships; a green flang suite is evidence about portability and about the
+serial code, never about the parallel code. Keep quoting which of the three you mean.
 
 **And `--profile release` does NOT link under flang, which is an LLVM defect rather than
 anything here.** The release profile carries `-flto`, and the link dies with `LLVM ERROR: Unsupported
@@ -2569,6 +2581,33 @@ applied to the harness instead of the source.
 - **`transfer(source, mold, size)` into a longer target leaves the trailing bytes undefined**, not
   blank-padded. To place a short string into a longer fixed-length slot, assign normally (which
   blank-pads); reserve `transfer` for exact-size byte moves.
+- **A CHARACTER TEMPORARY built inside a loop may never be reclaimed until the procedure returns, so
+  a long loop dies of stack exhaustion far from its cause.** Confirmed on flang 22.1.8: every
+  `call sub("%" // what // ": ...")` in a loop gets its own stack slot, about 90 bytes a call, and
+  the frame grows monotonically. `check_rows_consistent` (`test/test_table_parallel.f90`) makes about
+  `NROW * (3 + 2*VW)` such calls -- 19 per row at this fixture's width -- and **SIGSEGV'd at
+  roughly row 4500**, which is the ~7.7 MB those 85000 calls account for on macOS's 8 MB default
+  stack, needing 32–40 MB to finish. gfortran reclaims per iteration and is unaffected.
+
+  **The symptom names nothing useful.** The fault lands in the *callee's* prologue — here
+  test-drive's own `check_logical` — as `EXC_BAD_ACCESS (code=2)` at a guard-page address, with a
+  backtrace that cannot unwind because the stack is gone. It reads as a crash in the library or the
+  test framework, and it was recorded in this file as an "unexplained and undiagnosed" race for some
+  time before anyone measured it.
+
+  **Diagnosis is three cheap steps, in this order**: raise the stack (`ulimit -s 65520`) and see if
+  it passes; scale the fixture down and see if the requirement scales with it; then print the
+  iteration counter to find where it dies. `code=2` at a `0x7ff7...` address is the tell — that is a
+  write to the guard page, not a bad pointer. Note `-fno-stack-arrays` does **not** help, because
+  these are expression temporaries rather than automatic arrays.
+
+  **The fix is to hoist, never to raise the limit.** Build each message once above the loop into a
+  `character(len=:), allocatable` and pass the variable; the temporary then does not exist. That
+  needs no flag, no `ulimit`, no shrinking of a fixture whose size is usually load-bearing (here
+  `NROW` is what clears the parallel work floor), and it is faster everywhere. **Apply it whenever a
+  loop of more than a few thousand iterations passes a concatenated or otherwise constructed
+  `character` expression to a procedure** — the same shape hides in any assertion helper called
+  per row.
 - **A PER-ELEMENT `transfer` into a `character(len=1)` array allocates a temporary each time, and
   SEQUENCE ASSOCIATION is the way out.** `dst(a:b) = transfer(str(lo:hi), dst, n)` is the obvious way
   to copy a `character(len=*)` scalar's bytes into a packed `character(len=1), allocatable` payload,
@@ -3899,6 +3938,53 @@ behaviour has a positive form worth asserting instead** (that one became "report
 than aborting", which is a stronger test than the refusal ever was), and **expect the widening to
 break tests far from the change** — six unrelated error scenarios had been using a `uint32` column
 precisely *because* it was unreadable. Run the whole suite, not the area's own.
+
+### A test that asserts THREADING must skip without OpenMP
+
+A test whose subject is that something *ran in parallel* — a threaded rebuild matching its serial
+twin, a sort reaching Design B, a shared-state guard firing inside a region — has nothing to assert
+on a build where no team can be opened. **The danger is not that it cannot run; it is that the
+assertions become VACUOUS while still looking like assertions.** Both arms of an A/B execute the same
+serial code, so the equality holds for the wrong reason, and the negative control that was keeping
+the equality honest is the only thing that fails. A reader then sees "the threaded rebuild is
+broken" where the truth is "this build cannot reach the threaded rebuild".
+
+Skipping is what distinguishes the two, and it has to be said out loud — a silent pass is worse than
+a failure, because it removes the doubt that would have prompted a look.
+
+```fortran
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: <what is compiled out, and why the assertion below " // &
+            "would then hold for the wrong reason>")
+        return
+#endif
+```
+
+Four rules, each of which has already been broken here:
+
+- **Put it after the declarations and before every executable statement**, and check that it does not
+  land inside the declaration block — an inserted `call`/`return` among the declarations is a
+  compile error, and a guard placed after some setup skips a test that has already mutated global
+  state.
+- **Pick the predicate the code actually keys on, not the nearest OpenMP-sounding one.** The sort
+  engine clamps an explicit `threads=` against `omp_get_num_procs()`
+  (`sort_build_permutation_threaded`), so those tests need an `omp_get_num_procs() < 2` arm as well
+  — on a one-processor runner `threads=4` resolves to 1 and no design is entered.
+  `parquet_strings` resolves from `omp_get_max_threads()` and never clamps to the processor count,
+  so its tests need only `_OPENMP`. Reading the resolution path is the only way to tell.
+- **Give the guard a NEGATIVE CONTROL, exactly as any other guard.** One that fires unconditionally
+  turns a whole suite green while testing nothing. The cheap check is that a normal build reports
+  **zero** skips; the sharper one is to invert the predicate and confirm the expected tests skip,
+  which is also the only way to exercise a processor-count arm on a machine that has processors.
+- **An error scenario needs BOTH halves.** The test-drive wrapper takes the guard above, and the
+  scenario name belongs in `tools/run_error_scenarios.sh`'s `concurrency_scenarios` bucket, which
+  exists for precisely this class and is documented there. A scenario in the strict list instead
+  works only by the accident that everyone builds with OpenMP.
+
+**A test that merely USES threads is not in this class** and must not be guarded: it either behaves
+identically when the team is one thread, or it is asserting something else. Guard only what asserts
+that a team existed. Distinguishing the two is the whole judgement — over-applying this hollows out
+the suite on exactly the builds that ship.
 
 ### A static check that enumerates names goes stale silently
 

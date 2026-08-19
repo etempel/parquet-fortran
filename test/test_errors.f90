@@ -14,7 +14,7 @@
 !> finalization of the old value before reassignment, which for test-drive's
 !> `error_type` calls its FINAL `escalate_error` and aborts the whole process.
 module test_errors
-    use testdrive, only : new_unittest, unittest_type, error_type, check
+    use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     !$ use omp_lib, only : omp_get_max_threads
     !
     implicit none
@@ -2186,6 +2186,17 @@ contains
 
     subroutine test_table_reserve_columns_shared_aborts(error)
         type(error_type), allocatable, intent(out) :: error
+        ! **Preconditions, declared rather than assumed.** The scenario opens a table OUTSIDE a
+        ! parallel region and reserves columns on it INSIDE one, which the shared-table guard can
+        ! only notice when there is a real region to be inside. Without OpenMP the reserve simply
+        ! succeeds and the scenario exits 0 -- a build that cannot run the test, not a guard that
+        ! failed to fire, and the two must not look alike. `tools/run_error_scenarios.sh` says the
+        ! same thing for the same five scenarios in its `concurrency_scenarios` comment.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the shared-table guard has no parallel region to " // &
+            "fire in, so the scenario reserves the columns successfully and exits 0")
+        return
+#endif
         call check_scenario_exit_status_and_stderr(error, &
             "table_reserve_columns_shared_in_parallel", expect_abort=.true., &
             failure_message="reserving columns on a shared table in a region was expected to abort", &

@@ -171,6 +171,24 @@ module parquet_random
 
 
     !> Process-wide call counter behind `pf_random_seed`.
+    !!
+    !! **This is the module's only mutable state**, and deliberately so: `pf_random_seed` is the one
+    !! procedure here that is not a pure function, precisely because it has to differ between two
+    !! calls the clock cannot separate. Everything else in `parquet_random` answers from its
+    !! arguments alone, which is what makes the module reproducible and what
+    !! `tools/check_random_kernels.sh` relies on when it compiles this file standalone.
+    !!
+    !! Updated by an `!$omp atomic capture` (see `pf_random_seed`), so a concurrent increment cannot
+    !! be lost and two racing calls cannot be handed the same count. **Without OpenMP that atomic is
+    !! a comment**, so the counter is then an ordinary read-modify-write -- which is sound here only
+    !! because this library's threading model IS OpenMP; a caller that threads a non-OpenMP build by
+    !! some other means must not treat `pf_random_seed` as thread-safe.
+    !!
+    !! nagfor's `-thread_safe` reports the increment ("Assignment to SEED_CALL_COUNTER ... in
+    !! thread-safe procedure PF_RANDOM_SEED"). That diagnostic is a static "this procedure writes a
+    !! variable from an outer scope" test with no notion of an atomic or a critical region, so it
+    !! fires on every deliberate process-global in this library and cannot be satisfied while the
+    !! counter exists. It is answered here rather than removed.
     integer(int64), save :: seed_call_counter = 0_int64
 
 
@@ -716,7 +734,9 @@ contains
     !!
     !! Folds the clock at its finest resolution together with a process-wide call counter, so two
     !! calls differ even when the clock has not ticked between them, and so do two calls racing on
-    !! different threads -- the counter is incremented inside a named critical region. This is the
+    !! different threads -- the counter is incremented by an `!$omp atomic capture`, so no increment
+    !! is lost and no two callers see the same count. (In a build without OpenMP that directive is a
+    !! comment and the guarantee lapses; see the counter's declaration.) This is the
     !! one procedure in the module that is not a pure function, and the one that is deliberately
     !! not reproducible: a program that wants a reproducible run stores the value it got and passes
     !! that back next time.
@@ -729,10 +749,14 @@ contains
     function pf_random_seed() result(s)
         integer(int64) :: s                         !! a nondeterministic seed in `[1, huge(int64)]`
         integer(int64) :: counted, ticks, rate, ceiling_
-        !$omp critical (pf_random_seed_counter)
+        ! Fetch-and-add, which is exactly what this needs -- `atomic capture` is the precise
+        ! construct for it and is lock-free, where the named critical region this replaced
+        ! serialised every caller through a lock for a single integer update. See the counter's
+        ! own declaration for what holds when OpenMP is absent.
+        !$omp atomic capture
         seed_call_counter = seed_call_counter + 1_int64
         counted = seed_call_counter
-        !$omp end critical (pf_random_seed_counter)
+        !$omp end atomic
         call system_clock(count=ticks, count_rate=rate, count_max=ceiling_)
         s = mix64(ieor(mix64(ieor(ticks, rate)), counted))
         s = ibclr(s, 63)                            ! into [0, huge]; the mixer is otherwise a bijection

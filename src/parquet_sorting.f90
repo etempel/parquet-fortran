@@ -141,10 +141,17 @@ module parquet_sorting
     ! Both are process-global saved state, which is why the `sorting` and `sort` suites must stay
     ! excluded from test-drive's per-test parallelism (test/run_tester.f90) -- they already are.
     logical, save :: dbg_fortran_engine = .true. !! .true. routes `drive_engine` to the Fortran sort.
-    !> .true. once the affinity-clamp warning has been emitted, so it is said once per process
-    !! rather than once per sort. Written without synchronisation -- see `warn_thread_clamp`, which
-    !! explains why a duplicated diagnostic is preferable to a lock on every sort's resolution path.
-    logical, save :: warned_thread_clamp = .false.
+    !> Nonzero once the affinity-clamp warning has been claimed, so it is said once per process
+    !! rather than once per sort. Claimed by an `!$omp atomic capture` in `warn_thread_clamp`, which
+    !! is where the reasoning lives.
+    !!
+    !! **An integer rather than the obvious `logical`, and that is a portability constraint, not a
+    !! preference.** The natural test-and-set is `seen = flag; flag = .true.` inside an
+    !! `atomic capture`, and nagfor 7.2 rejects it -- *"Invalid form of expression in OpenMP ATOMIC
+    !! assignment"* -- while gfortran accepts it, so the shape compiles on the machine you wrote it
+    !! on and fails on the next one. A fetch-and-add over an integer is accepted by both, and the
+    !! claim is then "the caller that displaced a zero". Do not simplify it back to a logical.
+    integer(int64), save :: thread_clamp_claims = 0_int64
     !> Overrides the introsort's depth limit; NEGATIVE restores the computed `2*floor(log2(n))`.
     !!
     !! Zero forces the heapsort fallback on the first partition, which is otherwise unreachable from

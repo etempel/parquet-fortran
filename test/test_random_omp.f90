@@ -268,8 +268,8 @@ contains
     !! This belongs here rather than in the `random` suite: test-drive's parallelism runs whole
     !! TESTS concurrently, so a test there would compare only its own thread's values against each
     !! other. The property that matters is that two threads calling at the same moment -- possibly
-    !! within the same clock tick -- come away with different seeds, which is what the critical
-    !! region around the process-wide counter is for.
+    !! within the same clock tick -- come away with different seeds, which is what the
+    !! `!$omp atomic capture` around the process-wide counter is for.
     !!
     !! **The vacuity guard here is not optional decoration, and its absence would be invisible.**
     !! `team` says how many threads were ASKED for; `got` says how many the region received. With a

@@ -3120,6 +3120,41 @@ prescreen-disabled arm and never checked it, which is precisely the half
 says an A/B equality is not evidence without. Likewise a discarded `setenv` return code means every
 assertion after it is made against an environment nobody set.
 
+**`-thread_safe` is the noisiest of them and needs a scope-based triage, not a read-through.**
+The `nag` profile passes `-thread_safe`, which reports every assignment to a variable from an outer
+scope — **291 of them across `src/`**. Almost all are correct, and the discriminator is the scope
+the message names, not the file:
+
+- **A PROCEDURE scope** (`from scope LEX_FILTER_EXPR`, `from scope SCHEMA_ADD_FIELD`) is a contained
+  procedure writing its host's locals — the recursive-descent parser advancing `pos`, `push_token`
+  appending to the token arrays. Host locals are per-invocation, so there is nothing shared to race
+  on. About 29 of them, all fine.
+- **No scope named at all** (`SELF cannot be C_LOC argument`, `SELF cannot be INTENT(INOUT) actual
+  arg`) is NAG objecting to a *dummy* being passed on, not to shared state. 185 of them, all fine.
+- **A MODULE scope is the only class worth reading**, and there are 77. They are process-global by
+  design and split three ways: the `cfg_*` settings knobs (34, and being global is the entire
+  premise of [`parquet_settings`](#a-new-process-global-parameter-goes-in-parquet_settings-and-a-design-doc-must-say-so)),
+  the `parquet_debug_*` overrides and counters (~40, which
+  [have to be globals](#a-fortran-side-debug-hook-has-to-be-public-so-prefer-a-c-one)), and exactly
+  **two genuine runtime counters**: `seed_call_counter` in `parquet_random` and
+  `warned_thread_clamp` in `parquet_sorting_keys`.
+
+**No amount of guarding silences it** — the check is static and has no notion of an atomic, a
+critical region or a lock, so it fires on a correctly-synchronised global exactly as loudly as on an
+unsynchronised one. That makes it useless as a pass/fail gate and useful as a *census*: run it when
+you want the list of everything in the library that is process-global, then check each entry against
+what it is supposed to be. `seed_call_counter`'s and `ek_dbg_force_fail`'s declarations carry that
+reasoning at the site, which is the pattern to copy rather than re-deriving it from a build log.
+
+**One-command census**, since the raw log buries the module-scope entries under the other 214:
+
+```bash
+grep '^Questionable:' <log> | grep 'thread-safe' | grep -oE 'from scope [A-Z0-9_]+' | sort | uniq -c | sort -rn
+```
+
+A scope name that matches a `module`/`submodule` in `src/` is process-global; anything else is a
+procedure and can be skipped.
+
 **A NAG run needs `--verbose`, its own build tree, and `-openmp` if it is to mean anything about the
 threaded code.** `fpm test --verbose --flag "-colour -w=unused -openmp"` with `FPM_BUILD_DIR` set
 somewhere under `test_run/` gets all three; `-w=unused` clears the noise this section's first half
@@ -3834,6 +3869,30 @@ Four things to know before touching this area:
   that no longer exists is the failure mode this design is shaped around.
 - **`PARQUET_TEST_NO_PRIME=1` turns priming off** (debug one scenario without 686 others running
   first); `PARQUET_TEST_PRIME_JOBS=<n>` sets the concurrency. A named single test never primes.
+
+**A capability probe must RUN the command with the flags it will use, never ask whether the name
+exists.** Both scenario harnesses guard each scenario with `timeout -s KILL`, and both used to
+select it with `command -v timeout`. MacPorts ships a **BSD-syntax** `/opt/local/bin/timeout`
+(usage: `timeout [-signal] time command`) which exists, satisfies `command -v`, and then rejects
+`-s KILL`. The failure is as bad as it gets:
+
+- every scenario's captured stderr becomes `usage: timeout [-signal] time command...` with status 1;
+- that is **indistinguishable from a scenario that really printed that and exited 1**, so the
+  degrade-to-on-demand-spawn path never fires;
+- **541 of 664 error-scenario tests failed**, with messages like *"expected stderr to contain
+  'parquet_write_column: column not defined...'"* and *"control scenario 'ok' was expected to exit
+  cleanly"* — every one of them blaming the library for a defect in the harness.
+
+It appeared mid-session, when a MacPorts install put that binary on `PATH` between two runs, so the
+same tree passed at 14:2x and failed at 14:45 with no source change. **The tell is that the
+scenarios pass when run BY HAND** (`<build>/test/error_scenarios ok` exits 0) while the suite says
+they fail; when that happens, read `test_run/.primed/<name>.err` — it holds whatever was captured,
+and a harness error is visible there immediately.
+
+Both sites now probe by running `timeout -s KILL 1 true >/dev/null 2>&1` and fall through to
+`gtimeout` (GNU coreutils). That covers the absent case for free, since a missing command also
+exits nonzero, and it keeps the probe and the real invocation using the same flags — which is the
+rule: **probe with what you will actually run.**
 
 Both streams are now always captured **separately** — the old `2>&1` merge is gone, because the
 primed and spawned paths have to produce the same shape. A helper wanting the old "appeared

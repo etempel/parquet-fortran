@@ -391,10 +391,17 @@ module parquet_sorting
     ! Both are process-global saved state, which is why the `sorting` and `sort` suites must stay
     ! excluded from test-drive's per-test parallelism (test/run_tester.f90) -- they already are.
     logical, save :: dbg_fortran_engine = .true. !! .true. routes `drive_engine` to the Fortran sort.
-    !> .true. once the affinity-clamp warning has been emitted, so it is said once per process
-    !! rather than once per sort. Written without synchronisation -- see `warn_thread_clamp`, which
-    !! explains why a duplicated diagnostic is preferable to a lock on every sort's resolution path.
-    logical, save :: warned_thread_clamp = .false.
+    !> Nonzero once the affinity-clamp warning has been claimed, so it is said once per process
+    !! rather than once per sort. Claimed by an `!$omp atomic capture` in `warn_thread_clamp`, which
+    !! is where the reasoning lives.
+    !!
+    !! **An integer rather than the obvious `logical`, and that is a portability constraint, not a
+    !! preference.** The natural test-and-set is `seen = flag; flag = .true.` inside an
+    !! `atomic capture`, and nagfor 7.2 rejects it -- *"Invalid form of expression in OpenMP ATOMIC
+    !! assignment"* -- while gfortran accepts it, so the shape compiles on the machine you wrote it
+    !! on and fails on the next one. A fetch-and-add over an integer is accepted by both, and the
+    !! claim is then "the caller that displaced a zero". Do not simplify it back to a logical.
+    integer(int64), save :: thread_clamp_claims = 0_int64
     !> Overrides the introsort's depth limit; NEGATIVE restores the computed `2*floor(log2(n))`.
     !!
     !! Zero forces the heapsort fallback on the first partition, which is otherwise unreachable from
@@ -3218,9 +3225,13 @@ contains
     !! What it does catch is a caller who asked for more -- by environment or by an explicit
     !! `threads=` -- than the binding permits.
     !!
-    !! The `saved` flag is written without synchronisation. A concurrent first sort could print the
-    !! line twice; it can never print a wrong one, and guarding it would put a lock on the resolution
-    !! path of every sort to save a duplicated diagnostic.
+    !! **The claim is atomic, and the cost argument against guarding it was wrong twice over.** The
+    !! shape this replaced -- `if (flag) return` and then `flag = .true.` -- let two threads both
+    !! read the unset value and both print, which is benign in effect but is a real unsynchronised
+    !! read-modify-write on shared state. Guarding it was argued against on the grounds that it
+    !! would "put a lock on the resolution path of every sort": an `!$omp atomic capture` is a
+    !! lock-free fetch-and-add rather than a lock, and it sits behind the fast-path read below, so
+    !! it is reached only by the one call that is about to print.
     subroutine warn_thread_clamp(count)
         use parquet_settings, only : parquet_emit_warning, parquet_output_is_suppressed
 #ifdef _OPENMP
@@ -3228,10 +3239,22 @@ contains
 #endif
         integer(int64), intent(in) :: count !! the clamped count, for the message.
         character(len=32) :: got, asked
+        integer(int64) :: seen !! the claim count this call observed; 0 means this call won it.
         !
-        if (warned_thread_clamp) return
+        ! Fast path first: in a process whose affinity really is clamped the caller's branch fires
+        ! on EVERY sort, so this procedure is entered every time and must cost one load once the
+        ! line has been said. `atomic read` is a plain load on every real target.
+        !$omp atomic read
+        seen = thread_clamp_claims
+        if (seen /= 0_int64) return
+        ! Suppression is checked BEFORE the claim, deliberately: a run that silenced its output must
+        ! not consume the one warning, so a later call with output enabled still receives it.
         if (parquet_output_is_suppressed()) return
-        warned_thread_clamp = .true.
+        !$omp atomic capture
+        seen = thread_clamp_claims
+        thread_clamp_claims = thread_clamp_claims + 1_int64
+        !$omp end atomic
+        if (seen /= 0_int64) return
 #ifdef _OPENMP
         write (got, '(i0)') count
         write (asked, '(i0)') omp_get_max_threads()

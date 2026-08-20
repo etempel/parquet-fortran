@@ -47,6 +47,25 @@ module parquet_expkey
 
     !> Forces `exp_key_contract_ok` to report failure. **Test-only**, and the only writer is the
     !! debug hook below.
+    !!
+    !! Process-global, which is not a compromise but the only shape available: this module reaches
+    !! no `bind(C)` surface, so the C++-side debug-hook convention every other override in this
+    !! library uses cannot be applied here (see CLAUDE.md, "A Fortran-side debug hook has to be
+    !! PUBLIC, so prefer a C++ one").
+    !!
+    !! **It is nonetheless free of the shared-state hazard**, because of where it is written from:
+    !! its single caller is `scenario_weighted_contract_failure` in `test/error_scenarios.f90`,
+    !! and an error scenario is one whole PROCESS that sets the flag and then aborts. No other test
+    !! runs beside it, so there is no reader to race with and no vacuous-pass risk of the kind that
+    !! forces `filter_screen`/`sorting`/`settings` out of test-drive's per-suite parallelism. Keep it
+    !! that way: a new in-process caller of `parquet_debug_set_exp_key_contract` would need that
+    !! whole suite excluded, since a sibling test flipping this flag mid-run would leave
+    !! `exp_key_contract_ok` answering about someone else's override.
+    !!
+    !! nagfor's `-thread_safe` reports the assignment below regardless -- it is a static "writes a
+    !! variable from an outer scope" test that cannot see any of the above. Answered here rather
+    !! than removed: dropping the flag would take with it the negative control that stops a
+    !! `exp_key_contract_ok` returning `.true.` unconditionally from passing every test.
     logical, save :: ek_dbg_force_fail = .false.
 
     !> `1/sqrt(2)`, the point the mantissa is folded about so that `|f|` stays under 0.1716.

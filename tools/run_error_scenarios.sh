@@ -29,10 +29,18 @@ cd "$(dirname "$0")/.."
 #
 # macOS ships no `timeout` (coreutils installs it as `gtimeout`), so an absent one degrades to
 # running unguarded rather than failing the run.
+#
+# The probe RUNS the command with the flags actually used rather than asking whether the name
+# exists, because existence does not imply this syntax: MacPorts ships a BSD-style
+# /opt/local/bin/timeout whose usage is `timeout [-signal] time command`, so `command -v timeout`
+# succeeds and `-s KILL` is then rejected. Every scenario would capture
+# "usage: timeout [-signal] time command..." as its own output. Running the probe falls through
+# to `gtimeout` instead, and covers the absent case for free -- a missing command exits nonzero
+# too. Keep the probe and the real invocation using the same flags.
 SCENARIO_TIMEOUT="${PARQUET_SCENARIO_TIMEOUT:-120}"
-if command -v timeout >/dev/null 2>&1; then
+if timeout -s KILL 1 true >/dev/null 2>&1; then
     TIMEOUT_CMD="timeout -s KILL $SCENARIO_TIMEOUT"
-elif command -v gtimeout >/dev/null 2>&1; then
+elif gtimeout -s KILL 1 true >/dev/null 2>&1; then
     TIMEOUT_CMD="gtimeout -s KILL $SCENARIO_TIMEOUT"
 else
     TIMEOUT_CMD=""

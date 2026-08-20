@@ -6339,10 +6339,20 @@ contains
         ! it `gtimeout`) leaves the variable empty, which runs the scenario unguarded rather
         ! than breaking the run. `timeout` reports 124 when it fires, which is the sentinel
         ! check_scenario_exit_status and its siblings key on.
+        !
+        ! **The probe RUNS the command rather than asking whether it exists, and the difference
+        ! is not academic.** MacPorts ships a BSD-syntax `/opt/local/bin/timeout` whose usage is
+        ! `timeout [-signal] time command` -- it exists, so `command -v timeout` succeeds, and it
+        ! then rejects `-s KILL`. Every scenario's captured stderr becomes
+        ! "usage: timeout [-signal] time command..." with status 1, which is indistinguishable
+        ! from a scenario that really did print that and exit 1: the fallback never fires, and
+        ! 541 of 664 error-scenario tests fail with messages blaming the library. Probing with
+        ! the real flags falls through to `gtimeout` (GNU coreutils) instead, and covers the
+        ! absent case for free, since a missing command also exits nonzero.
         cmd = "PF_SCENARIO_TIMEOUT=''; " // &
-            "if command -v timeout >/dev/null 2>&1; then PF_SCENARIO_TIMEOUT=" // dq // &
+            "if timeout -s KILL 1 true >/dev/null 2>&1; then PF_SCENARIO_TIMEOUT=" // dq // &
             "timeout -s KILL ${PARQUET_SCENARIO_TIMEOUT:-120}" // dq // "; " // &
-            "elif command -v gtimeout >/dev/null 2>&1; then PF_SCENARIO_TIMEOUT=" // dq // &
+            "elif gtimeout -s KILL 1 true >/dev/null 2>&1; then PF_SCENARIO_TIMEOUT=" // dq // &
             "gtimeout -s KILL ${PARQUET_SCENARIO_TIMEOUT:-120}" // dq // "; fi; " // &
             "export PF_SCENARIO_TIMEOUT; "
         cmd = trim(cmd) // " sed -n '/^scenarios=(/,/^)/p' " // scenario_list_file // &

@@ -531,7 +531,7 @@ contains
         integer(int64), pointer :: w_i64(:), o_i64, r_i64(:)
         integer(int32), pointer :: w_i32(:), o_i32, r_i32(:)
         logical, pointer :: w_b(:), o_b, r_b(:)
-        real(real64), pointer :: w_f64(:), o_f64, r_f64(:)
+        real(real64), pointer :: w_f64(:), o_f64, r_f64(:), o2_f64, r2_f64(:)
         real(real32), pointer :: w_f32v(:,:), o_f32v(:), r_f32v(:,:)
         integer(int32), pointer :: w_i32v(:,:), o_i32v(:), r_i32v(:,:)
         logical, pointer :: w_bv(:,:), o_bv(:), r_bv(:,:)
@@ -586,11 +586,23 @@ contains
         if (allocated(error)) return
         !
         ! --- float64 scalars: ra, dec, and the computed flux
-        call check_f64_forms(error, t%ra(), t%ra(3), t%ra(3_int64), t%ra(LO, HI), &
-            t%ra(int(LO, int64), int(HI, int64)), "ra")
+        ! Each form is bound to a local pointer before the call, rather than passed inline as
+        ! `t%ra()`. That matches how every other column is checked below, and it is also required:
+        ! nagfor 7.2 emits invalid C under -C=undefined for a POINTER-valued function result used
+        ! directly as an actual argument (16-line reproducer in feature_nag_ice_scope_id.md).
+        w_f64  => t%ra()
+        o_f64  => t%ra(3)
+        o2_f64 => t%ra(3_int64)
+        r_f64  => t%ra(LO, HI)
+        r2_f64 => t%ra(int(LO, int64), int(HI, int64))
+        call check_f64_forms(error, w_f64, o_f64, o2_f64, r_f64, r2_f64, "ra")
         if (allocated(error)) return
-        call check_f64_forms(error, t%dec(), t%dec(3), t%dec(3_int64), t%dec(LO, HI), &
-            t%dec(int(LO, int64), int(HI, int64)), "dec")
+        w_f64  => t%dec()
+        o_f64  => t%dec(3)
+        o2_f64 => t%dec(3_int64)
+        r_f64  => t%dec(LO, HI)
+        r2_f64 => t%dec(int(LO, int64), int(HI, int64))
+        call check_f64_forms(error, w_f64, o_f64, o2_f64, r_f64, r2_f64, "dec")
         if (allocated(error)) return
         ! `flux` is `source: computed`, so the generated type creates it with every row null and
         ! nothing has written a value into it. A null numeric row's VALUE bytes are unspecified by
@@ -605,8 +617,12 @@ contains
         ! problem for a silently weaker test.
         w_f64 => t%flux()
         w_f64 = [(0.5_real64*i, i = 1, NROW)]
-        call check_f64_forms(error, t%flux(), t%flux(3), t%flux(3_int64), t%flux(LO, HI), &
-            t%flux(int(LO, int64), int(HI, int64)), "flux")
+        w_f64  => t%flux()
+        o_f64  => t%flux(3)
+        o2_f64 => t%flux(3_int64)
+        r_f64  => t%flux(LO, HI)
+        r2_f64 => t%flux(int(LO, int64), int(HI, int64))
+        call check_f64_forms(error, w_f64, o_f64, o2_f64, r_f64, r2_f64, "flux")
         if (allocated(error)) return
         !
         ! --- float32 vector: crd

@@ -49,28 +49,30 @@ nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal 
 #
 #   -C=intovf    Correct behaviour, not a defect: it is nagfor's -ftrapv, and it traps the two
 #                deliberate wrapping multiplies src/parquet_random.f90 documents as "UB site 1 of 2".
-#   -C=undefined THREE independent nagfor 7.2 defects, none of them a finding about this code.
-#                (a) `Panic: Cannot find scope id 0` -- an internal compiler error, triggered by
-#                    compiling ANY submodule of a separately compiled module that declares a FINAL
-#                    binding bound to a SEPARATE MODULE PROCEDURE. FIXED HERE by keeping every
-#                    FINAL target module-contained (see src/parquet_core.f90's contains section and
-#                    the note in tools/generate_parquet_tables.py); do not move one back into a
-#                    submodule. 15-line reproducer in feature_nag_ice_scope_id.md.
-#                (b) nagfor emits invalid C for the implicit finalization of an ARRAY whose element
-#                    type has a FINALIZABLE COMPONENT: the generated pointer difference mixes the
-#                    element-struct pointer with `Char *`, and the host C compiler rejects it
-#                    ("are not pointers to compatible types"). test/test_parquet_string.f90's
-#                    `type(t_row) :: rows(3)` hits it, t_row holding a type(parquet_string) whose
-#                    finalizer nullifies the handle. NOT the same bug as (a). Cleared once by
-#                    deleting parquet_string's redundant finalizer; it REAPPEARS at
-#                    src/parquet_tables_lifecycle.f90:671 for an array of parquet_table_column,
-#                    which reaches a finalizable component transitively via parquet_column ->
-#                    parquet_string_column. Removing THAT finalizer (also redundant -- Fortran
-#                    deallocates allocatable components itself) was measured to clear the site, but
-#                    it is a public owning type and the change was not made.
-#                (c) A THIRD defect behind (b): invalid C for a character dope vector, at
-#                    test/test_table_codegen.f90:589. So -C=undefined costs at least three source
-#                    concessions to reach and there is no sign (c) is the last one.
+#   -C=undefined FOUR independent nagfor 7.2 defects, none of them a finding about this code.
+#                Three were compile-time and are FIXED here, so the project now BUILDS cleanly
+#                under -C=undefined; the fourth is a runtime miscompilation and is why the option
+#                is still excluded. Each was revealed only once the one in front of it was cleared.
+#                (a) `Panic: Cannot find scope id 0` -- an ICE, triggered by compiling ANY submodule
+#                    of a separately compiled module that declares a FINAL binding bound to a
+#                    SEPARATE MODULE PROCEDURE. Fixed by keeping every FINAL target
+#                    module-contained (src/parquet_core.f90's contains section, and the note in
+#                    tools/generate_parquet_tables.py). Do not move one back into a submodule.
+#                (b) Invalid C for the implicit finalization of an ARRAY whose element type has a
+#                    FINALIZABLE COMPONENT (a pointer difference mixing the element-struct pointer
+#                    with `Char *`). Fixed by deleting two redundant finalizers -- parquet_string's
+#                    and parquet_string_column's -- neither of which freed anything the language
+#                    was not already freeing. See the notes in their own type bodies.
+#                (c) Invalid C for a POINTER-valued function result used directly as an actual
+#                    argument (`assigning to 'Char *' from '__NAGf90_ChDope1'`). Fixed in
+#                    test/test_table_codegen.f90 by binding each accessor form to a local pointer
+#                    first, which is what every other column in that file already did.
+#                (d) NOT FIXED, and not fixable here: the writer's compression codec arrives at the
+#                    C++ side as garbage bytes, aborting the first test that writes a file. The
+#                    Fortran side validates that same string against its whitelist two statements
+#                    above the ONE call site, so the value is correct on entry to the call and
+#                    wrong on arrival -- a miscompilation of the argument passing, not an undefined
+#                    read. Not reducible to a standalone reproducer so far.
 #                Note -C=all does NOT imply -C=undefined, so the nagdeb set below is unaffected.
 #
 # Both are written up in feature_nag_runtime_checks.md. Full suite under the set below:

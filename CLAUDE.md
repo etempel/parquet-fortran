@@ -3171,60 +3171,47 @@ timeout.
   `src/parquet_random.f90` that
   [`-ftrapv` does](#compiler--language-gotchas) — the sites the source itself labels "UB site 1 of
   2". Excluded for that documented reason, not because of a defect.
-- **`-C=undefined` carries at least THREE independent nagfor 7.2 defects**, none a finding about
-  this code, and each is revealed only when the one in front of it is cleared — which is why a
-  clean-looking build under it means nothing until the whole build passes.
-  **(a)** `Panic: Cannot find scope id 0`, an internal compiler error that fires when compiling
-  **any submodule of a separately compiled module that declares a `FINAL` binding bound to a
-  SEPARATE MODULE PROCEDURE**. An *empty* submodule is enough, and 15 lines in two files reproduce
-  it with nothing but `nagfor -c` — see `feature_nag_ice_scope_id.md`. **Fixed in this project** by
-  keeping every `FINAL` target **module-contained** (`writer_lock_release`, `writer_finalize`,
-  `reader_finalize` in `parquet_core`'s own `contains`; `table_finalize` in a `contains` section
-  `tools/generate_parquet_tables.py` now emits). **A new finalizer must follow that rule**, and
-  moving one back into a submodule silently reintroduces the ICE for every sibling submodule.
-  **(b)** nagfor emits **invalid C** for the implicit finalization of an **array** whose element
-  type has a **finalizable component** — the generated pointer difference mixes the element-struct
-  pointer with `Char *` and the host C compiler rejects it. Twenty-seven lines reproduce it:
+- **`-C=undefined` carries FOUR independent nagfor 7.2 defects**, none a finding about this code,
+  and each is revealed only when the one in front of it is cleared — so a clean-looking result
+  under it means nothing until the whole build *and* the whole suite pass. **Three are compile-time
+  and are fixed here**, so the project now builds cleanly under it; **the fourth is a runtime
+  miscompilation**, and is why the option is still excluded from `nagdeb`.
+  **(a)** `Panic: Cannot find scope id 0`, an ICE that fires when compiling **any submodule of a
+  separately compiled module that declares a `FINAL` binding bound to a SEPARATE MODULE
+  PROCEDURE**. An *empty* submodule is enough; 15 lines in two files reproduce it
+  (`feature_nag_ice_scope_id.md`). **Fixed** by keeping every `FINAL` target **module-contained**
+  (`writer_lock_release`, `writer_finalize`, `reader_finalize` in `parquet_core`'s own `contains`;
+  `table_finalize` in a `contains` section `tools/generate_parquet_tables.py` now emits). **A new
+  finalizer must follow that rule** — moving one into a submodule silently reintroduces the ICE for
+  every sibling submodule.
+  **(b)** Invalid C for the implicit finalization of an **array** whose element type has a
+  **finalizable component** — the generated pointer difference mixes the element-struct pointer
+  with `Char *`. Reproduces in 27 lines: a type with a `FINAL`, used as a *component* of a second
+  type, an array of which is finalized. All three parts are required (a scalar compiles, an array
+  of the finalizable type *directly* compiles, no `final` compiles), and finalization is confirmed
+  as the trigger in both directions — `save` on the local array compiles, an `intent(out)` dummy
+  array fails at the procedure header instead. **Fixed** by deleting the two redundant finalizers
+  this library had: `parquet_string`'s (a non-owning handle whose finalizer nulled a borrowed
+  pointer) and `parquet_string_column`'s (three `deallocate` calls on allocatable components, which
+  F2018 9.7.3.2 already deallocates). Both type bodies now carry the reasoning; **do not add either
+  back**. The remaining four finalizers release C++ handles and OpenMP locks and must stay.
+  **(c)** Invalid C for a **pointer-valued function result used directly as an actual argument**
+  (`assigning to 'Char *' from incompatible type '__NAGf90_ChDope1'`); 16 lines reproduce it, and
+  the character in the message is a red herring — no character argument is involved. **Fixed** in
+  `test/test_table_codegen.f90` by binding each accessor form to a local pointer before the call,
+  which is what every other column in that file already did. Allocatable and explicit-shape
+  function results are unaffected.
+  **(d)** **Not fixed, and not a source defect.** The writer's compression codec reaches the C++
+  side as garbage bytes, aborting the first test that writes a file. The Fortran side validates
+  that same string against its whitelist **two statements above the single call site**, so it is
+  correct on entry and wrong on arrival — argument passing, not an undefined read. No standalone
+  reproducer yet: the obvious synthetics (a fixed-length string, a deferred-length allocatable,
+  both through `trim(x)//char(0)` into a `character(kind=c_char) :: s(*)` `bind(C)` dummy) all pass.
 
-```fortran
-type :: inner
-    integer :: x = 0
-contains
-    final :: inner_final          ! inner is finalizable ...
-end type inner
-type :: outer
-    integer :: id = 0
-    type(inner) :: nm             ! ... as a COMPONENT of outer
-end type outer
-...
-subroutine s()
-    type(outer) :: rows(3)        ! an ARRAY of outer, finalized at scope exit -> invalid C
-end subroutine s
-```
-
-  All three ingredients are required, and the toggles are unusually clean: a **scalar** `outer`
-  compiles; an array of `inner` **directly** compiles (so NAG finalizes an array of a finalizable
-  type correctly — it is the nested case it gets wrong); `inner` without `final` compiles; and an
-  `allocatable` array fails identically. **Finalization is exactly the trigger**, confirmed in both
-  directions: adding `save` to the local array (no finalization at return) compiles, and an
-  `intent(out)` dummy array (finalized on *entry*) fails at the procedure header instead of at
-  `end subroutine`, while `intent(inout)` compiles. `test/test_parquet_string.f90`'s
-  `type(t_row) :: rows(3)` hit it — `t_row` holds a `type(parquet_string)` — and deleting that
-  handle's redundant finalizer cleared it there. It **reappears** at
-  `src/parquet_tables_lifecycle.f90:671` for an array of `parquet_table_column`, which reaches a
-  finalizable component *transitively* (`parquet_table_column` → `parquet_column` →
-  `parquet_string_column`). Removing `finalize_column` too was measured to clear that site — it is
-  equally redundant, since Fortran deallocates allocatable components itself — but it is a public
-  owning type and the change was not made.
-  **(c)** Invalid C for a **character dope vector**, at `test/test_table_codegen.f90:589`
-  (`assigning to 'Char *' from incompatible type '__NAGf90_ChDope1'`), on a generated-table
-  accessor returning a character array section. Reached only once (b) is cleared, and not
-  investigated further.
-
-  **So `-C=undefined` costs at least three separate source concessions to reach, two of them on
-  public types, with no evidence (c) is the last** — which is why only (a) was fixed, and that
-  because the fix is small and reads better anyway. Note `-C=all` does **not** imply
-  `-C=undefined`, so none of this touches the `nagdeb` set.
+  **So `-C=undefined` is a build-clean, run-broken option here**, and `-C=all` does **not** imply
+  it, so none of this touches the `nagdeb` set. The three fixes were kept because each is an
+  improvement on its own terms — two redundant finalizers removed, and a test file made internally
+  consistent — not because the option became usable.
 
 **`-C=dangling` and `-C=calls` are BOTH in the set, and the one-word source change that let them
 in must not be reverted.** An earlier version of this section said to drop `-C=dangling`, that it

@@ -255,8 +255,26 @@ module parquet_strings
         procedure :: raw_buffers                       !! Export c_loc pointers to the internal buffers.
         procedure :: copy_buffers                      !! Copy the offsets and packed payload into caller arrays.
         procedure :: append_buffers                    !! Bulk-append one row group from C buffers.
-        ! --- finalization ---
-        final :: finalize_column                       !! Deallocate all owned buffers.
+        !
+        ! --- NO `final` PROCEDURE, deliberately ---
+        !
+        ! This type owns three ALLOCATABLE components (offsets, data, validity) and nothing else --
+        ! no pointer, no handle, no external resource. Fortran deallocates allocatable components
+        ! automatically whenever the object ceases to exist, is deallocated, or is entered as an
+        ! `intent(out)` dummy (F2018 9.7.3.2), so the `final :: finalize_column` this type used to
+        ! carry -- whose entire body was three `if (allocated(x)) deallocate(x)` lines -- freed
+        ! nothing the language was not already freeing. Contrast parquet_writer/parquet_reader/
+        ! parquet_table, whose finalizers release C++ handles and OpenMP locks the language knows
+        ! nothing about: those are real and must stay.
+        !
+        ! Do not add one back. Three things now depend on the absence:
+        !   * nagfor 7.2 emits INVALID C under -C=undefined when finalizing an ARRAY whose element
+        !     type has a finalizable COMPONENT. parquet_column embeds one of these, and
+        !     parquet_table_column embeds a parquet_column, so `cache%cols(:)` reached it
+        !     transitively and src/parquet_tables_lifecycle.f90 would not compile.
+        !   * a finalizable type may not go in an OpenMP `private()` clause under gfortran.
+        !   * intrinsic assignment to or from a finalizable type runs the finalizer twice per
+        !     iteration, which a loop assigning columns would pay on every element.
     end type parquet_string_column
     !
     !> A lightweight, non-owning handle to one element of a parquet_string_column.
@@ -3409,12 +3427,6 @@ contains
     end subroutine append_buffers
     !
     !> Finalizer -- deallocates all owned buffers.
-    subroutine finalize_column(self)
-        type(parquet_string_column), intent(inout) :: self !! the column being finalized.
-        if (allocated(self%offsets)) deallocate(self%offsets)
-        if (allocated(self%data)) deallocate(self%data)
-        if (allocated(self%validity)) deallocate(self%validity)
-    end subroutine finalize_column
     !
     ! ==================================================================================
     ! parquet_string (handle) type-bound procedures

@@ -112,17 +112,45 @@ pf_first_on_path() {
 # set when the configuration cannot be assembled. Kept separate from the wrapper
 # so that executing this file can show what it would pick without building.
 pf_lto_resolve() {
-    local fc="${1:-${FPM_FC:-gfortran}}" maj artool fcbin
+    local fc="${1:-${FPM_FC:-gfortran}}" maj artool fcbin tried
     PF_LTO_FLAG=""; PF_LTO_AR=""; PF_LTO_LD=""; PF_LTO_ERR=""
+    # Empty when the compiler does not answer -dumpversion. nagfor is one such (it
+    # reports "Unrecognised option" on stderr and exits 2, so 2>/dev/null leaves
+    # stdout empty and the pipe swallows the status) -- see the guard below, which
+    # is what stops an empty version being pasted into a candidate name.
     maj=$("$fc" -dumpversion 2>/dev/null | cut -d. -f1)
+    # The NAG arm must precede the *) default -- `case` takes the FIRST match, and
+    # NAG matches none of the patterns above it, so without its own arm it lands in
+    # the GCC one. It returns here rather than setting artool because there is no
+    # NAG configuration to assemble: falling through would make the refusal below
+    # key on whether SOME archiver exists, i.e. it would let a machine that happens
+    # to carry an unsuffixed gcc-ar report success and hand nagfor -flto plus a GCC
+    # archiver. A passing check is the dangerous direction here, not a failing one.
     case "$("$fc" --version 2>&1 | head -1)" in
         *ifx*|*Intel*|*IFX*) PF_LTO_FLAG="-ipo";  artool="llvm-ar" ;;
         *flang*|*clang*)     PF_LTO_FLAG="-flto"; artool="llvm-ar" ;;
+        *NAG*|*nagfor*)
+            PF_LTO_ERR="LTO is not configured for nagfor.
+     -flto is a GCC/LLVM flag that nagfor does not accept, and gcc-ar cannot
+     archive NAG objects -- there is no LTO configuration to assemble here.
+     Build without PF_LTO=1, or activate a gfortran/ifx/flang environment first."
+            return 1 ;;
         *)                   PF_LTO_FLAG="-flto"; artool="gcc-ar"  ;;
     esac
-    PF_LTO_AR=$(pf_first_on_path "$artool-mp-$maj" "$artool-$maj" "$artool") || PF_LTO_AR=""
+    # Never compose a candidate from an empty $maj: "gcc-ar-mp-" and "gcc-ar-" are
+    # names no program can have, and printing them in the error below sends the
+    # reader after a missing archiver when the real problem is an unrecognised
+    # compiler. The unsuffixed name is still tried -- on Linux `gcc-ar` is the
+    # normal spelling, so refusing outright here would break a working setup.
+    if [ -n "$maj" ]; then
+        PF_LTO_AR=$(pf_first_on_path "$artool-mp-$maj" "$artool-$maj" "$artool") || PF_LTO_AR=""
+        tried="$artool-mp-$maj, $artool-$maj, $artool"
+    else
+        PF_LTO_AR=$(pf_first_on_path "$artool") || PF_LTO_AR=""
+        tried="$artool ('$fc -dumpversion' gave no version, so no versioned names were tried)"
+    fi
     if [ -z "$PF_LTO_AR" ]; then
-        PF_LTO_ERR="no plugin-capable archiver found (tried $artool-mp-$maj, $artool-$maj, $artool).
+        PF_LTO_ERR="no plugin-capable archiver found (tried $tried).
      Plain 'ar' archives IR the linker will not use, so the build would SUCCEED
      having done no interprocedural optimisation at all, with no warning."
         return 1

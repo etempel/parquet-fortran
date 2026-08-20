@@ -301,10 +301,56 @@ contains
         do k = 0, 31
             u = scale(0.5_real64 + real(mod(k * 5, 8), real64) / 16.0_real64, -k)
             fp = ieor(fp, transfer(exp_key(u), 0_int64))
-            fp = fp * 6364136223846793005_int64 + 1442695040888963407_int64
+            fp = fp_step(fp)
         end do
         exp_key_contract_ok = fp == ek_contract_fp .and. .not. ek_dbg_force_fail
     end function exp_key_contract_ok
+
+    !> One step of the fingerprint's mixer: `fp * 6364136223846793005 + 1442695040888963407`,
+    !! modulo `2**64`, computed so that nothing overflows.
+    !!
+    !! **The value is unchanged -- this is the same LCG step, spelled without undefined behaviour**,
+    !! so `ek_contract_fp` is the same constant it always was and a mismatch still means `exp_key`
+    !! moved. The plain spelling relied on the multiply and the add both wrapping, which is
+    !! undefined rather than merely implementation-defined: it aborts under `nagfor -C=intovf` and
+    !! `gfortran -ftrapv`, and an optimiser is entitled to reason from it (see `feature_risks.md`
+    !! Risk-94, where exactly that deleted a branch two functions away in a sibling module).
+    !!
+    !! 16-bit limbs for the product and 32-bit halves for the sum, which is the same construction
+    !! `parquet_random`'s `mul64_lo_strict` and `add64` use; nothing here reaches `2**35`. This runs
+    !! 32 times per contract check and never on a draw, so the limb form costs nothing worth
+    !! measuring -- which is why it is unconditional rather than forked per compiler.
+    pure function fp_step(fp) result(r)
+        integer(int64), intent(in) :: fp            !! the fingerprint so far
+        integer(int64) :: r                         !! `fp * K + C` modulo `2**64`
+        integer(int64), parameter :: K = 6364136223846793005_int64
+        integer(int64), parameter :: C = 1442695040888963407_int64
+        integer(int64), parameter :: MASK16 = 65535_int64
+        integer(int64), parameter :: MASK32 = 4294967295_int64
+        integer(int64) :: a0, a1, a2, a3, b0, b1, b2, b3, d0, d1, d2, d3, acc, p, low, high
+        a0 = iand(fp, MASK16)
+        a1 = iand(ishft(fp, -16), MASK16)
+        a2 = iand(ishft(fp, -32), MASK16)
+        a3 = iand(ishft(fp, -48), MASK16)
+        b0 = iand(K, MASK16)
+        b1 = iand(ishft(K, -16), MASK16)
+        b2 = iand(ishft(K, -32), MASK16)
+        b3 = iand(ishft(K, -48), MASK16)
+        ! Column by column, carrying as we go. The widest accumulator value is below 2**35.
+        acc = a0 * b0
+        d0 = iand(acc, MASK16)
+        acc = ishft(acc, -16) + a0 * b1 + a1 * b0
+        d1 = iand(acc, MASK16)
+        acc = ishft(acc, -16) + a0 * b2 + a1 * b1 + a2 * b0
+        d2 = iand(acc, MASK16)
+        acc = ishft(acc, -16) + a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0
+        d3 = iand(acc, MASK16)
+        p = ior(ior(d0, ishft(d1, 16)), ior(ishft(d2, 32), ishft(d3, 48)))
+        ! The sum on 32-bit halves, so a carry into bit 63 is a bit operation and not an overflow.
+        low = iand(p, MASK32) + iand(C, MASK32)
+        high = ishft(p, -32) + ishft(C, -32) + ishft(low, -32)
+        r = ior(ishft(iand(high, MASK32), 32), iand(low, MASK32))
+    end function fp_step
 
 
     !> Forces the frozen-transform check to fail. **Test-only.**

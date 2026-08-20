@@ -14,8 +14,25 @@
 ! operands still being below 2**32, the product is then provably in range and the undefined
 ! behaviour is removed outright rather than merely avoided; the optimiser narrows it straight
 ! back to a native multiply, so this is a statement that the product cannot overflow rather than
-! a wider operation at run time. Where there is no such kind (ifx), the wrapping int64 product
-! ships, and the agreement tests are what stand behind it.
+! a wider operation at run time.
+!
+! THREE arms, not two. Where there is no 128-bit kind there is a second way to remove the
+! overflow, and nagfor takes it (PF_SAFE64): both Philox multipliers are ODD, so
+! `M*c == 2*((M/2)*c) + c`, and `(M/2)*c` is bounded by (2**31-1)(2**32-1), below 2**63. The
+! doubling is then done on halves so no intermediate reaches 2**63 either. Nothing on that arm can
+! overflow at any input, which is what lets nagfor run this module under `-C=intovf` -- its
+! `-ftrapv` -- where the wrapping arm aborts on the first draw. ifx keeps the wrapping product
+! (PF_SAFE64 is not selected for it) because the overflow-free spelling is not free: measured on
+! machine A, `pf_random_at` costs 8.82 ns wrapping against 21.49/12.87 = 1.67x under nagfor and
+! 1.94x under a gfortran build forced onto this arm. That is a deliberate split -- correctness is
+! identical on all three arms and verified bit-for-bit, so the only thing traded is speed against
+! the ability to run a checking build.
+!
+! The arms are bit-exact, and that is asserted rather than assumed: `tools/check_random_kernels.sh`
+! builds all three against the same golden vectors at every optimisation setting. Worth knowing
+! what that found -- the wrapping arm FAILS there under `-O3 -flto` and `-Ofast -flto` (504
+! mismatches, feature_risks.md Risk-101), and the safe64 arm passes at every setting. Removing the
+! undefined behaviour removed a real miscompilation, not a theoretical one.
 !
 ! "The compiler wraps this expression" is NOT the same claim as "this expression is safe", and
 ! conflating the two has already cost this module one silent wrong answer. ifx wraps the round
@@ -28,12 +45,18 @@
 ! evaluate selected_int_kind(38), which is why a predefine is needed at all; fpm passes -cpp
 ! (or -fpp) automatically, so nothing is asked of a consumer. Deliberately absent: any
 ! consumer-supplied macro or escape hatch, which would reintroduce exactly the silent
-! wrong-kernel hazard this exists to close. The remaining silent direction -- a capable compiler
-! not named below quietly taking the wrapping path -- is closed by a test, not by cpp:
-! `parquet_debug_random_uses_int128()` must agree with `selected_int_kind(38) > 0`.
+! wrong-kernel hazard this exists to close. Every arm is keyed on a macro the COMPILER predefines
+! -- `__GFORTRAN__`, `__flang__`/`__FLANG`, `__NAG_COMPILER_RELEASE`/`NAGFOR` -- so adding nagfor's
+! arm widened the allowlist without opening that door. The remaining silent direction -- a capable
+! compiler not named below quietly taking the wrapping path -- is closed by a test, not by cpp:
+! `parquet_debug_random_uses_int128()` must agree with `selected_int_kind(38) > 0`, and
+! `parquet_debug_random_uses_safe64()` names the third arm, which the first cannot distinguish
+! from the wrapping one (both answer .false. there).
 
 #if defined(__GFORTRAN__) || defined(__flang__) || defined(__FLANG)
 #  define PF_INT128 1
+#elif defined(__NAG_COMPILER_RELEASE) || defined(NAGFOR)
+#  define PF_SAFE64 1
 #endif
 
 !> Counter-based random numbers: reproducible under any OpenMP schedule, at any thread count.
@@ -88,6 +111,7 @@ module parquet_random
     public :: pf_random_seed
     public :: pf_random_key
     public :: parquet_debug_random_uses_int128
+    public :: parquet_debug_random_uses_safe64
     public :: parquet_debug_random_block
 
     !> Identifies the algorithm together with every mapping this module freezes -- the cipher, the
@@ -150,6 +174,21 @@ module parquet_random
     integer(int64), parameter :: SIGN_BIT = ibset(0_int64, 63)
     !> Low 16 bits set: one limb of the strict multiply.
     integer(int64), parameter :: M16 = 65535_int64
+
+#ifdef PF_SAFE64
+    !> Low 31 bits set: splits a value below `2**63` into the part that survives a doubling.
+    integer(int64), parameter :: M31 = 2147483647_int64
+    !> `PHILOX_M0 / 2`. Both Philox multipliers are ODD, which is what makes the halved-constant
+    !! identity `M*c == 2*((M/2)*c) + c` hold with a bare `+ c` rather than a masked select.
+    integer(int64), parameter :: PHILOX_H0 = ishft(PHILOX_M0, -1)
+    !> `PHILOX_M1 / 2`; see `PHILOX_H0`.
+    integer(int64), parameter :: PHILOX_H1 = ishft(PHILOX_M1, -1)
+    !> Build-breaking assertion that both multipliers really are odd, since the `+ c` correction
+    !! above is silently wrong for an even one. A zero divisor here is a compile error naming this
+    !! line; the alternative is a wrong stream that only the golden vectors would catch.
+    integer, parameter :: pf_safe64_assert = &
+        1 / merge(1, 0, iand(PHILOX_M0, 1_int64) == 1_int64 .and. iand(PHILOX_M1, 1_int64) == 1_int64)
+#endif
 
 #ifdef PF_INT128
     !> The 128-bit integer kind route (e) forms Philox's multiplies in.
@@ -797,6 +836,26 @@ contains
 #endif
     end function parquet_debug_random_uses_int128
 
+    !> Reports whether the OVERFLOW-FREE 64-bit arm was compiled. **Test-only.**
+    !!
+    !! Public for the same reason as `parquet_debug_random_uses_int128`, and it exists because that
+    !! one alone can no longer name the arm: the fork has three sides, and both `PF_SAFE64` and the
+    !! wrapping arm answer `.false.` there. Without this, `tools/check_random_kernels.sh` would
+    !! label a `PF_SAFE64` build "wrapping" and its vacuity guard would compare two arms it had
+    !! mis-identified -- reporting that it had exercised both when it had exercised one twice.
+    !!
+    !! The two are mutually exclusive by construction (`#elif`), so `.true.` here implies `.false.`
+    !! there; a build where both answer `.true.` is impossible and would mean the fork was edited
+    !! into overlapping conditions.
+    pure function parquet_debug_random_uses_safe64() result(r)
+        logical :: r                                !! `.true.` if the overflow-free arm was compiled
+#ifdef PF_SAFE64
+        r = .true.
+#else
+        r = .false.
+#endif
+    end function parquet_debug_random_uses_safe64
+
     !> Runs the Philox block function directly, on raw counter and key words. **Test-only.**
     !!
     !! **This exists so the LIBRARY'S OWN kernel can be known-answer-checked against all three
@@ -859,6 +918,9 @@ contains
 #else
         integer(int64) :: p0, p1
 #endif
+#ifdef PF_SAFE64
+        integer(int64) :: s0, s1
+#endif
         k0 = iand(key, M32)
         k1 = iand(ishft(key, -32), M32)
         c0 = iand(index, M32)
@@ -876,6 +938,20 @@ contains
             lo0 = int(iand(p0, M32_128), int64)
             hi1 = int(ishft(p1, -32), int64)
             lo1 = int(iand(p1, M32_128), int64)
+#elif defined(PF_SAFE64)
+            ! Overflow-free without a 128-bit kind, by the halved-constant identity. Both Philox
+            ! multipliers are odd, so `M*c == 2*((M/2)*c) + c`; `(M/2)*c <= (2**31-1)(2**32-1)`,
+            ! which is below 2**63, and the doubling is then done on the two halves so that no
+            ! intermediate reaches 2**63 either -- `s` stays below 2**33. Nothing here can
+            ! overflow at any input, so this arm needs no wrapping measurement standing behind it.
+            p0 = PHILOX_H0 * c0
+            s0 = ishft(iand(p0, M31), 1) + c0
+            lo0 = iand(s0, M32)
+            hi0 = ishft(p0, -31) + ishft(s0, -32)
+            p1 = PHILOX_H1 * c2
+            s1 = ishft(iand(p1, M31), 1) + c2
+            lo1 = iand(s1, M32)
+            hi1 = ishft(p1, -31) + ishft(s1, -32)
 #else
             ! UB site 1 of 2: the true product can exceed huge(int64) and wraps. `ishft` is a
             ! LOGICAL shift, so it recovers the correct high half from the wrapped pattern. Shipped
@@ -2071,6 +2147,28 @@ contains
         if (wh >= TWO63_128) wh = wh - TWO64_128
         low = int(wl, int64)
         high = int(wh, int64)
+#elif defined(PF_SAFE64)
+        integer(int64) :: a0, a1, b0, b1
+        integer(int64) :: h00, l00, h01, l01, h10, l10, h11, l11, col1, col2, col3
+        a0 = iand(a, M32)
+        a1 = ishft(a, -32)
+        b0 = iand(b, M32)
+        b1 = ishft(b, -32)
+        ! Each partial product is taken as a (high, low) pair of 32-bit words, so no product is
+        ! ever formed as a single value above 2**63 -- which is what the `#else` arm below does.
+        call mul32x32(a0, b0, h00, l00)
+        call mul32x32(a0, b1, h01, l01)
+        call mul32x32(a1, b0, h10, l10)
+        call mul32x32(a1, b1, h11, l11)
+        ! Schoolbook columns in units of 2**32. Each is at most three words below 2**32 plus a
+        ! carry below 4, so each stays under 2**34 and the carries propagate exactly. The two
+        ! results are assembled with bit operations only, so a word with bit 63 set -- negative
+        ! read as signed -- is formed without any arithmetic that could overflow.
+        col1 = h00 + l10 + l01
+        low = ior(ishft(iand(col1, M32), 32), l00)
+        col2 = h10 + h01 + l11 + ishft(col1, -32)
+        col3 = h11 + ishft(col2, -32)
+        high = ior(ishft(iand(col3, M32), 32), iand(col2, M32))
 #else
         integer(int64) :: a0, a1, b0, b1, p00, p01, p10, p11, mid, mid2
         a0 = iand(a, M32)
@@ -2087,6 +2185,27 @@ contains
         high = p11 + ishft(mid, -32) + ishft(mid2, -32)
 #endif
     end subroutine mulhilo64
+
+#ifdef PF_SAFE64
+    !> The full product of two values below `2**32`, as a (high, low) pair of 32-bit words.
+    !!
+    !! Exists only on the `PF_SAFE64` arm, where a 32x32 product must not be formed as a single
+    !! `int64`: at the top of the range it exceeds `huge(int64)`, which is undefined rather than
+    !! merely wrapping. Halving `y` bounds `x * (y/2)` by `(2**32-1)(2**31-1)`, below 2**63, and
+    !! the odd bit is added back as `x` or 0 without a branch. `s` stays below 2**33, so no
+    !! intermediate can overflow at any input.
+    pure subroutine mul32x32(x, y, high, low)
+        integer(int64), intent(in) :: x             !! one factor, below `2**32`
+        integer(int64), intent(in) :: y             !! the other factor, below `2**32`
+        integer(int64), intent(out) :: high         !! bits 32..63 of the product
+        integer(int64), intent(out) :: low          !! bits 0..31 of the product
+        integer(int64) :: u, s
+        u = x * ishft(y, -1)
+        s = ishft(iand(u, M31), 1) + iand(x, -iand(y, 1_int64))
+        low = iand(s, M32)
+        high = ishft(u, -31) + ishft(s, -32)
+    end subroutine mul32x32
+#endif
 
     !> Unsigned `a < b` for two 64-bit patterns.
     !!

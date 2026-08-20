@@ -190,6 +190,7 @@ xfail_reason() {
 # failure arriving by some other route.
 shipped_kernel=""
 forced_kernel=""
+safe64_kernel=""
 
 # A run that dies partway through must never look like a clean one. `set -e` is not usable here --
 # build_and_run deliberately inspects non-zero exits -- so instead every deliberate exit happens
@@ -252,6 +253,7 @@ build_and_run () {
     k=$(echo "$verdict" | sed -n 's/^KERNEL=\([a-z0-9]*\).*/\1/p')
     case "$label" in
         shipped\ *) [ -z "$shipped_kernel" ] && shipped_kernel="$k" ;;
+        safe64\ *) [ -z "$safe64_kernel" ]  && safe64_kernel="$k" ;;
         forced\ *)  [ -z "$forced_kernel" ]  && forced_kernel="$k" ;;
     esac
     return 0
@@ -274,6 +276,22 @@ elif [ -n "$UNDEF" ]; then
     done
 else
     echo "--- $FC already compiles the wrapping kernel; nothing to force ---"
+fi
+
+# ---- the third arm: PF_SAFE64, overflow-free, which only nagfor ships --------------------------
+# It has to be forced here for the same reason the wrapping arm does: no compiler in this fleet's
+# default configuration selects it except nagfor, so without this half its agreement with the other
+# two rests on someone happening to run a NAG build -- and never on the interprocedural settings,
+# which are the ones that have actually caught miscompilations here.
+if [ "$SHIPPED_ONLY" = "1" ]; then
+    echo "--- safe64 half skipped (--shipped-only) ---"
+elif [ "$shipped_kernel" = "safe64" ]; then
+    echo "--- $FC already compiles the safe64 kernel; nothing to force ---"
+else
+    echo "--- safe64 forced ($UNDEF -D__NAG_COMPILER_RELEASE=1): the overflow-free kernel ---"
+    for cfg in "${CONFIGS[@]}"; do
+        build_and_run "safe64 $cfg" $UNDEF -D__NAG_COMPILER_RELEASE=1 $cfg
+    done
 fi
 
 # Every build has run; from here every exit is a deliberate verdict rather than a crash.
@@ -300,6 +318,22 @@ if [ -n "$UNDEF" ]; then
     echo "--- both kernels exercised: shipped=$shipped_kernel forced=$forced_kernel ---"
 else
     echo "--- single kernel exercised: $shipped_kernel ---"
+fi
+
+# Same guard for the safe64 half: a name that is not "safe64" means the -D stopped selecting that
+# arm, and the half then re-tested a kernel already covered while still reporting green.
+if [ "$SHIPPED_ONLY" != "1" ] && [ "$shipped_kernel" != "safe64" ]; then
+    if [ -z "$safe64_kernel" ]; then
+        echo "ERROR: the safe64 half produced no kernel name -- the check proves nothing." >&2
+        exit 2
+    fi
+    if [ "$safe64_kernel" != "safe64" ]; then
+        echo "ERROR: the safe64 half compiled the '$safe64_kernel' kernel --" >&2
+        echo "       '-D__NAG_COMPILER_RELEASE=1' no longer selects PF_SAFE64, so that half tested" >&2
+        echo "       nothing. Keep this in step with the #if fork at the top of parquet_random.f90." >&2
+        exit 2
+    fi
+    echo "--- safe64 kernel exercised as well ---"
 fi
 
 if [ $xpass -ne 0 ]; then

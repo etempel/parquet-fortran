@@ -38,8 +38,13 @@ program check_random_kernels
 
     failed = 0
     rt_n = 24_int64
+    ! Three arms, so this cannot be a two-way test: PF_SAFE64 and the wrapping arm both answer
+    ! .false. to uses_int128, and labelling the first of them "wrapping" would make the wrapper's
+    ! vacuity guard compare two arms it had mis-identified.
     if (parquet_debug_random_uses_int128()) then
         kernel = "int128"
+    else if (parquet_debug_random_uses_safe64()) then
+        kernel = "safe64"
     else
         kernel = "wrapping"
     end if
@@ -71,9 +76,13 @@ contains
     subroutine check_fork()
         logical :: capable
         capable = selected_int_kind(38) > 0
+        if (parquet_debug_random_uses_int128() .and. parquet_debug_random_uses_safe64()) then
+            call bad("fork reports BOTH int128 and safe64 -- the #elif arms now overlap")
+            return
+        end if
         if (capable .and. parquet_debug_random_uses_int128()) return       ! ordinary build
         if (.not. capable .and. .not. parquet_debug_random_uses_int128()) return
-        if (capable .and. .not. parquet_debug_random_uses_int128()) return ! forced wrapping build
+        if (capable .and. .not. parquet_debug_random_uses_int128()) return ! forced wrapping/safe64
         call bad("fork reports int128 on a compiler with no 128-bit kind")
     end subroutine check_fork
 

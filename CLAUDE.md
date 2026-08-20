@@ -2996,14 +2996,22 @@ applied to the harness instead of the source.
   exactly that way: `pf_sort_threads` asks `omp_get_max_threads()`/`omp_in_parallel()` in Fortran and
   hands C++ a plain integer count, so `parquet_wrapper.cpp` receives a number and never a policy.
   Do not add an "auto" sentinel to a `bind(C)` signature for the C++ side to interpret — it cannot.
-- **`-ftrapv` cannot be used to build this project, and that is by design rather than a defect.**
-  `src/parquet_random.f90` carries two deliberate signed-overflow sites — `random_block`'s wrapping
-  multiplies on the non-`PF_INT128` arm, and `mulhilo64`'s partial products on both arms — documented
-  in its own header together with the measurement that ruled out the overflow-free spelling (1.31x on
-  gfortran, 2.05x on ifx for the whole integer path). `-ftrapv` traps exactly those, so such a build
-  aborts with SIGABRT (exit 134) inside `mulhilo64` on the first wide-range `pf_random_int_at` —
-  reached from the test suite's own golden integer table, so it needs no unusual input. Confirmed on
-  gfortran 14.2.1/Linux at `-O0`, `-O1` and `-O2`, and independently on gfortran 15.2/macOS.
+- **`-ftrapv` traps only the WRAPPING arm of `src/parquet_random.f90`, which is the one arm no
+  compiler in this fleet ships by default.** Measured 2026-08-20 on machine A, gfortran 15.2, over a
+  wide-range `pf_random_int_at` sweep, forcing each arm of the route (e) fork in turn:
+
+  | arm | who ships it | `-ftrapv` at `-O0`/`-O2`/`-O3` |
+  |---|---|---|
+  | `PF_INT128` | gfortran, flang | **passes** |
+  | `PF_SAFE64` | nagfor | **passes** |
+  | wrapping (`#else`) | ifx | **SIGABRT (134)** at every level |
+
+  All three return the identical checksum, so they are bit-exact and only the undefined behaviour
+  differs. An earlier version of this note said `-ftrapv` "cannot be used to build this project" and
+  named `mulhilo64`'s partial products as overflowing "on both arms"; both statements predate route
+  (e) covering `mulhilo64` and the addition of the nagfor arm, and neither is true now.
+  **A gfortran build of this library is therefore `-ftrapv`-clean**, and so is a nagfor one — which
+  is the same property `-C=intovf` exercises from the other side (see the NAG section).
   **The sharper lesson is the converse, and it has already misled once here: a `-ftrapv` build that
   does NOT abort is not evidence that a site is safe.** Whether a given overflow is instrumented
   depends on optimisation level and inlining context, and a site whose result is *dead* — such as a
@@ -3173,10 +3181,25 @@ with real runtime checking, and under `nagdeb` the whole suite passes (1783/0/0,
 hangs). Under `-C=all` it is unusable: 243 of 824 error scenarios die on SIGSEGV, SIGBUS or a 120 s
 timeout.
 
-- **`-C=intovf` is NAG's `-ftrapv`** and trips the same two deliberate wrapping multiplies in
-  `src/parquet_random.f90` that
-  [`-ftrapv` does](#compiler--language-gotchas) — the sites the source itself labels "UB site 1 of
-  2". Excluded for that documented reason, not because of a defect.
+- **`-C=intovf` is NAG's `-ftrapv`, and the whole suite now PASSES under it** —
+  `fpm test --profile nagdeb --flag "-C=intovf"` reports **1783 passed / 0 failed**. It used to
+  trap the deliberate wrapping multiplies in `src/parquet_random.f90`; since 2026-08-20 **nagfor
+  takes a third, overflow-free arm** of that file's route (e) fork (`PF_SAFE64`), so there is no
+  overflow left for it to trap. `-ftrapv` on gfortran is a *different* question and still aborts,
+  because gfortran takes the int128 arm and `-ftrapv` instruments elsewhere — see
+  [Compiler & language gotchas](#compiler--language-gotchas).
+  **It is still not in the `nagdeb` flag list, and the reason is a nagfor bug rather than this
+  code**: under `-C=intovf` *and* threads, the `reading` suite segfaults intermittently — 1 run in
+  3, exit 139, no overflow message, while it passes single-threaded and passes without the flag.
+  That is the overflow instrumentation not being thread-safe. Adding it by default would make the
+  profile flaky, so pass it explicitly, and re-run a failure before believing it.
+  **ifx deliberately keeps the wrapping arm**: the overflow-free spelling is not free, measured at
+  **1.67x** on `pf_random_at` under nagfor (8.82 → 21.49 ns on machine A) and 1.94x on a gfortran
+  build forced onto that arm. Correctness is identical on all three arms and asserted bit-for-bit
+  by `tools/check_random_kernels.sh`, so the split trades only speed against the ability to run a
+  checking build. **ifx is unmeasured for this** — it is machine B only, and CLAUDE.md records ifx
+  paying 2.05x where gfortran paid 1.31x on a related limb spelling, so do not assume 1.67x
+  carries over if that arm is ever reconsidered.
 - **`-C=undefined` carries THREE independent nagfor 7.2 defects plus ONE documented limitation**,
   none a finding about this code, and each is revealed only when the one in front of it is cleared
   — so a clean-looking result under it means nothing until the whole build *and* the whole suite

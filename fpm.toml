@@ -47,8 +47,18 @@ nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=do
 #
 # Two of them are deliberately absent, and each absence is load-bearing rather than untried:
 #
-#   -C=intovf    Correct behaviour, not a defect: it is nagfor's -ftrapv, and it traps the two
-#                deliberate wrapping multiplies src/parquet_random.f90 documents as "UB site 1 of 2".
+#   -C=intovf    NOW PASSES, and is left out only because of a nagfor bug unrelated to this code.
+#                It used to trap the deliberate wrapping multiplies in src/parquet_random.f90;
+#                those are gone under nagfor, which since 2026-08-20 takes a third, overflow-free
+#                arm of that file's route (e) fork (PF_SAFE64 -- see its header). ifx keeps the
+#                wrapping arm, which is 1.67x faster there and is what that split buys.
+#                    fpm test --profile nagdeb --flag "-C=intovf"     -> 1783 passed, 0 failed
+#                The reason it is not simply added to the flags below: under -C=intovf AND
+#                threads, the `reading` suite segfaults intermittently -- measured at 1 run in 3,
+#                exit 139, no overflow message; it passes single-threaded and passes without the
+#                flag, so this is nagfor's overflow instrumentation not being thread-safe rather
+#                than anything here. Adding it by default would make this profile flaky. Pass it
+#                explicitly when you want it, and re-run a failure before believing it.
 #   -C=undefined THREE nagfor 7.2 defects plus ONE documented limitation, none a finding about
 #                this code. The three defects were compile-time and are FIXED here, so the project
 #                now BUILDS cleanly under -C=undefined; the limitation is a runtime miscompilation
@@ -105,9 +115,8 @@ nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=do
 # such a dummy -- under either check, and worst under both -- so restoring that attribute takes the
 # suite from 1783/0 to 243 of 824 error scenarios dying on SIGSEGV, SIGBUS or a 120 s hang. The
 # reasoning is written out beside the workers; do not put the attribute back.
-#nagdeb.flags = "-C=all -C=undefined -g -gline -mtrace"
-#nagdeb.flags = "-C=all -g"
-nagdeb.flags = "-C=alias -C=array -C=bits -C=calls -C=dangling -C=do -C=present -C=pointer -C=recursion -g"
+#nagdeb.flags = "-C=all -g -gline -mtrace"
+nagdeb.flags = "-C=all -g"
 
 nagundefined.flags = "-C=undefined"
 

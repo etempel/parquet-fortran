@@ -4351,6 +4351,24 @@ and **both are now on the route (e) `#else` arm only**: the Philox round multipl
 module's own comments. **A build with a 128-bit integer kind — gfortran and flang — therefore
 carries no deliberate signed overflow at all**, and the sites below are ifx's alone.
 
+**Update 2026-08-20: nagfor is no longer among them either.** A third fork arm (`PF_SAFE64`) makes
+both sites overflow-free without a 128-bit kind, using the fact that both Philox multipliers are
+ODD: `M*c == 2*((M/2)*c) + c`, where `(M/2)*c` is bounded by `(2**31-1)(2**32-1)` and so stays below
+`2**63`. `mulhilo64` takes its four partial products through the same identity, as (high, low) pairs
+of 32-bit words. So the deliberate sites are now **ifx's alone**, and the arm is chosen per compiler
+rather than per capability — ifx keeps wrapping because the safe spelling costs **1.67x** on
+`pf_random_at` under nagfor (8.82 -> 21.49 ns, machine A) and 1.94x on a gfortran build forced onto
+it. **ifx itself is unmeasured** (machine B), and CLAUDE.md records ifx paying 2.05x where gfortran
+paid 1.31x on the related limb spelling, so do not assume 1.67x carries across before re-measuring.
+
+Two things that change what this entry is worth. The evidence is now three-way and mechanical:
+`tools/check_random_kernels.sh` builds all three arms against the same golden vectors at every
+optimisation setting, with a vacuity guard per arm, so "the arms agree" is asserted rather than
+assumed. And the safe arm is demonstrably not just theoretically better — under `-O3 -flto` and
+`-Ofast -flto` the **wrapping** arm fails there with 504 mismatches (Risk-101) while `PF_SAFE64`
+passes at every setting, and `-ftrapv` aborts the wrapping arm at `-O0`/`-O2`/`-O3` while both
+overflow-free arms run clean. Removing the undefined behaviour removed a real miscompilation.
+
 `mulhilo64` was the one that used to be carried on **both** sides, and it moved for a reason worth
 keeping: the wide arm is *both* faster and overflow-free, so the trade that kept it wrapping no
 longer exists. A strictly overflow-free spelling on **16-bit limbs** was what had been measured at

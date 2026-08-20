@@ -36,11 +36,6 @@ contains
         self%handle = writer%handle
         call parquet_writer_enter(self%handle)
     end procedure writer_lock_claim
-    module procedure writer_lock_release
-        if (.not. c_associated(self%handle)) return
-        call parquet_writer_leave(self%handle)
-        self%handle = c_null_ptr
-    end procedure writer_lock_release
     !> The name actually written to the parquet file/VOTable header for
     !> `col`: its output_name if set, else its (internal) name. Falling back
     !> to name defensively handles a parquet_column_type built without going
@@ -1488,11 +1483,5 @@ contains
     !> let alone crashing, from an implicit finalizer on an incompletely-written file would be
     !> surprising. The resulting output file is therefore not guaranteed complete/valid when
     !> reached this way -- always prefer calling parquet_close_writer explicitly.
-    module procedure writer_finalize
-        if (c_associated(this%handle)) then
-            call abandon_parquet_writer(this%handle)
-            this%handle = c_null_ptr
-        end if
-    end procedure writer_finalize
 
 end submodule parquet_write

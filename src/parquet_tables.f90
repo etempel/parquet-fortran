@@ -1441,11 +1441,6 @@ module parquet_tables
             class(parquet_table), intent(out) :: lhs !! unused -- this procedure never returns.
             class(parquet_table), intent(in) :: rhs  !! unused -- this procedure never returns.
         end subroutine table_assign_guard
-        !> Frees the column store and abandons the reader. Runs at scope exit and on an
-        !! intent(out) reopen, so it must always succeed silently -- it validates nothing.
-        module subroutine table_finalize(self)
-            type(parquet_table), intent(inout) :: self !! the table being destroyed.
-        end subroutine table_finalize
         !> Moves one descriptor slot's contents into another, leaving the source slot empty.
         !!
         !! The metadata fields are plain scalars and short allocatable strings, so they are
@@ -7764,5 +7759,27 @@ module parquet_tables
             character(len=*), intent(in) :: unit         !! unit string to store ("" for none).
         end subroutine table_materialize_chunk_kind
     end interface
+    !
+contains
+    !
+    !> FINAL procedure: frees the column store and abandons the reader. Runs at scope exit
+    !! and on an intent(out) reopen, so it must always succeed silently -- it validates
+    !! nothing. Module-contained on purpose; see the note in the generator that emits it.
+    subroutine table_finalize(self)
+        type(parquet_table), intent(inout) :: self !! the table being destroyed.
+        ! An implicit finalizer runs at unpredictable points -- scope exit, an intent(out)
+        ! reopen, an early return -- with no caller able to see or handle a failure, so it
+        ! must always succeed silently and validate nothing (CLAUDE.md). Deallocating the
+        ! cache runs parquet_reader's own finalizer, which abandons rather than closes it.
+        if (associated(self%cache)) then
+            ! The lock is an OpenMP handle rather than a value, so it has to be destroyed
+            ! explicitly -- deallocating the cache would otherwise leak whatever the
+            ! runtime allocated for it. table_destroy_lock validates nothing and cannot
+            ! abort, which is what makes it safe to call from here.
+            call table_destroy_lock(self%cache)
+            deallocate(self%cache)
+            nullify(self%cache)
+        end if
+    end subroutine table_finalize
     !
 end module parquet_tables ! GCOVR_EXCL_LINE -- gcov attribution artifact

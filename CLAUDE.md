@@ -3171,12 +3171,17 @@ timeout.
   `src/parquet_random.f90` that
   [`-ftrapv` does](#compiler--language-gotchas) — the sites the source itself labels "UB site 1 of
   2". Excluded for that documented reason, not because of a defect.
-- **`-C=undefined` carries TWO independent nagfor 7.2 defects**, neither a finding about this
-  code, and it is worth knowing they are different because the second one hides the first.
-  **(a)** `Panic: Cannot find scope id 0`, an internal compiler error on `src/parquet_write.f90`,
-  `src/parquet_metadata.f90` and `src/parquet_tables.f90`, with nothing but `nagfor -c` involved —
-  no linking and no Arrow. Delta-debugged from 1498 to 187 lines and no further; it still needs the
-  project's own `.mod` files, so there is no standalone reproducer.
+- **`-C=undefined` carries at least THREE independent nagfor 7.2 defects**, none a finding about
+  this code, and each is revealed only when the one in front of it is cleared — which is why a
+  clean-looking build under it means nothing until the whole build passes.
+  **(a)** `Panic: Cannot find scope id 0`, an internal compiler error that fires when compiling
+  **any submodule of a separately compiled module that declares a `FINAL` binding bound to a
+  SEPARATE MODULE PROCEDURE**. An *empty* submodule is enough, and 15 lines in two files reproduce
+  it with nothing but `nagfor -c` — see `feature_nag_ice_scope_id.md`. **Fixed in this project** by
+  keeping every `FINAL` target **module-contained** (`writer_lock_release`, `writer_finalize`,
+  `reader_finalize` in `parquet_core`'s own `contains`; `table_finalize` in a `contains` section
+  `tools/generate_parquet_tables.py` now emits). **A new finalizer must follow that rule**, and
+  moving one back into a submodule silently reintroduces the ICE for every sibling submodule.
   **(b)** nagfor emits **invalid C** for the implicit finalization of an **array** whose element
   type has a **finalizable component** — the generated pointer difference mixes the element-struct
   pointer with `Char *` and the host C compiler rejects it. Twenty-seven lines reproduce it:
@@ -3204,11 +3209,22 @@ end subroutine s
   directions: adding `save` to the local array (no finalization at return) compiles, and an
   `intent(out)` dummy array (finalized on *entry*) fails at the procedure header instead of at
   `end subroutine`, while `intent(inout)` compiles. `test/test_parquet_string.f90`'s
-  `type(t_row) :: rows(3)` hits it — `t_row` holds a `type(parquet_string)`, whose finalizer
-  nullifies the handle — which matters practically: **(b) is reached before (a)**, so
-  `fpm test --flag "-C=undefined"` dies in `test/` and a reader concludes the `src/` ICE is fixed.
-  It is not; `fpm build --flag "-C=undefined"` still panics on all three files. Note also that
-  `-C=all` does **not** imply `-C=undefined`, so neither defect touches the `nagdeb` set.
+  `type(t_row) :: rows(3)` hit it — `t_row` holds a `type(parquet_string)` — and deleting that
+  handle's redundant finalizer cleared it there. It **reappears** at
+  `src/parquet_tables_lifecycle.f90:671` for an array of `parquet_table_column`, which reaches a
+  finalizable component *transitively* (`parquet_table_column` → `parquet_column` →
+  `parquet_string_column`). Removing `finalize_column` too was measured to clear that site — it is
+  equally redundant, since Fortran deallocates allocatable components itself — but it is a public
+  owning type and the change was not made.
+  **(c)** Invalid C for a **character dope vector**, at `test/test_table_codegen.f90:589`
+  (`assigning to 'Char *' from incompatible type '__NAGf90_ChDope1'`), on a generated-table
+  accessor returning a character array section. Reached only once (b) is cleared, and not
+  investigated further.
+
+  **So `-C=undefined` costs at least three separate source concessions to reach, two of them on
+  public types, with no evidence (c) is the last** — which is why only (a) was fixed, and that
+  because the fix is small and reads better anyway. Note `-C=all` does **not** imply
+  `-C=undefined`, so none of this touches the `nagdeb` set.
 
 **`-C=dangling` and `-C=calls` are BOTH in the set, and the one-word source change that let them
 in must not be reverted.** An earlier version of this section said to drop `-C=dangling`, that it

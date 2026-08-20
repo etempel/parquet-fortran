@@ -2031,13 +2031,6 @@ module parquet_core
             class(writer_lock), intent(inout) :: self !! lock that will hold the guard until it dies.
             type(parquet_writer), intent(in) :: writer !! writer whose guard is being claimed.
         end subroutine writer_lock_claim
-        !> Releases the guard `self` holds, if any. Runs implicitly at every exit from the
-        !> procedure holding the lock, so it must never validate anything or abort -- the same rule
-        !> writer_finalize follows, and for the same reason (see CLAUDE.md's "Implicit finalizers
-        !> must never route through a path that can throw/abort").
-        module subroutine writer_lock_release(self)
-            type(writer_lock), intent(inout) :: self !! lock being finalized.
-        end subroutine writer_lock_release
     end interface
 
     ! ---- Writer lifecycle & column management ----
@@ -2170,12 +2163,6 @@ module parquet_core
         module subroutine parquet_close_writer(writer)
             type(parquet_writer), intent(inout) :: writer !! writer to close.
         end subroutine parquet_close_writer
-        !> FINAL procedure: safety-net close for a writer whose variable goes
-        !> out of scope (or is overwritten) still open; see parquet_writer's
-        !> own doc comment for why this is not a substitute for %close.
-        module subroutine writer_finalize(this)
-            type(parquet_writer), intent(inout) :: this !! writer being finalized.
-        end subroutine writer_finalize
     end interface
 
     ! ---- Write column specifics (numeric / string / temporal) ----
@@ -2690,12 +2677,6 @@ module parquet_core
             type(parquet_reader), intent(in) :: reader !! open reader.
             character(len=*), intent(in) :: names !! comma/semicolon-separated column names.
         end subroutine parquet_prefetch_columns_string
-        !> FINAL procedure: safety-net close for a reader whose variable goes
-        !> out of scope (or is overwritten) still open; see parquet_writer's
-        !> doc comment for why this is not a substitute for %close.
-        module subroutine reader_finalize(this)
-            type(parquet_reader), intent(inout) :: this !! reader being finalized.
-        end subroutine reader_finalize
         !> int64 specific of parquet_get_nrows.
         module subroutine parquet_get_nrows_int64(reader, nrows, check_positive)
             type(parquet_reader), intent(in) :: reader !! open reader.
@@ -3949,6 +3930,52 @@ module parquet_core
     end interface
 
 contains
+
+    ! ---- FINAL targets (deliberately module-CONTAINED, not separate module procedures) ----
+    !
+    ! These three are bound as `final ::` on writer_lock/parquet_writer/parquet_reader, and their
+    ! bodies live HERE rather than in parquet_write/parquet_read, which is the reverse of this
+    ! file's usual arrangement. It is not a style choice: nagfor 7.2 panics with
+    ! `Panic: Cannot find scope id 0` -- an internal compiler error naming no line -- when
+    ! compiling ANY submodule of a separately compiled module that declares a FINAL binding whose
+    ! target is a SEPARATE MODULE PROCEDURE, under -C=undefined. An empty submodule is enough.
+    ! Keeping the target module-contained is the documented ingredient that avoids it, and it costs
+    ! nothing: each body is four lines and needs only parquet_bindings, which this module already
+    ! uses. See feature_nag_ice_scope_id.md for the 15-line reproducer and the ingredient table.
+    ! Do not move these back into a submodule, and give any FUTURE finalizer the same treatment.
+
+    !> FINAL procedure: releases the guard `self` holds, if any. Runs implicitly at every exit from
+    !! the procedure holding the lock, so it must never validate anything or abort -- the same rule
+    !! writer_finalize follows, and for the same reason (see CLAUDE.md's "Implicit finalizers must
+    !! never route through a path that can throw/abort").
+    subroutine writer_lock_release(self)
+        type(writer_lock), intent(inout) :: self !! lock being finalized.
+        if (.not. c_associated(self%handle)) return
+        call parquet_writer_leave(self%handle)
+        self%handle = c_null_ptr
+    end subroutine writer_lock_release
+
+    !> FINAL procedure: safety-net close for a writer whose variable goes out of scope (or is
+    !! overwritten) still open; see parquet_writer's own doc comment for why this is not a
+    !! substitute for %close.
+    subroutine writer_finalize(this)
+        type(parquet_writer), intent(inout) :: this !! writer being finalized.
+        if (c_associated(this%handle)) then
+            call abandon_parquet_writer(this%handle)
+            this%handle = c_null_ptr
+        end if
+    end subroutine writer_finalize
+
+    !> FINAL procedure: safety-net close for a reader whose variable goes out of scope (or is
+    !! overwritten) still open; see parquet_writer's doc comment for why this is not a substitute
+    !! for %close.
+    subroutine reader_finalize(this)
+        type(parquet_reader), intent(inout) :: this !! reader being finalized.
+        if (c_associated(this%handle)) then
+            call close_parquet_reader(this%handle)
+            this%handle = c_null_ptr
+        end if
+    end subroutine reader_finalize
 
     !> Splits a scalar string of column names into the packed array every name-taking
     !> array form expects. Separators are commas and semicolons, interchangeably;

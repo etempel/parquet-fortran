@@ -1158,12 +1158,6 @@ contains
     !> scope or is overwritten -- frees the underlying C++ object so the
     !> process doesn't leak it. Always prefer calling parquet_close_reader
     !> explicitly.
-    module procedure reader_finalize
-        if (c_associated(this%handle)) then
-            call close_parquet_reader(this%handle)
-            this%handle = c_null_ptr
-        end if
-    end procedure reader_finalize
     !> Shared by both parquet_get_nrows overloads' check_positive=.true. path.
     !> nrows64 is always <= 0 here (never negative in practice, but the check
     !> itself is written against <= 0 to also cover that impossible case).

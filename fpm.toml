@@ -49,17 +49,28 @@ nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal 
 #
 #   -C=intovf    Correct behaviour, not a defect: it is nagfor's -ftrapv, and it traps the two
 #                deliberate wrapping multiplies src/parquet_random.f90 documents as "UB site 1 of 2".
-#   -C=undefined TWO independent nagfor 7.2 defects, neither of them a finding about this code.
-#                (a) `Panic: Cannot find scope id 0` -- an internal compiler error on
-#                    src/parquet_write.f90, src/parquet_metadata.f90 and src/parquet_tables.f90,
-#                    with nothing but `nagfor -c` involved.
+#   -C=undefined THREE independent nagfor 7.2 defects, none of them a finding about this code.
+#                (a) `Panic: Cannot find scope id 0` -- an internal compiler error, triggered by
+#                    compiling ANY submodule of a separately compiled module that declares a FINAL
+#                    binding bound to a SEPARATE MODULE PROCEDURE. FIXED HERE by keeping every
+#                    FINAL target module-contained (see src/parquet_core.f90's contains section and
+#                    the note in tools/generate_parquet_tables.py); do not move one back into a
+#                    submodule. 15-line reproducer in feature_nag_ice_scope_id.md.
 #                (b) nagfor emits invalid C for the implicit finalization of an ARRAY whose element
 #                    type has a FINALIZABLE COMPONENT: the generated pointer difference mixes the
 #                    element-struct pointer with `Char *`, and the host C compiler rejects it
 #                    ("are not pointers to compatible types"). test/test_parquet_string.f90's
 #                    `type(t_row) :: rows(3)` hits it, t_row holding a type(parquet_string) whose
-#                    finalizer nullifies the handle. NOT the same bug as (a), and it is hit FIRST,
-#                    so `fpm test --flag "-C=undefined"` dies in test/ before src/ is even reached.
+#                    finalizer nullifies the handle. NOT the same bug as (a). Cleared once by
+#                    deleting parquet_string's redundant finalizer; it REAPPEARS at
+#                    src/parquet_tables_lifecycle.f90:671 for an array of parquet_table_column,
+#                    which reaches a finalizable component transitively via parquet_column ->
+#                    parquet_string_column. Removing THAT finalizer (also redundant -- Fortran
+#                    deallocates allocatable components itself) was measured to clear the site, but
+#                    it is a public owning type and the change was not made.
+#                (c) A THIRD defect behind (b): invalid C for a character dope vector, at
+#                    test/test_table_codegen.f90:589. So -C=undefined costs at least three source
+#                    concessions to reach and there is no sign (c) is the last one.
 #                Note -C=all does NOT imply -C=undefined, so the nagdeb set below is unaffected.
 #
 # Both are written up in feature_nag_runtime_checks.md. Full suite under the set below:

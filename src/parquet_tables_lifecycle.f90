@@ -585,21 +585,6 @@ contains
             "column store); use call a%clone(b) to copy a table"
     end procedure table_assign_guard
     !
-    module procedure table_finalize
-        ! An implicit finalizer runs at unpredictable points -- scope exit, an intent(out)
-        ! reopen, an early return -- with no caller able to see or handle a failure, so it must
-        ! always succeed silently and validate nothing (CLAUDE.md). Deallocating the cache runs
-        ! parquet_reader's own finalizer on the reader, which abandons rather than closes it.
-        if (associated(self%cache)) then
-            ! The lock is an OpenMP handle rather than a value, so it has to be destroyed
-            ! explicitly -- deallocating the cache would otherwise leak whatever the runtime
-            ! allocated for it. table_destroy_lock validates nothing and cannot abort, which is
-            ! what makes it safe to call from here.
-            call table_destroy_lock(self%cache)
-            deallocate(self%cache)
-            nullify(self%cache)
-        end if
-    end procedure table_finalize
     !
     module procedure table_new_slot
         integer :: existing, n, i

@@ -564,6 +564,38 @@ module parquet_tables
     # credits it with a large hit count (1690 in one full run here), so without the phrase it is
     # reported forever as a candidate stale exclusion. See CLAUDE.md, "Fortran gcov attribution
     # artifacts".
+    # table_finalize is bound as `final ::` and its body is emitted HERE, module-contained,
+    # rather than in parquet_tables_lifecycle.f90 with the rest of the lifecycle code. Not a style
+    # choice: nagfor 7.2 panics with `Panic: Cannot find scope id 0` -- an internal compiler error
+    # naming no line -- when compiling ANY submodule of a separately compiled module that declares
+    # a FINAL binding whose target is a SEPARATE MODULE PROCEDURE, under -C=undefined. An empty
+    # submodule is enough, so every parquet_tables_* file failed to compile. Keeping the target
+    # module-contained is the documented ingredient that avoids it. table_destroy_lock stays a
+    # separate module procedure (module -> submodule is the legal direction and it has an
+    # interface). See feature_nag_ice_scope_id.md. Do not move this back into a submodule, and
+    # give any FUTURE finalizer on this type the same treatment.
+    w("contains")
+    w("    !")
+    w("    !> FINAL procedure: frees the column store and abandons the reader. Runs at scope exit")
+    w("    !! and on an intent(out) reopen, so it must always succeed silently -- it validates")
+    w("    !! nothing. Module-contained on purpose; see the note in the generator that emits it.")
+    w("    subroutine table_finalize(self)")
+    w("        type(parquet_table), intent(inout) :: self !! the table being destroyed.")
+    w("        ! An implicit finalizer runs at unpredictable points -- scope exit, an intent(out)")
+    w("        ! reopen, an early return -- with no caller able to see or handle a failure, so it")
+    w("        ! must always succeed silently and validate nothing (CLAUDE.md). Deallocating the")
+    w("        ! cache runs parquet_reader's own finalizer, which abandons rather than closes it.")
+    w("        if (associated(self%cache)) then")
+    w("            ! The lock is an OpenMP handle rather than a value, so it has to be destroyed")
+    w("            ! explicitly -- deallocating the cache would otherwise leak whatever the")
+    w("            ! runtime allocated for it. table_destroy_lock validates nothing and cannot")
+    w("            ! abort, which is what makes it safe to call from here.")
+    w("            call table_destroy_lock(self%cache)")
+    w("            deallocate(self%cache)")
+    w("            nullify(self%cache)")
+    w("        end if")
+    w("    end subroutine table_finalize")
+    w("    !")
     w("end module parquet_tables ! GCOVR_EXCL_LINE -- gcov attribution artifact")
     return "\n".join(o) + "\n"
 
@@ -1311,11 +1343,6 @@ def gen_spec_interfaces():
             class(parquet_table), intent(out) :: lhs !! unused -- this procedure never returns.
             class(parquet_table), intent(in) :: rhs  !! unused -- this procedure never returns.
         end subroutine table_assign_guard
-        !> Frees the column store and abandons the reader. Runs at scope exit and on an
-        !! intent(out) reopen, so it must always succeed silently -- it validates nothing.
-        module subroutine table_finalize(self)
-            type(parquet_table), intent(inout) :: self !! the table being destroyed.
-        end subroutine table_finalize
         !> Moves one descriptor slot's contents into another, leaving the source slot empty.
         !!
         !! The metadata fields are plain scalars and short allocatable strings, so they are

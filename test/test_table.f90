@@ -2438,6 +2438,11 @@ contains
         k = t%kind("no_such_column", found=ok)
         call check(error, .not. ok, "kind should report a missing column through found=")
         if (allocated(error)) return
+        ! The RESULT matters as much as found=: table_column_kind sets k = PK_NONE before it looks
+        ! the name up, and asserting only found= would pass just as happily against a %kind that
+        ! returned whatever the last lookup left behind.
+        call check(error, k == PK_NONE, "kind should return PK_NONE for a missing column, not a stale or arbitrary kind")
+        if (allocated(error)) return
         ! And a hit still reports .true.
         call t%get("f64", g, found=ok)
         call check(error, ok, "found= should be .true. for a column that exists")

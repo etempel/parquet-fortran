@@ -39,8 +39,8 @@ test = false
 [features]
 
 # standard
-nagfor.flags = "-openmp -f2018 -nan -colour -info -w=unused -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal"
-# standard + -thread_safe
+nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal"
+# standard + -thread_safe + extended warnings
 #nagfor.flags = "-openmp -f2018 -nan -colour -info -w=unused -Warn=allocation -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal -thread_safe"
 
 #nagdeb.flags = "-C=all -g -gline"

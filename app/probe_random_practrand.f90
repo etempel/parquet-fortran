@@ -13,15 +13,23 @@
 !! words**, and the seed-derivation and permutation constructions built on top of it. That is what
 !! the axes below are for, and it is why the interesting ones are not the sequential walk.
 !!
-!! Axes, chosen with `--axis=`:
+!! Axes, chosen with `--axis=`. Each names what is streamed and the word size the battery is fed.
+!! (A markdown table would read well here and cannot be used: a table row is one line, and these
+!! rows ran to 205 columns -- past the 132-column limit this project holds comments to, which
+!! nagfor reports as `Extension(F2023): Comment extends past column 132`.)
 !!
-!! | axis | what it streams | word size | why it is interesting |
-!! |---|---|---|---|
-!! | `draw` | `pf_random_bits_at(seed, 1, k)`, k = 1, 2, 3, … | 64 | the sequential counter walk — the one case published Philox results already cover, so this is a wiring check, not a finding |
-!! | `stream` | `pf_random_bits_at(seed, i)`, i = 1, 2, 3, … | 64 | **the library's own mapping** — the stream index becomes counter words 2 and 3, and this is the loop the guide tells users to write |
-!! | `seed` | `pf_random_bits_at(seed0 + j, 1)`, j = 0, 1, 2, … | 64 | consecutive seeds, one draw each — what `seed = base + rank` produces across MPI ranks |
-!! | `key` | `pf_random_bits_at(pf_random_key(seed0, j), 1)` | 64 | the derived-key fan-out, which is `mix64` rather than the cipher |
-!! | `perm` | low 32 bits of `pf_random_perm_at(seed, 2**62, k) - 1` | 32 | the 4-round modular Feistel, the one construction here with no published KATs |
+!! - **`draw`**, 64-bit -- `pf_random_bits_at(seed, 1, k)`, k = 1, 2, 3, …
+!!   The sequential counter walk: the one case published Philox results already cover, so this is a
+!!   wiring check rather than a finding.
+!! - **`stream`**, 64-bit -- `pf_random_bits_at(seed, i)`, i = 1, 2, 3, …
+!!   **The library's own mapping.** The stream index becomes counter words 2 and 3, and this is the
+!!   loop the guide tells users to write.
+!! - **`seed`**, 64-bit -- `pf_random_bits_at(seed0 + j, 1)`, j = 0, 1, 2, …
+!!   Consecutive seeds, one draw each -- what `seed = base + rank` produces across MPI ranks.
+!! - **`key`**, 64-bit -- `pf_random_bits_at(pf_random_key(seed0, j), 1)`
+!!   The derived-key fan-out, which is `mix64` rather than the cipher.
+!! - **`perm`**, 32-bit -- low 32 bits of `pf_random_perm_at(seed, 2**62, k) - 1`
+!!   The 4-round modular Feistel, the one construction here with no published KATs.
 !!
 !! **`perm` needs the width care it gets.** `pf_random_perm_at` returns a value in `[1, m]`, so
 !! feeding it whole would hand the battery a constant top bit and fail instantly for a reason that is

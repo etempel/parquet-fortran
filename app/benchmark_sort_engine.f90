@@ -599,7 +599,7 @@ contains
             error stop 2
         end select
         !
-        if (dst == "nan") call sprinkle_nan(fam, n, st)
+        if (dst == "nan") call sprinkle_nan(n)
         !
         if (has_valid) then
             allocate(vvalid(n))
@@ -729,20 +729,20 @@ contains
     !> Replaces every thousandth element with a NaN. NaNs are ordinary VALUES to this library and
     !! are tiered by the engine, never by the caller -- so an arm that contains them is testing the
     !! tier logic, which is invisible to every other arm here.
-    subroutine sprinkle_nan(fam, n, st)
-        character(len=*), intent(in) :: fam !! key family.
+    subroutine sprinkle_nan(n)
         integer(int64), intent(in) :: n     !! rows.
-        integer(int64), intent(inout) :: st !! PRNG state (unused; kept for symmetry).
         integer(int64) :: i
-        real(real64) :: zero
         !
-        zero = 0.0_real64
-        if (st == 0_int64) zero = 0.0_real64      ! silences an unused-argument warning
+        ! `fam` and the PRNG state used to be taken too, "for symmetry", and neither was read: the
+        ! body reaches the module's own vf64/vf32 arrays and needs nothing else. Both were kept
+        ! alive by a statement whose only job was to mention them -- a dead `zero` local for the
+        ! state and a bare `continue` for the family -- so dropping the arguments removes the two
+        ! suppression devices with them. There is one call site and no dispatch table, so nothing
+        ! required the wider signature.
         do i = 1000_int64, n, 1000_int64
             if (allocated(vf64)) vf64(i) = ieee_nan_r64()
             if (allocated(vf32)) vf32(i) = real(ieee_nan_r64(), real32)
         end do
-        if (fam == "i32" .or. fam == "i64" .or. fam == "i64lo" .or. fam == "str") continue
     end subroutine sprinkle_nan
 
     !> A quiet NaN, built without a literal division so no compiler flag can trap it at build time.

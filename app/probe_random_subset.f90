@@ -26,8 +26,7 @@
 program probe_random_subset
 
     use iso_fortran_env, only: int32, int64, real64, output_unit
-    use parquet, only: pf_random_at, pf_random_int_at, pf_random_fill_streams, &
-                       pf_partial_argsort, pf_argsort, parquet_set_sort_threads
+    use parquet, only: pf_random_int_at, pf_random_fill_streams, pf_partial_argsort, pf_argsort, parquet_set_sort_threads
 
     implicit none
 

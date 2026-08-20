@@ -15,17 +15,14 @@
 !> ...) use it, but its name and contents may change in any release.
 module parquet_core
     use iso_c_binding
-    use iso_fortran_env, only: int8, int32, int64, real32, real64
+    use iso_fortran_env, only: int32, int64, real32, real64
     use parquet_bindings
     ! Default accessibility here is `private`, so the names this brings in are NOT re-exported from
     ! parquet_core -- a user reaches them through the `parquet` facade's own `use parquet_settings`.
     ! What this import is for is the limit aliases a few lines below.
-    use parquet_settings, only: parquet_max_filter_rule_len, parquet_max_filter_depth, &
-        parquet_max_filter_nodes, parquet_max_sort_keys, parquet_max_sort_key_len, &
-        parquet_max_maml_line_len, parquet_valid_compressions, &
-        parquet_resolve_writer_compression, parquet_get_default_use_threads, &
-        parquet_emit_warning, parquet_emit_error_context, parquet_output_is_suppressed
-    use parquet_maml_base, only: parquet_maml_file, parquet_maml_missing_column, parquet_maml_col_map_entry
+    use parquet_settings, only: parquet_max_filter_rule_len, parquet_max_filter_depth, parquet_max_filter_nodes, &
+        parquet_max_sort_keys, parquet_max_sort_key_len
+    use parquet_maml_base, only: parquet_maml_file
     use parquet_strings, only: parquet_string_column, parquet_string
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, &
         parquet_unit_seconds, parquet_unit_millis, parquet_unit_micros, parquet_unit_nanos, &

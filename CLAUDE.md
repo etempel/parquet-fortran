@@ -75,6 +75,7 @@ working rules).
   - [The three machines available for testing](#the-three-machines-available-for-testing)
   - [Writing benchmarking instructions for another machine](#writing-benchmarking-instructions-for-another-machine)
   - [Compiler & language gotchas](#compiler--language-gotchas)
+  - [NAG's "explicitly imported but not used" warnings: most are FALSE POSITIVES](#nags-explicitly-imported-but-not-used-warnings-most-are-false-positives)
   - [Arrow's own type singletons have thread-unsafe lazy state on first concurrent use](#arrows-own-type-singletons-have-thread-unsafe-lazy-state-on-first-concurrent-use)
   - [gcovr <7.1 cannot parse gcov output for a 10,000+ line file](#gcovr-71-cannot-parse-gcov-output-for-a-10000-line-file)
   - [gcovr 8.4+ drops coverage for module-contained Fortran subroutines](#gcovr-84-drops-coverage-for-module-contained-fortran-subroutines)
@@ -3018,6 +3019,73 @@ applied to the harness instead of the source.
   undocumented signed-overflow sites** in the bulk fills, where `base + k - 1_int64` forms `huge + 1`
   at the boundary the suite deliberately tests. Every value was correct; only UBSan could see it.
   See `feature_risks.md` Risk-112, and note that a `-ftrapv` build had never flagged any of them.
+
+### NAG's "explicitly imported but not used" warnings: most are FALSE POSITIVES
+
+NAG is the only compiler in the fleet that reports unused imports and unused variables by default,
+so it is the only one that can find a dead `use ..., only:` entry here — and the only one whose
+warning list, taken at face value, will make you delete something load-bearing. A full survey needs
+its own build tree and **`--verbose`**, because fpm prints compiler diagnostics in no other mode
+(a plain `fpm build` looks perfectly clean at zero warnings, which is a very convincing way to
+conclude there is nothing to do):
+
+```bash
+source ~/.activate_nag.sh
+export PATH="$PWD/tools/nagfor_fpm_shim:$PATH"     # see tools/nagfor_fpm_shim/nagfor
+FPM_BUILD_DIR=test_run/nag-warnsurvey fpm build --verbose 2>&1 | grep '^Warning:'
+```
+
+**Two classes of false positive dominate, and both are invisible to NAG by construction.**
+
+- **A name reached by HOST ASSOCIATION from an ancestor.** NAG compiles one file at a time and
+  cannot see that a descendant submodule uses a name its ancestor imported. This project leans on
+  that heavily: `parquet_read_*`, `parquet_write_*`, `parquet_metadata_base/_get`, every
+  `parquet_tables_*`, every `parquet_sorting_*` and every `parquet_columns_*` file has **no `use`
+  statement at all** (the one exception is `parquet_metadata_maml.f90`, with two), so the module or
+  submodule spec above them imports on the whole subtree's behalf. `parquet_tables.f90` and
+  `parquet_sorting.f90` are entirely in this class — every name their specs import is for a
+  descendant, so NAG flags nearly the whole list.
+- **A name used only inside `#ifdef _OPENMP`.** A NAG build of this project is **serial** — fpm's
+  compile-side OpenMP probe fails under NAG and no `-openmp` reaches any compile
+  (`tools/nagfor_fpm_shim/nagfor` explains why, and why the shim deliberately does not fix it) — so
+  every OpenMP-only import, local and dummy reads as unused. Deleting one breaks every OpenMP build
+  and **nothing in a NAG run will say so**, because in a NAG run it really is unused.
+
+**So the decision rule is three conditions, not one.** Remove a flagged name from a scope only when
+(1) NAG flags it, **and** (2) it is absent from that file's own code with comments *and string
+literals* stripped and **both** arms of every `#ifdef` included — a type-token string like `"int32"`
+otherwise reads as a use of `int32`, and an `#ifdef _OPENMP` body otherwise reads as absent — **and**
+(3) no descendant needs it through that scope.
+
+**Condition (3) has to be solved GLOBALLY, because removals interact.** Checking each candidate
+against the *current* imports is not enough: drop a name from an ancestor and from a descendant in
+the same pass, and a leaf that was relying on the ancestor loses it. Compute the whole plan, then
+verify that every use is still covered by the file itself or a surviving ancestor, and restore the
+lowest ancestor that had it wherever it is not. `parquet_maml_missing_column` is the worked example
+— dead in `parquet_core`, dead in `parquet_read`, dead in `parquet_write`, dead in
+`parquet_metadata`'s own text, and needed by `parquet_metadata_maml`, which imports nothing of the
+kind; it therefore has to stay in exactly one of them.
+
+**The ground truth is a build with EACH compiler, and neither alone will do.** A removed name is a
+hard compile error, never a silent wrong answer, so the compilers settle it — but only together:
+gfortran carries `-fopenmp` from the `openmp = "*"` metapackage and so compiles the `#ifdef _OPENMP`
+arms, NAG compiles the `#else`/absent arms, and between them every line is seen. A green gfortran
+run says nothing about the serial arm and vice versa.
+
+**Do not forget which files are generated.** `src/parquet_tables.f90`, `src/parquet_sorting.f90`
+and `src/parquet_columns.f90` all carry flagged imports and all are emitted by a `tools/` script —
+edit the generator's template text and re-run it with `--check`, per
+[Some `src/*.f90` files are generated](#some-srcf90-files-are-generated--edit-the-generator-never-the-output).
+
+**What the numbers look like when this is in hand:** the 2026-08-20 sweep took 171 flagged imports
+to **84**, and the 84 that remain are all in the two false-positive classes above (79 host
+association, 4 OpenMP-only, 1 restored by the global check). **That residue is the healthy state,
+not a backlog** — it cannot be driven to zero without giving twelve-odd descendant submodules their
+own `use` statements, which would duplicate their parents' lists and is a change to the tree's
+deliberate design, not a lint fix. The same two causes, plus ordinary interface conformance (a dummy
+a particular implementation does not need), account for most of the ~320 "Unused dummy variable" and
+~70 "Unused local variable" warnings, so those are likewise not a to-do list. Re-derive the count
+rather than trusting this figure.
 
 ### Arrow's own type singletons have thread-unsafe lazy state on first concurrent use
 

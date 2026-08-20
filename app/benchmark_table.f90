@@ -31,7 +31,7 @@
 program benchmark_table
     use parquet
     use parquet_tables
-    use iso_fortran_env, only : int8, int32, int64, real32, real64, error_unit, output_unit
+    use iso_fortran_env, only : int8, int64, real64, error_unit, output_unit
     use iso_c_binding, only : c_int64_t, c_int
     implicit none
 

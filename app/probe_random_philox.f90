@@ -39,7 +39,7 @@
 !! ```
 program probe_random_philox
 
-    use iso_fortran_env, only: int32, int64, output_unit, error_unit
+    use iso_fortran_env, only: int64, output_unit, error_unit
     use parquet, only: parquet_debug_random_block, parquet_debug_random_uses_int128, &
                        pf_random_bits_at
 

@@ -56,10 +56,10 @@ module parquet_tables
     use parquet_columns
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
-    use parquet_core, only : parquet_reader, parquet_writer, parquet_schema, parquet_column_type, &
+    use parquet_core, only : parquet_reader, parquet_writer, parquet_schema, &
         parquet_open_reader, parquet_close_reader, parquet_get_nrows, parquet_get_col_size, &
         parquet_get_column_names, parquet_get_column_type, parquet_column_exists, &
-        parquet_release_column, parquet_read_column, parquet_get_metadata, parquet_get_string_length, &
+        parquet_release_column, parquet_read_column, parquet_get_string_length, &
         parquet_get_num_row_groups, parquet_get_chunk_size, parquet_read_column_chunk, &
         parquet_open_writer, parquet_write_column, parquet_close_writer, parquet_write_row_mask, &
         parquet_measure_list_width, parquet_column_width_needs_data, parquet_column_has_nulls, &

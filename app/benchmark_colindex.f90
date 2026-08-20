@@ -54,7 +54,7 @@
 !! Maintainer tool, never run by `fpm test`. Drive it with tools/benchmark_colindex.sh.
 program benchmark_colindex
     use parquet
-    use iso_fortran_env, only : int32, int64, real64, error_unit, output_unit
+    use iso_fortran_env, only : int64, real64, error_unit, output_unit
     implicit none
 
     character(len=:), allocatable :: mode

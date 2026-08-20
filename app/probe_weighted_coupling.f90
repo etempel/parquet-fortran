@@ -1,5 +1,5 @@
 program probe_weighted_coupling
-    use iso_fortran_env, only: int32, int64, real64, output_unit
+    use iso_fortran_env, only: int64, real64, output_unit
     use parquet
     implicit none
     integer, parameter :: N = 50

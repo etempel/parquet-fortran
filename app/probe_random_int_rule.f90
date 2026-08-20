@@ -65,7 +65,7 @@
 #endif
 
 module pf_probe_int_rule
-    use iso_fortran_env, only: int32, int64, real64
+    use iso_fortran_env, only: int64, real64
     implicit none
     private
 

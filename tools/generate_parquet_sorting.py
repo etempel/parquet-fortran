@@ -296,7 +296,7 @@ def gen_spec():
 !! `parquet_table%sort_by`, which reorders every column together.
 module parquet_sorting
     use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
-    use iso_c_binding, only : c_ptr, c_loc, c_null_ptr, c_int8_t, c_char, c_long_long
+    use iso_c_binding, only : c_ptr, c_loc, c_null_ptr, c_int8_t, c_char
     use parquet_bindings, only : parquet_sort_builder_new, parquet_sort_builder_add_key_int64, &
         parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string, &
         parquet_sort_builder_build, parquet_sort_builder_is_sorted, parquet_sort_builder_free, &

@@ -34,7 +34,7 @@
 !! ```
 program benchmark_random
 
-    use iso_fortran_env, only: int32, int64, real32, real64, output_unit
+    use iso_fortran_env, only: int64, real32, real64, output_unit
     use parquet, only: pf_random_at, pf_random_fill_draws, pf_random_algorithm, &
                        parquet_debug_random_uses_int128
 

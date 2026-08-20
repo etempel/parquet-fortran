@@ -41,7 +41,7 @@
 !> ```
 program probe_random_mix2
 
-    use iso_fortran_env, only: int32, int64, real64, output_unit
+    use iso_fortran_env, only: int64, real64, output_unit
     use parquet, only: pf_random_perm_at, pf_random_int_at
     implicit none
 

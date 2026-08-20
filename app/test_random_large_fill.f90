@@ -25,7 +25,7 @@
 !> Run it through `tools/test_random_large_fill.sh`, which supplies `--profile release`.
 program test_random_large_fill
 
-    use iso_fortran_env, only: int32, int64, real32, real64, output_unit, error_unit
+    use iso_fortran_env, only: int64, real32, real64, output_unit, error_unit
     use parquet_random
 
     implicit none

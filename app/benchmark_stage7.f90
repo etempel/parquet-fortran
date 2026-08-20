@@ -12,7 +12,7 @@ program benchmark_stage7
     !! without a profile measures an unoptimised build and is meaningless.
     use parquet
     use iso_c_binding, only: c_int8_t, c_int32_t, c_int64_t
-    use iso_fortran_env, only: int32, int64, real32, real64, compiler_version
+    use iso_fortran_env, only: int32, int64, real64, compiler_version
 #ifdef _OPENMP
     use omp_lib, only: omp_get_max_threads
 #endif

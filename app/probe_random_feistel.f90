@@ -316,7 +316,7 @@ contains
         integer(int64), parameter :: C1 = 2654435761_int64
         integer(int64), parameter :: C2 = 2246822519_int64
         integer(int64) :: p, q, sw, x
-        integer :: k, j, n, trials
+        integer :: k, j, n
         n = size(v)
         do j = 1, n
             v(j) = k0 + int(j, int64) - 1_int64
@@ -353,7 +353,6 @@ contains
                 v(j) = x
             end if
         end do
-        trials = 0
     end subroutine perm_fill_block
 
     !> LEVER 6, done properly: a bulk fill that needs NO division at all.

@@ -111,7 +111,7 @@ contains
         character(kind=c_char), allocatable, target :: bytes(:)
         integer(c_int8_t), allocatable, target :: cvalid(:)
         logical, allocatable :: fvalid(:)
-        integer(int64) :: fsum, csum, k
+        integer(int64) :: fsum, csum
         integer :: j
         real(real64) :: tf, tc
         !
@@ -165,7 +165,6 @@ contains
         call report(fam // " keys_compare", tf, tc, fsum, csum)
         !
         call parquet_sort_builder_free(builder)
-        k = 0_int64 ! keep the compiler from eliding anything above
     end subroutine run_family
 
     !> The control: a plain Fortran array sum, which no comparator change can reach.

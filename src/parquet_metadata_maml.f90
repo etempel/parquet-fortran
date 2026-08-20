@@ -1179,7 +1179,7 @@ contains
         integer :: i, j, start, stop_at
         logical :: in_fields, has_qc
 
-        allocate(lo(max(size(src, kind=int64), 1)), hi(max(size(src, kind=int64), 1)))
+        allocate(lo(max(size(src, kind=int64), 1_int64)), hi(max(size(src, kind=int64), 1_int64)))
         nentry = 0
         in_fields = .false.
         i = 0

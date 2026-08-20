@@ -1009,6 +1009,10 @@ def emit_accessors(schema, f):
             o.append(f"    end function {t}_{f.name}_all")
             o.append("    !")
             for kind, suffix in (("integer(int32)", "i32"), ("integer(int64)", "i64")):
+                # MAX requires every argument to share one kind (F2018 16.9.147). A bare `0`
+                # beside an int64 `hi - lo + 1` is a gfortran/ifx extension that nagfor reports
+                # as Extension(NAG); spell the literal in the index's own kind instead.
+                zero = "0_int64" if suffix == "i64" else "0"
                 o.extend(wrap_doc("    ", "!>", f"{summary} A zero-copy handle to row `i`. "
                                                 f"Repeats the column lookup on every call."))
                 o.append(f"    function {t}_{f.name}_at_{suffix}(self, i) result(h)")
@@ -1031,7 +1035,7 @@ def emit_accessors(schema, f):
                 o.append("        type(parquet_string_column), pointer :: p")
                 o.append("        !")
                 o.append(f'        call self%col("{f.name}", p)')
-                o.append("        allocate(h(max(hi - lo + 1, 0)))")
+                o.append(f"        allocate(h(max(hi - lo + 1, {zero})))")
                 o.append("        call p%view_slice(lo, hi, h)")
                 o.append(f"    end function {t}_{f.name}_rng_{suffix}")
                 o.append("    !")

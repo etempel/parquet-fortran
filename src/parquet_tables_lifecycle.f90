@@ -647,7 +647,7 @@ contains
             ! Growth doubles rather than adding one, so a long add_column loop is not quadratic.
             ! This DOES relocate every descriptor, which is why it -- and only it -- bumps the
             ! generation below.
-            allocate(bigger(max(2 * size(cache%cols, kind=int64), n + 1)))
+            allocate(bigger(max(2 * size(cache%cols, kind=int64), int(n, int64) + 1_int64)))
             ! Moved, not assigned: an intrinsic array assignment here would deep-copy every
             ! column's storage into the new array and then free the old one, so growing the slot
             ! array would cost a full copy of everything the table holds.

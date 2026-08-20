@@ -4237,6 +4237,9 @@ contains
         integer :: rc
 
         rc = int(c_setenv(name // char(0), value // char(0), int(1, kind=c_int)))
+        ! Checked rather than discarded: a failed setenv leaves the old value in place, and the
+        ! scenario would then exercise an environment nobody set.
+        if (rc /= 0) error stop "set_env: setenv failed for '" // name // "'"
     end subroutine scenario_setenv
 
     !> An unknown token. The abort must name the VARIABLE, not just the setter -- a config-style

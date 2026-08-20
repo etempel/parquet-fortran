@@ -3087,6 +3087,46 @@ a particular implementation does not need), account for most of the ~320 "Unused
 ~70 "Unused local variable" warnings, so those are likewise not a to-do list. Re-derive the count
 rather than trusting this figure.
 
+**Its other diagnostic classes need the same triage, and four of them are correct-by-design here.**
+`fpm.toml`'s `nagfor` feature turns on `-info` and several `-Warn=` categories, so a NAG run also
+reports `Extension(NAG)`, `Questionable` and `Note` lines. Fixing these four would make the code
+worse, so recognise them rather than acting on them:
+
+- **`Last statement of DO loop body is an unconditional RETURN/EXIT/ERROR STOP`** — this is the
+  `cycle`-guard search idiom, `do i = ...; if (no match) cycle; <act>; return; end do`, which this
+  project uses everywhere a list is scanned for one entry. NAG reads only the body's textual last
+  statement and cannot see that the `cycle` above it is what makes the loop a loop. Twelve sites,
+  all of that shape. Restructuring one to satisfy the diagnostic is how you turn a working search
+  into a first-element-only search.
+- **`Expression in OpenMP IF clause is always .FALSE.`** — `!$omp parallel if(.false.)` is
+  deliberate in `test/test_sorting.f90`: it opens an **inactive** region, the only way to reach the
+  state where `omp_get_level()` is 1 while `omp_in_parallel()` is `.false.`, which is exactly what
+  `pf_sort_threads` has to resolve to 1 for (`feature_risks.md` Risk-104).
+- **`CONTINUE statement with no label`** (and its "did you mean CYCLE?" variant) — a bare `continue`
+  is this project's spelling for a deliberately empty branch, including the `case (PK_STRING, ...)`
+  arm whose whole job is to stop the string kinds reaching `case default`'s `error stop`.
+- **`Non-standard intrinsic module OMP_LIB`** — inherent to using OpenMP from Fortran at all; the
+  standard does not define `omp_lib`, OpenMP does. Twenty-three sites and nothing to do about any of
+  them.
+
+**`Questionable: Variable X set but never referenced` is worth reading every time, though — it
+splits three ways.** Some are genuine dead stores and should go. Some are unavoidable: Fortran has
+no way to call a function and discard the result, so a scenario whose whole point is that
+`parquet_column_exists(...)` aborts must still assign it somewhere. And some are a **missing
+assertion** — which is the reason to read the list rather than skim it. `test_no_stats_declines`
+(`test/test_filter_screen.f90`) captured `parquet_debug_get_row_groups_pruned()` from its
+prescreen-disabled arm and never checked it, which is precisely the half
+[the statistics screen's own rule](#the-row-group-statistics-screen-every-uncertainty-must-decline)
+says an A/B equality is not evidence without. Likewise a discarded `setenv` return code means every
+assertion after it is made against an environment nobody set.
+
+**A NAG run needs `--verbose`, its own build tree, and `-openmp` if it is to mean anything about the
+threaded code.** `fpm test --verbose --flag "-colour -w=unused -openmp"` with `FPM_BUILD_DIR` set
+somewhere under `test_run/` gets all three; `-w=unused` clears the noise this section's first half
+is about so the rest is readable. Note the `-openmp` there is what takes the suite from
+1768 passed / 15 skipped to **1783 passed / 0 skipped** — without it every threading test skips and
+a green NAG run says nothing at all about the parallel paths.
+
 ### Arrow's own type singletons have thread-unsafe lazy state on first concurrent use
 
 Every no-argument `arrow::<type>()` factory (`arrow::int32()`, `arrow::utf8()`, `arrow::boolean()`,

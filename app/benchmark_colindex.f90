@@ -1042,7 +1042,7 @@ contains
         real(real64), allocatable :: raw(:), vrow(:), v2(:,:)
         real(real64) :: t0, dt, best, acc, v, a, b, cc, d
         real(real64) :: ns_name, ns_hand, ns_refetch, ns_getat, ns_mkname, ns_mkpos
-        real(real64) :: ns_index, ns_valid, ns_lname, ns_lhand, ns_vrow, ns_velem
+        real(real64) :: ns_lname, ns_lhand, ns_vrow, ns_velem
         integer(int64) :: i, k
         integer :: r, kk, pos(4), jslot, e
 
@@ -1181,7 +1181,6 @@ contains
             dt = now() - t0
             if (dt < best) best = dt
         end do
-        ns_index = ns_per(best, naccess)
         call emit("G c%index()  [col_resolve+load]", best, naccess, acc)
 
         best = huge(1.0_real64)
@@ -1194,7 +1193,6 @@ contains
             dt = now() - t0
             if (dt < best) best = dt
         end do
-        ns_valid = ns_per(best, naccess)
         call emit("H c%is_valid()", best, naccess, acc)
 
         ! --- I/J: the 4-column loop, both ways --------------------------------------------------

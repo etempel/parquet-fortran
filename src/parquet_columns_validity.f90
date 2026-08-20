@@ -376,7 +376,7 @@ contains
     !! composes with a mask describing only part of what the caller knows and never resurrects a
     !! value that was already null.
     module procedure set_validity_elems
-        integer(int64) :: i, e, n, w, base, k, blk, cur, word
+        integer(int64) :: i, e, n, w, k, blk, cur, word
         logical :: any_false
         !
         n = self%nrows
@@ -440,7 +440,6 @@ contains
                 ! reached by a flat element index, so this keeps the existing per-element route
                 ! minus the dispatch.
                 do i = 1_int64, n
-                    base = (i - 1_int64)*w
                     do e = 1_int64, w
                         if (.not. valid(e, i)) call self%set_null(i, e)
                     end do

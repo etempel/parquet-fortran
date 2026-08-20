@@ -600,7 +600,7 @@ contains
         type(parquet_string_column), pointer :: p
         !
         call self%col("name", p)
-        allocate(h(max(hi - lo + 1, 0)))
+        allocate(h(max(hi - lo + 1, 0_int64)))
         call p%view_slice(lo, hi, h)
     end function parquet_table_test_name_rng_i64
     !

@@ -37,7 +37,7 @@ library = false
 test = false
 
 [features]
-nagfor.flags = "-openmp -f2018 -nan -colour -info -Warn=reallocation -Warn=allocation -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal -thread_safe"
+nagfor.flags = "-openmp -f2018 -nan -colour -info -w=unused -Warn=reallocation -Warn=allocation -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal -thread_safe"
 
 nagdeb.flags = "-C=all -g -gline"
 

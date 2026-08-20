@@ -819,6 +819,10 @@ contains
         call check(error, all(screened == plain), "no statistics: pruned and unpruned values must agree")
         if (allocated(error)) return
         call check(error, pruned == 0_int64, "no statistics: nothing may be pruned")
+        if (allocated(error)) return
+        call check(error, pruned_off == 0_int64, &
+            "no statistics: the prescreen-disabled arm must prune nothing either, which is what " // &
+            "makes the equality above evidence about the screen rather than about the fixture")
     end subroutine test_no_stats_declines
     !
     !> parquet-cpp does not truncate an over-long min/max -- it DROPS it (see

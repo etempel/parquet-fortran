@@ -868,6 +868,9 @@ contains
         integer :: rc
 
         rc = int(c_setenv(name // c_null_char, value // c_null_char, 1_c_int))
+        ! Checked rather than discarded: a failed setenv leaves the old value in place, so every
+        ! assertion downstream would be made against an environment nobody set.
+        if (rc /= 0) error stop "set_env: setenv failed for '" // name // "'"
     end subroutine set_env
 
     !> Removes an environment variable.
@@ -883,6 +886,7 @@ contains
         integer :: rc
 
         rc = int(c_unsetenv(name // c_null_char))
+        if (rc /= 0) error stop "unset_env: unsetenv failed for '" // name // "'"
     end subroutine unset_env
 
     !> All three thread counts must move, and each is read back through its OWN getter -- a
@@ -1546,7 +1550,6 @@ contains
         character(len=*), parameter :: loud_file = "test_run/settings_normal_schema_info.txt"
         logical :: quiet_exists, loud_exists
         integer :: u, ios, nlines
-        character(len=256) :: line
 
         call parquet_reset_settings()
         call schema%init(table="silent_probe")
@@ -1572,7 +1575,7 @@ contains
         nlines = 0
         open(newunit=u, file=loud_file, status="old", action="read")
         do
-            read(u, '(a)', iostat=ios) line
+            read(u, '(a)', iostat=ios)      ! no item: the count is all this loop wants
             if (ios /= 0) exit
             nlines = nlines + 1
         end do

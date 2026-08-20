@@ -161,7 +161,7 @@ end module playground_helpers
 program playground
     use parquet
     use playground_helpers
-    use iso_fortran_env, only : real64
+    use iso_fortran_env, only : int64, real64
     implicit none
     !
     !call test_vector_column() is a playground for testing the conversions
@@ -176,7 +176,10 @@ contains
         integer, parameter :: ncycles = 100000000
         integer, parameter :: nlen = 100000
         real(real64), dimension(:), allocatable :: arr
-        integer :: i, cstart, cend, cr
+        integer :: i
+        ! int64, per SYSTEM_CLOCK's own recommendation: a default-integer count and rate
+        ! can wrap mid-measurement and turn a timing negative.
+        integer(int64) :: cstart, cend, cr
         real(real64) :: tstart, tend
         !
         allocate(arr(nlen))

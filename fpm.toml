@@ -39,9 +39,9 @@ test = false
 [features]
 
 # standard
-nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal"
+nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal"
 # standard + -thread_safe + extended warnings
-#nagfor.flags = "-openmp -f2018 -nan -colour -info -w=unused -Warn=allocation -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal -thread_safe"
+#nagfor.flags = "-f2018 -nan -colour -info -w=unused -Warn=allocation -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal -thread_safe"
 
 # Paranoid debugging build: every -C= check nagfor 7.2 can actually run against this project.
 #
@@ -49,10 +49,11 @@ nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal 
 #
 #   -C=intovf    Correct behaviour, not a defect: it is nagfor's -ftrapv, and it traps the two
 #                deliberate wrapping multiplies src/parquet_random.f90 documents as "UB site 1 of 2".
-#   -C=undefined FOUR independent nagfor 7.2 defects, none of them a finding about this code.
-#                Three were compile-time and are FIXED here, so the project now BUILDS cleanly
-#                under -C=undefined; the fourth is a runtime miscompilation and is why the option
-#                is still excluded. Each was revealed only once the one in front of it was cleared.
+#   -C=undefined THREE nagfor 7.2 defects plus ONE documented limitation, none a finding about
+#                this code. The three defects were compile-time and are FIXED here, so the project
+#                now BUILDS cleanly under -C=undefined; the limitation is a runtime miscompilation
+#                of every bind(C) call and is why the option is still excluded. Each was revealed
+#                only once the one in front of it was cleared.
 #                (a) `Panic: Cannot find scope id 0` -- an ICE, triggered by compiling ANY submodule
 #                    of a separately compiled module that declares a FINAL binding bound to a
 #                    SEPARATE MODULE PROCEDURE. Fixed by keeping every FINAL target
@@ -67,12 +68,32 @@ nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal 
 #                    argument (`assigning to 'Char *' from '__NAGf90_ChDope1'`). Fixed in
 #                    test/test_table_codegen.f90 by binding each accessor form to a local pointer
 #                    first, which is what every other column in that file already did.
-#                (d) NOT FIXED, and not fixable here: the writer's compression codec arrives at the
-#                    C++ side as garbage bytes, aborting the first test that writes a file. The
-#                    Fortran side validates that same string against its whitelist two statements
-#                    above the ONE call site, so the value is correct on entry to the call and
-#                    wrong on arrival -- a miscompilation of the argument passing, not an undefined
-#                    read. Not reducible to a standalone reproducer so far.
+#                (d) NOT FIXABLE, and DOCUMENTED: the nagfor manual says -C=undefined "is not
+#                    compatible with calling C code via a BIND(C) interface" and that "the whole
+#                    program must be Fortran code and compiled the same way" -- but the violation
+#                    is accepted with NO diagnostic: nagfor miscompiles every bind(C) call,
+#                    inserting a spurious extra argument after the first. A 20-line
+#                    reproducer with a plain-Fortran control in the same program prints
+#                    "a=11 b=0 c=22" for the bind(C) call and "a=11 b=22 c=33" for the control.
+#                    `nagfor -S` shows why: NAG interleaves a definedness-map pointer after every
+#                    argument and appends a hidden length per map -- its -C=undefined
+#                    instrumentation ABI -- into a call whose callee has the plain C signature.
+#                    Independent of the C/C++ compiler used for the other half (measured across
+#                    Apple clang, gcc-mp-15 and clang-mp-22, as C and as C++).
+#                    Only argument 1 survives, so a handle still arrives and the failure looks
+#                    like corrupted data rather than a broken call. This one defect explains both
+#                    runtime symptoms seen here: the writer's compression codec arriving as
+#                    garbage, and error scenario extended_qc_range_violation_warns appearing to
+#                    hang (parquet_reader_set_qc's rule count `n` arrives as a ~4.4e9 pointer
+#                    value, so its loop runs billions of iterations). This library reaches Arrow
+#                    only across bind(C), so there is no workaround and -C=undefined stays out for
+#                    as long as this stands: per-file exclusion is impossible (the option is
+#                    stamped into every .mod; a mismatched `use` is a fatal error both ways), and
+#                    an augmented-ABI C shim was investigated and rejected -- see CLAUDE.md's NAG
+#                    section. The all-Fortran suites DO run under it, and pass:
+#                    fpm test run_tester --flag "-C=undefined" -- random    (likewise random_perm
+#                    and random_weighted). Standalone report, with the generated C
+#                    and the compiler matrix: feature_nag_bindc_undefined.md.
 #                Note -C=all does NOT imply -C=undefined, so the nagdeb set below is unaffected.
 #
 # Both are written up in feature_nag_runtime_checks.md. Full suite under the set below:
@@ -88,9 +109,12 @@ nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal 
 #nagdeb.flags = "-C=all -g"
 nagdeb.flags = "-C=alias -C=array -C=bits -C=calls -C=dangling -C=do -C=present -C=pointer -C=recursion -g"
 
+nagundefined.flags = "-C=undefined"
+
 [profiles]
 nag = ["nagfor"]
 nagdeb = ["nagfor", "nagdeb"]
+nagundef = ["nagfor", "nagdeb", "nagundefined"]
 
 [preprocess]
 [preprocess.cpp]

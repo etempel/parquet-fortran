@@ -1042,21 +1042,40 @@ repeated option, where gfortran silently tolerates the equally-doubled `-fopenmp
 external libraries as `-Wl,arrow` instead of `-larrow` (nagfor's `-Wl,` forwards the bare word to
 the host C compiler, which reads it as an input filename), and passes the gcc-style macOS
 `-Wl,-headerpad,0x200`, which clang rejects when it arrives via nagfor. The shim rewrites those
-three shapes and execs the real `nagfor` found further along `PATH`; being named `nagfor` keeps
-fpm's compiler identification unaffected. To use it, prepend the directory to `PATH` in whatever
+three shapes, adds the compile-side `-openmp` described below, and execs the real `nagfor` found
+further along `PATH`; being named `nagfor` keeps fpm's compiler identification unaffected. To use it, prepend the directory to `PATH` in whatever
 script activates the NAG environment:
 
 ```bash
 export PATH="/path/to/parquet-fortran/tools/nagfor_fpm_shim:$PATH"
 ```
 
-Note a NAG build is **serial** regardless: fpm's compile-side OpenMP probe fails under NAG
-(fpm hands nagfor `-fPIC`, whose NAG spelling is `-PIC`), so no `-openmp` reaches any compile and
-every `#ifdef _OPENMP` block compiles out — the same situation as a flang build (see CLAUDE.md's
-machine notes). The shim deliberately does not translate `-fPIC`: that would flip fpm's probe to
-passing and silently turn every NAG build into an untested threaded one. The shim's header
-comment carries the full defect list; the defects were reported upstream to fortran-lang/fpm on
-2026-08-19, and fpm PR #1312 tracks the headerpad half. Remove the shim once fpm's NAG link-line
+The shim also **supplies `-openmp` itself**, which is what makes a NAG build threaded. fpm cannot:
+its compile-side OpenMP probe fails under NAG (fpm hands nagfor `-fPIC`, whose NAG spelling is
+`-PIC`), so fpm puts the flag on the link line only and every `#ifdef _OPENMP` block would
+otherwise compile out, leaving a serial build like a flang one. The difference is measurable and
+worth knowing: a full `fpm test` reports **1783 passed / 0 skipped** with the flag and
+**1768 / 15** without, those 15 being tests that assert threading and correctly skip when no team
+can be opened — so a serial run tells you nothing about the parallel paths.
+
+`NAGFOR_OMP=0` opts out, for a deliberately serial NAG build (the configuration that exercises the
+`#ifndef _OPENMP` arms and proves those skip guards really skip). It is a master switch rather than
+a "do not add" flag: at `0` the shim also strips an `-openmp` that fpm or anything else passed, so
+it cannot be silently overridden by a profile or a `--flag` supplying the option. Unset, or any
+value other than `0`, means on.
+
+**`fpm --verbose` will not show the flag, and that is expected** — it prints the command line fpm
+constructs and then hands to `nagfor`, whereas the shim rewrites that command afterwards (this
+addition, the `-Wl,` fixes and the deduplication alike) before exec'ing the real compiler. So none
+of the shim's work is visible in fpm's output by construction. To confirm the build really is
+threaded, run something that asserts threading rather than reading flags: the `string_parallel`
+suite reports 9 passed / 0 skipped when it is, and 1 / 8 under `NAGFOR_OMP=0`.
+
+The shim still deliberately does **not** translate `-fPIC` to `-PIC`. Flipping fpm's probe that way
+would make fpm add its own compile-side `-openmp` on top of the shim's, i.e. a second mechanism for
+one flag — and that doubling is exactly what the shim already has to clean up on the link line.
+The shim's header comment carries the full defect list; the three link-line defects were reported
+upstream to fortran-lang/fpm on 2026-08-19, and fpm PR #1312 tracks the headerpad half. Remove the shim once fpm's NAG link-line
 construction is fixed upstream. Maintainer-only (stripped from the fpm-published package, see
 `tools/prep_fpm_publish.sh`).
 

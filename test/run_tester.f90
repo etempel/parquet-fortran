@@ -104,13 +104,14 @@ program tester
     ! prime_error_scenarios in test_errors.f90 for what this buys and why it is safe here and
     ! nowhere else (exactly one fork, with no OpenMP team active).
     !
-    ! Two gates, and both exist to keep an interactive single-test run fast rather than to
-    ! protect correctness -- priming is a pure optimisation, and a suite that is not primed
-    ! simply spawns its scenarios on demand exactly as it always did:
+    ! Two gates, and both exist to keep a targeted run fast rather than to protect correctness --
+    ! priming is a pure optimisation, and a suite that is not primed simply spawns its scenarios
+    ! on demand exactly as it always did:
     !   * a named single test never primes, since it would pay for ~690 scenarios to run one;
-    !   * a named suite primes only if it actually drives scenarios.
-    ! suite_drives_error_scenarios is therefore allowed to go stale in the safe direction: a
-    ! missing name costs that suite its speedup, nothing more.
+    !   * a named suite primes only if it consumes essentially the whole set, i.e. only "errors".
+    ! Priming is all-or-nothing, so anything narrower than that is a bad trade -- see
+    ! suite_drives_error_scenarios. Both gates are therefore allowed to go stale in the safe
+    ! direction: a missing name costs that suite its speedup, nothing more.
     if (.not. allocated(test_name)) then
         if (.not. allocated(suite_name)) then
             call prime_error_scenarios()
@@ -318,13 +319,17 @@ contains
     end function suite_is_safe_to_parallelize
 
     !> Whether running just this suite is worth pre-running the whole scenario set for. Purely a
-    !> cost question -- see the gate at the top of this program. Note the overlap with the four
-    !> subprocess-driving suites excluded above is not exact: "reading" drives four scenarios of
-    !> its own while still running its tests concurrently, so it belongs here but not there.
+    !> cost question -- see the gate at the top of this program.
+    !!
+    !! **Only "errors" qualifies, because priming is all-or-nothing.** It runs every scenario in
+    !! `tools/run_error_scenarios.sh`'s array (~690 of them), so it pays off only for the suite
+    !! that goes on to consume essentially all of them. Several other suites do drive scenarios --
+    !! "writing", "metadata", "maml" and "reading" each drive a few dozen at most -- and for those
+    !! the trade is backwards: ~690 subprocesses to save a few dozen. They spawn theirs on demand
+    !! instead, which is what a targeted `fpm test run_tester -- <suite>` should do.
     logical function suite_drives_error_scenarios(name) result(drives)
         character(len=*), intent(in) :: name
-        drives = (name == "writing" .or. name == "errors" .or. name == "metadata" &
-            .or. name == "maml" .or. name == "reading")
+        drives = (name == "errors")
     end function suite_drives_error_scenarios
 
 end program tester

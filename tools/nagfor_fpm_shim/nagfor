@@ -1,9 +1,10 @@
 #!/bin/bash
 # nagfor shim for building this project with fpm + NAG (FPM_FC=nagfor).
 #
-# fpm 0.13's NAG support mis-builds the link line in three independent ways
-# (verified against fpm 0.13.0 alpha; reported upstream to fortran-lang/fpm
-# on 2026-08-19):
+# fpm 0.13's NAG support needs four independent fixes to build this project
+# -- three on the link line, one on the compile line (verified against fpm
+# 0.13.0 alpha; the three link-line ones reported upstream to
+# fortran-lang/fpm on 2026-08-19):
 #
 #   1. The `openmp = "*"` metapackage's link flag is appended to the build
 #      model TWICE -- fpm's build_model resolves metapackages once before and
@@ -32,14 +33,36 @@
 # found further along PATH. Remove the PATH line once fpm's link-line
 # construction is fixed upstream.
 #
-# Known and deliberately NOT worked around: fpm's compile-side OpenMP probe
-# fails under NAG (fpm hands nagfor `-fPIC`, which NAG rejects -- its
-# spelling is `-PIC`), so no `-openmp` reaches any compile and a NAG build of
-# this project is SERIAL: every `#ifdef _OPENMP` block compiles out, the same
-# situation as the flang build documented in CLAUDE.md. Translating -fPIC to
-# -PIC here would flip that probe to passing and silently turn every NAG
-# build into an untested threaded one -- if a threaded NAG build is ever
-# wanted, do that deliberately, not via this shim.
+# 4. fpm's compile-side OpenMP probe fails under NAG (fpm hands nagfor
+#    `-fPIC`, which NAG rejects -- its spelling is `-PIC`), so fpm puts
+#    `-openmp` on the LINK line only and never on a compile line. Left alone
+#    that makes every NAG build SERIAL -- each `#ifdef _OPENMP` block compiles
+#    out, 15 threading tests skip, and a green NAG run says nothing at all
+#    about the parallel paths (1768 passed / 15 skipped, against 1783 / 0
+#    with the flag). So this shim SUPPLIES `-openmp` itself: every invocation
+#    gets exactly one, added when absent and deduplicated when fpm's doubled
+#    link flag or a profile already provides it.
+#
+#    The -fPIC probe is deliberately still NOT translated to -PIC. Flipping it
+#    would make fpm add its own compile-side `-openmp` on top of this one --
+#    two mechanisms for one flag, and the doubling is exactly what item 1
+#    above already has to clean up. Supplying it here keeps it to one place
+#    that can be read and turned off.
+#
+#    NAGFOR_OMP controls it: unset or 1 (the default) supplies the flag, 0
+#    opts out for a deliberately serial NAG build -- and 0 also STRIPS an
+#    -openmp that fpm or anything else passed, rather than merely declining to
+#    add one, so it cannot be silently overridden by a profile or a --flag
+#    that supplies the option. (fpm.toml's nagfor.flags no longer carries one:
+#    it became redundant once this shim supplied it. The stripping is what
+#    keeps the switch honest if it ever comes back.) That serial build is a
+#    real configuration and worth keeping reachable: it is what exercises
+#    this project's `#ifndef _OPENMP` arms and proves its skip guards
+#    actually skip (see CLAUDE.md, "A test that asserts THREADING must skip
+#    without OpenMP") -- a guard that fires unconditionally passes every test
+#    ever written for it. Measured 2026-08-20 with a bare `fpm test` under
+#    FPM_FC=nagfor and no profile flags: 1783 passed / 0 skipped by default,
+#    1768 / 15 under NAGFOR_OMP=0.
 
 # Resolve the real nagfor: first PATH entry whose nagfor is not this script.
 real_nagfor=""
@@ -61,11 +84,19 @@ if [ -z "$real_nagfor" ]; then
     exit 127
 fi
 
+# NAGFOR_OMP is a master switch, not merely a "do not add" flag: at 0 it also
+# drops an -openmp that fpm or a profile supplied, since all three NAG
+# profiles in fpm.toml carry one and an opt-out that they silently override
+# would be worse than none -- it would report a serial arm that never ran.
+omp_off=0
+[ "${NAGFOR_OMP:-1}" = "0" ] && omp_off=1
+
 args=()
 seen_openmp=0
 for a in "$@"; do
     case "$a" in
         -openmp)
+            [ "$omp_off" = "1" ] && continue
             [ "$seen_openmp" = "1" ] && continue
             seen_openmp=1
             ;;
@@ -79,5 +110,12 @@ for a in "$@"; do
     esac
     args+=("$a")
 done
+
+# Supply -openmp when nothing else did (item 4 above). fpm cannot: its
+# compile-side probe fails on -fPIC, so it only ever puts the flag on the
+# link line. NAGFOR_OMP=0 opts out; unset or anything else means on.
+if [ "$seen_openmp" = "0" ] && [ "$omp_off" = "0" ]; then
+    args+=("-openmp")
+fi
 
 exec "$real_nagfor" "${args[@]}"

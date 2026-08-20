@@ -3051,11 +3051,17 @@ FPM_BUILD_DIR=test_run/nag-warnsurvey fpm build --verbose 2>&1 | grep '^Warning:
   submodule spec above them imports on the whole subtree's behalf. `parquet_tables.f90` and
   `parquet_sorting.f90` are entirely in this class — every name their specs import is for a
   descendant, so NAG flags nearly the whole list.
-- **A name used only inside `#ifdef _OPENMP`.** A NAG build of this project is **serial** — fpm's
-  compile-side OpenMP probe fails under NAG and no `-openmp` reaches any compile
-  (`tools/nagfor_fpm_shim/nagfor` explains why, and why the shim deliberately does not fix it) — so
-  every OpenMP-only import, local and dummy reads as unused. Deleting one breaks every OpenMP build
-  and **nothing in a NAG run will say so**, because in a NAG run it really is unused.
+- **A name used only inside `#ifdef _OPENMP`** — a class that **only appears in a SERIAL NAG
+  build**, and is therefore mostly historical. fpm's compile-side OpenMP probe fails under NAG
+  (it hands nagfor `-fPIC`, whose NAG spelling is `-PIC`), so fpm puts `-openmp` on the link line
+  only; `tools/nagfor_fpm_shim/nagfor` supplies it on every invocation to compensate, so a NAG
+  build made through the shim compiles the `#ifdef _OPENMP` arms and does not flag their names at
+  all. It comes back the moment the build is serial again — under the shim's
+  `NAGFOR_OMP=0` opt-out, or without the shim on `PATH` — and there the trap is sharp:
+  every OpenMP-only import, local and dummy reads as unused, deleting one breaks every OpenMP build,
+  and **nothing in that NAG run will say so**, because in that run it really is unused. **The
+  survey figures below were taken serially and predate this**, so re-derive rather than trusting
+  their split.
 
 **So the decision rule is three conditions, not one.** Remove a flagged name from a scope only when
 (1) NAG flags it, **and** (2) it is absent from that file's own code with comments *and string
@@ -3171,11 +3177,12 @@ timeout.
   `src/parquet_random.f90` that
   [`-ftrapv` does](#compiler--language-gotchas) — the sites the source itself labels "UB site 1 of
   2". Excluded for that documented reason, not because of a defect.
-- **`-C=undefined` carries FOUR independent nagfor 7.2 defects**, none a finding about this code,
-  and each is revealed only when the one in front of it is cleared — so a clean-looking result
-  under it means nothing until the whole build *and* the whole suite pass. **Three are compile-time
-  and are fixed here**, so the project now builds cleanly under it; **the fourth is a runtime
-  miscompilation**, and is why the option is still excluded from `nagdeb`.
+- **`-C=undefined` carries THREE independent nagfor 7.2 defects plus ONE documented limitation**,
+  none a finding about this code, and each is revealed only when the one in front of it is cleared
+  — so a clean-looking result under it means nothing until the whole build *and* the whole suite
+  pass. **The three defects are compile-time and are fixed here**, so the project now builds
+  cleanly under it; **the limitation is a runtime miscompilation of every `bind(C)` call**, and is
+  why the option is still excluded from `nagdeb`.
   **(a)** `Panic: Cannot find scope id 0`, an ICE that fires when compiling **any submodule of a
   separately compiled module that declares a `FINAL` binding bound to a SEPARATE MODULE
   PROCEDURE**. An *empty* submodule is enough; 15 lines in two files reproduce it
@@ -3201,12 +3208,64 @@ timeout.
   `test/test_table_codegen.f90` by binding each accessor form to a local pointer before the call,
   which is what every other column in that file already did. Allocatable and explicit-shape
   function results are unaffected.
-  **(d)** **Not fixed, and not a source defect.** The writer's compression codec reaches the C++
-  side as garbage bytes, aborting the first test that writes a file. The Fortran side validates
-  that same string against its whitelist **two statements above the single call site**, so it is
-  correct on entry and wrong on arrival — argument passing, not an undefined read. No standalone
-  reproducer yet: the obvious synthetics (a fixed-length string, a deferred-length allocatable,
-  both through `trim(x)//char(0)` into a `character(kind=c_char) :: s(*)` `bind(C)` dummy) all pass.
+  **(d)** **Not fixed, not fixable — and, unlike (a)-(c), DOCUMENTED: nagfor miscompiles EVERY
+  `bind(C)` call under `-C=undefined`, inserting a spurious extra argument after the first, and
+  the manual says it will** — "`-C=undefined` … is not compatible with calling C code via a
+  BIND(C) interface"; "the whole program must be Fortran code and compiled the same way"
+  (`man nagfor`, found only AFTER the full diagnosis — read an option's own manual section before
+  diagnosing its behaviour). What stays report-worthy is that the violation is SILENTLY ACCEPTED —
+  no diagnostic at compile or run time — while the module-level half of the same restriction is a
+  fatal compile error ("Incompatible option setting for module M (was not compiled with the
+  -C=undefined option)"). Twenty lines reproduce it,
+  with a plain-Fortran control in the same program: the `bind(C)` call prints `a=11 b=0 c=22` where
+  the control prints `a=11 b=22 c=33`. **`nagfor -S` emits the generated C and shows the cause
+  outright**: NAG interleaves a definedness-map pointer after *every* argument and appends a hidden
+  length per map — its `-C=undefined` instrumentation ABI — into a `bind(C)` call whose callee has
+  the plain C signature, so `three(11L, 22L, 33L)` becomes
+  `three(11L, (Char *)0, 22L, (Char *)0, 33L, (Char *)0, 1, 1, 1)`. Every argument shape behaves the
+  same (assumed-size, explicit-shape, by-reference scalar, all-`value`), and **only argument 1
+  survives** — which is why the symptoms look like data corruption rather than a broken call: a
+  handle still arrives. **The C/C++ side is irrelevant**, measured across six callee compilers
+  (Apple clang 21, `gcc-mp-15`, `clang-mp-22` as C; Apple clang++, `g++-mp-15`, `clang++-mp-22` as
+  C++), all identical, and across nagfor's own `-Wc=` back-end too. Standalone report:
+  `feature_nag_bindc_undefined.md`.
+  **One cause, both runtime symptoms**: the writer's compression codec reaching C++ as garbage,
+  and `extended_qc_range_violation_warns` appearing to hang — it is not hung, its rule count `n`
+  arrives as a ~4.4e9 pointer value and the C++ loop runs billions of iterations (a `sample(1)`
+  stack sits entirely in `std::vector<std::string>::push_back` under `struct_path_exists`; an lldb
+  probe at the callee's entry shows `name_len` as 0 where Fortran passed 64).
+
+  **No workaround exists, and the candidates were investigated to closure (2026-08-20)** — this
+  library reaches Arrow only across `bind(C)`. **Per-file exclusion** (compiling
+  `parquet_bindings.f90`, or any other subset, without the flag) is impossible: the option is
+  stamped into every `.mod`, a mismatched `use` is a fatal compile error in BOTH directions
+  ("Incompatible option setting for module ... (was not compiled with the -C=undefined option)"),
+  and the augmented call is generated at the CALL SITE anyway — the interfaces in
+  `parquet_bindings.f90` are only declarations — so the exclusion would have to spread over the
+  whole use-graph. **Teaching the C side the instrumented ABI** is mechanically possible and was
+  demonstrated (an augmented-signature callee — map pointer after every argument, trailing
+  lengths — receives every value correctly), and is rejected for three measured reasons: the
+  CALLEE is expected to maintain the per-byte definedness maps, so an `intent(out)` value written
+  by C still aborts as undefined on the Fortran side (the map wants an exact `'O'`/`'-'`
+  per-object byte pattern, visible in `nagfor -S` output); `type(c_ptr)` itself changes
+  representation to a two-field `{addr, map}` struct, reshaping every handle argument; and it
+  means generating ~200 shims against an undocumented, disclaimed, version-specific internal ABI
+  whose every mistake is exactly the silent corruption the option exists to catch. There is also
+  **no report-and-continue runtime mode** (`NAGFORTRAN_RUNTIME_OPTIONS` offers nothing for it), so
+  a partial run survives only until the first `bind(C)` call or deliberately-undefined byte.
+
+  **What DOES run under it: the all-Fortran suites.** With every Fortran file uniformly
+  instrumented the Fortran-to-Fortran ABI is consistent, and a suite whose runtime paths never
+  execute a `bind(C)` call runs genuinely: `fpm test run_tester --flag "-C=undefined" -- random`
+  passes completely, as do `random_perm` and `random_weighted` — a real undefined-variable check
+  over the random/sampling/expkey family, cheap to re-run, and it found nothing as of 2026-08-20.
+  Do not expect to widen it: `columns` aborts inside `ensure_capacity`
+  (`parquet_columns_mutate.f90`) on the value bytes of null rows, which are unspecified BY DESIGN
+  (`%init`'s documented contract) — the checker and the design disagree, and per "Coverage tooling
+  never drives design" the design wins — and `sorting` turns out to hide a file round-trip, dying
+  with the codec-mojibake signature. A bare `--flag` run applies no `nagfor`-feature flags, so
+  there is no `-openmp` and OpenMP-asserting tests skip; the flag pair itself is compatible
+  (tested standalone).
 
   **So `-C=undefined` is a build-clean, run-broken option here**, and `-C=all` does **not** imply
   it, so none of this touches the `nagdeb` set. The three fixes were kept because each is an
@@ -3274,12 +3333,31 @@ Get the real one from a backtrace (`lldb -b -o "breakpoint set -n __NAGf90_rtcra
 then `thread backtrace all`), or re-run with `OMP_NUM_THREADS=1`, which also stops the runtime
 error message being interleaved with another thread's output mid-line.
 
-**A NAG run needs `--verbose`, its own build tree, and `-openmp` if it is to mean anything about the
-threaded code.** `fpm test --verbose --flag "-colour -w=unused -openmp"` with `FPM_BUILD_DIR` set
-somewhere under `test_run/` gets all three; `-w=unused` clears the noise this section's first half
-is about so the rest is readable. Note the `-openmp` there is what takes the suite from
-1768 passed / 15 skipped to **1783 passed / 0 skipped** — without it every threading test skips and
-a green NAG run says nothing at all about the parallel paths.
+**A NAG run needs `--verbose` and its own build tree; `-openmp` it now gets by itself.**
+`fpm test --verbose --flag "-colour -w=unused"` with `FPM_BUILD_DIR` set somewhere under
+`test_run/` is the shape to use — `-w=unused` clears the noise this section's first half is about
+so the rest is readable. **`tools/nagfor_fpm_shim/nagfor` supplies `-openmp` on every invocation**
+(fpm cannot: its compile-side probe fails on `-fPIC`, so fpm only ever puts the flag on the link
+line), which is what takes the suite from 1768 passed / 15 skipped to **1783 passed / 0 skipped** —
+without it every threading test skips and a green NAG run says nothing at all about the parallel
+paths. Both figures are current, measured 2026-08-20 with `fpm test` under `FPM_FC=nagfor` and no
+profile flags at all: **1783/0 by default, and 1768/15 under `NAGFOR_OMP=0`**, which is
+the shim's opt-out and the only supported way to get a serial NAG build now (`NAGFOR_OMP=1` is the
+default and need not be set; only the literal value `0` opts out). **That opt-out is a master
+switch: at `0` the shim STRIPS an `-openmp` anything else passed, not merely declines to add one**,
+so it cannot be silently overridden by a profile or a `--flag` that supplies the option and then
+report a serial arm that never ran. Confirmed both ways on the `string_parallel` suite under
+`--profile nagdeb`: 9 passed / 0 skipped by default, 1 / 8 under `NAGFOR_OMP=0`. Passing `-openmp`
+yourself is harmless — the shim deduplicates it, as it must anyway for fpm's doubled link flag.
+
+**`fpm --verbose` does NOT show the flag, and never will — do not read that as it being absent.**
+fpm prints the command it constructs and then invokes `nagfor`, which on `PATH` is the shim; every
+rewrite the shim makes (this addition, the `-Wl,` fixes, the deduplication) happens *after* that
+print, so fpm's output shows fpm's intent rather than what the compiler received. `--show-model`
+has the same blind spot for the same reason. **Verify by behaviour, not by flags**: run
+`string_parallel` and read the skip count, or set `NAGFOR_OMP=0` and confirm the count moves. This
+is the same "a tool's silence is evidence about the tool" trap as the `machine_report.sh` one — a
+flag can be in force and invisible, exactly as a compiler can be installed and unreported.
 
 ### Arrow's own type singletons have thread-unsafe lazy state on first concurrent use
 
@@ -3987,7 +4065,15 @@ Four things to know before touching this area:
   from an earlier run can never be consumed as this run's result — a vacuous pass against a binary
   that no longer exists is the failure mode this design is shaped around.
 - **`PARQUET_TEST_NO_PRIME=1` turns priming off** (debug one scenario without 686 others running
-  first); `PARQUET_TEST_PRIME_JOBS=<n>` sets the concurrency. A named single test never primes.
+  first); `PARQUET_TEST_PRIME_JOBS=<n>` sets the concurrency.
+- **Only a full run and the `errors` suite prime; every other named suite, and any named single
+  test, does not.** Priming is all-or-nothing — it runs the whole ~690-scenario array — so it pays
+  off only where essentially all of it is consumed. `writing`, `metadata`, `maml` and `reading`
+  each drive a few dozen scenarios and spawn them on demand instead, which is what keeps
+  `fpm test run_tester -- <suite>` a targeted command rather than a near-full run. Do not widen
+  `suite_drives_error_scenarios` back to those four: the trade is ~690 subprocesses to save a few
+  dozen, and the behaviour reads as a bug from outside — a `maml` run looks like it is dragging in
+  the error suite, which is exactly how the previous, wider gate came to be narrowed.
 
 **A capability probe must RUN the command with the flags it will use, never ask whether the name
 exists.** Both scenario harnesses guard each scenario with `timeout -s KILL`, and both used to

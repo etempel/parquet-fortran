@@ -49,8 +49,18 @@ nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal 
 #
 #   -C=intovf    Correct behaviour, not a defect: it is nagfor's -ftrapv, and it traps the two
 #                deliberate wrapping multiplies src/parquet_random.f90 documents as "UB site 1 of 2".
-#   -C=undefined An internal compiler error (`Panic: Cannot find scope id 0`) on three source files,
-#                with nothing but `nagfor -c` involved.
+#   -C=undefined TWO independent nagfor 7.2 defects, neither of them a finding about this code.
+#                (a) `Panic: Cannot find scope id 0` -- an internal compiler error on
+#                    src/parquet_write.f90, src/parquet_metadata.f90 and src/parquet_tables.f90,
+#                    with nothing but `nagfor -c` involved.
+#                (b) nagfor emits invalid C for the implicit finalization of an ARRAY whose element
+#                    type has a FINALIZABLE COMPONENT: the generated pointer difference mixes the
+#                    element-struct pointer with `Char *`, and the host C compiler rejects it
+#                    ("are not pointers to compatible types"). test/test_parquet_string.f90's
+#                    `type(t_row) :: rows(3)` hits it, t_row holding a type(parquet_string) whose
+#                    finalizer nullifies the handle. NOT the same bug as (a), and it is hit FIRST,
+#                    so `fpm test --flag "-C=undefined"` dies in test/ before src/ is even reached.
+#                Note -C=all does NOT imply -C=undefined, so the nagdeb set below is unaffected.
 #
 # Both are written up in feature_nag_runtime_checks.md. Full suite under the set below:
 # 1783 passed, 0 failed, zero crashes, zero hangs.

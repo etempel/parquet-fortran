@@ -280,7 +280,24 @@ module parquet_strings
         procedure :: startswith => psv_startswith   !! Prefix test.
         procedure :: endswith => psv_endswith       !! Suffix test.
         procedure :: print => psv_print             !! Human-readable representation.
-        final :: finalize_handle                    !! Nullify the reference (never frees the column).
+        !
+        ! THIS TYPE DELIBERATELY HAS NO `final` PROCEDURE, and one must not be added for symmetry
+        ! with parquet_string_column above -- that one owns buffers and genuinely needs to free
+        ! them, whereas this is a NON-OWNING handle: a borrowed pointer and an index. It once
+        ! carried `final :: finalize_handle`, whose entire body was `self%col => null()`; that is
+        ! unobservable on every path finalization can occur (the object is either ceasing to exist
+        ! or being wholly overwritten, and Fortran never auto-deallocates a pointer component, so
+        ! there was nothing to release and no dangling reference the caller could still reach).
+        !
+        ! Three things depend on the absence, so weigh them before reintroducing one:
+        !   * nagfor 7.2 emits INVALID C under -C=undefined when finalizing an ARRAY whose element
+        !     type has a finalizable COMPONENT -- so `type(t_row) :: rows(3)` holding one of these
+        !     would not compile. See fpm.toml's nagdeb comment for the reproducer.
+        !   * a finalizable type may not go in an OpenMP `private()` clause under gfortran (CLAUDE.md
+        !     has the rule); handles staying non-finalizable is what keeps them usable there, which
+        !     is the same reason parquet_table_row and parquet_table_col have no finalizer either.
+        !   * intrinsic assignment to or from a finalizable type runs the finalizer twice per
+        !     iteration, so `h = col%view(i)` in a user loop would pay for it on every element.
     end type parquet_string
     !
 contains
@@ -3512,9 +3529,4 @@ contains
     end subroutine psv_print
     !
     !> Finalizer -- nullifies the reference. Never deallocates the referenced column (non-owning).
-    subroutine finalize_handle(self)
-        type(parquet_string), intent(inout) :: self !! the handle being finalized.
-        self%col => null()
-    end subroutine finalize_handle
-    !
 end module parquet_strings

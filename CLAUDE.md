@@ -2460,9 +2460,12 @@ applied to the harness instead of the source.
   This applies to every finalizable type this library exposes (`parquet_table`, `parquet_reader`,
   `parquet_writer`), and to any future one — so a per-thread instance of any of them belongs in a
   `block`, and any example or guide page showing `private(<that type>)` is wrong and should be
-  corrected on sight. **The two table HANDLES are deliberately not in that list**: neither
-  `parquet_table_row` nor `parquet_table_col` has a finalizer, which is what keeps them usable in a
-  `private()` clause — so removing a finalizer is one way to take a type *out* of this rule, and
+  corrected on sight. **The HANDLE types are deliberately not in that list**: none of
+  `parquet_table_row`, `parquet_table_col` and `parquet_string` has a finalizer, which is what keeps
+  them usable in a `private()` clause — so removing a finalizer is one way to take a type *out* of
+  this rule, and `parquet_string` is the worked example of doing exactly that, since a non-owning
+  handle's finalizer frees nothing and is unobservable on every path (see its own type body for the
+  full reasoning, and do not restore it), and
   adding one to either handle would put it back in.
 - **ifx forbids the `block` form the previous bullet prescribes, for any type that has
   ALLOCATABLE COMPONENTS — and is perfectly happy with `private()`. The two compilers forbid
@@ -2693,10 +2696,13 @@ applied to the harness instead of the source.
   finalizes the function result afterwards, so a loop that only needs to set a couple of components
   pays two finalizer calls per element for them. `parquet_string_column%view_all` did exactly that
   (`data_string(i) = self%view(i)`, setting a pointer and an integer) and got **3.9x** faster by
-  writing the two components directly, which also dropped a redundant bounds check. This library
-  exposes five finalizable types (`parquet_writer`, `parquet_reader`, `parquet_string_column`,
-  `parquet_string`, `parquet_table` — grep `final ::` to re-derive the list rather than trusting
-  this one, which has already gone stale once), so
+  writing the two components directly, which also dropped a redundant bounds check. **That example
+  is historical in one respect**: `parquet_string` has since had its finalizer removed outright (it
+  was a non-owning handle whose finalizer only nulled a borrowed pointer), which is the *other* way
+  to fix this shape and the better one when a type does not actually own anything — the measurement
+  and the rule both still stand for the types that do. This library exposes four finalizable types
+  (`parquet_writer`, `parquet_reader`, `parquet_string_column`, `parquet_table` — grep `final ::`
+  to re-derive the list rather than trusting this one, which has already gone stale twice), so
   check for this shape before threading any loop that assigns one of them. Every other finalizer note
   in this file is about *correctness*; this one is purely about cost.
 - **Passing an UNALLOCATED allocatable to an `optional` dummy makes that dummy ABSENT** (F2018
@@ -3165,8 +3171,44 @@ timeout.
   `src/parquet_random.f90` that
   [`-ftrapv` does](#compiler--language-gotchas) — the sites the source itself labels "UB site 1 of
   2". Excluded for that documented reason, not because of a defect.
-- **`-C=undefined` is an internal compiler error** (`Panic: Cannot find scope id 0`) on three
-  source files, with nothing but `nagfor -c` involved — no linking and no Arrow.
+- **`-C=undefined` carries TWO independent nagfor 7.2 defects**, neither a finding about this
+  code, and it is worth knowing they are different because the second one hides the first.
+  **(a)** `Panic: Cannot find scope id 0`, an internal compiler error on `src/parquet_write.f90`,
+  `src/parquet_metadata.f90` and `src/parquet_tables.f90`, with nothing but `nagfor -c` involved —
+  no linking and no Arrow. Delta-debugged from 1498 to 187 lines and no further; it still needs the
+  project's own `.mod` files, so there is no standalone reproducer.
+  **(b)** nagfor emits **invalid C** for the implicit finalization of an **array** whose element
+  type has a **finalizable component** — the generated pointer difference mixes the element-struct
+  pointer with `Char *` and the host C compiler rejects it. Twenty-seven lines reproduce it:
+
+```fortran
+type :: inner
+    integer :: x = 0
+contains
+    final :: inner_final          ! inner is finalizable ...
+end type inner
+type :: outer
+    integer :: id = 0
+    type(inner) :: nm             ! ... as a COMPONENT of outer
+end type outer
+...
+subroutine s()
+    type(outer) :: rows(3)        ! an ARRAY of outer, finalized at scope exit -> invalid C
+end subroutine s
+```
+
+  All three ingredients are required, and the toggles are unusually clean: a **scalar** `outer`
+  compiles; an array of `inner` **directly** compiles (so NAG finalizes an array of a finalizable
+  type correctly — it is the nested case it gets wrong); `inner` without `final` compiles; and an
+  `allocatable` array fails identically. **Finalization is exactly the trigger**, confirmed in both
+  directions: adding `save` to the local array (no finalization at return) compiles, and an
+  `intent(out)` dummy array (finalized on *entry*) fails at the procedure header instead of at
+  `end subroutine`, while `intent(inout)` compiles. `test/test_parquet_string.f90`'s
+  `type(t_row) :: rows(3)` hits it — `t_row` holds a `type(parquet_string)`, whose finalizer
+  nullifies the handle — which matters practically: **(b) is reached before (a)**, so
+  `fpm test --flag "-C=undefined"` dies in `test/` and a reader concludes the `src/` ICE is fixed.
+  It is not; `fpm build --flag "-C=undefined"` still panics on all three files. Note also that
+  `-C=all` does **not** imply `-C=undefined`, so neither defect touches the `nagdeb` set.
 
 **`-C=dangling` and `-C=calls` are BOTH in the set, and the one-word source change that let them
 in must not be reverted.** An earlier version of this section said to drop `-C=dangling`, that it

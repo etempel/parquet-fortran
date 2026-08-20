@@ -1471,7 +1471,14 @@ contains""")
         call check_kind(self, {pk}, "set_all")
         call check_nrows(self, size(values, kind=int64), "set_all")
         if (mod_nulls) then
-            self%{comp}(1:self%nrows) = values""")
+            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
+            ! early at n == 0), so this whole-array assignment would reference an unallocated
+            ! allocatable. The section is empty either way, but referencing an unallocated
+            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
+            ! ("ALLOCATABLE SELF%{comp} is not currently allocated") while gfortran no-ops silently.
+            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
+            ! before a parallel region appends to it.
+            if (self%nrows > 0_int64) self%{comp}(1:self%nrows) = values""")
             if temporal:
                 w("            self%nulls_dirty = .true.")
             else:
@@ -1598,7 +1605,14 @@ contains""")
         call check_width(self, size(values, 1, kind=int64), "set_all")
         call check_nrows(self, size(values, 2, kind=int64), "set_all")
         if (mod_nulls) then
-            self%{comp}(:, 1:self%nrows) = values""")
+            ! Guarded on nrows: a ZERO-ROW column has no storage at all (`grow_storage` returns
+            ! early at n == 0), so this whole-array assignment would reference an unallocated
+            ! allocatable. The section is empty either way, but referencing an unallocated
+            ! allocatable is not conforming -- nagfor's -C=array rejects it at run time
+            ! ("ALLOCATABLE SELF%{comp} is not currently allocated") while gfortran no-ops silently.
+            ! Reached by the documented `%add_column(name, empty)` shape that declares a column
+            ! before a parallel region appends to it.
+            if (self%nrows > 0_int64) self%{comp}(:, 1:self%nrows) = values""")
             if temporal:
                 w("            self%nulls_dirty = .true.")
             else:

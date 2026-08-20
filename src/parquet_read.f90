@@ -141,8 +141,20 @@ contains
         type(c_ptr), intent(out) :: valid_ptr !! c_loc(valid_buf), or c_null_ptr if want_report is .false.
 
         if (want_report) then
+            ! Allocated even when n is 0, because every caller's `is_valid = valid_buf /= 0` is a
+            ! whole-array assignment that needs an allocated (if zero-sized) source.
             allocate(valid_buf(n))
-            valid_ptr = c_loc(valid_buf)
+            if (n > 0_int64) then
+                valid_ptr = c_loc(valid_buf)
+            else
+                ! A ZERO-ROW read: `C_LOC` requires a nonzero-sized array (F2018 18.2.3.6), so the
+                ! obvious `c_loc(valid_buf)` here is not conforming -- nagfor's -C=pointer rejects
+                ! it at run time ("Argument VALID_BUF to C_LOC is a zero-sized array") while
+                ! gfortran accepts it silently. A null pointer says the same thing anyway: there is
+                ! no element for C++ to report validity for, and the zero-sized assignment above
+                ! is a no-op either way.
+                valid_ptr = c_null_ptr
+            end if
         else
             valid_ptr = c_null_ptr
         end if

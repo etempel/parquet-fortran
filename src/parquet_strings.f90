@@ -1623,6 +1623,15 @@ contains
         logical, intent(in), optional :: is_null(:)               !! .true. => store that element as null.
         integer(int64) :: n, k, nchars, nnull
         integer, allocatable :: lens(:)
+        ! Stands in for `self%data` when the column holds no bytes at all. `ensure_data_cap`
+        ! deliberately allocates nothing for a zero-byte payload, and `pack_character_bytes` takes
+        ! `dst` as an ordinary (non-allocatable) dummy -- so passing `self%data` there unallocated
+        ! is not conforming, and nagfor's -C=array aborts on it ("ALLOCATABLE SELF%DATA is not
+        ! currently allocated") where gfortran runs on silently. Reached whenever every element is
+        ! blank or null.
+        ! Handing the same routine a real one-byte array instead keeps ONE implementation of the
+        ! offset walk: with every `lens(k)` zero it writes offsets and never touches `dst`.
+        character(len=1) :: no_bytes(1)
         n = size(values, kind=int64)
         if (present(is_null)) then
             if (size(is_null, kind=int64) /= n) then
@@ -1656,7 +1665,11 @@ contains
         call self%reserve(n, nchars)
         ! Pass 2: the prefix sum and the payload, in one walk, continuing from offsets(1) = 0.
         self%offsets(1) = 0_int64
-        call pack_character_bytes(values, self%data, self%offsets, lens, n, len(values), 0_int64)
+        if (nchars > 0_int64) then
+            call pack_character_bytes(values, self%data, self%offsets, lens, n, len(values), 0_int64)
+        else
+            call pack_character_bytes(values, no_bytes, self%offsets, lens, n, len(values), 0_int64)
+        end if
         self%nrows = n
         self%nchars = nchars
         if (nnull > 0_int64) then
@@ -1710,6 +1723,16 @@ contains
         logical, intent(in), optional :: is_null(:)           !! .true. => append that element as null.
         integer(int64) :: n, k, nchars, nnull, base_rows
         integer, allocatable :: lens(:)
+        ! Stands in for `self%data` when the column holds no bytes at all. `ensure_data_cap`
+        ! deliberately allocates nothing for a zero-byte payload, and `pack_character_bytes` takes
+        ! `dst` as an ordinary (non-allocatable) dummy -- so passing `self%data` there unallocated
+        ! is not conforming, and nagfor's -C=array aborts on it ("ALLOCATABLE SELF%DATA is not
+        ! currently allocated") where gfortran runs on silently. Reached whenever every element is
+        ! blank or null. Here it needs the column to be empty too, since an
+        ! earlier append will already have allocated the payload.
+        ! Handing the same routine a real one-byte array instead keeps ONE implementation of the
+        ! offset walk: with every `lens(k)` zero it writes offsets and never touches `dst`.
+        character(len=1) :: no_bytes(1)
         n = size(values, kind=int64)
         if (present(is_null)) then
             if (size(is_null, kind=int64) /= n) then
@@ -1739,7 +1762,11 @@ contains
         base_rows = self%nrows
         call ensure_offsets_cap(self, base_rows + n)
         if (nchars > 0_int64) call ensure_data_cap(self, self%nchars + nchars)
-        call pack_character_bytes(values, self%data, self%offsets, lens, n, len(values), base_rows)
+        if (allocated(self%data)) then
+            call pack_character_bytes(values, self%data, self%offsets, lens, n, len(values), base_rows)
+        else
+            call pack_character_bytes(values, no_bytes, self%offsets, lens, n, len(values), base_rows)
+        end if
         if (nnull > 0_int64) then
             self%has_nulls = .true.
             call ensure_validity_cap(self, base_rows + n)

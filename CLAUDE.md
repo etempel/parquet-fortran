@@ -3155,6 +3155,53 @@ grep '^Questionable:' <log> | grep 'thread-safe' | grep -oE 'from scope [A-Z0-9_
 A scope name that matches a `module`/`submodule` in `src/` is process-global; anything else is a
 procedure and can be skipped.
 
+**`-C=all` is NOT the checked profile to use — drop `-C=dangling` and `-C=intovf`, and the rest is
+a genuinely useful instrument.** `nagfor` is the only compiler here with real runtime checking, and
+with those two removed the whole suite passes under it (1783/0/0). With them, 243 of 824 error
+scenarios die on SIGSEGV, SIGBUS or a 120 s timeout and the suite is unusable.
+
+- **`-C=dangling` is a NAG codegen bug on a shape this library uses everywhere**, not a finding.
+  It needs `-C=calls` alongside it, and reproduces in 19 lines with no library at all: pass an
+  **absent** `optional` actual to an assumed-size `target` dummy, beside another `target` dummy —
+  which is every `write_<type>_flat(writer, name, values, …, is_valid)` call. Toggling each
+  ingredient: either check alone runs; removing `target` from either dummy runs; making the
+  optional non-optional or *present* runs; `flat` assumed-shape still crashes. Two failure modes
+  from the one cause — a wild-pointer SIGSEGV, and a negative-sized compiler temporary whose fatal
+  error then **self-deadlocks in NAG's own termination** (`rt_abort → io_finish → force_closef →
+  line_deallocate → dismiss_thread → nanosleep`, forever). The "slow test" is not slow: it dies in
+  milliseconds and then hangs until the timeout kills it.
+- **`-C=intovf` is NAG's `-ftrapv`** and trips the same two deliberate wrapping multiplies in
+  `src/parquet_random.f90` that
+  [`-ftrapv` does](#compiler--language-gotchas) — the sites the source itself labels "UB site 1 of
+  2". Excluded for that documented reason, not because of a defect.
+
+**What the remaining checks found is worth the trouble: three real standard violations, all the
+same shape — a ZERO-SIZED thing referenced where the standard forbids it.** Each was invisible under
+gfortran, which no-ops all three:
+
+| site | what | check |
+|---|---|---|
+| `make_valid_buf` (`parquet_read.f90`) | `C_LOC` on a zero-sized array — F2018 18.2.3.6 requires nonzero-sized | `-C=pointer` |
+| `set_all_*` (generated) | whole-array assignment to a zero-row column's storage, which `grow_storage` never allocates (`if (n == 0) return`) | `-C=array` |
+| `build_from_character` / `append_values` (`parquet_strings.f90`) | unallocated `self%data` passed to `pack_character_bytes` when every element is blank | `-C=array` |
+
+**The generalisable rule: a zero-length case reaches storage that was never allocated, because the
+allocators here all skip zero deliberately.** `grow_storage` returns early at `n == 0`;
+`ensure_data_cap` allocates nothing for a zero-byte payload. Both are right, and both mean any
+"just assign the whole array" or "just pass the buffer" downstream is referencing an unallocated
+allocatable. Look for it whenever a new bulk path is added, and note that the trigger is often a
+**documented user pattern** rather than an edge case — the `set_all` instance is reached by
+`%add_column(name, empty)`, which is exactly what the guide tells users to do to declare a column
+before a parallel region appends to it.
+
+**One debugging gotcha, because it cost a wrong diagnosis here: under test-drive's per-suite
+parallelism the last `Starting <test>` line in the log is NOT the test that aborted.** Tests run
+concurrently, so the abort belongs to whichever test was running on the faulting thread. The log
+blamed `materialize_all reads columns in parallel`; the stack showed `test_table_parallel_append`.
+Get the real one from a backtrace (`lldb -b -o "breakpoint set -n __NAGf90_rtcrash" -o run …`,
+then `thread backtrace all`), or re-run with `OMP_NUM_THREADS=1`, which also stops the runtime
+error message being interleaved with another thread's output mid-line.
+
 **A NAG run needs `--verbose`, its own build tree, and `-openmp` if it is to mean anything about the
 threaded code.** `fpm test --verbose --flag "-colour -w=unused -openmp"` with `FPM_BUILD_DIR` set
 somewhere under `test_run/` gets all three; `-w=unused` clears the noise this section's first half

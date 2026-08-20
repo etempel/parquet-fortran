@@ -43,8 +43,11 @@ nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal 
 # standard + -thread_safe + extended warnings
 #nagfor.flags = "-openmp -f2018 -nan -colour -info -w=unused -Warn=allocation -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal -thread_safe"
 
-#nagdeb.flags = "-C=all -g -gline"
-nagdeb.flags = "-C=all -g"
+# paranoid debugging build:
+#nagdeb.flags = "-C=all -C=undefined -g -gline -mtrace"
+#nagdeb.flags = "-C=all -g"
+# all, except: -C=dangling, -C=intovf and -C=undefined
+nagdeb.flags = "-C=alias -C=array -C=bits -C=calls -C=dangling -C=do -C=present -C=pointer -C=recursion -g"
 
 [profiles]
 nag = ["nagfor"]

@@ -223,6 +223,11 @@ contains
     ! one is. That copy is what a `pack` over a character array costs -- a fresh deferred-length
     ! array of every kept element -- so skipping it is the whole point. See the same note in
     ! parquet_write_numeric.f90 for the shared reasoning.
+    !
+    ! `valid` DELIBERATELY DOES NOT CARRY TARGET here either, for the reason set out in full beside
+    ! the numeric workers: nagfor 7.2 miscompiles a call passing an ABSENT optional actual to a
+    ! dummy that is at once `optional`, assumed-size and `target`. `valid_c` exists solely to give
+    ! `vmask` something it may point at; do not restore TARGET and delete it.
 
     !> Whole-column write worker for the four space-padded string specifics: packs `flat`'s bytes
     !> into the contiguous fixed-width buffer the C binding takes, runs the qc/validity checks,
@@ -235,7 +240,8 @@ contains
         integer(int64), intent(in) :: nitems !! number of elements in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! post-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nitems`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nitems`-long validity mask, or absent. No TARGET: see above.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at.
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
@@ -249,7 +255,10 @@ contains
 
         protected = .false.
         nullify(vmask)
-        if (present(valid)) vmask => valid(1:nitems)
+        if (present(valid)) then
+            valid_c = valid(1:nitems)
+            vmask => valid_c
+        end if
         if (associated(vmask)) then
             call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)
@@ -280,7 +289,8 @@ contains
         integer(int64), intent(in) :: nitems !! number of elements in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! this chunk's post-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nitems`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nitems`-long validity mask, or absent. No TARGET: see above.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at.
         character(len=:), allocatable :: outname !! parquet_resolve_output_name scratch.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
         type(c_ptr) :: valid_ptr
@@ -292,7 +302,10 @@ contains
 
         protected = .false.
         nullify(vmask)
-        if (present(valid)) vmask => valid(1:nitems)
+        if (present(valid)) then
+            valid_c = valid(1:nitems)
+            vmask => valid_c
+        end if
         if (associated(vmask)) then
             call parquet_check_protected(writer, name, vmask, protected)
             call parquet_check_qc_miss(writer, name, vmask)

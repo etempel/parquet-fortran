@@ -43,10 +43,26 @@ nagfor.flags = "-openmp -f2018 -nan -colour -w=unused -Warn=unkind_real_literal 
 # standard + -thread_safe + extended warnings
 #nagfor.flags = "-openmp -f2018 -nan -colour -info -w=unused -Warn=allocation -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal -thread_safe"
 
-# paranoid debugging build:
+# Paranoid debugging build: every -C= check nagfor 7.2 can actually run against this project.
+#
+# Two of them are deliberately absent, and each absence is load-bearing rather than untried:
+#
+#   -C=intovf    Correct behaviour, not a defect: it is nagfor's -ftrapv, and it traps the two
+#                deliberate wrapping multiplies src/parquet_random.f90 documents as "UB site 1 of 2".
+#   -C=undefined An internal compiler error (`Panic: Cannot find scope id 0`) on three source files,
+#                with nothing but `nagfor -c` involved.
+#
+# Both are written up in feature_nag_runtime_checks.md. Full suite under the set below:
+# 1783 passed, 0 failed, zero crashes, zero hangs.
+#
+# -C=dangling and -C=calls are BOTH in, and both are here only because src/parquet_write_numeric.f90
+# and src/parquet_write_string.f90 no longer declare a dummy that is at once `optional`,
+# assumed-size and `target`. nagfor 7.2 miscompiles a call passing an ABSENT optional actual to
+# such a dummy -- under either check, and worst under both -- so restoring that attribute takes the
+# suite from 1783/0 to 243 of 824 error scenarios dying on SIGSEGV, SIGBUS or a 120 s hang. The
+# reasoning is written out beside the workers; do not put the attribute back.
 #nagdeb.flags = "-C=all -C=undefined -g -gline -mtrace"
 #nagdeb.flags = "-C=all -g"
-# all, except: -C=dangling, -C=intovf and -C=undefined
 nagdeb.flags = "-C=alias -C=array -C=bits -C=calls -C=dangling -C=do -C=present -C=pointer -C=recursion -g"
 
 [profiles]

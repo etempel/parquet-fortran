@@ -3155,25 +3155,52 @@ grep '^Questionable:' <log> | grep 'thread-safe' | grep -oE 'from scope [A-Z0-9_
 A scope name that matches a `module`/`submodule` in `src/` is process-global; anything else is a
 procedure and can be skipped.
 
-**`-C=all` is NOT the checked profile to use — drop `-C=dangling` and `-C=intovf`, and the rest is
-a genuinely useful instrument.** `nagfor` is the only compiler here with real runtime checking, and
-with those two removed the whole suite passes under it (1783/0/0). With them, 243 of 824 error
-scenarios die on SIGSEGV, SIGBUS or a 120 s timeout and the suite is unusable.
+**`-C=all` is NOT the checked profile to use — `fpm.toml`'s `nagdeb` feature is, and the two
+checks it leaves out are each left out for a stated reason.** `nagfor` is the only compiler here
+with real runtime checking, and under `nagdeb` the whole suite passes (1783/0/0, zero crashes, zero
+hangs). Under `-C=all` it is unusable: 243 of 824 error scenarios die on SIGSEGV, SIGBUS or a 120 s
+timeout.
 
-- **`-C=dangling` is a NAG codegen bug on a shape this library uses everywhere**, not a finding.
-  It needs `-C=calls` alongside it, and reproduces in 19 lines with no library at all: pass an
-  **absent** `optional` actual to an assumed-size `target` dummy, beside another `target` dummy —
-  which is every `write_<type>_flat(writer, name, values, …, is_valid)` call. Toggling each
-  ingredient: either check alone runs; removing `target` from either dummy runs; making the
-  optional non-optional or *present* runs; `flat` assumed-shape still crashes. Two failure modes
-  from the one cause — a wild-pointer SIGSEGV, and a negative-sized compiler temporary whose fatal
-  error then **self-deadlocks in NAG's own termination** (`rt_abort → io_finish → force_closef →
-  line_deallocate → dismiss_thread → nanosleep`, forever). The "slow test" is not slow: it dies in
-  milliseconds and then hangs until the timeout kills it.
 - **`-C=intovf` is NAG's `-ftrapv`** and trips the same two deliberate wrapping multiplies in
   `src/parquet_random.f90` that
   [`-ftrapv` does](#compiler--language-gotchas) — the sites the source itself labels "UB site 1 of
   2". Excluded for that documented reason, not because of a defect.
+- **`-C=undefined` is an internal compiler error** (`Panic: Cannot find scope id 0`) on three
+  source files, with nothing but `nagfor -c` involved — no linking and no Arrow.
+
+**`-C=dangling` and `-C=calls` are BOTH in the set, and the one-word source change that let them
+in must not be reverted.** An earlier version of this section said to drop `-C=dangling`, that it
+"needs `-C=calls` alongside it", and later that `-C=calls` was a second trigger that had to stay
+out. All three claims are wrong, and the way they were wrong is worth keeping: **there is one
+defect, and neither check is the ingredient.** What matters is the `target` attribute on an
+`optional`, assumed-size dummy receiving an **absent** actual. The twelve
+`write_<type>[_chunk]_flat` workers declared `logical, intent(in), optional, target :: valid(*)`;
+dropping `target` from those twelve dummies removes every crash and hang under **either check and
+under both together** — measured at 1783/0 with the full `nagdeb` set, against 243 of 824 error
+scenarios dying with the attribute restored. It costs one `logical` array copy on the unmasked
+path, since `vmask` can no longer point straight at the caller's mask; the full reasoning is in the
+banner comment above the workers in `src/parquet_write_numeric.f90`. **Do not give that dummy
+`target` back**, and do not read a green run as evidence that it would now be safe — both checks
+are in the set only because it is absent.
+
+**The methodological lesson is sharper than the fix: a minimal reproducer for a CODEGEN bug is
+evidence about the reproducer.** The 19-line one said "either check alone runs", so the obvious
+plan — run the suite twice, once under each check — looked sound; the real library then crashed
+under `-C=dangling` alone. Adding one local variable to the reproducer later made it stop crashing
+under *both*. An ingredient table from a reduced case establishes what is **sufficient** to trigger
+the bug, never what is **necessary** in code the optimiser sees differently. Settle a flag question
+by building the real thing.
+
+**And `-C=dangling` earned its place on its first run, by finding a real standard violation
+nothing else in the fleet can see.** `%view_all` associates each returned handle's `%col` with its
+own `intent(in), target` dummy, so F2018 15.5.2.4 leaves those pointers **undefined** on return
+whenever the actual argument has no `TARGET` attribute — the handles are then unusable, and
+`build_from`'s `associated(handles(k)%col, self)` is itself non-conforming. Three call sites
+declared the column without `target` (`test/test_string_parallel.f90`, and the `app/` string
+benchmarks, which the suite never runs); gfortran, ifx and flang all execute them happily.
+**Any procedure handing back a pointer into a dummy needs its callers checked for this**, and
+`view_all`'s doc-comment already said "must be a target" — the contract was written down and simply
+not honoured, which is exactly the class a runtime check exists for.
 
 **What the remaining checks found is worth the trouble: three real standard violations, all the
 same shape — a ZERO-SIZED thing referenced where the standard forbids it.** Each was invisible under

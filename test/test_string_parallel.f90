@@ -560,7 +560,10 @@ contains
     !! validity bits under the byte-aligned split — the one whose failure is silent.
     subroutine test_build_from_threaded_equals_serial(error)
         type(error_type), allocatable, intent(out) :: error
-        type(parquet_string_column) :: src, ser, par
+        ! `src` MUST be a target: %view_all associates each handle's %col with its own dummy,
+        ! and F2018 15.5.2.4 leaves those pointers UNDEFINED on return when the actual argument
+        ! has no TARGET attribute. nagfor -C=dangling catches it; gfortran/ifx/flang do not.
+        type(parquet_string_column), target :: src, ser, par
         type(parquet_string), allocatable :: h(:)
         integer(int64) :: n, stride
         logical :: ever_threaded

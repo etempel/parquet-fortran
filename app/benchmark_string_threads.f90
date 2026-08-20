@@ -233,7 +233,9 @@ contains
         logical, intent(in) :: with_nulls   !! .true. => column contains nulls.
         integer, intent(in) :: sweep(:)     !! thread counts.
         integer, intent(in) :: nsweep       !! entries used in `sweep`.
-        type(parquet_string_column) :: src, work, reference
+        ! `src` must be a target -- %view_all hands back pointers into it; see the same note in
+        ! test/test_string_parallel.f90 for why F2018 15.5.2.4 makes this mandatory, not stylistic.
+        type(parquet_string_column), target :: src, work, reference
         character(len=:), allocatable :: chars(:)
         type(parquet_string), allocatable :: handles(:)
         integer(int64), allocatable :: perm(:)

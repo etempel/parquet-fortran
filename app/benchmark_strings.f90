@@ -129,7 +129,9 @@ contains
         integer, intent(in) :: rounds            !! timed rounds.
         logical, intent(in) :: with_nulls        !! .true. => column contains nulls.
         integer(int64), intent(in) :: null_every !! null stride.
-        type(parquet_string_column) :: src, work, dest
+        ! `src` must be a target -- %view_all hands back pointers into it; see the same note in
+        ! test/test_string_parallel.f90 for why F2018 15.5.2.4 makes this mandatory, not stylistic.
+        type(parquet_string_column), target :: src, work, dest
         type(parquet_string), allocatable :: handles(:)
         character(len=:), allocatable :: chars(:)
         integer(int64), allocatable :: perm(:), idx(:)

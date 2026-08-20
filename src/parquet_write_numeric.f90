@@ -790,8 +790,21 @@ contains
     ! case -- there is nothing to remove, so `vals` simply points at the caller's own array and no
     ! mask, no expanded element mask and no `pack` copy are built at all. When one is, the packed
     ! copy is built exactly as before and `vals` points at that instead. Pointing rather than
-    ! copying is what keeps the two paths sharing one tail; `flat` and `valid` therefore carry the
-    ! TARGET attribute, and the pointers are used only within the worker, never returned.
+    ! copying is what keeps the two paths sharing one tail; `flat` therefore carries the TARGET
+    ! attribute, and the pointers are used only within the worker, never returned.
+    !
+    ! `valid` DELIBERATELY DOES NOT CARRY TARGET, and must not be given it back. nagfor 7.2
+    ! miscompiles a call that passes an ABSENT optional actual to a dummy that is at once
+    ! `optional`, assumed-size and `target`: the caller faults in its own argument setup, or
+    ! computes a negative size for a compiler temporary and then hangs forever inside its own
+    ! error termination. Every whole-column write here has that shape, so it cost
+    ! 243 of 824 error scenarios; dropping TARGET from this one dummy is the entire fix, and with
+    ! it the whole suite passes under -C=dangling AND -C=calls together, which is what puts both
+    ! in fpm.toml's nagdeb feature. They are not two defects: either check alone is enough to
+    ! trigger this one, and the TARGET attribute is the only ingredient that matters. The price is
+    ! that the unmasked path copies the mask (`valid_c = valid(1:nelem)`) instead of pointing at
+    ! it, which is why both branches now route the mask through `valid_c`. gfortran, ifx and flang
+    ! are unaffected either way. See feature_nag_runtime_checks.md, Report 1.
     !
     ! A caller that supplied no `is_valid` leaves `vmask` disassociated, which makes it ABSENT at
     ! every `optional` dummy it is passed on to (F2018 15.5.2.12) -- so the qc checker and
@@ -805,10 +818,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         integer(int32), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         integer(int32), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
@@ -832,7 +845,10 @@ contains
         else
             vals => flat(1:nelem)
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -856,10 +872,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         integer(int64), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         integer(int64), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
@@ -883,7 +899,10 @@ contains
         else
             vals => flat(1:nelem)
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -907,10 +926,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         real(real32), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         real(real32), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
@@ -934,7 +953,10 @@ contains
         else
             vals => flat(1:nelem)
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -958,10 +980,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         real(real64), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         real(real64), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
@@ -985,7 +1007,10 @@ contains
         else
             vals => flat(1:nelem)
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -1015,10 +1040,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         integer(c_int8_t), allocatable :: bool_data(:)
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
@@ -1050,7 +1075,10 @@ contains
                 bool_data(i) = merge(1_c_int8_t, 0_c_int8_t, flat(i))
             end do
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -1079,10 +1107,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         integer(int32), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         integer(int32), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
@@ -1106,7 +1134,10 @@ contains
         else
             vals => flat(1:nelem)
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -1132,10 +1163,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         integer(int64), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         integer(int64), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
@@ -1159,7 +1190,10 @@ contains
         else
             vals => flat(1:nelem)
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -1185,10 +1219,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         real(real32), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         real(real32), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
@@ -1212,7 +1246,10 @@ contains
         else
             vals => flat(1:nelem)
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -1238,10 +1275,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         real(real64), allocatable, target :: values_c(:) !! masked copy; unused on the fast path.
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         real(real64), pointer :: vals(:) !! the values actually written.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
@@ -1265,7 +1302,10 @@ contains
         else
             vals => flat(1:nelem)
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then
@@ -1291,10 +1331,10 @@ contains
         integer(int64), intent(in) :: nelem !! number of values in `flat`, i.e. asize*nrows.
         integer(int64), intent(in) :: asize !! per-row element count (1 for a scalar column).
         integer(int64), intent(in) :: nrows !! this chunk's pre-mask row count.
-        logical, intent(in), optional, target :: valid(*) !! `nelem`-long validity mask, or absent.
+        logical, intent(in), optional :: valid(*) !! `nelem`-long validity mask, or absent. No TARGET: see above.
         integer(c_int8_t), allocatable :: bool_data(:)
         logical, allocatable :: row_mask(:), elem_mask(:)
-        logical, allocatable, target :: valid_c(:) !! masked copy of `valid`; unused on the fast path.
+        logical, allocatable, target :: valid_c(:) !! the `valid` copy vmask points at, packed or plain.
         logical, pointer :: vmask(:) !! the validity mask actually written, or disassociated.
         logical :: protected !! .true. if this column is protected, so the mask above is erased.
         integer(c_int8_t), allocatable, target :: valid_buf(:)
@@ -1326,7 +1366,10 @@ contains
                 bool_data(i) = merge(1_c_int8_t, 0_c_int8_t, flat(i))
             end do
             nkeep = nrows
-            if (present(valid)) vmask => valid(1:nelem)
+            if (present(valid)) then
+                valid_c = valid(1:nelem)
+                vmask => valid_c
+            end if
         end if
 
         if (associated(vmask)) then

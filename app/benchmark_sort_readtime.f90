@@ -31,10 +31,20 @@
 !! columns the caller goes on to read.** `--keys=2` is the arm that shows it; there is deliberately
 !! no prefetch arm, because prefetch-then-sort is not a reachable shape.
 !!
+!! **`--reads=N` adds the WORKFLOW arm, which is what P13's design question actually turns on.**
+!! The phase table above times the open alone, where `take` is a fifth to a quarter of it. That is
+!! not what deferring the `Take` could recover: a program opens once and then reads, and the
+!! reordering of a key column is wasted only when the caller never reads that key. `--reads=N`
+!! times open-plus-`N`-payload-reads in both shapes -- key never read, and key read afterwards --
+!! and prints `take` as a share of each. The first is the ceiling on any deferral design; the
+!! second is zero by construction and is measured anyway, because it is what shows the key comes
+!! back from the cache rather than being decoded again.
+!!
 !! Usage (via `tools/benchmark_sort_readtime.sh`, which sets `--profile release`):
 !!
 !!   fpm run benchmark_sort_readtime --profile release -- --n=1000000 --reps=5
 !!   fpm run benchmark_sort_readtime --profile release -- --n=1000000 --key=string --keys=2
+!!   fpm run benchmark_sort_readtime --profile release -- --n=1000000 --reads=2
 program benchmark_sort_readtime
     use parquet
     use iso_fortran_env, only : int32, int64, real64, output_unit
@@ -72,16 +82,22 @@ program benchmark_sort_readtime
     end interface
 
     integer(int64) :: n
-    integer :: reps, nkeys
+    integer :: reps, nkeys, nreads
     character(len=32) :: key_mode
     character(len=256) :: file_name
     logical :: keep
 
-    call read_args(n, reps, key_mode, nkeys, file_name, keep)
-    call banner(n, reps, key_mode, nkeys, file_name)
+    call read_args(n, reps, key_mode, nkeys, file_name, keep, nreads)
+    call banner(n, reps, key_mode, nkeys, file_name, nreads)
     call write_fixture(trim(file_name), n)
-    if (key_mode == "int64" .or. key_mode == "both") call measure(trim(file_name), "id", reps, nkeys, n)
-    if (key_mode == "string" .or. key_mode == "both") call measure(trim(file_name), "name", reps, nkeys, n)
+    if (key_mode == "int64" .or. key_mode == "both") then
+        call measure(trim(file_name), "id", reps, nkeys, n)
+        if (nreads > 0) call measure_workflow(trim(file_name), "id", reps, nkeys, n, nreads)
+    end if
+    if (key_mode == "string" .or. key_mode == "both") then
+        call measure(trim(file_name), "name", reps, nkeys, n)
+        if (nreads > 0) call measure_workflow(trim(file_name), "name", reps, nkeys, n, nreads)
+    end if
     if (.not. keep) call delete_file(trim(file_name))
 
 contains
@@ -148,6 +164,160 @@ contains
         write (output_unit, '(a)') "  -----------------------------------------------------------------------"
         call row("TOTAL", best * 1.0e9_real64, best, n, "wall clock for the whole open")
     end subroutine measure
+
+    !> Times the WORKFLOW a caller runs -- open with `sort_by=`, then read some columns -- in the
+    !! two shapes P13's design question turns on, and reports what deferring the key's `Take` could
+    !! at most be worth.
+    !!
+    !! **Why the open's own share is not the answer.** `measure` above times the OPEN, where `take`
+    !! is a fifth to a quarter. A deferral would not recover that share: the open is only part of
+    !! what a program does, and the `Take` is wasted only when the caller never reads the key it
+    !! sorted by. Both shapes are timed here over one fixture, so the two rows are comparable:
+    !!
+    !!   * **key not read** -- the reordering of the key column is pure waste, so `take`'s share of
+    !!     the whole workflow is the CEILING on what any deferral design could recover.
+    !!   * **key read too** -- a deferred `Take` would be paid at read time instead, so the ceiling
+    !!     there is zero by construction. The row is measured anyway, because it is what shows that
+    !!     reading the key back is a cache hit rather than a second decode.
+    !!
+    !! **The payload columns read are never sort keys.** With `--keys=2` the sort names `x1`, so the
+    !! list starts at `x2`; otherwise the "key not read" shape would be reading a key.
+    !!
+    !! Buffers are allocated and first-touched before anything is timed, and each shape runs one
+    !! untimed warm-up repetition. Without it the shape that runs second inherits the first one's
+    !! warm pages, which is the ordering artifact CLAUDE.md's benchmarking rules warn about.
+    subroutine measure_workflow(file_name, key, reps, nkeys, n, nreads)
+        character(len=*), intent(in) :: file_name !! the fixture to read.
+        character(len=*), intent(in) :: key       !! leading column to sort by.
+        integer, intent(in) :: reps               !! timed repetitions; the best total is kept.
+        integer, intent(in) :: nkeys              !! 1, or 2 to add a second key ("x1 asc").
+        integer(int64), intent(in) :: n           !! rows.
+        integer, intent(in) :: nreads             !! payload columns to read after the open.
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        character(len=8) :: pcols(4)
+        character(len=64) :: cols_txt
+        real(real64), allocatable :: xbuf(:)
+        integer(int64), allocatable :: kbuf64(:)
+        character(len=16), allocatable :: kbufs(:)
+        real(real64) :: t0, t1, t2, t3
+        real(real64) :: best(2), open_s(2), read_s(2), keyread_s(2), take_s(2)
+        integer(c_long_long) :: take_ns
+        integer :: first, npay, nrd, sh, r, j
+        logical :: want_key
+        !
+        ! The payload list deliberately skips any column the sort names, or the "key not read"
+        ! shape would be reading a key and would measure nothing.
+        first = 1
+        if (nkeys >= 2) first = 2
+        npay = 4 - first + 1
+        nrd = min(nreads, npay)
+        cols_txt = ""
+        do j = 1, nrd
+            write (pcols(j), '(a,i0)') "x", first + j - 1
+            if (j > 1) cols_txt = trim(cols_txt) // ","
+            cols_txt = trim(cols_txt) // trim(pcols(j))
+        end do
+        !
+        allocate(xbuf(n))
+        xbuf = 0.0_real64
+        if (key == "id") then
+            allocate(kbuf64(n))
+            kbuf64 = 0_int64
+        else
+            allocate(kbufs(n))
+            kbufs(:) = " "
+        end if
+        call srt%add(key // " asc")
+        if (nkeys >= 2) call srt%add("x1 asc")
+        !
+        do sh = 1, 2
+            want_key = (sh == 2)
+            best(sh) = huge(1.0_real64)
+            open_s(sh) = 0.0_real64; read_s(sh) = 0.0_real64
+            keyread_s(sh) = 0.0_real64; take_s(sh) = 0.0_real64
+            do r = 0, reps        ! r = 0 is the untimed warm-up
+                call parquet_debug_reset_sort_phase_nanos()
+                call cpu_wall(t0)
+                call parquet_open_reader(reader, file_name, sort_by=srt)
+                call cpu_wall(t1)
+                do j = 1, nrd
+                    call parquet_read_column(reader, trim(pcols(j)), xbuf)
+                end do
+                call cpu_wall(t2)
+                if (want_key) then
+                    if (key == "id") then
+                        call parquet_read_column(reader, key, kbuf64)
+                    else
+                        call parquet_read_column(reader, key, kbufs)
+                    end if
+                end if
+                call cpu_wall(t3)
+                take_ns = parquet_debug_get_sort_take_nanos()
+                call parquet_close_reader(reader)
+                if (r >= 1 .and. t3 - t0 < best(sh)) then
+                    best(sh) = t3 - t0
+                    open_s(sh) = t1 - t0
+                    read_s(sh) = t2 - t1
+                    keyread_s(sh) = t3 - t2
+                    take_s(sh) = real(take_ns, real64) * 1.0e-9_real64
+                end if
+            end do
+        end do
+        ! Outside every timed region, and not a formality: it asserts that the key really came back
+        ! in sorted order, i.e. that the workflow measured above is the sorted one.
+        call check_key_sorted(key, kbuf64, kbufs, n)
+        !
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a,a,a,a,a,i0,a)') "## workflow: sort_by=""", key, " asc"" then read ", &
+            trim(cols_txt), "   (", nrd, " payload column(s), never a key)"
+        write (output_unit, '(a)') ""
+        write (output_unit, '(a)') "  shape              open ms     read ms  keyread ms    total ms" // &
+            "     take ms   take%"
+        call wrow("key not read  ", open_s(1), read_s(1), keyread_s(1), best(1), take_s(1), &
+                  "<- CEILING on deferring the key's Take")
+        call wrow("key read too  ", open_s(2), read_s(2), keyread_s(2), best(2), take_s(2), &
+                  "(a deferred Take would be paid here instead)")
+        write (output_unit, '(a,i0,a,i0)') "  rows: ", n, "   timed repetitions: ", reps
+    end subroutine measure_workflow
+
+    !> One line of the workflow table.
+    subroutine wrow(label, open_s, read_s, keyread_s, total_s, take_s, note)
+        character(len=*), intent(in) :: label  !! which shape this row is.
+        real(real64), intent(in) :: open_s     !! the open, in seconds.
+        real(real64), intent(in) :: read_s     !! the payload reads, in seconds.
+        real(real64), intent(in) :: keyread_s  !! reading the key back, in seconds; 0 when not read.
+        real(real64), intent(in) :: total_s    !! the whole workflow, in seconds.
+        real(real64), intent(in) :: take_s     !! `arrow::compute::Take` at install, in seconds.
+        character(len=*), intent(in) :: note   !! how to read this row.
+        real(real64) :: share
+        !
+        share = 0.0_real64
+        if (total_s > 0.0_real64) share = 100.0_real64 * take_s / total_s
+        write (output_unit, '(a,a14,5f12.2,f8.1,a,a)') "  ", label, open_s * 1.0e3_real64, &
+            read_s * 1.0e3_real64, keyread_s * 1.0e3_real64, total_s * 1.0e3_real64, &
+            take_s * 1.0e3_real64, share, "%  ", note
+    end subroutine wrow
+
+    !> Aborts unless the key column came back non-decreasing, which is what makes the workflow
+    !! above a measurement of a SORTED read rather than of an ordinary one.
+    subroutine check_key_sorted(key, kbuf64, kbufs, n)
+        character(len=*), intent(in) :: key                        !! which key was sorted on.
+        integer(int64), allocatable, intent(in) :: kbuf64(:)       !! the int64 key, when that is it.
+        character(len=16), allocatable, intent(in) :: kbufs(:)     !! the string key, when that is it.
+        integer(int64), intent(in) :: n                            !! rows.
+        integer(int64) :: i
+        !
+        if (key == "id") then
+            do i = 2_int64, n
+                if (kbuf64(i) < kbuf64(i - 1_int64)) error stop "workflow arm: the int64 key came back unsorted"
+            end do
+        else
+            do i = 2_int64, n
+                if (kbufs(i) < kbufs(i - 1_int64)) error stop "workflow arm: the string key came back unsorted"
+            end do
+        end if
+    end subroutine check_key_sorted
 
     !> One line of the phase table.
     subroutine row(label, nanos, total_s, n, what)
@@ -236,12 +406,13 @@ contains
 
     !> Prints what this run is, before it costs anything -- provenance first, per CLAUDE.md's
     !! benchmarking rules.
-    subroutine banner(n, reps, key_mode, nkeys, file_name)
+    subroutine banner(n, reps, key_mode, nkeys, file_name, nreads)
         integer(int64), intent(in) :: n            !! rows.
         integer, intent(in) :: reps                !! repetitions.
         character(len=*), intent(in) :: key_mode   !! which keys are measured.
         integer, intent(in) :: nkeys               !! sort keys per run.
         character(len=*), intent(in) :: file_name  !! the fixture.
+        integer, intent(in) :: nreads              !! payload columns read in the workflow arm.
         !
         write (output_unit, '(a)') "=============================================================="
         write (output_unit, '(a)') "benchmark_sort_readtime -- where a read-time sort spends time"
@@ -249,17 +420,19 @@ contains
         write (output_unit, '(a,i0,a,i0)') "  n = ", n, "   reps = ", reps
         write (output_unit, '(a,a,a,i0)') "  key type    : ", trim(key_mode), "   sort keys per run: ", nkeys
         write (output_unit, '(a,a)') "  fixture     : ", trim(file_name)
+        write (output_unit, '(a,i0,a)') "  workflow arm: ", nreads, " payload column(s) read after the open (0 = off)"
         write (output_unit, '(a)') "  'engine+open' is DERIVED (total minus the five C++ phases)."
     end subroutine banner
 
     !> `--key=` and friends. Every setting has a default, so a bare run is meaningful.
-    subroutine read_args(n, reps, key_mode, nkeys, file_name, keep)
+    subroutine read_args(n, reps, key_mode, nkeys, file_name, keep, nreads)
         integer(int64), intent(out) :: n             !! rows.
         integer, intent(out) :: reps                 !! repetitions.
         character(len=*), intent(out) :: key_mode    !! int64 / string / both.
         integer, intent(out) :: nkeys                !! sort keys per run: 1 or 2.
         character(len=*), intent(out) :: file_name   !! the fixture path.
         logical, intent(out) :: keep                 !! .true. leaves the fixture behind.
+        integer, intent(out) :: nreads               !! payload columns to read; 0 disables the arm.
         character(len=256) :: a
         integer :: i
         !
@@ -269,6 +442,7 @@ contains
         nkeys = 1
         file_name = "test_run/bench_sort_readtime.parquet"
         keep = .false.
+        nreads = 0
         do i = 1, command_argument_count()
             call get_command_argument(i, a)
             if (a(1:4) == "--n=") then
@@ -277,6 +451,8 @@ contains
                 read (a(8:), *) reps
             else if (a(1:6) == "--key=") then
                 key_mode = a(7:)
+            else if (a(1:8) == "--reads=") then
+                read (a(9:), *) nreads
             else if (a(1:7) == "--keys=") then
                 read (a(8:), *) nkeys
             else if (a(1:7) == "--file=") then

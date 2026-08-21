@@ -656,19 +656,48 @@ as a 2.3x threading win on an engine that ignores `threads=` entirely. It bites 
 arm at a *large* n, which is exactly where a figure is least likely to be double-checked; a slow arm
 at the same size hides the same absolute cost inside its noise.
 
-`ENGINE=cpp|fortran` selects which sort engine to measure — the shipped C++ one, or the pure-Fortran
-engine `feature_sort.md` is building, which the library reaches only through a debug hook until that
-work is cut over. An A/B is two runs of the script differing in nothing else. The two engines return
+`ENGINE=cpp|fortran` selects which sort engine to measure — the **Fortran** engine, which is what
+every production path uses, or the C++ one, which is retained as the reference implementation the
+tests A/B against and which the library reaches only through a debug hook. An A/B is two runs of
+the script differing in nothing else. The two engines return
 identical permutations, so the printed checksum must match across the pair; a checksum that moves
 means the two runs did not see the same data and neither figure is comparable. The header line
 reports the engine the *library* says it will use rather than the value asked for.
+
+**The `design` column reports which parallel design actually ran** — `serial`, `A`, or `B(k)` with
+`k` the split's bucket count — read from the engine rather than inferred from the flags that were
+passed. It matters because a Design A/B comparison is built by forcing `SPLIT_MIN_CARD`, and
+nothing else in the table distinguishes an arm that took the design it was asked for from one that
+declined and fell back silently.
+
+Five further knobs reach the low-cardinality and split behaviour. They were previously reachable
+only by invoking `app/benchmark_sort_engine.f90` directly, which also skips this wrapper's two
+optimisation-flag assertions — the exact route by which a campaign ends up quoting an `-O0` figure.
+Each is passed through only when set, so an unset one cannot override a shipped default.
+
+| variable | default | meaning |
+|---|---|---|
+| `CARD` | shipped | distinct values the `i64lo`/`multi` primary key folds onto. |
+| `CARD_SPREAD` | shipped (`0`) | `0` packs them into `0..card-1`, which never reaches the split at all; `1` multiplies by a **stride**; `2` hashes. **Prefer `2`** — a stride is a structured bit pattern that spikes Design A at scattered cardinalities, so a crossover fitted on it is fitted on an artifact. |
+| `SPLIT_MIN_CARD` | shipped | forces `SORT_SPLIT_MIN_CARD`: `0` always splits, anything over 256 never does, so the pair `(0, 1000)` is how a Design B versus Design A arm is built. |
+| `TASK_FLOOR` | shipped | forces `SORT_TASK_FLOOR`, the refine target's floor (shipped as `2048 * threads`). |
+| `STRPREFIX` | shipped (`0`) | leading characters every string row shares — the fixture that puts work into the string refine at all. |
+
+**A sweep over these has to engage the mechanism it is testing**, which is easy to miss because the
+run looks identical either way: the task floor only binds while `n < 2048 * threads²`, so at eight
+threads a sweep at `n = 10⁶` leaves it inert and answers a different question than the one asked.
 
 ```bash
 tools/benchmark_sort_engine.sh                                  # every mode, default sweep
 tools/benchmark_sort_engine.sh --mode=threads                   # the thread ladder alone
 SIZES=50000000 FAMILIES=f64,i64lo tools/benchmark_sort_engine.sh --mode=argsort
 PERM=64 tools/benchmark_sort_engine.sh --mode=argsort           # the int64 permutation path
-ENGINE=fortran tools/benchmark_sort_engine.sh --mode=argsort    # the Fortran engine's own figures
+ENGINE=cpp tools/benchmark_sort_engine.sh --mode=argsort        # the reference engine's figures
+# Design B against Design A on a hashed low-cardinality key:
+ENGINE=fortran FAMILIES=i64lo CARD=6 CARD_SPREAD=2 SIZES=100000 THREADS=8 \
+    tools/benchmark_sort_engine.sh --mode=argsort
+ENGINE=fortran FAMILIES=i64lo CARD=6 CARD_SPREAD=2 SIZES=100000 THREADS=8 SPLIT_MIN_CARD=1000 \
+    tools/benchmark_sort_engine.sh --mode=argsort
 ```
 
 `tools/benchmark_sort_ab.sh` is the one to reach for when the question is *"is the Fortran sort
@@ -756,11 +785,28 @@ scaling; there is deliberately no prefetch arm, because prefetch-then-sort is no
 | `REPS` | `3` | timed opens per figure. The best **total** is kept, with that run's own phases — a per-phase minimum would sum to a total nothing measured. |
 | `KEY` | `both` | `int64` / `string` / `both`. The string key is the interesting one: `Take` on a variable-length column rebuilds offsets and copies the payload. |
 | `KEYS` | `1` | sort keys per run; `2` adds a second key and doubles the Take loop. |
+| `READS` | `0` | payload columns read after the open, which switches on the **workflow arm** below. `0` prints the phase table alone. |
 | `KEEP` | `0` | `1` leaves the fixtures under `test_run/` for a re-run. |
+
+**`READS=N` is the arm that sizes the `Take`, and the phase table alone cannot.** A share of the
+*open* is not what deferring the key's `Take` would recover: a program opens once and then reads,
+and reordering a key column is wasted work only when the caller never reads that key. `READS=N`
+times open-plus-`N`-payload-reads in both shapes — key never read, and key read afterwards — and
+prints `take` as a share of each total. The first row is the **ceiling** on any deferral design;
+the second is zero by construction and is measured anyway, because it is what shows the key comes
+back out of the cache rather than being decoded a second time. The payload columns it reads are
+never sort keys, so the "key not read" shape really does not read one, and the arm asserts the key
+came back sorted before printing anything.
+
+Read the ceiling against **both** `READS` and `SIZES`: it falls as the caller reads more columns
+(the workflow grows while the `Take` does not) and rises with `n` (the gather falls out of cache).
+On one machine it spans 6.4% to 49.1% across that grid, so a single figure from it means nothing
+without both coordinates attached.
 
 ```bash
 tools/benchmark_sort_readtime.sh
 SIZES=20000000 KEY=string KEYS=2 tools/benchmark_sort_readtime.sh
+READS=1 SIZES=1000000,20000000 tools/benchmark_sort_readtime.sh   # the workflow arm
 ```
 
 

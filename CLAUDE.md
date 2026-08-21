@@ -4152,6 +4152,20 @@ before being noticed:**
   reversal is simultaneously the best case for the seen-set's locality and the worst case for the
   bit-set's store-to-load forwarding, while the byte-set's 8x memory only bites once it misses cache.
   Both were needed to reach the right conclusion, which was to change nothing.
+- **A sweep must ENGAGE the mechanism it is testing, and one that does not looks exactly like one
+  that does.** Work out the condition under which the thing being studied is even active, and pick
+  the sweep point from that — never from whatever size the previous measurement happened to use,
+  because a threshold measured on one machine usually moves when the team size or the cache does.
+  Worked example, and it very nearly retired a real item as closed: the sort's refine target is
+  `max(nv/team, 2048*nt)`, so its floor binds only while `n < 2048*nt²` — 131 072 rows at 8 threads
+  against 8.4 M at 64. A cardinality sweep at n = 10⁶ and 8 threads therefore found **no effect at
+  any cardinality**, on two different fixtures, because the floor was inert; the same sweep at
+  n = 10⁵ found a 1.9x cliff immediately and reproducibly. Nothing in either run's output
+  distinguished the two. This is the benchmarking twin of the size-threshold trap under
+  [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing), and the
+  same fix applies — give the constant a `parquet_debug_set_*` override and **prove the effect in
+  both directions with it**, since "disabling the mechanism removes the effect" and "forcing it on
+  reproduces the effect elsewhere" together identify the cause where either alone only suggests it.
 - **Measure what a restructure costs SERIALLY before assuming the threaded form can replace the
   original.** Making a rebuild splittable usually adds a pass, and that pass is charged to every
   caller below the work floor and every caller already inside a parallel region. Three of the four

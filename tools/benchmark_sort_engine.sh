@@ -93,6 +93,24 @@ ROUNDS="${ROUNDS:-3}"
 PERM="${PERM:-32}"
 THREADS="${THREADS-64}"
 STRWIDTH="${STRWIDTH:-16}"
+# The low-cardinality and split knobs. They were reachable only by bypassing this wrapper, which
+# also bypasses the two optimisation-flag assertions below -- the exact way a campaign ends up
+# quoting an -O0 figure. Defaults leave the shipped behaviour untouched.
+#   CARD          distinct values the i64lo/multi primary folds onto.
+#   CARD_SPREAD   0 packed into 0..card-1 (never reaches the split), 1 a STRIDE, 2 hashed.
+#                 Prefer 2: a stride is a structured bit pattern that spikes Design A at scattered
+#                 cardinalities, so a crossover fitted on it is fitted on an artifact.
+#   SPLIT_MIN_CARD  forces SORT_SPLIT_MIN_CARD: 0 always splits, anything over 256 never does, so
+#                 the pair (0, 1000) is how a Design B versus Design A arm is built. The `design`
+#                 column of the output reports which one actually ran -- read it, do not assume.
+#   TASK_FLOOR    forces SORT_TASK_FLOOR (the refine target's floor, shipped as 2048 * threads).
+#   STRPREFIX     leading characters every string row shares; the fixture that puts work into the
+#                 string refine at all.
+CARD="${CARD:--1}"
+CARD_SPREAD="${CARD_SPREAD:--1}"
+SPLIT_MIN_CARD="${SPLIT_MIN_CARD:--1}"
+TASK_FLOOR="${TASK_FLOOR:--1}"
+STRPREFIX="${STRPREFIX:--1}"
 SEED="${SEED:-20260814}"
 ENGINE="${ENGINE:-cpp}"
 RADIX_MIN_ROWS="${RADIX_MIN_ROWS:--1}"   # negative leaves the shipped SORT_RADIX_MIN_ROWS alone
@@ -298,6 +316,15 @@ fpm build --profile release >/dev/null
 THREADS_ARG=()
 [[ -n "$THREADS" ]] && THREADS_ARG=(--threads="$THREADS")
 
+# Each is passed only when set, so an unset knob cannot silently override a shipped default with
+# this wrapper's idea of what that default is.
+OPT_ARGS=()
+[[ "$CARD" != "-1" ]] && OPT_ARGS+=(--card="$CARD")
+[[ "$CARD_SPREAD" != "-1" ]] && OPT_ARGS+=(--card-spread="$CARD_SPREAD")
+[[ "$SPLIT_MIN_CARD" != "-1" ]] && OPT_ARGS+=(--split-min-card="$SPLIT_MIN_CARD")
+[[ "$TASK_FLOOR" != "-1" ]] && OPT_ARGS+=(--task-floor="$TASK_FLOOR")
+[[ "$STRPREFIX" != "-1" ]] && OPT_ARGS+=(--strprefix="$STRPREFIX")
+
 for m in "${MODES[@]}"; do
     fpm run benchmark_sort_engine --profile release -- \
         --mode="$m" --sizes="$SIZES" --families="$(families_for "$m")" --dists="$DISTS" \
@@ -306,7 +333,7 @@ for m in "${MODES[@]}"; do
         --engine="$ENGINE" \
         --radix-min-rows="$RADIX_MIN_ROWS" \
         --inner="$INNER" \
-        "${THREADS_ARG[@]}"
+        "${THREADS_ARG[@]}" "${OPT_ARGS[@]}"
     echo
 done
 

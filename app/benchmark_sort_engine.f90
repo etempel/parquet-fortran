@@ -928,7 +928,8 @@ contains
 
     !> The column header for the result rows.
     subroutine table_head()
-        write(output_unit,'(a)') "# family  dist      op           n            thr   reps  seconds       ns/elem"
+        write(output_unit,'(a)') "# family  dist      op           n            thr   reps  seconds" // &
+            "       ns/elem  design"
     end subroutine table_head
 
     !> One result row, in a fixed-width layout that is both readable and greppable.
@@ -943,15 +944,30 @@ contains
         character(len=8) :: cfam
         character(len=9) :: cdst
         character(len=12) :: cop
+        character(len=10) :: cdesign
         !
+        ! **Which parallel design actually ran, read from the engine rather than inferred from the
+        ! flags that were passed.** An A-versus-B comparison is driven by `--split-min-card`, and
+        ! nothing else in this table distinguishes an arm that took the design it was asked for
+        ! from one that declined and fell back silently -- which is the false green CLAUDE.md's
+        ! "check WHICH CODE PATH the test actually reaches" rule exists to prevent. The bracketed
+        ! number is Design B's split bucket count, so a decline cannot masquerade as a split.
+        select case (parquet_debug_sort_design())
+        case (1_int64)
+            cdesign = "A"
+        case (2_int64)
+            write(cdesign, '(a,i0,a)') "B(", parquet_debug_sort_split_buckets(), ")"
+        case default
+            cdesign = "serial"
+        end select
         ! Padded into fixed-width variables rather than with an `a-8` edit descriptor, which is not
         ! Fortran (there is no left-justify modifier on `a`; a character variable is already left
         ! justified within its own length).
         cfam = fam
         cdst = dst
         cop = op
-        write(output_unit,'(2x,a,1x,a,1x,a,1x,i12,1x,i5,1x,i5,1x,es12.4,1x,f10.2)') &
-            cfam, cdst, cop, n, nthr, nrep, secs, secs * 1.0e9_real64 / real(n, real64)
+        write(output_unit,'(2x,a,1x,a,1x,a,1x,i12,1x,i5,1x,i5,1x,es12.4,1x,f10.2,2x,a)') &
+            cfam, cdst, cop, n, nthr, nrep, secs, secs * 1.0e9_real64 / real(n, real64), cdesign
         flush(output_unit)
         nfig = nfig + 1
     end subroutine row
@@ -1237,14 +1253,17 @@ contains
         write(output_unit,'(a)') "  --families=i32,i64,i64lo,f32,f64,str,multi2,multi3"
         write(output_unit,'(a)') "  --dists=rand,sorted,reverse,organ,equal,null001,null10,nan"
         write(output_unit,'(a)') "  --card=N              distinct values the i64lo/multi primary folds onto"
-        write(output_unit,'(a)') "  --card-spread=1       spread those values across int64 (reaches the split)"
-        write(output_unit,'(a)') "  --split-min-card=N    force SORT_SPLIT_MIN_CARD (0 = always split)"
+        write(output_unit,'(a)') "  --card-spread=1|2     spread those values across int64 (reaches the split);"
+        write(output_unit,'(a)') "                        prefer 2 (hashed) -- 1 is a stride and spikes Design A"
+        write(output_unit,'(a)') "  --split-min-card=N    force SORT_SPLIT_MIN_CARD (0 = always split,"
+        write(output_unit,'(a)') "                        >256 = never; the design column shows which ran)"
         write(output_unit,'(a)') "  --task-floor=N        force SORT_TASK_FLOOR"
         write(output_unit,'(a)') "  --thread-dist=rand   (the one distribution --mode=threads sweeps)"
         write(output_unit,'(a)') "  --sizes=1000,10000,...                row counts to sweep"
         write(output_unit,'(a)') "  --rounds=5                            max rounds per figure"
         write(output_unit,'(a)') "  --perm=32|64                          permutation kind to ask for"
         write(output_unit,'(a)') "  --strwidth=16                         string key element width"
+        write(output_unit,'(a)') "  --strprefix=0                         leading characters shared by every row"
         write(output_unit,'(a)') "  --threads=N                           high thread count (default: max)"
         write(output_unit,'(a)') "  --seed=N                              PRNG seed"
         write(output_unit,'(a)') "  --engine=cpp|fortran                  which sort engine to measure"

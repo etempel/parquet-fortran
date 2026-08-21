@@ -11,6 +11,7 @@
 #   tools/benchmark_sort_readtime.sh
 #   SIZES=1000000,20000000 tools/benchmark_sort_readtime.sh
 #   KEYS=2 tools/benchmark_sort_readtime.sh
+#   READS=2 tools/benchmark_sort_readtime.sh          # the workflow arm; see below
 #
 # ---------------------------------------------------------------------------------------------
 # SET THE ENVIRONMENT UP YOURSELF, BEFORE RUNNING THIS
@@ -42,6 +43,14 @@
 #   * `engine+open` is DERIVED, not measured: it is the wall clock minus the five C++ phases, so it
 #     holds pf_argsort, the reader open itself, and any allocation between them. Do not quote it as
 #     a sort-engine figure -- tools/benchmark_sort_engine.sh is what measures that.
+#   * READS=N adds the WORKFLOW arm, and it is the one that answers P13's design question rather
+#     than merely describing the open. A share of the OPEN is not what deferring the key's Take
+#     could recover: a program opens once and then reads, and the reordering of a key column is
+#     wasted only when the caller never reads that key. The arm times open-plus-N-payload-reads in
+#     both shapes -- key never read, key read afterwards -- and prints `take` as a share of each.
+#     The first row is the CEILING on any deferral design; the second is zero by construction and
+#     is measured anyway, because it shows the key comes back from the cache rather than being
+#     decoded a second time. The payload columns it reads are never sort keys.
 #
 # Config (environment; every one has a default so a bare run is meaningful):
 #   SIZES=1000000,20000000   Row counts, comma-separated. The larger entry dominates runtime and
@@ -54,6 +63,9 @@
 #   KEYS=1                   Sort keys per run: 1, or 2 to add a second key. The Take loop runs
 #                             once per KEY column and can never cover more -- a sort must be
 #                             installed before any column is read, so nothing else is cached.
+#   READS=0                  Payload columns read after the open, enabling the workflow arm.
+#                             0 disables it and the output is the phase table alone. Capped at the
+#                             number of payload columns the sort does not name (4, or 3 at KEYS=2).
 #   KEEP=0                   1 leaves the fixtures under test_run/ for a re-run.
 set -uo pipefail
 
@@ -64,6 +76,7 @@ SIZES="${SIZES:-1000000,20000000}"
 REPS="${REPS:-3}"
 KEY="${KEY:-both}"
 KEYS="${KEYS:-1}"
+READS="${READS:-0}"
 KEEP="${KEEP:-0}"
 
 die() { echo "benchmark_sort_readtime.sh: $*" >&2; exit 1; }
@@ -92,7 +105,7 @@ echo "benchmark_sort_readtime.sh"
 echo "=============================================================="
 echo "  fortran     : $FC   ($("$FC" --version 2>&1 | head -n 1))"
 echo "  arch        : $(uname -m)   $(uname -s)"
-echo "  sizes       : $SIZES     reps: $REPS     key: $KEY     keys: $KEYS"
+echo "  sizes       : $SIZES     reps: $REPS     key: $KEY     keys: $KEYS     reads: $READS"
 echo "  load        : $(uptime | sed 's/.*load/load/')"
 
 # A release profile that produced no optimisation flag is an -O0 run reported as a release one --
@@ -144,7 +157,7 @@ fpm build --profile release >/dev/null || die "build failed."
 
 for n in ${SIZES//,/ }; do
     fixture="test_run/bsr_${n}.parquet"
-    args=(--n="$n" --reps="$REPS" --key="$KEY" --keys="$KEYS" --file="$fixture")
+    args=(--n="$n" --reps="$REPS" --key="$KEY" --keys="$KEYS" --reads="$READS" --file="$fixture")
     [[ "$KEEP" == "1" ]] && args+=(--keep)
     fpm run benchmark_sort_readtime --profile release -- "${args[@]}" || die "run failed at n=$n."
 done

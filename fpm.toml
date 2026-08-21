@@ -37,6 +37,12 @@ library = false
 test = false
 
 [features]
+#
+# NOTE: this table and the feature-list form of `[profiles]` below are fpm 0.13.0-alpha
+# constructs. The newest fpm RELEASE (0.12.0, what `pipx install fpm` installs) cannot parse
+# either, so GitLab CI strips both from its own checkout first -- see
+# tools/prep_gitlab_fpm_toml.sh, called from .gitlab-ci.yml's before_script. Adding another
+# alpha-only key here is fine, but check whether that script needs to strip it too.
 
 # standard
 nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=double_real_literal -Warn=subnormal"

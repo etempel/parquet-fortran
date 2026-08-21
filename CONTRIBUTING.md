@@ -285,6 +285,14 @@ The `clang++` invocation is unconditional, with no `FPM_CXX`/`CXX` override — 
 
 A few more `tools/` scripts, unrelated to fixtures and not part of the build or test flow:
 
+`tools/prep_gitlab_fpm_toml.sh` makes `fpm.toml` parseable by the fpm **release** that GitLab CI installs, and is called from `.gitlab-ci.yml`'s `before_script` before anything runs fpm. This project is developed against fpm 0.13.0-alpha and its manifest uses two constructs that version introduced — the `[features]` table and the feature-list form of `[profiles]` (`nag = ["nagfor"]`) — while CI's `pipx install fpm` gives the newest release, 0.12.0, which rejects unknown manifest keys outright:
+
+```
+<ERROR> *cmd_run* Package error: Key features is not allowed in package file
+```
+
+The script copies the manifest to `fpm_original.toml` (git-ignored) and removes both tables from the CI checkout only; `--restore` puts the original back, which is what to use after running it locally by accident. **Both tables must go, and that is measured rather than assumed**: with `[features]` removed but `[profiles]` left in place, fpm 0.12.0 does not report an error — it segfaults. Nothing about the local workflow changes, so `--profile nag`/`nagdeb`/`nagundef` keep working everywhere outside CI. Two things to know: a second run is a no-op and an existing `fpm_original.toml` is never overwritten, so a re-run cannot lose the original; and **the fpm-published package is not covered by this** — `tools/prep_fpm_publish.sh` does not strip these tables, so a consumer on a released fpm would hit the same error from an installed package. Delete the CI line, and this script, once a released fpm understands both tables. Maintainer/CI-only.
+
 `tools/run_lint_check.sh` runs the same checks as `.gitlab-ci.yml`'s `lint` stage, locally — `tools/check_bindc_boundary.py`, `tools/check_doc_anchors.py`, `tools/check_source_conventions.py`, the four generated-file `--check` calls (`generate_parquet_columns.py`, `generate_parquet_tables.py`, `generate_parquet_sorting.py`, `generate_parquet_maml.sh base`), `generate_user_table_code.py`'s own `--self-test` plus the `--check` for this project's committed generated table type, and `generate_random_golden_vectors.py`'s and `generate_random_perm_vectors.py`'s `--self-test` and `--check`. It needs nothing but `python3` and `bash` — no fpm, no gfortran, no Arrow — and finishes in well under a second, so it is worth running before every push:
 
 ```bash

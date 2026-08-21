@@ -10,4 +10,3 @@ __pycache__
 qemu_*.core
 core
 run_test.sh
-

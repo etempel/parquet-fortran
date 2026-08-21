@@ -28,6 +28,13 @@
 ! identical on all three arms and verified bit-for-bit, so the only thing traded is speed against
 ! the ability to run a checking build.
 !
+! nagfor's arm is a CHOICE, not a necessity, and that is now measured rather than assumed: the
+! wrapping kernel compiled by nagfor reproduces every golden vector at -O0, -O2, -O3 and -O4
+! (`tools/check_random_kernels.sh`'s forced half, which reaches it by pre-expanding this file --
+! nagfor has no `-U`). So safe64 buys `-C=intovf` and nothing else there. Worth contrasting with
+! the compiler that does have a problem with it: gfortran's *wrapping* arm fails at `-O3 -flto`
+! and `-Ofast -flto` (504 mismatches, Risk-101), which is the exposure the whole fork exists for.
+!
 ! The arms are bit-exact, and that is asserted rather than assumed: `tools/check_random_kernels.sh`
 ! builds all three against the same golden vectors at every optimisation setting. Worth knowing
 ! what that found -- the wrapping arm FAILS there under `-O3 -flto` and `-Ofast -flto` (504
@@ -169,9 +176,6 @@ module parquet_random
     !! idiom. Load-bearing, not decoration.
     integer(int64), parameter :: RETRY_TAG = ishft(int(z'5A170000', int64), 32)
 
-    !> Bit 63 alone: XORing it flips the ordering between signed and unsigned, which is how this
-    !! module compares 64-bit patterns as unsigned without leaving the bit domain.
-    integer(int64), parameter :: SIGN_BIT = ibset(0_int64, 63)
     !> Low 16 bits set: one limb of the strict multiply.
     integer(int64), parameter :: M16 = 65535_int64
 
@@ -2209,13 +2213,36 @@ contains
 
     !> Unsigned `a < b` for two 64-bit patterns.
     !!
-    !! Flipping the sign bit of both maps the unsigned order onto the signed one, so this is two
-    !! bit operations and a comparison -- it cannot overflow, and needs no wide kind.
+    !! Two operands with the SAME top bit compare the same way signed and unsigned, so the signed
+    !! comparison already answers; operands whose top bits DIFFER compare the opposite way, because
+    !! the one with the top bit set is the larger as unsigned and the smaller as signed. That is the
+    !! whole rule, and it is what the body says: take the signed answer, and invert it exactly when
+    !! the top bits differ. It cannot overflow and needs no wide kind.
+    !!
+    !! **Do NOT write this as `ieor(a, K) < ieor(b, K)` with `K` the sign bit** -- the shorter,
+    !! obvious spelling, and what this was until it was found miscompiled. nagfor 7.2 cancels the
+    !! common `ieor(., 2**63)` from both sides of the relational, which is invalid precisely because
+    !! XOR
+    !! with the sign bit REVERSES the order it maps, and the comparison collapses to the signed
+    !! `a < b` -- the exact inverse of this function's contract for a pair straddling `2**63`. It
+    !! computes both `ieor`s correctly and then compares them wrongly, so printing the operands
+    !! shows nothing amiss; only a comparison reveals it. See `feature_risks.md` Risk-125 for the
+    !! same defect's other two shapes, and CLAUDE.md's compiler-gotchas section.
+    !!
+    !! **What that cost, and why the shape is worth protecting.** `ult` is `int_reduce`'s lazy
+    !! guard, so it is reached for every width above the narrow-32 cap. A wrong answer there sends
+    !! the draw around the rejection path and returns a DIFFERENT value that is still inside
+    !! `[lo, hi]` and still uniform-looking: 13 of the 38 golden integer rows, every one of them a
+    !! width above `2**63`, and nothing but the frozen vectors could see it. Writing the rule out
+    !! rather than reaching for the identity costs about 2.7 % on that path (41.9 -> 43.0 ns per
+    !! draw, gfortran -O3; 58.2 -> 59.8 under nagfor -O3, measured against the fastest correct
+    !! spelling) and removes the identity a compiler can mis-cancel. Keep it that way: a silent
+    !! change to a frozen bit contract is not worth 2.7 %.
     pure function ult(a, b) result(r)
         integer(int64), intent(in) :: a             !! left operand, read as unsigned
         integer(int64), intent(in) :: b             !! right operand, read as unsigned
         logical :: r                                !! `.true.` if `a < b` as unsigned
-        r = ieor(a, SIGN_BIT) < ieor(b, SIGN_BIT)
+        r = (a < b) .neqv. ((a < 0_int64) .neqv. (b < 0_int64))
     end function ult
 
     ! ================================================================================

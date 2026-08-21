@@ -5447,8 +5447,10 @@ backtrace into this library at all.
 
 ### Risk-125 — The most-negative int64 CONSTANT in a runtime expression is wrong under nagfor
 
-**Covered** by the temporal suite's `date difference and day-offset arithmetic` test and by
-`temporal_ts_to_unix_overflow_negative` (`test/error_scenarios.f90`), again **only under nagfor**.
+**Covered** by the temporal suite's `date difference and day-offset arithmetic` test, by
+`temporal_ts_to_unix_overflow_negative` (`test/error_scenarios.f90`), and by the `random` suite's
+three golden-vector/reference-agreement tests — all of them **only under nagfor**, which is why
+`tools/check_random_kernels.sh` now runs there too.
 
 nagfor 7.2 mis-evaluates an expression mixing the most-negative `int64` — here the `INT64_MIN`
 parameter in `src/parquet_temporal.f90` — with a non-constant operand, and it does so silently.
@@ -5458,6 +5460,7 @@ Measured against gfortran on the same machine, with `v = 19920` and `delta = -4`
 |---|---|---|
 | `v < INT64_MIN - delta` | `.true.` | `.false.` |
 | `INT64_MIN/scale` (`scale = 1e9`) | `+9223372036` | `-9223372036` |
+| `ieor(a, K) < ieor(b, K)` with `K = 2**63`, operands straddling `2**63` | `.false.` | `.true.` |
 | `v < lo_limit - delta` (constant copied to a variable first) | `.false.` | `.false.` |
 | `v == INT64_MIN`, a bare constant comparison, a fully folded constant expression | correct | correct |
 
@@ -5471,6 +5474,30 @@ wrapped and returned a plausible wrong number instead of aborting. `date_offset_
 started firing on ordinary arithmetic, so `a + 4` aborted on a 2024 date. No other compiler in the
 fleet is affected, so the default toolchain is green either way.
 
+**The third instance was a wrong ANSWER from the random generator, and it shows the reach of this.**
+`ult` (`src/parquet_random.f90`) was `ieor(a, SIGN_BIT) < ieor(b, SIGN_BIT)` — the textbook unsigned
+comparison. nagfor cancels the common `ieor(., 2**63)` from both sides, which is invalid precisely
+because XOR with the sign bit REVERSES the order it maps, and the relational collapses to the signed
+`a < b`: the exact inverse of the function's contract for a pair straddling `2**63`. `ult` is
+`int_reduce`'s lazy guard, so it is reached for every width above the narrow-32 cap; a wrong answer
+there sends the draw around the rejection path and returns a **different, in-range, uniform-looking
+value**. It broke **13 of the 38 golden integer rows** — every one of them a width above `2**63` —
+and nothing but the frozen vectors could see it. Note the compiler computes both `ieor`s correctly
+and only compares them wrongly, so printing the operands shows nothing amiss.
+
+**What let it ship is a check that could not run under the compiler that needed it.**
+`tools/check_random_kernels.sh` exists to assert the three kernels agree, and it hardcoded gfortran's
+`-cpp`; nagfor spells it `-fpp` and rejects `-cpp` outright, so every configuration failed to build
+and the script exited saying it proved nothing. The safe64 arm had therefore only ever been verified
+by a **gfortran forced onto it** — the arm was correct, and the compiler that actually ships it was
+never run against the vectors. The script now understands nagfor, and covers two arms there:
+safe64 as nagfor's shipped build, and the wrapping kernel via a forced half that pre-expands the
+source with an external `cpp`, since nagfor has no `-U` (`-u` means IMPLICIT NONE) and the fork
+deliberately offers no `-DPF_FORCE_*` escape hatch. It asserts a nagfor run really compiled safe64.
+That forced half also settled a question worth having settled: nagfor compiles the *wrapping* kernel
+correctly at every optimisation level, so safe64 there is a deliberate choice bought for `-C=intovf`
+rather than a correctness necessity.
+
 **What this forbids.**
 
 - **Copy `INT64_MIN` into a local variable before combining it with anything computed at run time.**
@@ -5478,6 +5505,18 @@ fleet is affected, so the default toolchain is green either way.
   measurements live at the constant's own declaration, which is where a fourth site will look.
 - **Do not generalise the exemptions past what was measured.** Equality, a bare constant comparison,
   plain assignment and an all-constant folded expression are correct; anything else is unmeasured.
+- **Do not restore `ieor(a, K) < ieor(b, K)` in `ult`, and do not reach for that identity anywhere
+  else.** The shipped form writes the rule out — take the signed answer, invert it exactly when the
+  top bits differ — which costs about **2.7 %** on the reduction path (41.9 -> 43.0 ns per draw,
+  gfortran -O3; 58.2 -> 59.8 under nagfor -O3) and leaves no identity for a compiler to mis-cancel.
+  Copying the constant into a local variable was measured free and was **rejected**: it works only
+  while the optimiser declines to propagate the copy, and the thing at stake is a frozen bit
+  contract. The same reasoning already put `sub64`/`add64`/`width_of` in that file.
+- **A compile-time fork needs a check that runs under every compiler that selects an arm.** An arm
+  verified only by another compiler simulating it is verified against the wrong codegen — which is
+  this entry's whole story. `SORT_SIGN_BIT` (`parquet_sorting_engine.f90`) uses the same sign-bit XOR
+  but *stores* the result into a radix key rather than comparing two of them, so nothing can cancel;
+  that is why the sort is unaffected, and it is a property to preserve rather than a coincidence.
 - **Other most-negative constants are safe only because of how they are USED.** `SIGN_BIT`
   (`parquet_random`) and `SORT_SIGN_BIT` (`parquet_sorting_engine`) appear solely inside `ieor`.
   A future arithmetic or comparison use of either inherits this entry.

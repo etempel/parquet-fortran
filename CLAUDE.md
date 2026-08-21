@@ -1187,13 +1187,34 @@ constraint rather than a tidy accident.** Two checks compile that one file stand
 dependency resolver, no fpm, and no Arrow install anywhere — and they are the only evidence for two
 properties nothing else can reach:
 
-- **`tools/check_random_kernels.sh`** builds both arms of the route (e) `#ifdef` fork and asserts
+- **`tools/check_random_kernels.sh`** builds the arms of the route (e) `#ifdef` fork and asserts
   they agree. The fork exists because gfortran 14 and 15 have both been observed *miscompiling* the
   unprotected Philox round at `-O3`, silently, with no warning under `-Wall -Wextra`. The wrapping
   arm ships wherever the compiler has no 128-bit integer kind (ifx), and **no other check compiles
   it at all**, because every other compiler in the fleet takes the protected arm.
+  **Run it under `FC=nagfor` as well, not only gfortran.** A run there covers the `PF_SAFE64` arm as
+  nagfor's OWN build, which is the only place that happens — every other family can merely *simulate*
+  that arm with `-D__NAG_COMPILER_RELEASE=1`, and a simulation is a statement about the simulating
+  compiler's codegen. Skipping it is what let a wrong-answer defect in `ult` reach the golden vectors.
+  A nagfor run covers **two** arms: `safe64` as its shipped build, and the wrapping kernel through
+  the script's forced half, which reaches it by pre-expanding the source with an external `cpp` —
+  nagfor has no `-U` at all (`-u` means IMPLICIT NONE), and the fork deliberately has no
+  `-DPF_FORCE_*` door to open. The script asserts a nagfor run really compiled `safe64`, rather than
+  reporting green on whatever it got. The int128 arm is out of reach there and stays with the
+  families that have a 128-bit kind. **What that forced half established is worth knowing:** nagfor
+  compiles the wrapping kernel correctly at `-O0`, `-O2`, `-O3` and `-O4`, so its `PF_SAFE64` is a
+  choice bought for `-C=intovf`, not a correctness necessity — while gfortran's wrapping arm is the
+  one that fails, under `-flto`.
 - **`tools/check_exp_key.sh`** does the same for `src/parquet_expkey.f90`'s frozen `-log(u)`
-  transform, which is a leaf for the identical reason.
+  transform, which is a leaf for the identical reason. **Run this one under `FC=nagfor` too**, and
+  know which of its arms carry the weight there: nagfor generates C, so contraction and
+  reassociation happen in the BACKEND and are reached with `-Wc,` — and its default backend line
+  carries **`-march=nocona`**, a pre-FMA target, so without the `-Wc,-march=native` pairing the
+  whole FMA class is invisible on that compiler. Measured by defeating `ek_rnd`'s `volatile`
+  barrier: the plain `-O0`/`-O2`/`-O3`/`-O4`/`-float-store` ladder still reproduced the frozen
+  value, while `-O4 -Ounsafe` and the `-Wc,-ffast-math` arms caught it — the fast-math-plus-native
+  pairing with a different wrong fingerprint again. An optimisation ladder alone proves almost
+  nothing under nagfor.
 
 **The failure mode is a check that quietly stops being able to run, which is the worst kind.** When
 the weighted draw was first written it went into `parquet_random`, bringing `use parquet_sorting`
@@ -3068,9 +3089,21 @@ applied to the harness instead of the source.
   goes looking in the wrong place. Both failure directions had shipped in `src/parquet_temporal.f90`:
   a guard that stopped firing (`%to_unix` wrapping silently past int64 instead of aborting) and one
   that started firing on ordinary input (`date + 4` aborting as "out of range" for a 2024 date). The
-  int32 equivalent is unaffected, and so are gfortran, ifx and flang. A most-negative constant used
-  only inside `ieor` — `SIGN_BIT`, `SORT_SIGN_BIT` — is safe for that reason alone, not by nature.
-  See `feature_risks.md` Risk-125.
+  int32 equivalent is unaffected, and so are gfortran, ifx and flang.
+  **The same defect also cancels a common `ieor(., 2**63)` from BOTH sides of a relational**, which
+  is invalid because XOR with the sign bit reverses the order it maps: the textbook unsigned
+  comparison `ieor(a, K) < ieor(b, K)` collapses to the signed `a < b`, its exact inverse for a pair
+  straddling `2**63`. That is not a guard misfiring but a **wrong answer** — it broke 13 of the 38
+  golden integer vectors in `parquet_random`, returning different, in-range, uniform-looking draws.
+  Write the rule out instead (`(a < b) .neqv. ((a < 0) .neqv. (b < 0))`); copying the constant to a
+  local also works and was rejected, because it holds only while the optimiser declines to propagate
+  the copy. A most-negative constant used only inside `ieor` whose result is **stored** rather than
+  compared — `SORT_SIGN_BIT` in the sort's radix keys — is safe, and safe for that reason alone.
+  **And the tooling lesson, which is the expensive half:** `tools/check_random_kernels.sh` could not
+  run under nagfor at all (it hardcoded gfortran's `-cpp`; NAG spells it `-fpp` and rejects `-cpp`),
+  so the one arm nagfor ships had only ever been verified by a gfortran forced onto it — a compile-
+  time fork needs a check that runs under **every compiler that selects an arm**, or an arm is being
+  verified against codegen that never runs it. See `feature_risks.md` Risk-125.
 
 ### NAG's "explicitly imported but not used" warnings: most are FALSE POSITIVES
 

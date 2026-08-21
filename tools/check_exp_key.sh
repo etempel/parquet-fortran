@@ -65,8 +65,10 @@ cd "$ROOT_DIR"
 # The contract. Reproduced by gfortran 15.2.1 at -O0/-O2/-O3/-march=native/-mfma/-flto (machines
 # B and C, both x86-64), by gfortran 15.2.0 at -O0/-O2/-O3/-march=native/-flto/-ffp-contract=fast
 # (machine A, arm64 -- no -mfma arm there; see the note on the generic branch below for why its
-# absence costs no coverage), by ifx 2026.1.1 at -fp-model=precise (machine B), and by flang
-# 22.1.8 at -O0/-O2/-funroll-loops/-march=native/-flto/-ffp-contract=fast (machines A and C).
+# absence costs no coverage), by ifx 2026.1.1 at -fp-model=precise (machine B), by flang
+# 22.1.8 at -O0/-O2/-funroll-loops/-march=native/-flto/-ffp-contract=fast (machines A and C), and
+# by nagfor 7.2 at -O0/-O2/-O3/-O4/-O4 -Ounsafe/-float-store and with the backend pushed hard
+# (-Wc,-ffast-math, -Wc,-march=native, and both together) on machine C.
 EXPECTED_FP="-9123008136727752159"
 
 # Follow FPM_FC when FC is unset, as tools/check_random_kernels.sh does. Without this, running
@@ -132,6 +134,42 @@ case "$($FC --version 2>&1 | head -1)" in
                             "-O3 -flto" "-O3 -ffp-contract=fast" \
                             "-O3 -ffast-math" "-Ofast" \
                             "-O3 -ffast-math -march=native" "-Ofast -march=native") ;;
+    # nagfor generates C and hands it to a C compiler, so its optimiser is only half the story:
+    # FMA contraction and reassociation happen in the BACKEND, and are reached with `-Wc,`.
+    # `-Ounsafe` is NAG's own unsafe-optimisation switch, the nearest thing it has to fast-math.
+    #
+    # The `-Wc,-march=native` pairing is not optional here, for a reason specific to this compiler:
+    # nagfor's default backend line already carries **`-march=nocona`** (confirmed with `-dryrun`),
+    # a pre-FMA x86-64 target. So on this compiler the whole FMA-contraction class is invisible
+    # WITHOUT the pairing -- more so than on the families above, where the default target at least
+    # follows the host. `-Wc,` options land after NAG's own on the backend command line, so they
+    # win. `-mdir` is NAG's module-output flag; neither `-J` nor `-module` exists here.
+    #
+    # `-ieee=nonstd` is deliberately absent: it selects a non-conforming float mode, and the
+    # contract this script freezes is over IEEE-CONFORMING builds. `-ieee=full` changes only
+    # trapping, so it would add an arm that cannot differ.
+    #
+    # Which of these arms actually have TEETH was measured, not assumed, by defeating `ek_rnd`'s
+    # `volatile` barrier and re-running: `-O0`, `-O2`, `-O3`, `-O4`, `-float-store` and the bare
+    # `-Wc,-march=native` all still reproduced the frozen value, i.e. they are blind to the class
+    # this script exists for. `-O4 -Ounsafe` and the `-Wc,-ffast-math` arms caught it, and the
+    # fast-math-plus-native pairing caught it with a DIFFERENT wrong fingerprint again -- two
+    # distinct transformations, so both spellings earn their place. Do not prune this list down to
+    # the optimisation ladder: on this compiler the ladder alone proves almost nothing.
+    *NAG*)         PP="-fpp"; MD="-mdir $WORK"
+                   CONFIGS=("-O0" "-O2" "-O3" "-O4" "-O4 -Ounsafe" "-float-store" \
+                            "-O3 -Wc,-ffast-math" "-O4 -Ounsafe -Wc,-ffast-math")
+                   # Same architecture gate as the `-mfma` arm below, and the same reasoning: on a
+                   # target where FMA is baseline every arm above is already an FMA-capable build,
+                   # so pairing buys nothing; on x86-64 it is the only way the class can fire at
+                   # all, because of the `-march=nocona` default noted above.
+                   case "$(uname -m)" in
+                       x86_64|i?86)
+                           CONFIGS+=("-O3 -Wc,-march=native" \
+                                     "-O3 -Wc,-ffast-math -Wc,-march=native" \
+                                     "-O4 -Ounsafe -Wc,-ffast-math -Wc,-march=native") ;;
+                       *) SKIP_NOTE="  [skip] the -Wc,-march=native arms -- x86-only pairing; on $(uname -m) FMA is baseline, so every arm above is already FMA-capable" ;;
+                   esac ;;
     *)             PP="-cpp"; MD="-J$WORK"
                    # As on flang, the fast-math arms are swept both bare and with an FMA-bearing
                    # target -- the rewrite that needs the pairing is a property of the TARGET, not

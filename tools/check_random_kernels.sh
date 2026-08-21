@@ -23,7 +23,9 @@
 # prints which kernel it compiled and the script requires the two builds to disagree.
 #
 # Usage:  tools/check_random_kernels.sh [--quick] [--shipped-only]
-#   FC=<compiler>    Fortran compiler to use (default: gfortran).
+#   FC=<compiler>    Fortran compiler to use (default: gfortran). gfortran, flang, ifx and
+#                    nagfor are all understood; run it under nagfor too, since that is the only
+#                    compiler that SHIPS the safe64 arm.
 #   --quick          Only the LTO configurations, which are the ones that have ever failed.
 #   --shipped-only   Skip the forced-kernel half; check only the kernel this compiler ships.
 #
@@ -111,8 +113,62 @@ trap 'rm -rf "$WORK"' EXIT
 case "$FC" in
     *flang*) UNDEF="-U__flang__ -U__FLANG" ; CPP="-cpp" ; FAMILY="flang" ;;
     *ifx*|*ifort*) UNDEF="" ; CPP="-fpp" ; FAMILY="intel" ;;  # already wrapping; nothing to defeat
+    # nagfor is the ONLY compiler here that ships the safe64 arm, so it is the only one that can
+    # test that arm as its own build rather than as a simulation. It spells the preprocessor flag
+    # `-fpp`, and `-cpp` is not merely ignored -- it is a hard `Option error`, so before this case
+    # existed EVERY configuration failed to build and the script exited saying it proved nothing.
+    # That is exactly how a wrong-answer defect in `ult` reached the golden vectors: the arm was
+    # correct under a gfortran forced onto it, and no run ever compiled it with the compiler that
+    # actually uses it. Both NAG macros have to go to defeat the allowlist -- the `#elif` names
+    # them both, and undefining one leaves the other selecting safe64 again.
+    # nagfor has no `-U` at ALL -- its `-u` means IMPLICIT NONE, and `-Wp,-U...` does not reach
+    # fpp either (both tried) -- so the allowlist cannot be defeated with a flag here. It is
+    # defeated by PRE-EXPANDING the source with an external cpp instead (see NAG_FORCED_SRC
+    # below), which is what lets a nagfor run cover two arms rather than one. Deliberately not
+    # solved by adding a `-DPF_FORCE_*` escape hatch to the fork: src/parquet_random.f90's header
+    # says such a macro is absent on purpose, because a consumer-settable kernel switch is exactly
+    # the silent wrong-kernel hazard the allowlist exists to close. A test harness may preprocess
+    # the source it is testing; the shipped fork may not grow a door.
+    *nagfor*) UNDEF="" ; CPP="-fpp" ; FAMILY="nag" ;;
     *)       UNDEF="-U__GFORTRAN__" ; CPP="-cpp" ; FAMILY="gnu" ;;
 esac
+
+# nagfor's forced half: the same source with every allowlist macro expanded away, so the compiler
+# is handed a file that already selects the wrapping kernel. `-P` suppresses cpp's linemarkers,
+# which Fortran cannot parse, and `-traditional-cpp` is the mode this project preprocesses with
+# everywhere else (fpm's [preprocess.cpp], FORD's own preprocessor line). The undefines are passed
+# explicitly rather than relying on this cpp not defining them, so the result does not depend on
+# whether `cpp` here is clang's or GCC's.
+#
+# What this cannot reach is the int128 arm: nagfor has no 128-bit integer kind, so that arm does
+# not compile there at all, and its coverage stays with the families that have one.
+NAG_FORCED_SRC=""
+if [ "$FAMILY" = "nag" ]; then
+    if ! command -v cpp >/dev/null 2>&1; then
+        echo "check_random_kernels.sh: no external 'cpp' found; nagfor cannot reach the wrapping" >&2
+        echo "  kernel without one (it has no -U). Install cpp, or accept that this run covers" >&2
+        echo "  only the arm nagfor ships." >&2
+        exit 2
+    fi
+    NAG_FORCED_SRC="$WORK/parquet_random_forced.f90"
+    # Redirect rather than `-o`: Apple's cpp ignores `-o` in that position and writes the whole
+    # expansion to stdout, which leaves an EMPTY output file and a compile that fails several
+    # steps later with "no input files" -- a message that says nothing about its cause.
+    if ! cpp -traditional-cpp -E -P \
+            -U__GFORTRAN__ -U__flang__ -U__FLANG -U__NAG_COMPILER_RELEASE -UNAGFOR \
+            "$REPO/src/parquet_random.f90" > "$NAG_FORCED_SRC" 2>"$WORK/cpp.err"; then
+        echo "check_random_kernels.sh: pre-expanding parquet_random.f90 for the forced half failed:" >&2
+        sed 's/^/  /' "$WORK/cpp.err" >&2
+        exit 2
+    fi
+    # cpp warns about every apostrophe in a Fortran comment, so its stderr is noise; its OUTPUT is
+    # what matters. Assert the expansion actually produced the module before handing it on.
+    if ! grep -q '^ *module parquet_random' "$NAG_FORCED_SRC"; then
+        echo "check_random_kernels.sh: the pre-expanded source does not contain parquet_random --" >&2
+        echo "  the forced half would test nothing. Check the cpp invocation above." >&2
+        exit 2
+    fi
+fi
 
 # Flag spellings are per family. The interprocedural configurations matter most -- they are the
 # only ones that have ever failed here -- so each family must contribute one.
@@ -133,6 +189,17 @@ case "$FC" in
             CONFIGS=("-O3 -ipo")
         else
             CONFIGS=("-O0" "-O2" "-O3" "-O3 -xHost" "-O3 -ipo" "-O3 -xHost -ipo")
+        fi
+        ;;
+    *nagfor*)
+        # NAG has no `-flto` equivalent to offer here (it compiles through C and has no
+        # interprocedural mode this script can drive), so the sweep is the optimisation ladder
+        # alone -- `-O4` is its most aggressive. That is a weaker sweep than the other families
+        # get, and it is still the only sweep that compiles the safe64 arm as a real build.
+        if [ "$QUICK" = "1" ]; then
+            CONFIGS=("-O4")
+        else
+            CONFIGS=("-O0" "-O2" "-O3" "-O4")
         fi
         ;;
     *)
@@ -274,6 +341,18 @@ elif [ -n "$UNDEF" ]; then
     for cfg in "${CONFIGS[@]}"; do
         build_and_run "forced $cfg" $UNDEF $cfg
     done
+elif [ -n "$NAG_FORCED_SRC" ]; then
+    # Same half, reached the only way nagfor allows: the source pre-expanded with every allowlist
+    # macro undefined, so the file itself already selects the wrapping kernel. Swapping ABS_SRC is
+    # what build_and_run compiles, and it is restored immediately afterwards so the safe64 half
+    # below (and any future arm) still sees the real source.
+    echo "--- allowlist defeated (source pre-expanded by cpp): the kernel this compiler does NOT ship ---"
+    saved_abs_src="$ABS_SRC"
+    ABS_SRC="$(echo "$ABS_SRC" | sed "s#$REPO/src/parquet_random.f90#$NAG_FORCED_SRC#")"
+    for cfg in "${CONFIGS[@]}"; do
+        build_and_run "forced $cfg" $cfg
+    done
+    ABS_SRC="$saved_abs_src"
 else
     echo "--- $FC already compiles the wrapping kernel; nothing to force ---"
 fi
@@ -304,15 +383,15 @@ if [ -z "$shipped_kernel" ]; then
     echo "ERROR: could not read the kernel from the driver's output -- the check proves nothing." >&2
     exit 2
 fi
-if [ -n "$UNDEF" ]; then
+if [ -n "$UNDEF" ] || [ -n "$NAG_FORCED_SRC" ]; then
     if [ -z "$forced_kernel" ]; then
         echo "ERROR: the forced half produced no kernel name -- the check proves nothing." >&2
         exit 2
     fi
     if [ "$shipped_kernel" = "$forced_kernel" ]; then
-        echo "ERROR: both builds compiled the '$shipped_kernel' kernel -- '$UNDEF' no longer defeats" >&2
-        echo "       the allowlist, so the second half of this check tested nothing. Fix the flag" >&2
-        echo "       before trusting a green run here." >&2
+        echo "ERROR: both builds compiled the '$shipped_kernel' kernel -- ${UNDEF:-the pre-expansion}" >&2
+        echo "       no longer defeats the allowlist, so the second half of this check tested" >&2
+        echo "       nothing. Fix it before trusting a green run here." >&2
         exit 2
     fi
     echo "--- both kernels exercised: shipped=$shipped_kernel forced=$forced_kernel ---"
@@ -334,6 +413,15 @@ if [ "$SHIPPED_ONLY" != "1" ] && [ "$shipped_kernel" != "safe64" ]; then
         exit 2
     fi
     echo "--- safe64 kernel exercised as well ---"
+fi
+
+# A nagfor run exists to exercise safe64 as nagfor's OWN build. If it compiled something else the
+# fork has changed under it, and the run says nothing about the arm it was started for.
+if [ "$FAMILY" = "nag" ] && [ "$shipped_kernel" != "safe64" ]; then
+    echo "ERROR: nagfor compiled the '$shipped_kernel' kernel, not safe64 -- the one arm this" >&2
+    echo "       compiler is here to cover was not built. Check the #if fork at the top of" >&2
+    echo "       src/parquet_random.f90 against nagfor's own predefined macros." >&2
+    exit 2
 fi
 
 if [ $xpass -ne 0 ]; then

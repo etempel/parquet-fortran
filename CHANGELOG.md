@@ -23,7 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `use parquet_sampling` compiles 8 of this library's files where it used to compile 24. Each of
   those modules also re-exports, getter and setter both, the process-global settings its own code
   reads, so a narrow import can be configured without naming `parquet_settings` — which would put
-  the C++ boundary back. **One caveat that no import removes**: `link` is a package-level key in
+  the C++ boundary back. A tenth entry module, `parquet_version`, is new with this release and is
+  two files: it carries `parquet_get_version` alone, so a program built on any of the Arrow-free
+  tiers can report which parquet-fortran it was built against. It is the one module whose contents
+  no other tier re-exports (`use parquet` aside) — a version string is not a setting, and nothing
+  in the library reads it. **One caveat that no import removes**: `link` is a package-level key in
   `fpm.toml`, so depending on parquet-fortran still compiles `src/parquet_wrapper.cpp` and still
   links `-larrow -larrow_compute -lparquet` whichever module you name. See
   [Choosing a module](doc/pages/operating/choosing-a-module.md).
@@ -794,6 +798,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Random numbers](doc/pages/utilities/random.md).
 
 ### Changed
+
+- **`parquet_get_version` no longer reports the Arrow and Parquet C++ versions — `parquet_get_arrow_version`
+  does.** `parquet_get_version(v, mode="arrow")` and `mode="parquet"` are gone and now abort naming
+  the replacement; `parquet_get_arrow_version(v)` gives the linked Arrow library's runtime version
+  and `parquet_get_arrow_version(v, mode="parquet")` the compile-time Parquet C++ one. The bare call
+  and `mode="internal"` are unchanged. The split is what makes the library's own version reportable
+  without the C++ boundary: `parquet_get_version` moved into the new leaf module `parquet_version`,
+  which reaches no Arrow binding, while the linked-library query stays in `parquet_settings`, where
+  the boundary already is. Through `use parquet` both remain reachable with no import change; a
+  program importing one of the Arrow-free entry modules now adds `use parquet_version` for the
+  first, and cannot reach the second at all — by design, since answering it means calling into C++.
 
 - **`sample_seed=` is now `integer(int64)`, and `parquet_open_reader(..., sample_fraction=)`
   selects different rows for a given seed.** Two changes to one feature, and the first is a

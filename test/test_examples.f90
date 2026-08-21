@@ -168,10 +168,18 @@ contains
             "the plain reader should agree with the table on the row count")
         if (allocated(error)) return
 
-        ! The facade's own code, rather than something it re-exports.
+        ! The library's own version. It lives in the leaf module parquet_version, and `use parquet`
+        ! is the ONLY module that re-exports it -- so this assertion is what would fail if that one
+        ! bare `use parquet_version` line in the facade were ever dropped.
         call parquet_get_version(ver, mode="internal")
         call check(error, len(ver) > 0, &
-            "parquet_get_version must still be reachable now that it lives in the facade")
+            "parquet_get_version must be reachable through the facade")
+        if (allocated(error)) return
+
+        ! The linked Arrow version is the other half, re-exported from parquet_settings.
+        call parquet_get_arrow_version(ver)
+        call check(error, len(ver) > 0, &
+            "parquet_get_arrow_version must be reachable through the facade")
     end subroutine test_facade_covers_every_layer
 
     !> "Minimal writer example" + "Minimal reader example"

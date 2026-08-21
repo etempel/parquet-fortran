@@ -1308,6 +1308,10 @@ program error_scenarios
         call scenario_mask_row_group_no_writes_at_all()
     case ("get_version_invalid_mode")
         call scenario_get_version_invalid_mode()
+    case ("get_version_arrow_mode_removed")
+        call scenario_get_version_arrow_mode_removed()
+    case ("get_arrow_version_invalid_mode")
+        call scenario_get_arrow_version_invalid_mode()
     case ("column_exists_bad_type_token")
         call scenario_column_exists_bad_type_token()
     case ("column_exists_bad_type_token_missing_column")
@@ -11091,13 +11095,46 @@ contains
         print '(a)', "unexpectedly finished a row group with no column ever written for it"
     end subroutine scenario_mask_row_group_no_writes_at_all
 
-    !> parquet_get_version(mode=...) rejects any value other than "internal"/"arrow"/"parquet".
+    !> parquet_get_version(mode=...) rejects any value other than "internal".
     subroutine scenario_get_version_invalid_mode()
         character(len=:), allocatable :: ver_string
 
+        ! Negative control first: the one accepted mode must still work, so that a guard which
+        ! fired unconditionally could not pass this scenario.
+        call parquet_get_version(ver_string, mode="internal")
+        if (len_trim(ver_string) == 0) then
+            print '(a)', "mode='internal' returned an empty string"
+            return
+        end if
         call parquet_get_version(ver_string, mode="bogus")
         print '(a)', "unexpectedly returned a version string for an invalid mode"
     end subroutine scenario_get_version_invalid_mode
+
+    !> parquet_get_version no longer answers mode="arrow"/"parquet" -- those moved to
+    !> parquet_get_arrow_version when the library version moved into the Arrow-free leaf module
+    !> parquet_version. The abort names the replacement, so a caller migrating from the old
+    !> spelling is told where to go rather than merely told "invalid".
+    subroutine scenario_get_version_arrow_mode_removed()
+        character(len=:), allocatable :: ver_string
+
+        call parquet_get_version(ver_string, mode="arrow")
+        print '(a)', "unexpectedly returned a version string for the removed mode='arrow'"
+    end subroutine scenario_get_version_arrow_mode_removed
+
+    !> parquet_get_arrow_version(mode=...) rejects any value other than "arrow"/"parquet".
+    subroutine scenario_get_arrow_version_invalid_mode()
+        character(len=:), allocatable :: ver_string
+
+        ! Negative control: both accepted modes answer before the invalid one is tried.
+        call parquet_get_arrow_version(ver_string)
+        call parquet_get_arrow_version(ver_string, mode="parquet")
+        if (len_trim(ver_string) == 0) then
+            print '(a)', "mode='parquet' returned an empty string"
+            return
+        end if
+        call parquet_get_arrow_version(ver_string, mode="internal")
+        print '(a)', "unexpectedly returned a version string for an invalid mode"
+    end subroutine scenario_get_arrow_version_invalid_mode
 
     !> parquet_column_exists error stops on an unrecognized types= token (typo "itn32"), checked
     !> up front before the existence check itself -- see parquet_read.f90's

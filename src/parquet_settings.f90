@@ -34,7 +34,8 @@ module parquet_settings
     use iso_fortran_env, only: output_unit, error_unit, int32, int64
     use iso_c_binding, only: c_int, c_int64_t
     use parquet_bindings, only: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity, &
-        parquet_push_output_settings, parquet_push_performance_settings
+        parquet_push_output_settings, parquet_push_performance_settings, &
+        c_get_arrow_version, c_get_parquet_version
     ! Every knob an Arrow-free module has to reach -- state, getter AND setter -- lives in that
     ! leaf module rather than here, so that reaching it does not import parquet_bindings
     ! transitively. This module re-exports all of them, so `use parquet_settings` and `use parquet`
@@ -62,6 +63,7 @@ module parquet_settings
     public :: parquet_push_settings_to_cpp
     public :: parquet_set_arrow_threads
     public :: parquet_get_arrow_threads
+    public :: parquet_get_arrow_version
     public :: parquet_reset_settings
     public :: parquet_print_settings
     !
@@ -254,6 +256,47 @@ contains
 
         n = int(parquet_get_thread_pool_capacity())
     end function parquet_get_arrow_threads
+
+    !> Returns the version of the Arrow/Parquet C++ libraries this program is actually built
+    !> against, formatted "major.minor.patch". mode absent or mode="arrow" reports the linked
+    !> Arrow library's RUNTIME version -- what is loaded now, which need not be what the wrapper
+    !> was compiled against; mode="parquet" reports the Parquet C++ library version the wrapper
+    !> was COMPILED against. Any other mode value is an error.
+    !>
+    !> This is the C++ half of version reporting and so lives here, beside the other
+    !> "what is Arrow doing" queries, rather than in the Arrow-free parquet_version module. For
+    !> the version of parquet-fortran itself, call parquet_get_version (`use parquet_version`,
+    !> or `use parquet`). Quoting both is what makes a bug report actionable.
+    subroutine parquet_get_arrow_version(ver_string, mode)
+        character(len=:), allocatable, intent(out) :: ver_string !! resulting version string.
+        character(len=*), intent(in), optional :: mode
+        !! "arrow" | "parquet"; absent = "arrow".
+        integer(c_int) :: major, minor, patch
+        character(len=32) :: buf
+        character(len=:), allocatable :: preview
+        character(len=:), allocatable :: which
+
+        which = "arrow"
+        if (present(mode)) which = mode
+        select case (which)
+        case ("arrow")
+            call c_get_arrow_version(major, minor, patch)
+        case ("parquet")
+            call c_get_parquet_version(major, minor, patch)
+        case default
+            ! Capped preview, never the whole value -- `mode` is caller-supplied and unbounded, and
+            ! ifx 2026.1.1's ERROR STOP runtime corrupts memory once the message reaches 8192 bytes.
+            if (len(which) > 100) then
+                preview = which(1:100) // "..."
+            else
+                preview = which
+            end if
+            error stop "parquet_get_arrow_version: invalid mode '" // preview // &
+                "' (must be 'arrow' or 'parquet')"
+        end select
+        write(buf, '(i0,".",i0,".",i0)') major, minor, patch
+        ver_string = trim(buf)
+    end subroutine parquet_get_arrow_version
 
 
 

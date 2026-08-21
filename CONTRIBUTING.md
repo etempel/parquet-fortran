@@ -1245,7 +1245,7 @@ so work through this list in full for every release:
 1. **`VERSION.txt`** — the source of truth. `fpm.toml`'s `version = "VERSION.txt"` and its
    `RELEASE_VERSION={version}` macro derive from this automatically; nothing else to do for that
    part.
-2. **`src/parquet.f90`'s `cversion`** — a hand-maintained `"vX.Y.Z (date)"` string (e.g.
+2. **`src/parquet_version.f90`'s `cversion`** — a hand-maintained `"vX.Y.Z (date)"` string (e.g.
    `"v1.0.0 (2026-07-27)"`), used as `parquet_get_version`'s `mode="internal"` value. Update both
    the version and the date. `parquet_get_version` compares the fpm-injected `RELEASE_VERSION`
    macro against this string and prints a runtime warning if they disagree — the one part of this

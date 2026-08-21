@@ -655,7 +655,11 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and stands at
-**115** as of 2026-08-21, across **eight** modules. **It is stable only in the sense that it moves
+**113** as of 2026-08-21, across **nine** modules (115 across eight before version reporting left
+the facade: that change drops `c_int` and the two version bindings from `parquet`'s `private ::`
+list and adds one `public ::` re-export in `parquet_tables` — **derived, not measured, because no
+FORD was installed on the machine that made the change; re-derive with the command below before
+quoting it**). **It is stable only in the sense that it moves
 for a reason** — it rises by one for each name any module re-exports or hides with an accessibility
 statement naming a **use-associated** name, which is the expected cost of keeping a sibling module's
 plumbing out of a user's namespace, and a rise of exactly that size is not a regression. It was 23
@@ -767,20 +771,22 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **115** of
-  them as of 2026-08-21 and the one FORD number worth tracking across a change. Eight modules
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **113** of
+  them as of 2026-08-21 and the one FORD number worth tracking across a change (derived from the
+  measured 115 as described above, not re-measured). Nine modules
   contribute, and the per-module census is what to compare across a change rather than the total:
 
   | module | attribute | names |
   |---|---|---|
   | `parquet_sorting` | public | 31 |
   | `parquet_settings` | public | 22 |
-  | `parquet` | private | 18 |
+  | `parquet` | private | 15 |
   | `parquet_core` | public | 14 |
   | `parquet_argsort` | public | 12 |
   | `parquet_io` | private | 8 |
   | `parquet_strings` | public | 6 |
   | `parquet_sampling` | public | 4 |
+  | `parquet_tables` | public | 1 |
 
   **Five of those eight groups exist because of one rule** — a module re-exports, getter and setter
   both, every settings knob its own code reads (see "Nested submodule tree"). Every such re-export
@@ -794,18 +800,19 @@ Keep new code to the same standard:
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
   `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
   `parquet_maml_file` from `parquet_maml_base`), which FORD silently drops from that module's
-  generated page; and **20 `private ::`** names in the `parquet` facade — `c_int`, the two
-  `parquet_get_*_version` bindings, six names from `parquet_settings`
-  (`parquet_valid_compressions`, `parquet_resolve_writer_compression`, the three `parquet_emit_*`
-  output channels and `parquet_output_is_suppressed`), `parquet_split_name_list` and
-  `parquet_parse_sort_key` from `parquet_core`, and the **nine** `parquet_column_*`
+  generated page; and **15 `private ::`** names in the `parquet` facade — six names from
+  `parquet_settings` (`parquet_valid_compressions`, `parquet_resolve_writer_compression`, the three
+  `parquet_emit_*` output channels and `parquet_output_is_suppressed`), and the **nine**
+  `parquet_column_*`
   generics of the typed accessor tier (`_get_at`, `_set_at`, `_get_elem`, `_set_elem`, `_data_ptr`,
   `_string_column`, `_is_null`, `_set_null`, `_clear_null`) — which are the facade's only way to
   keep those names out of the namespace `use parquet` hands a user, so they cannot be removed.
   Note the count is of *names*, not of `private ::` statements: one statement may list several, and
-  `src/parquet.f90` carries 11 statements for those 20 names. Its twelfth, `private :: cversion`,
-  warns about nothing — `cversion` is defined in the facade rather than use-associated, which is
-  exactly the distinction this warning is about.
+  `src/parquet.f90` carries 7 statements for those 15 names. It used to carry three more names
+  (`c_int` and the two `parquet_get_*_version` bindings, imported for the version procedure the
+  facade no longer holds) plus `private :: cversion`, which warned about nothing — `cversion` was
+  *defined* in the facade rather than use-associated, which is exactly the distinction this warning
+  is about, and the settings setters below make the same point on a line that is still there.
   The third group is **4 `public ::`** re-exports in `parquet_settings`
   (`parquet_get_string_threads`, `parquet_output_is_suppressed`, `parquet_get_random_threads` and
   `parquet_get_random_parallel_min_elements`, all four defined in
@@ -839,9 +846,11 @@ Keep new code to the same standard:
 - **The `parquet` facade's re-exports do not appear on `module/parquet.html` either, and that is
   the accepted cost of S10.** The facade re-exports its siblings with *bare* `use` statements
   (no `public ::` list), which produces no warning at all — but FORD equally does not list the
-  re-exported names as belonging to `parquet`, so the page a user is told to `use` shows only
-  `parquet_get_version`. Keeping `cversion`/`parquet_get_version` in the facade is what stops it
-  being an empty page (it renders at ~33 KB). **The maintainer accepted this** and the guide points
+  re-exported names as belonging to `parquet`, so the page a user is told to `use` is now
+  **empty**: version reporting used to be the facade's own code and kept the page at ~33 KB, and it
+  moved out (`parquet_get_version` to the leaf `parquet_version`, `parquet_get_arrow_version` to
+  `parquet_settings`) so that an Arrow-free tier could report a version at all. **The maintainer
+  accepted this** and the guide points
   readers at the site-wide `lists/procedures.html`/`lists/types.html` instead, where every name does
   appear — `doc/pages/index.md` says so explicitly. This is a cosmetic gap in the generated
   reference, not a broken link. Re-test against a newer FORD before assuming it still holds.
@@ -973,7 +982,7 @@ submodule tree (not flat siblings under `parquet_core`), split by data-type fami
 and by format for metadata:
 
 ```
-parquet                         (module — the FACADE; see below. Holds only parquet_get_version)
+parquet                         (module — the FACADE; see below. Holds NO code at all.)
 parquet_io                      (module — the I/O FACADE: re-exports parquet_core + parquet_settings
                                  and nothing else. No code at all.)
 parquet_core                    (module — core API + cross-subtree private-helper interfaces)
@@ -993,8 +1002,11 @@ parquet_core                    (module — core API + cross-subtree private-hel
 parquet_bindings                (module — independent C++ interop)
 parquet_settings_base           (module — LEAF: every knob's state, getters, setters and the three
                                  emit channels. Imports iso_fortran_env + omp_lib only.)
-parquet_settings                (module — settings_base + parquet_bindings: print, reset, env, and
-                                 the ONE C++ push, parquet_push_settings_to_cpp)
+parquet_settings                (module — settings_base + parquet_bindings: print, reset, env, the
+                                 ONE C++ push parquet_push_settings_to_cpp, and
+                                 parquet_get_arrow_version)
+parquet_version                 (module — LEAF: cversion and parquet_get_version. Imports
+                                 parquet_settings_base only, for the emit channel.)
 parquet_strings                 (module — independent element domain; + settings_base)
 parquet_temporal                (module — independent element domain)
 parquet_random                  (module — the generator AND the four distributions; reaches only
@@ -1048,11 +1060,10 @@ without naming `parquet_settings` and putting the C++ boundary back. `test/test_
 holds one single-import module per tier and is where that rule is asserted; **do not add a second
 library `use` to any module in that file**, or it silently stops testing anything.
 
-**`parquet` is a facade module and holds almost no code, and `parquet_io` is a second facade that
-holds NONE.** `src/parquet.f90` re-exports `parquet_io`, `parquet_tables`, `parquet_columns`,
-`parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_random`, `parquet_sampling`,
-`parquet_settings` and three types from `parquet_maml_base`, so a user writes exactly one
-`use parquet`. `src/parquet_io.f90` re-exports `parquet_core` and `parquet_settings` and is the
+**`parquet` and `parquet_io` are BOTH facades and neither holds any code.** `src/parquet.f90`
+re-exports `parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal`,
+`parquet_sorting`, `parquet_random`, `parquet_sampling`, `parquet_settings`, `parquet_version` and
+three types from `parquet_maml_base`, so a user writes exactly one `use parquet`. `src/parquet_io.f90` re-exports `parquet_core` and `parquet_settings` and is the
 supported face of the reader/writer surface for a program that never builds a `parquet_table`.
 Five rules follow, and all five are easy to violate by reflex:
 
@@ -1060,14 +1071,29 @@ Five rules follow, and all five are easy to violate by reflex:
   `public ::` line, every interface body, every shared `parameter` reached by host association
   from a submodule lives there. A note elsewhere in this file saying "declared in `parquet.f90`"
   and meaning the reader/writer spec means `parquet_core.f90`.
-- **The facade must not gain library logic.** It holds `cversion` and `parquet_get_version` —
-  which is where they belong, being about the library itself, and which is also what keeps the
-  file needing cpp preprocessing and keeps `module/parquet.html` from rendering as an empty page.
-  A new public procedure goes in `parquet_core` (or the relevant sibling) and is re-exported for
-  free.
+- **The facade must not gain library logic**, and since version reporting moved out it holds
+  none: no `contains`, no parameter, nothing needing cpp. A new public procedure goes in
+  `parquet_core` (or the relevant sibling) and is re-exported for free. The cost of holding
+  nothing is that `module/parquet.html` renders empty — accepted, see the FORD note above.
+- **`parquet_version` is the one module the facade re-exports that NO sibling does.**
+  `parquet_get_version` is deliberately unavailable from `parquet_io`, `parquet_tables`,
+  `parquet_settings` or any Arrow-free tier: it is not a setting, nothing in the library reads it,
+  and making every tier carry it would grow every tier's graph for a compile-time constant. A
+  program on a narrow import writes `use parquet_version` (two files, no C++ boundary). Do not
+  "fix" this into consistency with the settings re-export rule — and note the one bare
+  `use parquet_version` line in `src/parquet.f90` is what `test_facade_covers_every_layer`
+  (`test/test_examples.f90`) and `test_module_surface_version` (`test/test_module_surface.f90`)
+  exist to pin from both sides.
+- **The linked ARROW version is a different question with a different home.**
+  `parquet_get_arrow_version` lives in `parquet_settings`, beside `parquet_get_arrow_threads`,
+  because reading it means calling into C++ — so it reaches `parquet_io`, `parquet_tables` and
+  the facade, and no Arrow-free tier. Its two `bind(C)` interfaces are named `c_get_arrow_version`
+  /`c_get_parquet_version` in `parquet_bindings` for the collision reason under "Naming
+  conventions"; the `bind(C, name=)` values, and so `parquet_wrapper.cpp`, are untouched.
 - **The facade uses bare `use <sibling>` with DEFAULT-PUBLIC accessibility**, deliberately — that
-  is what re-exports a whole module without maintaining a ~120-name `public ::` list. Its three
-  `private ::` statements (`c_int`, the two version bindings, `cversion`) are the only thing
+  is what re-exports a whole module without maintaining a ~120-name `public ::` list. Its seven
+  `private ::` statements (15 names: the compression pair, the three emit channels and the
+  suppression query, and the nine typed column accessors) are the only thing
   keeping implementation details out of the user's namespace, so anything new the facade imports
   for its own use needs its own `private ::` line. `parquet_bindings` is never re-exported.
   `parquet_maml_base` is imported with an `only:` list rather than in full, because its other
@@ -1258,9 +1284,13 @@ Follow these when adding new public API, types, or internal helpers:
   procedure cannot share a name with a binding. When that collides, keep the public name and give
   the *Fortran-side interface* a `c_`-prefixed one while leaving `bind(C, name="...")` — and thus
   the linked symbol and `parquet_wrapper.cpp` — untouched; `tools/check_bindc_boundary.py` keys on
-  the `bind(C, name=)` value, so it follows the rename with no change. `c_reader_set_filter`
-  (bound to `parquet_reader_set_filter`, whose Fortran name belongs to the public post-open filter
-  setter) is the existing instance.
+  the `bind(C, name=)` value, so it follows the rename with no change. There are four instances:
+  `c_reader_set_filter` (bound to `parquet_reader_set_filter`, whose Fortran name belongs to the
+  public post-open filter setter), `parquet_get_thread_pool_capacity` (bound to
+  `parquet_get_max_threads`, renamed the other way round for the same collision with
+  `parquet_get_arrow_threads`), and `c_get_arrow_version`/`c_get_parquet_version` (bound to
+  `parquet_get_arrow_version`/`parquet_get_parquet_version`, the first of which is now
+  `parquet_settings`' public linked-version query).
 
 - **A new module holding several related element/handle types** (as opposed to one module per
   type) should be named after the *domain* those types belong to, not any single type inside

@@ -19,6 +19,11 @@
 #
 # Only lines inside a [section] are data; anything above the first section is a comment.
 
+[parquet_version]
+parquet_settings_base.f90
+parquet_version.f90
+parquet_wrapper.cpp
+
 [parquet_temporal]
 parquet_temporal.f90
 parquet_wrapper.cpp
@@ -195,6 +200,7 @@ parquet_tables_slice.f90
 parquet_tables_sort.f90
 parquet_tables_write.f90
 parquet_temporal.f90
+parquet_version.f90
 parquet_wrapper.cpp
 parquet_write.f90
 parquet_write_numeric.f90

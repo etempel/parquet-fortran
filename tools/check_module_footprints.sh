@@ -57,8 +57,8 @@ expect_file="$repo/tools/module_footprints.txt"
 
 # The advertised entry modules, in tier order. Adding one here without adding its section to
 # tools/module_footprints.txt is a hard failure, which is the intent.
-ENTRY_MODULES="parquet_temporal parquet_strings parquet_random parquet_argsort parquet_sampling \
-parquet_columns parquet_sorting parquet_io parquet"
+ENTRY_MODULES="parquet_version parquet_temporal parquet_strings parquet_random parquet_argsort \
+parquet_sampling parquet_columns parquet_sorting parquet_io parquet"
 
 mode="check"
 only=""

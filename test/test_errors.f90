@@ -1385,6 +1385,10 @@ contains
                 test_mask_row_group_no_writes_at_all_aborts), &
             new_unittest("parquet_get_version with an invalid mode aborts", &
                 test_get_version_invalid_mode_aborts), &
+            new_unittest("parquet_get_version with the removed mode='arrow' aborts", &
+                test_get_version_arrow_mode_removed_aborts), &
+            new_unittest("parquet_get_arrow_version with an invalid mode aborts", &
+                test_get_arrow_version_invalid_mode_aborts), &
             new_unittest("parquet_column_exists with an unrecognized types= token aborts", &
                 test_column_exists_bad_type_token_aborts), &
             new_unittest("parquet_column_exists validates types= before checking the column exists", &
@@ -7402,6 +7406,23 @@ contains
             failure_message="parquet_get_version with an unrecognized mode was expected to abort", &
             required_stderr="parquet_get_version: invalid mode 'bogus'")
     end subroutine test_get_version_invalid_mode_aborts
+
+    !> mode="arrow"/"parquet" moved to parquet_get_arrow_version when parquet_get_version moved
+    !> into the Arrow-free leaf module parquet_version. Asserting on the second half of the message
+    !> is what pins the migration hint: without it the abort would merely say "invalid".
+    subroutine test_get_version_arrow_mode_removed_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "get_version_arrow_mode_removed", expect_abort=.true., &
+            failure_message="parquet_get_version(mode='arrow') was expected to abort now that the mode has moved", &
+            required_stderr="call parquet_get_arrow_version")
+    end subroutine test_get_version_arrow_mode_removed_aborts
+
+    subroutine test_get_arrow_version_invalid_mode_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "get_arrow_version_invalid_mode", expect_abort=.true., &
+            failure_message="parquet_get_arrow_version with an unrecognized mode was expected to abort", &
+            required_stderr="parquet_get_arrow_version: invalid mode 'internal'")
+    end subroutine test_get_arrow_version_invalid_mode_aborts
 
     subroutine test_column_exists_bad_type_token_aborts(error)
         type(error_type), allocatable, intent(out) :: error

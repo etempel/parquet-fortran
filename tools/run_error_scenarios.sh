@@ -923,6 +923,8 @@ scenarios=(
     "mask_chunk_row_mask_scheme_declined:1"
     "mask_row_group_no_writes_at_all:1"
     "get_version_invalid_mode:1"
+    "get_version_arrow_mode_removed:1"
+    "get_arrow_version_invalid_mode:1"
     "column_exists_bad_type_token:1"
     "column_exists_bad_type_token_missing_column:1"
     "column_exists_empty_type_filter:1"

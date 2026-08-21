@@ -72,7 +72,8 @@ module parquet_tables
     ! The table layer's two solicited printers (%print_stat) and its own warnings go through the
     ! library's output channels rather than printing directly, so verbosity/message_stream apply
     ! here as everywhere -- see tools/check_source_conventions.py's `no direct printing` check.
-    use parquet_settings, only : parquet_emit_warning, parquet_output_is_suppressed
+    use parquet_settings, only : parquet_emit_warning, parquet_output_is_suppressed, &
+        parquet_get_arrow_version
     ! The one binding this layer reaches for directly, and it needs no reader: the seed for a
     ! sample_fraction= open is settled BEFORE the table's reader is created, so that reader and
     ! every later one (a clone's, a per-thread one) draw the identical rows. It stays out of the
@@ -92,6 +93,11 @@ module parquet_tables
     public :: parquet_new_table
     public :: parquet_write_table
     public :: parquet_table_row_group_bounds
+    !> Re-exported from parquet_settings so that a `use parquet_tables` program can report
+    !! which Arrow/Parquet C++ it is linked against without a second import. The library's
+    !! OWN version is not re-exported here -- that is `parquet_get_version`, in the leaf
+    !! module parquet_version, carried only by the `parquet` facade.
+    public :: parquet_get_arrow_version
     public :: PARQUET_ROW_INDEX
     public :: REGIME_FULL, REGIME_SLICE
     public :: RES_EMPTY, RES_PARTIAL, RES_FULL

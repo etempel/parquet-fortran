@@ -186,6 +186,40 @@ contains
 
 end module test_module_surface_sampling
 
+!> `parquet_version` alone: the library's own version string.
+!!
+!! **This is the acceptance test for the leaf.** `parquet_get_version` is deliberately re-exported
+!! by exactly one module, the `parquet` facade -- no tier carries it -- so `use parquet_version` is
+!! the only route for a program built on `parquet_random`, `parquet_columns` or any other
+!! Arrow-free entry module. If this file stops compiling, that route is gone.
+module test_module_surface_version
+    use parquet_version                ! THE ONLY library import.
+    implicit none
+    private
+    public :: check_version_surface
+
+contains
+
+    !> Answers both forms through `use parquet_version` alone, and checks they agree.
+    subroutine check_version_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        character(len=:), allocatable :: release, internal
+
+        what = ""
+        call parquet_get_version(release)
+        if (len_trim(release) == 0) what = "parquet_get_version (default mode)"
+        call parquet_get_version(internal, mode="internal")
+        if (what == "" .and. len_trim(internal) == 0) what = "parquet_get_version(mode='internal')"
+        ! The internal string is the "vX.Y.Z (date)" form of the same release, so the default
+        ! form must appear inside it -- an assertion that both spellings answer, not merely that
+        ! neither is empty. Under NAG the two are derived from one another, which is the case
+        ! this deliberately still holds for.
+        if (what == "" .and. index(internal, release) == 0) what = "the two forms disagree"
+        if (what == "" .and. internal(1:1) /= "v") what = "mode='internal' is not v-prefixed"
+    end subroutine check_version_surface
+
+end module test_module_surface_version
+
 !> `parquet_io` alone: the whole read/write surface, plus the settings that govern it.
 !!
 !! **One library import, and it must stay that way.** This module is the acceptance test for the
@@ -238,6 +272,7 @@ contains
         character(len=:), allocatable :: comp_was, verb_was
         character(len=:), allocatable :: names(:)
         logical :: exists
+        character(len=:), allocatable :: arrow_ver
 
         what = ""
         id = [1_int32, 2_int32, 3_int32]
@@ -295,6 +330,12 @@ contains
         if (what == "" .and. cinfo%get_num_fields() <= 0) what = "parquet_column_info"
         if (what == "" .and. .not. allocated(tmeta%items)) what = "parquet_table_metadata"
 
+        ! The linked Arrow version, re-exported here from parquet_settings. Its Arrow-free
+        ! counterpart parquet_get_version is deliberately NOT reachable from this module -- see
+        ! test_module_surface_version above.
+        call parquet_get_arrow_version(arrow_ver)
+        if (what == "" .and. len_trim(arrow_ver) == 0) what = "parquet_get_arrow_version"
+
         call parquet_set_default_compression(comp_was)
     end subroutine check_io_surface
 
@@ -306,6 +347,7 @@ module test_module_surface
     use test_module_surface_sorting, only : check_sorting_surface
     use test_module_surface_strings, only : check_strings_surface
     use test_module_surface_sampling, only : check_sampling_surface
+    use test_module_surface_version, only : check_version_surface
     use parquet_settings_base          ! THE ONLY library import -- see the note above.
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use iso_fortran_env, only : int64
@@ -403,9 +445,20 @@ contains
                 test_strings_surface), &
             new_unittest("parquet_sampling alone exposes every knob it reads", &
                 test_sampling_surface), &
+            new_unittest("parquet_version alone reports the library version", &
+                test_version_surface), &
             new_unittest("parquet_io alone reaches every layer of the read/write API", &
                 test_io_surface) ]
     end subroutine collect_tests_module_surface
+
+    !> The test-drive wrapper over check_version_surface.
+    subroutine test_version_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_version_surface(what)
+        call check(error, what == "", "the version was not reportable through `use parquet_version` alone: " // what)
+    end subroutine test_version_surface
 
     !> The test-drive wrapper over check_io_surface.
     subroutine test_io_surface(error)

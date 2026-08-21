@@ -35,6 +35,15 @@ Two consequences worth knowing:
 - **Settings belong to the application, not to a library.** If you are writing a library that in
   turn uses parquet-fortran, do not set them on your caller's behalf.
 
+**One procedure in this module is not a setting.** `parquet_get_arrow_version` reports which Arrow
+and Parquet C++ libraries your program is actually linked against — `parquet_get_arrow_version(v)`
+for Arrow's runtime version, `parquet_get_arrow_version(v, mode="parquet")` for the Parquet C++ one.
+It lives here because reading it means calling into the C++ half, which is the boundary this module
+already owns, and because `parquet_get_arrow_threads` is its neighbour in every practical sense. The
+library's *own* version is a separate question with a separate answer: `parquet_get_version`, in the
+leaf module `parquet_version`, which needs no C++ at all. See
+[Choosing a module](choosing-a-module.html#the-entry-modules).
+
 ## Thread safety: set once, at startup
 
 Set your settings during program initialisation — before other threads exist, and before opening any

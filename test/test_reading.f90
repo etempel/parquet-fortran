@@ -1009,6 +1009,7 @@ contains
     subroutine test_get_library_version(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=:), allocatable :: ver_string, internal_ver_string, arrow_ver_string, parquet_ver_string
+        character(len=:), allocatable :: explicit_arrow_ver_string
 
         call parquet_get_version(ver_string)
 
@@ -1034,25 +1035,39 @@ contains
             return
         end if
 
-        ! mode="arrow"/mode="parquet" each format major.minor.patch from the linked Arrow/Parquet
-        ! C++ libraries -- the actual numbers vary by build, so just check the format.
-        call parquet_get_version(arrow_ver_string, mode="arrow")
+        ! The linked Arrow/Parquet C++ versions are a separate question, answered by a separate
+        ! procedure: parquet_get_version is Arrow-free (it lives in the leaf parquet_version, so
+        ! that an Arrow-free tier can report the library version too), while this one needs the
+        ! C++ boundary and so lives in parquet_settings. Default mode is "arrow".
+        ! Each formats major.minor.patch, and the actual numbers vary by build, so check the format.
+        call parquet_get_arrow_version(arrow_ver_string)
 
         call check(error, is_dotted_version_triplet(arrow_ver_string), &
             "is_dotted_version_triplet(arrow_ver_string)")
         if (allocated(error)) then
-            call test_failed(error, "parquet_get_version(mode='arrow') did not return a major.minor.patch string, got '" // &
+            call test_failed(error, "parquet_get_arrow_version() did not return a major.minor.patch string, got '" // &
                 arrow_ver_string // "'")
             return
         end if
 
-        call parquet_get_version(parquet_ver_string, mode="parquet")
+        ! The explicit mode="arrow" spelling must agree with the default.
+        call parquet_get_arrow_version(explicit_arrow_ver_string, mode="arrow")
+
+        call check(error, explicit_arrow_ver_string == arrow_ver_string, &
+            "explicit_arrow_ver_string == arrow_ver_string")
+        if (allocated(error)) then
+            call test_failed(error, "parquet_get_arrow_version(mode='arrow') disagreed with the default mode: '" // &
+                explicit_arrow_ver_string // "' vs '" // arrow_ver_string // "'")
+            return
+        end if
+
+        call parquet_get_arrow_version(parquet_ver_string, mode="parquet")
 
         call check(error, is_dotted_version_triplet(parquet_ver_string), &
             "is_dotted_version_triplet(parquet_ver_string)")
         if (allocated(error)) then
-            call test_failed(error, "parquet_get_version(mode='parquet') did not return a major.minor.patch string, got '" // &
-                parquet_ver_string // "'")
+            call test_failed(error, "parquet_get_arrow_version(mode='parquet') did not return a major.minor.patch " // &
+                "string, got '" // parquet_ver_string // "'")
             return
         end if
     end subroutine test_get_library_version

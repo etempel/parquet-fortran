@@ -37,6 +37,7 @@ in every one of them.
 
 | Import | Files | Fortran graph reaches Arrow? | What it gives you |
 |---|---|---|---|
+| `parquet_version` | 2 | no | `parquet_get_version`: which parquet-fortran this is |
 | `parquet_temporal` | 1 | no | `parquet_date`, `parquet_time`, `parquet_timestamp` and their unit constants |
 | `parquet_strings` | 2 | no | `parquet_string_column` / `parquet_string`: packed, null-aware string storage |
 | `parquet_random` | 3 | no | counter-based random numbers and the four distributions |
@@ -46,11 +47,20 @@ in every one of them.
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
 | `parquet_io` | 43 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 64 | **yes** | the `parquet_table` container |
-| `parquet` | 64 | **yes** | everything above, through one `use` |
+| `parquet` | 65 | **yes** | everything above, through one `use` |
 
-Two rows deserve a note.
+Three rows deserve a note.
 
-**`parquet_tables` costs the same as `parquet`**, so importing it instead of the facade buys
+**`parquet_version` is the only route to `parquet_get_version`**, apart from `use parquet`. No other
+entry module re-exports it, deliberately: a version string is fixed at compile time and nothing in
+the library reads it, so making every tier carry it would grow every tier's graph for a name none of
+them needs. A program built on one of the Arrow-free modules that wants to report its library
+version writes a second `use parquet_version` line — two files, no C++ boundary. The Arrow and
+Parquet C++ versions are a different question with a different answer: `parquet_get_arrow_version`,
+in `parquet_settings` (and so in `parquet_io`, `parquet_tables` and `parquet`), because reading them
+means calling into the C++ half.
+
+**`parquet_tables` costs all but one file of `parquet`**, so importing it instead of the facade buys
 nothing but a narrower namespace. The table layer sits on the reader, the column container and the
 sorting engine, which between them are almost the whole library.
 
@@ -102,6 +112,10 @@ anything else.
 The output pair (`verbosity`, `message_stream`) appears wherever a module can print something: a
 user who imports `parquet_argsort` alone must still be able to silence its thread-clamp warning.
 
+**`parquet_get_version` is deliberately outside this rule** and is not re-exported by any of these
+modules — it is not a setting, nothing in the library reads it, and it has its own two-file entry
+module. See the note under [The entry modules](#the-entry-modules).
+
 `parquet_settings` remains available and is what `use parquet` gives you; naming it directly is
 only a problem for a build that is deliberately staying clear of Arrow. See
 [Settings](settings.html) for what every knob does, and note in particular that four of them reach
@@ -116,6 +130,8 @@ what makes this per-module re-export possible.
   Arrow-free module you actually need — `parquet_sorting`, `parquet_argsort`, `parquet_sampling`,
   `parquet_random`, `parquet_columns`, `parquet_strings`, `parquet_temporal`. Remember the caveat at
   the top: your *package* still links Arrow.
+- **Reporting which library you built against: `use parquet_version`**, alongside whatever else you
+  import. `parquet_get_version` is there and, apart from `use parquet`, nowhere else.
 - **Never `use parquet_core`.** It is internal, undocumented and may change in any release;
   `parquet_io` is its supported face.
 

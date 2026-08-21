@@ -24,7 +24,7 @@ module parquet_bindings
     public :: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity
     public :: parquet_push_output_settings
     public :: parquet_push_performance_settings
-    public :: parquet_get_arrow_version, parquet_get_parquet_version
+    public :: c_get_arrow_version, c_get_parquet_version
     public :: parquet_maml_lock, parquet_maml_unlock
     public :: parquet_warmup_memory_pool
     public :: parquet_add_column_metadata, parquet_add_table_metadata
@@ -193,8 +193,11 @@ module parquet_bindings
             integer(c_int) :: n !! current thread-pool capacity.
         end function
 
-        !> Reports the actually-linked Arrow library's runtime version.
-        subroutine parquet_get_arrow_version(major, minor, patch) &
+        !> Reports the actually-linked Arrow library's runtime version. Named differently from
+        !> its linked symbol for the same reason as parquet_get_thread_pool_capacity above:
+        !> parquet_settings' own public procedure is called parquet_get_arrow_version, and the
+        !> two cannot share a name in scope.
+        subroutine c_get_arrow_version(major, minor, patch) &
                 bind(C, name="parquet_get_arrow_version")
             import
             integer(c_int), intent(out) :: major !! major version number.
@@ -202,8 +205,9 @@ module parquet_bindings
             integer(c_int), intent(out) :: patch !! patch version number.
         end subroutine
 
-        !> Reports the compile-time Parquet C++ library version.
-        subroutine parquet_get_parquet_version(major, minor, patch) &
+        !> Reports the compile-time Parquet C++ library version. Renamed alongside
+        !> c_get_arrow_version above, so that the pair stays spelled the same way.
+        subroutine c_get_parquet_version(major, minor, patch) &
                 bind(C, name="parquet_get_parquet_version")
             import
             integer(c_int), intent(out) :: major !! major version number.

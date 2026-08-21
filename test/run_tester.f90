@@ -33,6 +33,7 @@ program tester
     use test_string_parallel, only : collect_tests_string_parallel
     use test_table_codegen, only : collect_tests_table_codegen
     use test_settings, only : collect_tests_parquet_settings
+    use test_module_surface, only : collect_tests_module_surface
     use test_diagnostics, only : collect_tests_diagnostics
     use test_random, only : collect_tests_parquet_random, collect_tests_parquet_random_perm
     use test_random_omp, only : collect_tests_parquet_random_omp
@@ -90,6 +91,7 @@ program tester
         new_testsuite("string_parallel", collect_tests_string_parallel), &
         new_testsuite("table_codegen", collect_tests_table_codegen), &
         new_testsuite("settings", collect_tests_parquet_settings), &
+        new_testsuite("module_surface", collect_tests_module_surface), &
         new_testsuite("diagnostics", collect_tests_diagnostics), &
         new_testsuite("random", collect_tests_parquet_random), &
         new_testsuite("random_perm", collect_tests_parquet_random_perm), &
@@ -317,7 +319,7 @@ contains
         safe = .not. (name == "writing" .or. name == "errors" .or. name == "metadata" .or. name == "maml" &
             .or. name == "filter_screen" .or. name == "sorting" .or. name == "sort" .or. name == "settings" &
             .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
-            .or. name == "random_omp" .or. name == "random_perm")
+            .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface")
     end function suite_is_safe_to_parallelize
 
     !> Whether running just this suite is worth pre-running the whole scenario set for. Purely a

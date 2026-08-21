@@ -522,6 +522,8 @@ contains
                 test_settings_silent_gates_reader_print_stat), &
             new_unittest("settings: the C++ half honours the mirrored verbosity", &
                 test_settings_verbosity_reaches_cpp), &
+            new_unittest("settings: silencing AFTER an open does not reach that reader's C++ side", &
+                test_settings_mirror_is_taken_at_open), &
             new_unittest("settings: message_stream moves a warning off stdout", &
                 test_settings_message_stream_moves_warning), &
             new_unittest("settings: an abort still reports itself when everything is silenced", &
@@ -4892,6 +4894,32 @@ contains
     !> The mirror. Every Fortran-side assertion above passes against a C++ half that ignores the
     !> pushed verbosity entirely, so this is the only test that would catch the two drifting apart
     !> (feature_risks.md Risk-42). The warning provoked here is printed from parquet_wrapper.cpp.
+    !> The mirrored settings reach C++ at reader/writer OPEN, not when a setter is called -- so a
+    !> knob changed while a reader is already open does not apply to that reader.
+    !>
+    !> **This is the negative control for that relocation, and it asserts a deliberate behaviour
+    !> change rather than merely tolerating one.** `test_settings_verbosity_reaches_cpp` above is
+    !> the positive half: set first, then open, and the C++ warning is gone. This is the other half:
+    !> open first, then set, and the C++ warning is still there. Together they say the mirror is
+    !> taken at open and nowhere else.
+    !>
+    !> Why it has to exist: push-at-point-of-use is what let every sorting setter follow its state
+    !> into `parquet_settings_base`, where `parquet_sorting` can re-export it -- the visibility
+    !> requirement behind the module restructuring. Without this control, someone restoring
+    !> push-at-set later would see only a test that passes either way, would read the change as a
+    !> bug fix, and would silently re-couple those setters to `parquet_bindings`.
+    !>
+    !> `doc/pages/operating/settings.md` already tells users to apply settings before opening
+    !> anything, so nothing that follows the documented contract can observe this.
+    subroutine test_settings_mirror_is_taken_at_open(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "settings_cpp_warning_silenced_after_open", &
+            expect_abort=.false., &
+            failure_message="the qc soft-mode read scenario was not expected to abort", &
+            required_stderr="WARNING:")
+    end subroutine test_settings_mirror_is_taken_at_open
+
     subroutine test_settings_verbosity_reaches_cpp(error)
         type(error_type), allocatable, intent(out) :: error
 

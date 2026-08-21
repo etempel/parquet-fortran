@@ -1373,6 +1373,7 @@ contains
         ! fresh allocation reads back as zeros -- the trap CLAUDE.md records under 'An intermittent
         ! test failure has THREE causes'. Verified against that by running the whole suite under an
         ! LD_PRELOAD malloc filling every block with 0xFF.
+        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. **Stage 4 made this
             ! branch honour `threads`**, and the resolution above is deliberately SHARED with the
@@ -1423,6 +1424,7 @@ contains
             perm(ik) = ik
         end do
         if (count < 1_int64 .or. nrows < 2_int64) return
+        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             call sort_partial_permutation(keys, nrows, count, perm)
             return
@@ -1451,6 +1453,7 @@ contains
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
+        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             call sort_nth_index(keys, nrows, nth, idx)
             return
@@ -1536,6 +1539,7 @@ contains
         end if
         answer = .true.
         if (nrows < 2_int64) return
+        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             answer = sort_is_sorted(keys, nrows)
             return
@@ -2186,6 +2190,7 @@ contains
         ! sentinel, so the C++ side obeys rather than interprets what a prefix of zero would mean.
         gek = int(size(keys), int64)
         if (present(group_ekeys)) gek = int(group_ekeys, int64)
+        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             call sort_build_runs_permutation(keys, nrows, gek, perm, tie)
             return
@@ -2248,6 +2253,7 @@ contains
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
+        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             pos = sort_search_position(keys, n_search, upper)
             return
@@ -2278,6 +2284,7 @@ contains
             perm(k) = k
         end do
         if (nrows < 2_int64) return
+        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             call sort_merge_permutation(keys, nrows, na, perm)
             return
@@ -2293,5 +2300,23 @@ contains
             error stop EP // proc // ": the sort engine could not merge" ! GCOVR_EXCL_LINE
         end if
     end procedure engine_merge
+    !
+    !> Refreshes the C++ side's copy of every mirrored setting, before the C++ sort engine reads it.
+    !!
+    !! **The C++ engine is the one mirrored-knob consumer that is not downstream of a reader or
+    !! writer open.** No setter mirrors to C++ any more -- that is what let each sorting knob's
+    !! setter live beside its state in `parquet_settings_base`, where `parquet_sorting` can
+    !! re-export it -- so a `pf_argsort` call with no reader anywhere would otherwise drive the
+    !! engine against stale `g_sort_counting_path` / `g_sort_counting_bucket_limit` values. The A/B
+    !! conformance comparison would then compare the Fortran engine against a C++ engine running a
+    !! DIFFERENT configuration, which still passes whenever the two happen to agree.
+    !!
+    !! Called only on the C++ branch, so the shipped Fortran path pays nothing. **This moves into
+    !! `parquet_sorting_oracle` with the C++ branches it guards** (feature_modules.md S2).
+    subroutine push_engine_mirror()
+        use parquet_settings, only : parquet_push_settings_to_cpp
+
+        call parquet_push_settings_to_cpp()
+    end subroutine push_engine_mirror
     !
 end submodule parquet_sorting_keys ! GCOVR_EXCL_LINE

@@ -767,6 +767,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The settings that are mirrored to the C++ side now take effect when a reader or writer is
+  opened, rather than the instant they are set.** This affects `parquet_set_verbosity`,
+  `parquet_set_message_stream`, `parquet_set_sort_counting_path` and
+  `parquet_set_sort_counting_bucket_limit`. Under the contract
+  [Settings](doc/pages/operating/settings.md) already states — apply settings before opening any
+  reader, writer or table — nothing changes. Outside it, a program that changed one of these while
+  a reader was already open, and relied on the C++ half noticing mid-flight, will see the previous
+  value used for the rest of that reader's life; open the reader after setting the knob instead.
+  The change is what allows each of these setters to live beside its own state in a module that
+  does not depend on Arrow, so a program importing only the sorting or string API can configure it
+  without pulling in the Parquet C++ stack.
+
 - **A schema built with `schema%init`/`schema%add_field` no longer needs a `parquet_parse_maml`
   call, and its calls no longer have a required order.** Both builders now parse the MAML text
   they write as they write it, so the schema's fields and metadata are always in step with it: a

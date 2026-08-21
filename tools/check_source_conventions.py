@@ -691,13 +691,23 @@ def check_settings_are_read():
     other.
     """
     problems = []
-    settings = SRC / "parquet_settings.f90"
-    text = settings.read_text()
-    names = re.findall(r"^\s*(?:integer|logical|character\([^)]*\)|real\([^)]*\))\s*,\s*save\s*::\s*(cfg_\w+)",
-                       text, re.M)
-    if not names:
-        return ["%s: found no `cfg_* ` settings variables -- this check needs updating"
-                % settings.relative_to(REPO_ROOT)]
+    # BOTH settings files, because a knob's state lives beside the setter that writes it and an
+    # Arrow-free module's knobs live in the leaf. Scanning only parquet_settings.f90 would go
+    # silently blind to every knob that moved there -- the failure direction this check exists to
+    # prevent, one level up (CLAUDE.md, "A static check that enumerates names goes stale silently").
+    settings_files = [SRC / "parquet_settings.f90", SRC / "parquet_settings_base.f90"]
+    names = []
+    for settings in settings_files:
+        if not settings.exists():
+            return ["%s: expected settings file is missing -- this check needs updating"
+                    % settings.relative_to(REPO_ROOT)]
+        found = re.findall(
+            r"^\s*(?:integer|logical|character\([^)]*\)|real\([^)]*\))(?:\([^)]*\))?\s*,\s*save\s*::\s*(cfg_\w+)",
+            settings.read_text(), re.M)
+        if not found:
+            return ["%s: found no `cfg_* ` settings variables -- this check needs updating"
+                    % settings.relative_to(REPO_ROOT)]
+        names.extend(found)
     # Where each name is assigned, so an assignment does not count as a read of itself.
     sources = sorted(SRC.glob("*.f90"))
     for name in names:
@@ -706,6 +716,17 @@ def check_settings_are_read():
             for line in path.read_text().split("\n"):
                 code = strip_comment(line)
                 if name not in code:
+                    continue
+                # The DECLARATION is not a read of itself. Without this the check is vacuous:
+                # `integer, save :: cfg_x = 0` mentions the name, does not match the assignment
+                # pattern below, and so was counted as a read -- which meant a knob nothing reads
+                # (the one thing this check exists to catch) reported [ok]. Confirmed by adding a
+                # dead knob and watching the check pass.
+                if re.match(r"^\s*(?:integer|logical|character|real|type)\b[^:]*::\s*%s\b"
+                            % re.escape(name), code):
+                    continue
+                # A `public ::`/`private ::` accessibility statement is not a read either.
+                if re.match(r"^\s*(?:public|private)\s*::", code):
                     continue
                 # An assignment `name = ...` is a write; anything else mentioning it is a read.
                 if re.match(r"^\s*%s\s*=(?!=)" % re.escape(name), code):
@@ -716,7 +737,7 @@ def check_settings_are_read():
                 break
         if not read_somewhere:
             problems.append(
-                "src/parquet_settings.f90: `%s` is written but never read -- the setting it backs "
+                "src/parquet_settings*.f90: `%s` is written but never read -- the setting it backs "
                 "does nothing, and a set/get test would not notice (feature_risks.md Risk-41)" % name)
     return problems
 

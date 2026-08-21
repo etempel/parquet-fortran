@@ -402,6 +402,8 @@ program error_scenarios
         call scenario_settings_cpp_warning(level="normal")
     case ("settings_cpp_warning_errors_only")
         call scenario_settings_cpp_warning(level="errors_only")
+    case ("settings_cpp_warning_silenced_after_open")
+        call scenario_settings_cpp_warning(level="errors_only", after_open=.true.)
     case ("settings_bad_verbosity")
         call scenario_settings_bad_verbosity()
     case ("settings_bad_stream")
@@ -4641,9 +4643,16 @@ contains
         call parquet_write_column(writer, "v", v)
         call parquet_close_writer(writer)
 
+        ! **The verbosity is set BEFORE the reader is opened, and that ordering is the contract.**
+        ! The mirrored settings reach C++ when a reader or writer is opened
+        ! (parquet_push_settings_to_cpp), not when a setter is called -- which is what lets each
+        ! knob's setter live in parquet_settings_base beside its state, where an Arrow-free module
+        ! can re-export it. `parquet_reader_print_stat` prints from the C++ side, so a verbosity set
+        ! after this reader was opened would not reach the report this scenario is about.
+        ! doc/pages/operating/settings.md states the same rule for user code.
+        call parquet_set_verbosity(level)
         call parquet_open_reader(reader, out_file)
         call parquet_read_column(reader, "v", back)
-        call parquet_set_verbosity(level)
         call parquet_close_reader(reader, print_stat=.true.)
         call parquet_reset_settings()
     end subroutine scenario_reader_print_stat_verbosity
@@ -4662,8 +4671,10 @@ contains
     !> a clean abort. It is timing-dependent, so it passed locally for a long time and failed only
     !> on CI. Same rule as CLAUDE.md's "Tests run concurrently: never share a fixture file path
     !> between two tests", which applies to this runner too and not only to test-drive.
-    subroutine scenario_settings_cpp_warning(level)
-        character(len=*), intent(in) :: level !! verbosity to set first.
+    subroutine scenario_settings_cpp_warning(level, after_open)
+        character(len=*), intent(in) :: level !! verbosity to set.
+        logical, intent(in), optional :: after_open !! .true. silences AFTER the reader is opened.
+        logical :: late
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
         type(parquet_schema) :: schema
@@ -4671,7 +4682,13 @@ contains
         integer(int32) :: v(4) = [1, 2, 3, 400]
         integer(int32) :: got(4)
 
-        out_file = "test_run/scenario_settings_cpp_warning_" // trim(level) // ".parquet"
+        late = .false.
+        if (present(after_open)) late = after_open
+        ! The fixture path carries BOTH arguments, because three scenario names share this helper
+        ! and tools/run_error_scenarios.sh runs them concurrently -- two processes writing one path
+        ! is the collision CLAUDE.md's "never share a fixture file path" note describes.
+        out_file = "test_run/scenario_settings_cpp_warning_" // trim(level) // &
+            merge("_late", "_open", late) // ".parquet"
 
         schema%maml%name = "settings_cpp_warn.maml"
         schema%maml%lines = [character(len=40) :: &
@@ -4689,8 +4706,18 @@ contains
         call parquet_write_column(writer, "v", v)
         call parquet_close_writer(writer)
 
-        call parquet_set_verbosity(level)
+        ! **`late` is the NEGATIVE CONTROL for push-at-point-of-use, and it asserts a deliberate
+        ! behaviour change rather than tolerating one.** The mirrored settings reach C++ when a
+        ! reader or writer is opened, never when a setter is called -- that is what let each knob's
+        ! setter follow its state into parquet_settings_base, where an Arrow-free module can
+        ! re-export it. So silencing AFTER this reader was opened must leave the C++ warning
+        ! PRINTING: the mirror this reader is running against was taken at open time.
+        !
+        ! Without this control, restoring push-at-set later would look like a bug fix and would
+        ! silently re-couple every sorting setter to parquet_bindings.
+        if (.not. late) call parquet_set_verbosity(level)
         call parquet_open_reader(reader, out_file, schema=schema, qc=.true., qc_soft=.true.)
+        if (late) call parquet_set_verbosity(level)
         call parquet_read_column(reader, "v", got)   ! -> qc soft warning, printed from C++
         call parquet_close_reader(reader)
         call parquet_reset_settings()

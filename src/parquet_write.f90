@@ -12,6 +12,7 @@ submodule (parquet_core) parquet_write
     use iso_fortran_env, only: int32, int64, real32, real64
     use parquet_bindings
     use parquet_settings, only: parquet_valid_compressions, parquet_resolve_writer_compression, parquet_get_default_use_threads, &
+        parquet_push_settings_to_cpp, &
         parquet_emit_warning, parquet_emit_error_context
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp
     implicit none
@@ -577,6 +578,11 @@ contains
         !> An alias derived from parquet_settings' own list, never a second copy of it: the setter
         !! and this argument check must accept exactly the same set of codecs.
         character(len=12), parameter :: valid_compressions(6) = parquet_valid_compressions
+
+        ! Refresh the C++ side's copy of every mirrored setting before any C++ state exists --
+        ! see parquet_push_settings_to_cpp. `target_row_group_bytes` is read by the row-group
+        ! sizing at close, so it has to be current from the moment this writer exists.
+        call parquet_push_settings_to_cpp()
 
         overwrite_value = .true.
         if (present(overwrite)) overwrite_value = overwrite

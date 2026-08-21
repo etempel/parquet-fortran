@@ -35,16 +35,31 @@ module parquet_settings
     use iso_c_binding, only: c_int, c_int64_t
     use parquet_bindings, only: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity, &
         parquet_push_output_settings, parquet_push_performance_settings
-    ! The two knobs a no-C++-dependency module has to read live in this leaf module rather than
-    ! here, so that reading them does not import parquet_bindings transitively. See its header.
-    use parquet_settings_base, only: cfg_verbosity, cfg_string_threads, &
-        verb_normal, verb_silent, verb_errors_only, &
-        parquet_output_is_suppressed, parquet_get_string_threads, &
-        cfg_random_threads, cfg_random_parallel_min_elements, &
-        parquet_get_random_threads, parquet_get_random_parallel_min_elements
+    ! Every knob an Arrow-free module has to reach -- state, getter AND setter -- lives in that
+    ! leaf module rather than here, so that reaching it does not import parquet_bindings
+    ! transitively. This module re-exports all of them, so `use parquet_settings` and `use parquet`
+    ! present exactly the surface they always have. See parquet_settings_base's header for the rule
+    ! that decides which module a new knob belongs in.
+    use parquet_settings_base
     implicit none
     private
     !
+    ! ---- Re-exported from parquet_settings_base, so this module's surface is unchanged ----
+    public :: parquet_output_is_suppressed
+    public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    public :: parquet_set_sort_threads, parquet_get_sort_threads
+    public :: parquet_set_sort_radix_path, parquet_get_sort_radix_path
+    public :: parquet_set_sort_counting_path, parquet_get_sort_counting_path
+    public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
+    public :: parquet_set_string_threads, parquet_get_string_threads
+    public :: parquet_set_random_threads, parquet_get_random_threads
+    public :: parquet_set_random_parallel_min_elements
+    public :: parquet_get_random_parallel_min_elements
+    public :: parquet_set_verbosity, parquet_get_verbosity
+    public :: parquet_set_message_stream, parquet_get_message_stream
+    !
+    ! ---- Owned by this module ----
+    public :: parquet_push_settings_to_cpp
     public :: parquet_set_arrow_threads
     public :: parquet_get_arrow_threads
     public :: parquet_reset_settings
@@ -57,22 +72,12 @@ module parquet_settings
     public :: parquet_max_sort_key_len
     public :: parquet_max_maml_line_len
     !
-    public :: parquet_set_sort_threads, parquet_get_sort_threads
     public :: parquet_set_prefetch_threads, parquet_get_prefetch_threads
     public :: parquet_set_table_threads, parquet_get_table_threads
-    public :: parquet_set_string_threads, parquet_get_string_threads
-    public :: parquet_set_random_threads, parquet_get_random_threads
-    public :: parquet_set_random_parallel_min_elements
-    public :: parquet_get_random_parallel_min_elements
     public :: parquet_set_threads
     public :: parquet_set_default_compression, parquet_get_default_compression
     public :: parquet_set_default_compression_level, parquet_get_default_compression_level
     public :: parquet_set_default_use_threads, parquet_get_default_use_threads
-    public :: parquet_set_verbosity, parquet_get_verbosity
-    public :: parquet_set_message_stream, parquet_get_message_stream
-    public :: parquet_set_sort_counting_path, parquet_get_sort_counting_path
-    public :: parquet_set_sort_radix_path, parquet_get_sort_radix_path
-    public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
     public :: parquet_set_target_row_group_bytes, parquet_get_target_row_group_bytes
     public :: parquet_set_statistics_prescreen, parquet_get_statistics_prescreen
     public :: parquet_settings_from_env
@@ -80,8 +85,6 @@ module parquet_settings
     !> The three output channels, and the ONLY places `verbosity`/`message_stream` are read. Public
     !! here so every module that emits can reach them, `private ::` in the facade so no user sees
     !! them; see parquet_valid_compressions below for the same mechanism and the same reason.
-    public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
-    public :: parquet_output_is_suppressed
     !
     !> Library-internal plumbing, kept out of the `use parquet` namespace by an explicit
     !! `private ::` in the facade (src/parquet.f90) -- the same mechanism that hides `c_int` and the
@@ -130,9 +133,9 @@ module parquet_settings
     !! chances to disagree about what is accepted, so both read these arrays and both build their
     !! "expected one of: ..." text with `token_list`. `parquet_valid_compressions` is the same idea
     !! and already existed; these two are it applied to the knobs that had their vocabulary inline.
-    character(len=11), parameter :: verbosity_tokens(3) = [character(len=11) :: &
-        "normal", "silent", "errors_only"]
-    character(len=6), parameter :: stream_tokens(2) = [character(len=6) :: "stdout", "stderr"]
+    ! `verbosity_tokens` and `stream_tokens` live in parquet_settings_base, beside the setters
+    ! that validate against them; they are imported above so parquet_settings_from_env can use
+    ! the same vocabulary its setter does.
     !
     !> Longest environment-variable value this module will read. A longer one aborts naming the
     !! variable rather than being silently truncated -- the same failure the MAML line-length cap
@@ -143,8 +146,7 @@ module parquet_settings
     !> Where the library's own messages go. `message_stream` accepts exactly these two, because a
     !! Fortran unit number means nothing on the C++ side of the bind(C) boundary, where three of the
     !! library's warnings and one of its reports are printed -- see doc/pages/operating/settings.md.
-    integer, parameter :: stream_stdout = 0
-    integer, parameter :: stream_stderr = 1
+    ! (`stream_stdout`/`stream_stderr` live in parquet_settings_base with the emit channels.)
     !
     !> Arrow's kUseDefaultCompressionLevel sentinel (INT_MIN): "use the codec's own default level".
     integer, parameter :: level_codec_default = -huge(0) - 1
@@ -156,7 +158,6 @@ module parquet_settings
     !! getter reports after a reset. Each MUST equal the corresponding global's initialiser in
     !! src/parquet_wrapper.cpp (`kSortCountingBucketLimit`, `kTargetRowGroupBytes`), which is what
     !! applies before this module has pushed anything.
-    integer(int64), parameter :: sort_counting_bucket_limit_builtin = 4194304_int64 !! 2**22 buckets.
     integer(int64), parameter :: target_row_group_bytes_builtin = 268435456_int64   !! 256 MiB.
     !
     ! ---- Mutable settings state ----
@@ -173,7 +174,6 @@ module parquet_settings
     !! pf_sort_threads (src/parquet_sorting_keys.f90) resolves against the OpenMP environment -- and
     !! that is the ONLY place this is read, deliberately, so a read-time `sort_by=` and a raw-array
     !! sort can never disagree about it (feature_risks.md Risk-40).
-    integer, save :: cfg_sort_threads = 0
     !> Cap on the threads the table's internally-parallel %prefetch/%materialize_all may use. `0`
     !! means "auto" (as many as OpenMP offers). Read only in src/parquet_tables_read.f90, which owns
     !! the table's OpenMP plumbing.
@@ -195,7 +195,6 @@ module parquet_settings
     logical, save :: cfg_default_use_threads = .true.
     !> (`cfg_verbosity` lives in parquet_settings_base too, for the same reason.)
     !> Which stream the library's own messages go to. Read only by the emit channels.
-    integer, save :: cfg_message_stream = stream_stdout
     !
     !> The five knobs below live on the C++ side, and every one of them stores `0` (numbers) for
     !! "use the built-in default". The sentinel is resolved HERE, in push_performance_settings, so
@@ -204,16 +203,13 @@ module parquet_settings
     !! `*_builtin` parameters below must equal the initialisers of `g_sort_counting_bucket_limit`
     !! and `g_target_row_group_bytes` there (feature_risks.md Risk-42).
     !> Whether the sort's integer counting fast path may be taken at all.
-    logical, save :: cfg_sort_counting_path = .true.
     !> Whether the sort's single-key radix fast path may be taken at all.
     !!
     !! Deliberately NOT mirrored to C++ by `push_performance_settings`, unlike its counting-path
     !! neighbour: the radix path exists only in the Fortran engine, so there is nothing on the other
     !! side of the `bind(C)` boundary for a mirror to govern. Adding one would be a global that no
     !! code reads, which is the shape `feature_risks.md` Risk-42 warns about from the other end.
-    logical, save :: cfg_sort_radix_path = .true.
     !> Largest key value RANGE (not cardinality) the counting path will accept. `0` = built-in.
-    integer(int64), save :: cfg_sort_counting_bucket_limit = 0
     !> Target size in bytes of one auto-sized row group. `0` = built-in.
     integer(int64), save :: cfg_target_row_group_bytes = 0
     !> Whether the reader screens row groups against their footer statistics before reading them.
@@ -223,16 +219,8 @@ module parquet_settings
     !
     !> Sets the largest key value range the sort's counting fast path will accept. See
     !> parquet_set_sort_counting_bucket_limit_int64 for the full description.
-    interface parquet_set_sort_counting_bucket_limit
-        module procedure parquet_set_sort_counting_bucket_limit_int32
-        module procedure parquet_set_sort_counting_bucket_limit_int64
-    end interface parquet_set_sort_counting_bucket_limit
     !> Sets the work floor, in elements per thread, below which a bulk permutation stays
     !> serial. See parquet_set_random_parallel_min_elements_int64 for the full description.
-    interface parquet_set_random_parallel_min_elements
-        module procedure parquet_set_random_parallel_min_elements_int32
-        module procedure parquet_set_random_parallel_min_elements_int64
-    end interface parquet_set_random_parallel_min_elements
     !> Sets the byte size an auto-sized row group aims for. See
     !> parquet_set_target_row_group_bytes_int64 for the full description.
     interface parquet_set_target_row_group_bytes
@@ -267,29 +255,7 @@ contains
         n = int(parquet_get_thread_pool_capacity())
     end function parquet_get_arrow_threads
 
-    !> Sets the default thread count for every sort that does not pass `threads=` explicitly --
-    !> `pf_sort`/`pf_argsort` and friends, a read-time `parquet_open_reader(..., sort_by=)`, and
-    !> `parquet_table%sort_by`, which all share one engine and must share one default.
-    !>
-    !> Read per sort call, so it takes effect immediately. `0` restores automatic behaviour (as many
-    !> threads as OpenMP offers). **A setting caps the automatic answer; it never overrides the rule
-    !> that an unqualified sort inside an OpenMP parallel region runs serially** -- eight threads
-    !> each asking for eight more is slower than not threading at all, and a caller who set this said
-    !> nothing about nesting. An explicit `threads=` is still honoured everywhere, including there.
-    subroutine parquet_set_sort_threads(n)
-        integer, intent(in) :: n !! thread cap, or 0 for automatic; must be >= 0.
 
-        if (n < 0) error stop "parquet_set_sort_threads: n must be >= 0 (0 means automatic)"
-        cfg_sort_threads = n
-    end subroutine parquet_set_sort_threads
-
-    !> Reports the sort thread cap, or 0 if sorting is left automatic. This is the raw setting, not
-    !> the resolved count -- ask `pf_sort_threads()` for the number a sort would actually use here,
-    !> which additionally accounts for the OpenMP environment and for being inside a parallel region.
-    integer function parquet_get_sort_threads() result(n)
-
-        n = cfg_sort_threads
-    end function parquet_get_sort_threads
 
     !> Sets the cap on how many threads `parquet_table%prefetch`/`%materialize_all` may use to read
     !> several columns at once, each on its own reader.
@@ -311,78 +277,9 @@ contains
         n = cfg_prefetch_threads
     end function parquet_get_prefetch_threads
 
-    !> Sets the cap on how many threads one `parquet_string_column` bulk operation may use --
-    !> a reindex, gather, compaction or materialization of a single column's packed payload.
-    !>
-    !> This is the **within-one-column** axis, and it is the only one of the thread caps that is:
-    !> `parquet_set_table_threads` splits a table's work by COLUMN, this splits one column's work by
-    !> ROW RANGE. The two are mutually exclusive in practice, because a string operation reached from
-    !> inside the table's own parallel region stands down (see below), so setting both does not
-    !> multiply.
-    !>
-    !> Read per operation, so it takes effect immediately. `0` restores automatic behaviour. The
-    !> value is a **cap**: never more threads than OpenMP offers, so setting it above
-    !> `OMP_NUM_THREADS` changes nothing, and `1` forces every string operation serial.
-    !>
-    !> **A cap never overrides the rule that a string operation inside an OpenMP parallel region runs
-    !> serially.** A caller who capped string work at 8 said nothing about what should happen inside
-    !> someone else's region, and lifting the serial answer back to 8 there is exactly the T*T
-    !> oversubscription that rule exists to prevent.
-    subroutine parquet_set_string_threads(n)
-        integer, intent(in) :: n !! thread cap, or 0 for automatic; must be >= 0.
 
-        if (n < 0) error stop "parquet_set_string_threads: n must be >= 0 (0 means automatic)"
-        cfg_string_threads = n
-    end subroutine parquet_set_string_threads
 
-    !> Sets the cap on how many threads one bulk `pf_random_permutation`/`pf_random_subset` call
-    !> may use internally.
-    !>
-    !> Read per call, so it takes effect immediately. `0` restores automatic behaviour (as many
-    !> threads as OpenMP offers). The value is a **cap** and never a request: it can only lower the
-    !> automatic answer, it never overrides the rule that an unqualified bulk call inside an OpenMP
-    !> parallel region runs serially, and an explicit `threads=` is still honoured everywhere.
-    !>
-    !> **Threading a permutation changes how fast it is built and never what it contains.**
-    !> `pf_random_perm_at(seed, m, k)` is a pure function of its coordinates, so every element is
-    !> computed independently of every other -- the 1-thread and 64-thread outputs were verified
-    !> bit-identical. That is a stronger guarantee than most threading knobs can offer, and it is
-    !> why this one is admissible as a setting at all.
-    subroutine parquet_set_random_threads(n)
-        integer, intent(in) :: n !! thread cap, or 0 for automatic; must be >= 0.
 
-        if (n < 0) error stop "parquet_set_random_threads: n must be >= 0 (0 means automatic)"
-        cfg_random_threads = n
-    end subroutine parquet_set_random_threads
-
-    !> Sets the fewest elements a thread must be given before a bulk permutation opens a team.
-    !>
-    !> **A work floor, not a chunk size.** Threading a small permutation is not merely useless but
-    !> harmful -- the team costs more than the whole job -- so below `threads * this` elements the
-    !> bulk forms run serially however many threads are available. Machine B measured `m = 10` going
-    !> from 0.0021 ms on one core to 0.0050 on sixteen, and 1->16 thread efficiency of 99 % at
-    !> `10**6`, 95 % at `10**4`, 69 % at 1000 and 18 % at 100; the default of 1000 sits where that
-    !> curve turns.
-    !>
-    !> Read per call, so it takes effect immediately. `n` takes `integer(int32)` or
-    !> `integer(int64)`. `0` disables the floor entirely, which is how a test asks for a team on a
-    !> small array; it is not a useful production setting. An explicit `threads=` does not bypass
-    !> the floor -- the floor is about whether the work is worth splitting at all, which is a
-    !> property of the array rather than of the caller's intent.
-    subroutine parquet_set_random_parallel_min_elements_int64(n)
-        integer(int64), intent(in) :: n !! elements per thread, or 0 to disable; must be >= 0.
-
-        if (n < 0) error stop "parquet_set_random_parallel_min_elements: n must be >= 0 " // &
-            "(0 disables the work floor)"
-        cfg_random_parallel_min_elements = n
-    end subroutine parquet_set_random_parallel_min_elements_int64
-
-    !> int32 form of parquet_set_random_parallel_min_elements_int64 -- see it for what it means.
-    subroutine parquet_set_random_parallel_min_elements_int32(n)
-        integer(int32), intent(in) :: n !! elements per thread, or 0 to disable; must be >= 0.
-
-        call parquet_set_random_parallel_min_elements_int64(int(n, kind=int64))
-    end subroutine parquet_set_random_parallel_min_elements_int32
 
     ! parquet_get_random_threads and parquet_get_random_parallel_min_elements are defined in
     ! parquet_settings_base and re-exported by the `public ::` lines above, for the same reason
@@ -573,192 +470,16 @@ contains
         if (present(compression_level)) level = compression_level
     end subroutine parquet_resolve_writer_compression
 
-    !> Sets how much the library prints. One of "normal" (everything, the factory default),
-    !> "silent" (the library's own remarks and its explicitly-called print procedures go quiet;
-    !> warnings and errors still appear) or "errors_only" (warnings go quiet too). Case-insensitive;
-    !> anything else aborts.
-    !>
-    !> Read per message, so it takes effect immediately.
-    !>
-    !> **Errors are never suppressed, at any level.** An `error stop`, the C++ side's fatal-error
-    !> report, and the context lines a failing close prints before aborting all appear whatever this
-    !> is set to -- a program's control flow depends on that output being findable.
-    !>
-    !> **"silent" turns the explicitly-called print procedures into no-ops** -- `%print_stat`,
-    !> `%print_schema_info` and `parquet_string_column`'s printers included. That is deliberate (it
-    !> is what a global output control means) and it is a debugging trap worth knowing about: add a
-    !> print, see nothing, and the table is not at fault. `parquet_print_settings` is the one
-    !> exemption, so a silenced program can always be asked why it is silent.
-    subroutine parquet_set_verbosity(level)
-        character(len=*), intent(in) :: level !! "normal" | "silent" | "errors_only".
-        character(len=:), allocatable :: tok, expected
 
-        call fold_ascii_lower(trim(level), tok)
-        select case (tok)
-        case ("normal")
-            cfg_verbosity = verb_normal
-        case ("silent")
-            cfg_verbosity = verb_silent
-        case ("errors_only")
-            cfg_verbosity = verb_errors_only
-        case default
-            call token_list(verbosity_tokens, expected)
-            error stop "parquet_set_verbosity: unknown level '" // tok // &
-                "' (expected one of: " // expected // ")"
-        end select
-        call push_output_settings()
-    end subroutine parquet_set_verbosity
 
-    !> Reports the current verbosity as the same token parquet_set_verbosity accepts.
-    subroutine parquet_get_verbosity(level)
-        character(len=:), allocatable, intent(out) :: level !! "normal" | "silent" | "errors_only".
 
-        select case (cfg_verbosity)
-        case (verb_silent)
-            level = "silent"
-        case (verb_errors_only)
-            level = "errors_only"
-        case default
-            level = "normal"
-        end select
-    end subroutine parquet_get_verbosity
 
-    !> Sets which stream the library's own messages go to: "stdout" (the factory default) or
-    !> "stderr". Case-insensitive; anything else aborts.
-    !>
-    !> Read per message, so it takes effect immediately. The usual reason to change it is a program
-    !> that pipes its own stdout to a data consumer and does not want the library's warnings mixed
-    !> into that stream.
-    !>
-    !> **Only these two values are accepted, and that is a constraint rather than a preference.** A
-    !> Fortran unit number means nothing to the C++ half of this library, which prints three of the
-    !> warnings and one of the reports itself -- so a knob holding an arbitrary unit could be
-    !> honoured by the Fortran sites and silently ignored by the C++ ones. Sending messages to a log
-    !> file is therefore not supported; a shell redirect or the program's own logging covers it.
-    !>
-    !> **Errors always go to stderr regardless**, and the explicitly-called print procedures are
-    !> unaffected -- they keep their own `unit=` argument and its `output_unit` default.
-    subroutine parquet_set_message_stream(stream)
-        character(len=*), intent(in) :: stream !! "stdout" | "stderr".
-        character(len=:), allocatable :: tok, expected
 
-        call fold_ascii_lower(trim(stream), tok)
-        select case (tok)
-        case ("stdout")
-            cfg_message_stream = stream_stdout
-        case ("stderr")
-            cfg_message_stream = stream_stderr
-        case default
-            call token_list(stream_tokens, expected)
-            error stop "parquet_set_message_stream: unknown stream '" // tok // &
-                "' (expected one of: " // expected // ")"
-        end select
-        call push_output_settings()
-    end subroutine parquet_set_message_stream
 
-    !> Reports the current message stream as the same token parquet_set_message_stream accepts.
-    subroutine parquet_get_message_stream(stream)
-        character(len=:), allocatable, intent(out) :: stream !! "stdout" | "stderr".
 
-        if (cfg_message_stream == stream_stderr) then
-            stream = "stderr"
-        else
-            stream = "stdout"
-        end if
-    end subroutine parquet_get_message_stream
 
-    !> Sets the row count below which a sort refuses to use threads at all, however many `threads=`
-    !> asks for. Pass `0` to restore the built-in 8192.
-    !>
-    !> Enables or disables the sort's integer counting fast path.
-    !>
-    !> The counting path is a second implementation that must produce exactly the same permutation as
-    !> the comparator path, and it is the one place in the sort engine where a wrong answer would be
-    !> fast rather than slow. Turning it off is how a test compares the two on one fixture; there is
-    !> no performance reason for a program to do so.
-    !>
-    !> The full rule, in this order: the counting path is used when this flag is on **and** the key's
-    !> value range fits `parquet_set_sort_counting_bucket_limit` **and** the key is a single,
-    !> null-free integer key. Turning the flag off overrides the limit; raising the limit does
-    !> nothing while the flag is off.
-    subroutine parquet_set_sort_counting_path(enabled)
-        logical, intent(in) :: enabled !! .true. (the default) allows the fast path.
 
-        cfg_sort_counting_path = enabled
-        call push_performance_settings()
-    end subroutine parquet_set_sort_counting_path
 
-    !> Reports whether the sort's integer counting fast path is allowed.
-    logical function parquet_get_sort_counting_path() result(enabled)
-
-        enabled = cfg_sort_counting_path
-    end function parquet_get_sort_counting_path
-
-    !> Enables or disables the sort's single-key radix fast path.
-    !>
-    !> The radix path is a stable LSD radix sort that performs **no comparisons at all**, so it is a
-    !> third independent statement of the ordering beside the two comparators
-    !> (`feature_risks.md` Risk-89). Turning it off is how a test compares it against the comparison
-    !> sort on one fixture, which is the only way to grade a path that cannot fail slowly.
-    !>
-    !> **The one reason a program might turn it off is MEMORY.** The radix path allocates up to four
-    !> `n`-element `int64` buffers -- about 32 bytes per row -- where the comparison sort allocates
-    !> nothing beyond the permutation itself. At 50 million rows that is roughly 1.6 GB of scratch,
-    !> which a caller sorting near the edge of available memory may not want to spend. It buys
-    !> several times the throughput on a single key, so leave it on unless that trade is real for
-    !> you.
-    !>
-    !> The full rule, in this order: the radix path is used when this flag is on **and** there is
-    !> exactly one sort key **and** the row count clears an internal floor (the measured crossover
-    !> below which the comparison sort is cheaper). It applies to every key family -- integer, real
-    !> and string alike -- so unlike the counting path, the key's type is no reason it would decline.
-    subroutine parquet_set_sort_radix_path(enabled)
-        logical, intent(in) :: enabled !! .true. (the default) allows the fast path.
-
-        cfg_sort_radix_path = enabled
-    end subroutine parquet_set_sort_radix_path
-
-    !> Reports whether the sort's single-key radix fast path is allowed.
-    logical function parquet_get_sort_radix_path() result(enabled)
-
-        enabled = cfg_sort_radix_path
-    end function parquet_get_sort_radix_path
-
-    !> Sets the largest key value RANGE for which the sort's counting fast path is taken. Pass `0`
-    !> to restore the built-in 4194304 (2**22).
-    !>
-    !> **Range, not cardinality** -- the bound is `max(key) - min(key)`, so a thousand values spread
-    !> over a billion is far outside a limit that a million densely-packed values sit inside. This
-    !> distinction has already misled one test author here (feature_risks.md Risk-39).
-    !>
-    !> The number IS the memory control: `n` buckets costs `8n` bytes of counters, so the built-in
-    !> value caps the counting path at 32 MB. Raising it trades memory for speed on wide-ranged
-    !> integer keys; it does nothing at all while parquet_set_sort_counting_path is `.false.`.
-    !>
-    !> Available in both integer kinds; an int64 key's range can exceed int32.
-    subroutine parquet_set_sort_counting_bucket_limit_int64(n)
-        integer(int64), intent(in) :: n !! bucket ceiling, or 0 for the built-in default; must be >= 0.
-
-        if (n < 0) error stop "parquet_set_sort_counting_bucket_limit: n must be >= 0 " // &
-            "(0 restores the built-in default)"
-        cfg_sort_counting_bucket_limit = n
-        call push_performance_settings()
-    end subroutine parquet_set_sort_counting_bucket_limit_int64
-
-    !> int32 form of parquet_set_sort_counting_bucket_limit_int64 -- see it for what the value means.
-    subroutine parquet_set_sort_counting_bucket_limit_int32(n)
-        integer(int32), intent(in) :: n !! bucket ceiling, or 0 for the built-in default; must be >= 0.
-
-        call parquet_set_sort_counting_bucket_limit_int64(int(n, kind=int64))
-    end subroutine parquet_set_sort_counting_bucket_limit_int32
-
-    !> Reports the counting path's bucket ceiling -- the EFFECTIVE value, so a program that never set
-    !> it is told 4194304 rather than the `0` that is stored.
-    integer(int64) function parquet_get_sort_counting_bucket_limit() result(n)
-
-        n = cfg_sort_counting_bucket_limit
-        if (n <= 0) n = sort_counting_bucket_limit_builtin
-    end function parquet_get_sort_counting_bucket_limit
 
     !> Sets the size in BYTES an auto-sized row group aims for. Pass `0` to restore the built-in
     !> 268435456 (256 MiB).
@@ -781,7 +502,6 @@ contains
         if (n < 0) error stop "parquet_set_target_row_group_bytes: n must be >= 0 " // &
             "(0 restores the built-in default)"
         cfg_target_row_group_bytes = n
-        call push_performance_settings()
     end subroutine parquet_set_target_row_group_bytes_int64
 
     !> int32 form of parquet_set_target_row_group_bytes_int64 -- see it for what the value means.
@@ -813,7 +533,6 @@ contains
         logical, intent(in) :: enabled !! .true. (the default) lets the reader prune row groups.
 
         cfg_statistics_prescreen = enabled
-        call push_performance_settings()
     end subroutine parquet_set_statistics_prescreen
 
     !> Reports whether the reader's row-group statistics screen is enabled.
@@ -828,57 +547,9 @@ contains
     ! lives there rather than here so that parquet_strings can ask it without importing
     ! parquet_bindings; see that module's header.
 
-    !> Emits one informational remark -- something worth mentioning that is not a warning about the
-    !> data. Suppressed from "silent" downward.
-    !>
-    !> The library has exactly one of these today (the development-build notice in
-    !> parquet_get_version). It has its own channel rather than a special case inside
-    !> parquet_emit_warning because it is the one message whose suppression level differs, and a
-    !> hard-coded exception there would have to be re-explained every time someone read the
-    !> suppression logic.
-    subroutine parquet_emit_info(text)
-        character(len=*), intent(in) :: text !! the message, with no prefix.
 
-        if (cfg_verbosity >= verb_silent) return
-        write (message_unit(), '(a)') text
-    end subroutine parquet_emit_info
 
-    !> Emits one warning about the data or the schema. Suppressed only at "errors_only".
-    !>
-    !> **This is the single place a Fortran-side warning is printed**, which is what makes both
-    !> output settings apply everywhere without each call site testing them -- see
-    !> tools/check_source_conventions.py's `no direct printing` check, which is what keeps that true.
-    !> It supplies the "WARNING: " prefix, so twelve call sites no longer repeat it and it cannot
-    !> drift between them.
-    subroutine parquet_emit_warning(text)
-        character(len=*), intent(in) :: text !! the message, without the "WARNING: " prefix.
 
-        if (cfg_verbosity >= verb_errors_only) return
-        write (message_unit(), '(a)') "WARNING: " // text
-    end subroutine parquet_emit_warning
-
-    !> Emits one line of context belonging to an error that is about to abort.
-    !>
-    !> **Never suppressed and never redirected.** These lines carry what the abort message
-    !> deliberately leaves out -- the output filename, the schema name -- so silencing them would
-    !> turn a diagnosable failure into one that names nothing. They stay on standard output, where
-    !> they are today, rather than following `message_stream`: they belong to the error path, and
-    !> moving them would change what an existing program sees for no gain.
-    subroutine parquet_emit_error_context(text)
-        character(len=*), intent(in) :: text !! the context line, printed verbatim.
-
-        write (output_unit, '(a)') text
-    end subroutine parquet_emit_error_context
-
-    !> The unit the emit channels write to. One function so the three cannot disagree.
-    integer function message_unit() result(u)
-
-        if (cfg_message_stream == stream_stderr) then
-            u = error_unit
-        else
-            u = output_unit
-        end if
-    end function message_unit
 
     !> Mirrors both output settings to the C++ side, which prints three warnings and one report of
     !> its own and cannot see Fortran module variables.
@@ -887,6 +558,27 @@ contains
     !> once, here in Fortran; a second string parser in parquet_wrapper.cpp is exactly the drift this
     !> arrangement exists to avoid. And the C++ side gets no setter of its own, so this is the single
     !> writer and the mirror is derived rather than an independent copy that could diverge.
+    !> Refreshes the C++ side's copy of every mirrored setting. Called where Fortran is about to
+    !> hand control to C++ -- `parquet_open_reader` and `parquet_open_writer` -- and by
+    !> `parquet_sorting_oracle` before it drives the C++ sort engine, which is the one mirrored-knob
+    !> consumer that is not downstream of an open.
+    !>
+    !> **Push at POINT OF USE, not point of set.** No setter mirrors to C++ any more: that is what
+    !> let each knob's setter follow its state into `parquet_settings_base`, where an Arrow-free
+    !> module can re-export it. The cost is one grouped call per open instead of one per set, and
+    !> the behaviour is identical under the contract `doc/pages/operating/settings.md` already
+    !> states -- apply settings before opening anything. Outside that contract, a knob changed while
+    !> a reader is open no longer reaches C++ mid-flight.
+    !>
+    !> **One entry point, both groups**, so a caller cannot refresh half the mirror -- Risk-42's
+    !> "one push per group, never one per knob" carried forward rather than weakened. It is
+    !> `private ::`'d in the `parquet` facade, so it never reaches a user's namespace.
+    subroutine parquet_push_settings_to_cpp()
+
+        call push_output_settings()
+        call push_performance_settings()
+    end subroutine parquet_push_settings_to_cpp
+
     subroutine push_output_settings()
 
         call parquet_push_output_settings(int(cfg_verbosity, kind=c_int), &
@@ -1210,32 +902,7 @@ contains
         error stop "parquet_settings_from_env: " // name // "='" // text // "' " // why
     end subroutine env_reject
 
-    !> Renders a token vocabulary as "a, b, c", for an error message.
-    subroutine token_list(tokens, out)
-        character(len=*), intent(in) :: tokens(:) !! the accepted vocabulary.
-        character(len=:), allocatable, intent(out) :: out !! comma-separated, in array order.
-        integer :: i
 
-        out = ""
-        do i = 1, size(tokens)
-            if (i > 1) out = out // ", "
-            out = out // trim(tokens(i))
-        end do
-    end subroutine token_list
-
-    !> Lowercases ASCII letters. A local copy rather than parquet_to_lower, because that one lives
-    !> in parquet_core, which uses THIS module -- importing it back would be a circular dependency.
-    subroutine fold_ascii_lower(text, out)
-        character(len=*), intent(in) :: text !! input text.
-        character(len=:), allocatable, intent(out) :: out !! text with every ASCII A-Z lowercased.
-        integer :: k, ic
-
-        out = text
-        do k = 1, len(out)
-            ic = iachar(out(k:k))
-            if (ic >= iachar("A") .and. ic <= iachar("Z")) out(k:k) = achar(ic + 32)
-        end do
-    end subroutine fold_ascii_lower
 
     !> Restores every setting to the value it had before this program changed it.
     !>
@@ -1269,8 +936,7 @@ contains
         cfg_sort_counting_bucket_limit = 0
         cfg_target_row_group_bytes = 0
         cfg_statistics_prescreen = .true.
-        call push_output_settings()
-        call push_performance_settings()
+        call parquet_push_settings_to_cpp()
     end subroutine parquet_reset_settings
 
     !> Writes every setting's current value, and every read-only limit, to `unit`.

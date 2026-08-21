@@ -21,7 +21,7 @@ submodule (parquet_core) parquet_read
     use iso_c_binding
     use iso_fortran_env, only: int8, int32, int64, real64
     use parquet_bindings
-    use parquet_settings, only: parquet_get_default_use_threads
+    use parquet_settings, only: parquet_get_default_use_threads, parquet_push_settings_to_cpp
     use parquet_maml_base, only: parquet_maml_file
     use parquet_strings, only: parquet_string_column
     use parquet_temporal, only: parquet_date, parquet_time, parquet_timestamp, parquet_unit_seconds, parquet_unit_millis, &
@@ -855,6 +855,12 @@ contains
     module procedure parquet_open_reader_base
         logical :: use_threads_value, qc_effective, qc_soft_value, filter_will_apply
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
+
+        ! Refresh the C++ side's copy of every mirrored setting before any C++ state exists.
+        ! No setter mirrors to C++ any more -- that is what let each knob's setter live beside its
+        ! state in parquet_settings_base, where an Arrow-free module can re-export it -- so this is
+        ! where the mirror is made current. See parquet_push_settings_to_cpp's own doc-comment.
+        call parquet_push_settings_to_cpp()
 
         use_threads_value = parquet_get_default_use_threads()
         if (present(use_threads)) use_threads_value = use_threads

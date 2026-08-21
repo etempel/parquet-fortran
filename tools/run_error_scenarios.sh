@@ -565,6 +565,7 @@ scenarios=(
     "reader_print_stat_silent:0"
     "settings_cpp_warning_normal:0"
     "settings_cpp_warning_errors_only:0"
+    "settings_cpp_warning_silenced_after_open:0"
     "read_qc_entry_too_long:1"
     "read_qc_remap_size_mismatch:1"
     "read_qc_remap_entry_too_long:1"

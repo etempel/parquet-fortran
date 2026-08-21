@@ -69,7 +69,10 @@ contains
             new_unittest("a prefetched column comes back sorted", test_prefetch_is_sorted), &
             new_unittest("an empty sort_by at open time is a no-op", test_open_time_empty_sort_by_is_noop), &
             new_unittest("a TIME32 key and a foreign UINT64 key", test_time32_and_uint64_keys), &
-            new_unittest("the read-time sort runs on the Fortran engine", test_read_time_sort_uses_fortran_engine) &
+            new_unittest("the read-time sort runs on the Fortran engine", test_read_time_sort_uses_fortran_engine), &
+            new_unittest("two keys of DIFFERENT families do not share a staged reduction", &
+                test_two_keys_different_families), &
+            new_unittest("the same column as two keys binds twice, correctly", test_same_column_twice) &
             ]
     end subroutine collect_tests_sort
     !
@@ -918,4 +921,107 @@ contains
         call parquet_debug_use_fortran_sort_engine(.true.)   ! the shipped default
     end subroutine cpp_test_counting_path_matches
 
+    !
+    !> **The regression test for the one-slot sort-key cache** (`sort_key_cache`,
+    !! `src/parquet_wrapper.cpp`). Installing a read-time sort makes two crossings per key --
+    !! `_key_info` binds the key to report its family and size, then `_key_fetch` copies the values
+    !! out -- and the reduction is now handed from the first to the second through a single slot on
+    !! the reader handle instead of being rebuilt.
+    !!
+    !! **What this catches, established by mutation rather than asserted.** Moving the `std::move`
+    !! in `_key_info` above the size reads -- the live hazard in the change, since a moved-from
+    !! vector reports size 0 and Fortran allocates its buffers from that -- aborts this suite
+    !! outright: **exit 134, zero tests run**. Read the exit STATUS, not just the failure count; a
+    !! grep for `[FAILED]` reports 0 for that mutation and looks like a survival.
+    !!
+    !! **What it does NOT catch, and no fixture here can.** Replacing the slot's four-field identity
+    !! match with a bare "is anything staged" leaves all of this suite passing. `_key_info` and
+    !! `_key_fetch` have one caller (`add_read_sort_key`, `src/parquet_read.f90`) which pairs them
+    !! per key with identical arguments, so the slot always holds the key being fetched and the
+    !! mismatch arm is unreachable from production. It is kept as defence and is `GCOVR_EXCL`'d;
+    !! see its own note in `src/parquet_wrapper.cpp`.
+    !!
+    !! Both orderings are still exercised, because the staged key and the fetched key swap roles
+    !! between them: integer-then-string stages an `ints` vector and fetches a `strs` one,
+    !! string-then-integer the reverse. The first key deliberately TIES so the second is
+    !! load-bearing.
+    subroutine test_two_keys_different_families(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: id(6) = [1, 2, 3, 4, 5, 6]
+        integer(int32) :: grp(6) = [2, 1, 2, 1, 2, 1]
+        character(len=4) :: txt(6) = ["dd  ", "bb  ", "ff  ", "aa  ", "cc  ", "ee  "]
+        integer(int32) :: ids(6)
+        character(len=*), parameter :: file = "test_run/sort_two_families.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "grp", grp)
+        call parquet_write_column(writer, "txt", txt)
+        call parquet_close_writer(writer)
+
+        ! Integer key staged, string key fetched.
+        ! grp=1 rows are 2(bb), 4(aa), 6(ee) -> by txt asc: 4, 2, 6
+        ! grp=2 rows are 1(dd), 3(ff), 5(cc) -> by txt asc: 5, 1, 3
+        call srt%add("grp asc")
+        call srt%add("txt asc")
+        call parquet_open_reader(reader, file, sort_by=srt)
+        call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+        call check(error, all(ids == [4, 2, 6, 5, 1, 3]), &
+            "an int key followed by a string key must order the rows 4,2,6,5,1,3")
+        if (allocated(error)) return
+
+        ! String key staged, integer key fetched. txt is unique, so grp never breaks a tie here --
+        ! the point is the family of the staged key, not the tiebreak.
+        block
+            type(parquet_sortkey) :: srt2
+            call srt2%add("txt asc")
+            call srt2%add("grp asc")
+            call parquet_open_reader(reader, file, sort_by=srt2)
+            call parquet_read_column(reader, "id", ids)
+            call parquet_close_reader(reader)
+        end block
+        call check(error, all(ids == [4, 2, 5, 1, 6, 3]), &
+            "a string key followed by an int key must order the rows 4,2,5,1,6,3")
+    end subroutine test_two_keys_different_families
+    !
+    !> The same column used as BOTH keys: the slot must be filled, consumed and refilled once per
+    !! key rather than served stale on the second.
+    !!
+    !! **What this does NOT test, stated so it is not mistaken for a guard.** The slot's identity
+    !! match compares direction and null placement as well as the name, but the reduction itself is
+    !! direction-independent -- `sort_bind_arrow_key` stores `descending`/`nulls_first` on the key
+    !! and never lets them touch the values -- so a match on the name alone would return the same
+    !! bytes here and this test would pass against it. The direction fields are defence against a
+    !! future reduction that does depend on them; `test_two_keys_different_families` above is the
+    !! one that actually discriminates today.
+    subroutine test_same_column_twice(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: id(6) = [1, 2, 3, 4, 5, 6]
+        integer(int32) :: grp(6) = [2, 1, 2, 1, 2, 1]
+        integer(int32) :: ids(6)
+        character(len=*), parameter :: file = "test_run/sort_same_column_twice.parquet"
+
+        call parquet_open_writer(writer, file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "grp", grp)
+        call parquet_close_writer(writer)
+
+        ! Every row within a group ties on the second key too, so the answer is the first key's
+        ! order with file order inside each group -- i.e. the stability contract, reached through
+        ! two binds of one column.
+        call srt%add("grp asc")
+        call srt%add("grp desc")
+        call parquet_open_reader(reader, file, sort_by=srt)
+        call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+        call check(error, all(ids == [2, 4, 6, 1, 3, 5]), &
+            "the same column as both keys must order the rows 2,4,6,1,3,5")
+    end subroutine test_same_column_twice
 end module test_sort

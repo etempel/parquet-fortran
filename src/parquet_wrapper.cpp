@@ -462,6 +462,57 @@ extern "C"
 		bool null_values_allowed = true;
 	};
 
+	// ---- The sort key, declared HERE rather than beside the comparator that reads it ----
+	//
+	// `ParquetReaderHandle` below holds one `SortKeyData` by value, so the type has to be complete
+	// before that struct is declared. The comparator, the counting path and everything else that
+	// reads a key live far below, next to sort_build_permutation; only these three declarations
+	// moved up. A `std::unique_ptr<SortKeyData>` to an incomplete type was the alternative and was
+	// rejected: it needs a destructor declared in the struct and defined where the type is complete,
+	// which compiles until the day someone adds a second such member and does not.
+
+	// Which comparison a bound key uses. Boolean and every temporal type bind as Integer (their
+	// values are integers and their order is the integer order), which also lets them reach the
+	// counting fast path.
+	enum class SortValueKind { Integer, Real, Str };
+
+	// One sort key. Exactly one of ints/reals/strs describes it, matching `kind` -- but the values
+	// may either be OWNED (copied into the vector below) or BORROWED (ints_ptr/reals_ptr aimed at a
+	// caller's array, with the vector left empty).
+	//
+	// The comparator always reads through ints_ptr/reals_ptr, never through the vectors, so
+	// borrowing costs it nothing at all -- no extra branch in the hottest loop in the engine. Every
+	// place that fills a key must therefore call sort_key_finalize() before the key is used;
+	// sort_build_permutation checks that it happened rather than dereferencing a null pointer.
+	//
+	// Borrowing is only ever safe when the borrowed array outlives the sort, which is why it is
+	// used by the one-shot parquet_sort_argsort_*/parquet_sort_is_sorted_* entry points (the
+	// caller's array is live for the whole call and nothing survives it) and NOT by the
+	// SortBuilderHandle adders, whose keys outlive the call that added them.
+	struct SortKeyData
+	{
+		SortValueKind kind = SortValueKind::Integer;
+		bool descending = false;
+		bool nulls_first = false;
+		std::vector<int64_t> ints;             //!< Integer kind, when owned (includes boolean and temporal).
+		std::vector<double> reals;             //!< Real kind, when owned (float/double/half_float/uint64/decimal).
+		std::vector<std::string_view> strs;    //!< Str kind; views into `owner`'s buffers, or into a caller's.
+		std::vector<uint8_t> valid;            //!< 1 = valid; EMPTY means "no nulls at all".
+		std::shared_ptr<void> owner;           //!< Keeps whatever backs `strs` alive. Unused when borrowing.
+		const int64_t *ints_ptr = nullptr;     //!< What the comparator reads for Integer. Never null once finalized.
+		const double *reals_ptr = nullptr;     //!< What the comparator reads for Real. Never null once finalized.
+	};
+
+	// Points a key's read pointers at whatever backs it. Call once, after the values are in place
+	// and before the key is used; harmless to call on an already-borrowing key, whose pointer is
+	// left alone. A vector's heap buffer survives the vector being moved, so a key may be moved
+	// into a handle after this without invalidating anything.
+	static inline void sort_key_finalize(SortKeyData &key)
+	{
+		if (key.ints_ptr == nullptr) key.ints_ptr = key.ints.data();
+		if (key.reals_ptr == nullptr) key.reals_ptr = key.reals.data();
+	}
+
 	// Deliberately does NOT hold a materialized arrow::Table: opening a file
 	// only parses the (small) footer/schema via FileReaderBuilder, so no
 	// column's data is ever read from disk until that specific column is
@@ -522,6 +573,34 @@ extern "C"
 		// The sort keys as re-rendered by the Fortran side ("ra asc, dec desc"), retained solely
 		// for parquet_reader_print_stat's own "sort:" line -- never parsed here.
 		std::string sort_key_text;
+		// ---- One-slot cache of the key parquet_reader_sort_key_info most recently bound --------
+		//
+		// Installing a read-time sort makes TWO crossings per key (add_read_sort_key,
+		// src/parquet_read.f90): _key_info binds the key to report its family and size so Fortran
+		// can allocate buffers, then _key_fetch binds it AGAIN to copy the values out. Arrow's
+		// decode is shared -- both reach the column through get_single_chunk_array, which caches on
+		// column_cache -- so what repeated was sort_bind_arrow_key's O(rows) materialisation: a
+		// vector<int64_t>/vector<double>, or for a string key a vector<string_view> plus the buffer
+		// that owns it, plus a validity vector. Measured at 5-9% of a whole read-time open.
+		//
+		// ONE slot, not a map, because the two entry points are strictly paired: one _info
+		// immediately followed by one _fetch, per key. The three identity fields are what make a
+		// stale slot impossible to consume -- name alone is not enough, since the same column may
+		// legitimately appear twice under different directions.
+		//
+		// The slot is a pure optimisation and _fetch keeps its from-scratch path: if the identity
+		// does not match, or the slot is empty, it binds exactly as before. That is deliberate --
+		// it is what stops the two entry points becoming secretly order-dependent, and it costs one
+		// comparison. Do not replace it with an assertion.
+		//
+		// Memory is NEUTRAL despite appearances: the reduction used to be built and freed twice,
+		// and is now built once and held across one Fortran allocation of comparable size. It does
+		// not grow with the key count.
+		bool sort_key_cached = false;
+		std::string sort_key_cache_name;
+		bool sort_key_cache_descending = false;
+		bool sort_key_cache_nulls_first = false;
+		SortKeyData sort_key_cache;
 		// The whole filter expression re-rendered in canonical form by
 		// parquet_render_filter_expr (parquet_read_filter.f90) and handed over by
 		// parquet_reader_set_filter. Retained solely for parquet_reader_print_stat's own
@@ -4025,47 +4104,12 @@ extern "C"
 	// and multi-key (0.77x); 1.24x slower on strings; and -- with the counting fast path below --
 	// within 3 ms on low-cardinality integers, where the plain comparator was 86x slower.
 
-	// Which comparison a bound key uses. Boolean and every temporal type bind as Integer (their
-	// values are integers and their order is the integer order), which also lets them reach the
-	// counting fast path.
-	enum class SortValueKind { Integer, Real, Str };
-
-	// One sort key. Exactly one of ints/reals/strs describes it, matching `kind` -- but the values
-	// may either be OWNED (copied into the vector below) or BORROWED (ints_ptr/reals_ptr aimed at a
-	// caller's array, with the vector left empty).
-	//
-	// The comparator always reads through ints_ptr/reals_ptr, never through the vectors, so
-	// borrowing costs it nothing at all -- no extra branch in the hottest loop in the engine. Every
-	// place that fills a key must therefore call sort_key_finalize() before the key is used;
-	// sort_build_permutation checks that it happened rather than dereferencing a null pointer.
-	//
-	// Borrowing is only ever safe when the borrowed array outlives the sort, which is why it is
-	// used by the one-shot parquet_sort_argsort_*/parquet_sort_is_sorted_* entry points (the
-	// caller's array is live for the whole call and nothing survives it) and NOT by the
-	// SortBuilderHandle adders, whose keys outlive the call that added them.
-	struct SortKeyData
-	{
-		SortValueKind kind = SortValueKind::Integer;
-		bool descending = false;
-		bool nulls_first = false;
-		std::vector<int64_t> ints;             //!< Integer kind, when owned (includes boolean and temporal).
-		std::vector<double> reals;             //!< Real kind, when owned (float/double/half_float/uint64/decimal).
-		std::vector<std::string_view> strs;    //!< Str kind; views into `owner`'s buffers, or into a caller's.
-		std::vector<uint8_t> valid;            //!< 1 = valid; EMPTY means "no nulls at all".
-		std::shared_ptr<void> owner;           //!< Keeps whatever backs `strs` alive. Unused when borrowing.
-		const int64_t *ints_ptr = nullptr;     //!< What the comparator reads for Integer. Never null once finalized.
-		const double *reals_ptr = nullptr;     //!< What the comparator reads for Real. Never null once finalized.
-	};
-
-	// Points a key's read pointers at whatever backs it. Call once, after the values are in place
-	// and before the key is used; harmless to call on an already-borrowing key, whose pointer is
-	// left alone. A vector's heap buffer survives the vector being moved, so a key may be moved
-	// into a handle after this without invalidating anything.
-	static inline void sort_key_finalize(SortKeyData &key)
-	{
-		if (key.ints_ptr == nullptr) key.ints_ptr = key.ints.data();
-		if (key.reals_ptr == nullptr) key.reals_ptr = key.reals.data();
-	}
+	// `enum class SortValueKind`, `struct SortKeyData` and `sort_key_finalize` USED TO BE DECLARED
+	// HERE, next to the comparator that reads them. They now sit just above `ParquetReaderHandle`,
+	// because the handle holds a `SortKeyData` by value (see `sort_key_cache` there) and a member of
+	// incomplete type is not a thing C++ allows. It is a pure relocation -- no line of any of the
+	// three changed -- and it is recorded rather than silently done because the comparator below is
+	// where a reader looks for them.
 
 	// Output tier of row `i` under this key: 0 sorts first, 2 last. Absolute -- `descending` never
 	// reaches this, which is exactly Arrow's rule (a descending sort still puts nulls last by
@@ -7117,15 +7161,36 @@ extern "C"
 	// asks what family and how large a key is, copies the reduced values out, sorts, and hands the
 	// permutation back.
 	//
-	// **Nothing is staged on the reader handle between calls.** Each entry point binds the key it
-	// was asked about and discards it, so there is no lifetime to get wrong, nothing to free on an
-	// error path, and no pointer that can outlive what it points into -- the failure mode
-	// last_whole_column_buffers_array exists to patch elsewhere in this file. The cost is that
-	// _info and _fetch each bind, i.e. the value copy happens twice; the decode itself does not,
-	// because get_single_chunk_array serves the second call from column_cache. Binding was
-	// measured at 1.4-3% of a read-time sort, so this is inside the noise, and it buys the
-	// guarantee that the size _info promised is the size _fetch writes, by construction rather
-	// than by two code paths agreeing.
+	// **_info's reduction is handed to _fetch through a one-slot cache on the handle**
+	// (`sort_key_cache`; its declaration carries the reasoning). Each entry point used to bind the
+	// key it was asked about and discard it, which meant the O(rows) value copy happened TWICE per
+	// key -- Arrow's decode did not repeat, because get_single_chunk_array serves the second call
+	// from column_cache, but the reduction did. That was measured at 5-9% of a whole read-time open
+	// on both compilers, which is why it is no longer done.
+	//
+	// An earlier version of this banner said "nothing is staged on the reader handle between calls"
+	// and cited a 1.4-3% cost for the repeat. The figure was an estimate and was low by roughly
+	// three times; the phase counters below are what replaced it with a measurement.
+	//
+	// **The guarantee the old shape bought is not weakened -- it is strengthened.** The size _info
+	// promises and the size _fetch writes now come from ONE object rather than from two code paths
+	// agreeing. And the lifetime worry the old note raised does not arise: a finalized key may be
+	// moved without invalidating its read pointers (see sort_key_finalize), the slot is cleared the
+	// moment it is consumed, and _fetch keeps its from-scratch path for every case where the slot
+	// does not match.
+
+	// Drops whatever _info staged. Called on every error return from either entry point and once
+	// more when the sort is installed: a slot left full holds one key's reduction alive until the
+	// reader closes, which is bounded but free to avoid -- and, more importantly, a slot left full
+	// after an ABORTED sort is the one that a later, unrelated _fetch could find.
+	static inline void sort_key_cache_clear(ParquetReaderHandle *reader_handle)
+	{
+		reader_handle->sort_key_cached = false;
+		reader_handle->sort_key_cache = SortKeyData();
+		reader_handle->sort_key_cache_name.clear();
+		reader_handle->sort_key_cache_descending = false;
+		reader_handle->sort_key_cache_nulls_first = false;
+	}
 
 	// Reports a sort key's reduced family and dimensions.
 	//   family: 0 = integer (boolean and every temporal type reduce to this), 1 = real, 2 = string
@@ -7142,7 +7207,7 @@ extern "C"
 		auto t_info = std::chrono::steady_clock::now();
 		bool bound = bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap);
 		charge_phase(t_info, g_debug_sort_info_nanos);
-		if (!bound) return 1;
+		if (!bound) { sort_key_cache_clear(reader_handle); return 1; }
 
 		*nbytes = 0;
 		switch (key.kind)
@@ -7162,6 +7227,15 @@ extern "C"
 			break;
 		}
 		*has_nulls = key.valid.empty() ? 0 : 1;
+
+		// Hand the reduction to the _fetch that is about to follow. Every size above is read from
+		// `key` BEFORE this move -- moving a finalized key is safe (a vector's heap buffer survives
+		// it, so ints_ptr/reals_ptr stay valid) but it does leave `key` empty.
+		reader_handle->sort_key_cache = std::move(key);
+		reader_handle->sort_key_cache_name = name ? name : "";
+		reader_handle->sort_key_cache_descending = (descending != 0);
+		reader_handle->sort_key_cache_nulls_first = (nulls_first != 0);
+		reader_handle->sort_key_cached = true;
 		return 0;
 	}
 
@@ -7176,9 +7250,47 @@ extern "C"
 		auto reader_handle = as_reader_handle(handle);
 		SortKeyData key;
 		auto t_bind = std::chrono::steady_clock::now();
-		bool bound = bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap);
+		// The slot _info filled, if it holds THIS key. All three identity fields must match: a name
+		// match alone would hand back the wrong reduction for the same column sorted twice under
+		// different directions, and that is a wrong answer rather than a slowdown.
+		bool bound = false;
+		if (reader_handle->sort_key_cached
+			&& reader_handle->sort_key_cache_name == (name ? name : "")
+			&& reader_handle->sort_key_cache_descending == (descending != 0)
+			&& reader_handle->sort_key_cache_nulls_first == (nulls_first != 0))
+		{
+			key = std::move(reader_handle->sort_key_cache);
+			reader_handle->sort_key_cached = false;
+			reader_handle->sort_key_cache = SortKeyData();
+			reader_handle->sort_key_cache_name.clear();
+			bound = true;
+		}
+		else
+		{ // GCOVR_EXCL_START -- unreachable today; see the note below, kept deliberately
+			// Not a match, or nothing staged. Bind exactly as this entry point always did.
+			//
+			// **NO FIXTURE IN THIS REPOSITORY CAN REACH THIS ARM, and it stays anyway.** The two
+			// entry points have exactly one caller -- add_read_sort_key (src/parquet_read.f90) --
+			// which calls _info and then _fetch with identical arguments, per key, with nothing in
+			// between. So the slot always holds the key being fetched and the identity match above
+			// always succeeds. Confirmed by mutation: replacing the four-way match with a bare
+			// `if (reader_handle->sort_key_cached)` leaves all 29 tests in the `sort` suite
+			// passing, exit 0. (The mutation that IS caught is moving the `std::move` in _key_info
+			// above the size reads, which aborts the suite outright -- exit 134, zero tests run.)
+			//
+			// Two reasons not to replace it with an assertion, which is what a coverage report will
+			// suggest. The pairing it relies on is a property of ONE Fortran caller and nothing
+			// enforces it; and an assertion converts a recoverable mismatch into an abort inside a
+			// library whose C++ half cannot throw across the extern "C" boundary. One comparison is
+			// a cheap price for not making the two entry points secretly order-dependent.
+			bound = bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap);
+		}
+		// GCOVR_EXCL_STOP
+		// The phase counter stays where it was and still wraps WHICHEVER path was taken, so the
+		// benchmark shows `bind` collapsing towards zero rather than the counter vanishing. A
+		// counter that disappears is indistinguishable from one that was never reached.
 		auto t_copy = charge_phase(t_bind, g_debug_sort_bind_nanos);
-		if (!bound) return 1;
+		if (!bound) { sort_key_cache_clear(reader_handle); return 1; }
 
 		switch (key.kind)
 		{
@@ -7220,6 +7332,9 @@ extern "C"
 		const char *key_text, char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
+		// Every key has been fetched by the time a permutation comes back, so the slot is spent;
+		// clearing it here is what stops one surviving an aborted or partial install.
+		sort_key_cache_clear(reader_handle);
 		auto t_perm = std::chrono::steady_clock::now();
 		arrow::Int64Builder perm_builder;
 		auto append_status = perm_builder.AppendValues(perm, n);

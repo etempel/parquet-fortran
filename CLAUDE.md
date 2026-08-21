@@ -4022,6 +4022,23 @@ before being noticed:**
   wrappers do not. Recovery is to append the flag (`FPM_FFLAGS="${FPM_FFLAGS:-} -O3"`, appended
   never assigned) and say so in the report.
 
+  **And the check must cover the C++ HALF too, which is a separate flag line that a Fortran-only
+  guard cannot see.** fpm derives the C/C++ compiler from the *Fortran* one's family, and for a
+  family it does not recognise as a C family it emits **no profile flags for that half at all**.
+  Measured on this repository: `fpm build --profile release --show-model` gives `cxx_compile_flags`
+  `-O3 -fPIC -funroll-loops` under gfortran and **nothing** under nagfor and flang — so
+  `src/parquet_wrapper.cpp`, and with it the whole Arrow layer, compiles at the C++ compiler's own
+  `-O0` default. Every benchmark in this project that opens a file, sorts, or reaches a
+  `parquet_debug_*_cpp` arm passes through that file.
+  **The failure is silent and plausible**: the run satisfies the Fortran guard, prints a full table,
+  and every C++-side figure in it is wrong. `benchmark_sort_readtime` under nagfor at n = 10⁶
+  reported one phase at **25.9%** of the operation with an unoptimised C++ half and **2.9%** with
+  `-O3`, with the total at 97.45 ms against 36.91 — and nothing in the output said which it was. The
+  recovery is `FPM_CXXFLAGS="${FPM_CXXFLAGS:-} -O3"`, appended never assigned, because that variable
+  carries Arrow's include paths. Add the assertion to any wrapper whose timed work reaches C++; a
+  wrapper measuring Arrow-free Fortran (`benchmark_random.sh`, `probe_isnan.sh`) does not need it and
+  should not gain a gate it cannot fail meaningfully.
+
   **But "no `-O` in the flags" does NOT mean "unoptimised" — some compilers optimise by default, and
   a check that does not know this blocks a valid arm.** fpm gives **ifx** no `-O` either, and ifx's
   own default is **`-O2`**, so that build is already optimised and refusing it is wrong. This cost a

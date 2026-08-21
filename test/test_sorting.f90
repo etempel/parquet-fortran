@@ -227,6 +227,10 @@ contains
                 test_partial_argsort_threads_answer), &
             new_unittest("partial_argsort: the threaded tail passes agree with the serial ones", &
                 test_partial_argsort_threads_tail), &
+            new_unittest("selection: threads= never changes what partial_sort/nth/quantile answer", &
+                test_selection_threads_answer), &
+            new_unittest("selection: the threaded extraction agrees with the serial one", &
+                test_selection_threads_extraction), &
             new_unittest("engine: integer keys match the C++ comparators", test_engine_conf_int), &
             new_unittest("engine: real keys with NaNs match the C++ comparators", test_engine_conf_real), &
             new_unittest("engine: string keys match the C++ comparators", test_engine_conf_str), &
@@ -8639,4 +8643,126 @@ contains
         call restore_engine_default()
     end subroutine cpp_test_threads_one_is_serial
 
+    !
+    !> `threads=` on `pf_partial_sort`, `pf_nth_element` and `pf_nth_quantile` must never change
+    !! the answer, whatever it is set to. The cheap half of the pair below.
+    !!
+    !! Every value is distinct, so each of the three has exactly one right answer and a
+    !! thread-count-dependent one would be visible immediately. `threads=1` is included as the
+    !! forced-serial arm rather than assuming the default resolves to it.
+    subroutine test_selection_threads_answer(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: n = 512
+        real(real64) :: v(n)
+        real(real64), allocatable :: s_auto(:), s_one(:), s_many(:)
+        real(real64) :: nth_auto, nth_one, nth_many, q_auto, q_one, q_many
+        integer :: i
+
+        do i = 1, n
+            v(i) = real(mod(i * 7919, 5003), real64) * 0.25_real64
+        end do
+
+        call pf_partial_sort(v, s_auto, 16)
+        call pf_partial_sort(v, s_one, 16, threads=1)
+        call pf_partial_sort(v, s_many, 16, threads=4)
+        call check(error, all(s_auto == s_one) .and. all(s_auto == s_many), &
+            "pf_partial_sort must give the same first n whatever threads= is set to")
+        if (allocated(error)) return
+
+        call pf_nth_element(v, 37, nth_auto)
+        call pf_nth_element(v, 37, nth_one, threads=1)
+        call pf_nth_element(v, 37, nth_many, threads=4)
+        call check(error, nth_auto == nth_one .and. nth_auto == nth_many, &
+            "pf_nth_element must give the same value whatever threads= is set to")
+        if (allocated(error)) return
+
+        call pf_nth_quantile(v, 0.75_real64, q_auto)
+        call pf_nth_quantile(v, 0.75_real64, q_one, threads=1)
+        call pf_nth_quantile(v, 0.75_real64, q_many, threads=4)
+        call check(error, q_auto == q_one .and. q_auto == q_many, &
+            "pf_nth_quantile must give the same value whatever threads= is set to")
+    end subroutine test_selection_threads_answer
+    !
+    !> The half that makes `threads=` mean something on the three selection procedures: with the
+    !! tail floor forced down, the key extraction really does take its `!$omp parallel do` branch,
+    !! and its answer must equal the serial one.
+    !!
+    !! **Forcing the floor is the whole point**, exactly as in `test_partial_argsort_threads_tail`
+    !! above: `tail_team` declines a team below `max(32768, 1024*nt)` elements, which no fixture
+    !! here reaches, so without `parquet_debug_set_sort_tail_min_rows` both arms would run the same
+    !! serial code and every equality below would hold for the wrong reason.
+    !!
+    !! **What a team does and does not reach here** is narrower than on `pf_argsort`, and the
+    !! doc-comments on these three say so: only the extraction is threaded. The selection,
+    !! `pf_partial_sort`'s gather and `pf_nth_quantile`'s `key_valid_count` are all serial by
+    !! design, so this test asserts the extraction and nothing further. The `is_valid` arm is the
+    !! sharp one -- the mask travels through the same threaded extraction as the values, so a null
+    !! placed by the wrong thread's chunk is a wrong answer only that arm can see.
+    subroutine test_selection_threads_extraction(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: n = 4096
+        integer(int32) :: v(n)
+        logical :: mask(n)
+        integer(int32), allocatable :: ser(:), par(:), sernull(:), parnull(:)
+        integer(int32) :: nth_ser, nth_par, nthnull_ser, nthnull_par
+        ! p_value takes the ARRAY's type, not real64 -- `v` is int32, so a quantile of it is too.
+        integer(int32) :: q_ser, q_par
+        integer(int64) :: nnull_ser, nnull_par
+        integer :: i
+        !
+        ! Preconditions, declared rather than assumed: with the threaded branch preprocessed out,
+        ! or on a machine where an explicit threads= clamps back to 1, both arms below are the same
+        ! serial code and every assertion passes without testing anything.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the threaded extraction (extract_*, " // &
+            "src/parquet_argsort_kernel.f90) sits inside #ifdef _OPENMP, so both arms below " // &
+            "would run the same serial code and the equality would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: resolve_thread_count clamps " // &
+                "an explicit threads= to omp_get_num_procs(), so threads=4 resolves to 1 here " // &
+                "and the extraction is not threaded")
+            return
+        end if
+#endif
+        !
+        do i = 1, n
+            v(i) = int(mod(i * 7919, 65537), int32)
+            mask(i) = mod(i, 7) /= 0
+        end do
+        !
+        ! The floor is restored BEFORE the first assertion: every `check` can return early, and a
+        ! leaked floor would silently rethread every later test in this suite.
+        call parquet_debug_set_sort_tail_min_rows(1_int64)
+        call pf_partial_sort(v, par, 64, threads=4)
+        call pf_partial_sort(v, parnull, 64, is_valid=mask, threads=4)
+        call pf_nth_element(v, 37, nth_par, threads=4)
+        call pf_nth_element(v, 37, nthnull_par, is_valid=mask, threads=4)
+        call pf_nth_quantile(v, 0.6_real64, q_par, is_valid=mask, n_null=nnull_par, threads=4)
+        call parquet_debug_set_sort_tail_min_rows(-1_int64)
+        !
+        call pf_partial_sort(v, ser, 64, threads=1)
+        call pf_partial_sort(v, sernull, 64, is_valid=mask, threads=1)
+        call pf_nth_element(v, 37, nth_ser, threads=1)
+        call pf_nth_element(v, 37, nthnull_ser, is_valid=mask, threads=1)
+        call pf_nth_quantile(v, 0.6_real64, q_ser, is_valid=mask, n_null=nnull_ser, threads=1)
+        !
+        call check(error, size(par) == 64, "the forced-floor run must still return n values")
+        if (allocated(error)) return
+        call check(error, all(par == ser), &
+            "a threaded extraction must give pf_partial_sort's serial answer")
+        if (allocated(error)) return
+        call check(error, all(parnull == sernull), &
+            "a threaded extraction must place pf_partial_sort's nulls exactly as the serial one does")
+        if (allocated(error)) return
+        call check(error, nth_par == nth_ser, &
+            "a threaded extraction must give pf_nth_element's serial answer")
+        if (allocated(error)) return
+        call check(error, nthnull_par == nthnull_ser, &
+            "a threaded extraction must give pf_nth_element's serial answer with a mask")
+        if (allocated(error)) return
+        call check(error, q_par == q_ser .and. nnull_par == nnull_ser, &
+            "a threaded extraction must give pf_nth_quantile's serial value and null count")
+    end subroutine test_selection_threads_extraction
 end module test_sorting

@@ -439,7 +439,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_i32(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid)
+        call extract_i32(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(sorted(count))
         do k = 1_int64, count
@@ -468,7 +468,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_i64(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid)
+        call extract_i64(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(sorted(count))
         do k = 1_int64, count
@@ -497,7 +497,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_f32(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid)
+        call extract_f32(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(sorted(count))
         do k = 1_int64, count
@@ -526,7 +526,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_f64(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid)
+        call extract_f64(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(sorted(count))
         do k = 1_int64, count
@@ -555,7 +555,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_bool(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid)
+        call extract_bool(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(sorted(count))
         do k = 1_int64, count
@@ -584,7 +584,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_chr(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid)
+        call extract_chr(values, buf, desc, nlo, "pf_partial_sort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(character(len=len(values)) :: sorted(count))
         do k = 1_int64, count
@@ -613,7 +613,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_date(values, buf, desc, nlo, "pf_partial_sort")
+        call extract_date(values, buf, desc, nlo, "pf_partial_sort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(sorted(count))
         do k = 1_int64, count
@@ -633,7 +633,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_time(values, buf, desc, nlo, "pf_partial_sort")
+        call extract_time(values, buf, desc, nlo, "pf_partial_sort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(sorted(count))
         do k = 1_int64, count
@@ -653,7 +653,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_sort", count)
-        call extract_ts(values, buf, desc, nlo, "pf_partial_sort")
+        call extract_ts(values, buf, desc, nlo, "pf_partial_sort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_sort", perm)
         allocate(sorted(count))
         do k = 1_int64, count
@@ -669,7 +669,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_i32_i32
     !
     module procedure nth_i32_i32_i32
@@ -680,7 +680,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_i32_i32_i32
     !
@@ -692,7 +692,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_i32_i32_i64
     !
@@ -704,7 +704,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_i32_i64
     !
     module procedure nth_i32_i64_i32
@@ -715,7 +715,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_i32_i64_i32
     !
@@ -727,7 +727,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_i32_i64_i64
     !
@@ -739,7 +739,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_i64_i32
     !
     module procedure nth_i64_i32_i32
@@ -750,7 +750,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_i64_i32_i32
     !
@@ -762,7 +762,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_i64_i32_i64
     !
@@ -774,7 +774,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_i64_i64
     !
     module procedure nth_i64_i64_i32
@@ -785,7 +785,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_i64_i64_i32
     !
@@ -797,7 +797,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_i64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_i64_i64_i64
     !
@@ -809,7 +809,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_f32_i32
     !
     module procedure nth_f32_i32_i32
@@ -820,7 +820,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_f32_i32_i32
     !
@@ -832,7 +832,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_f32_i32_i64
     !
@@ -844,7 +844,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_f32_i64
     !
     module procedure nth_f32_i64_i32
@@ -855,7 +855,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_f32_i64_i32
     !
@@ -867,7 +867,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f32(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_f32_i64_i64
     !
@@ -879,7 +879,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_f64_i32
     !
     module procedure nth_f64_i32_i32
@@ -890,7 +890,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_f64_i32_i32
     !
@@ -902,7 +902,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_f64_i32_i64
     !
@@ -914,7 +914,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_f64_i64
     !
     module procedure nth_f64_i64_i32
@@ -925,7 +925,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_f64_i64_i32
     !
@@ -937,7 +937,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_f64(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_f64_i64_i64
     !
@@ -949,7 +949,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_bool_i32
     !
     module procedure nth_bool_i32_i32
@@ -960,7 +960,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_bool_i32_i32
     !
@@ -972,7 +972,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_bool_i32_i64
     !
@@ -984,7 +984,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_bool_i64
     !
     module procedure nth_bool_i64_i32
@@ -995,7 +995,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_bool_i64_i32
     !
@@ -1007,7 +1007,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_bool(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_bool_i64_i64
     !
@@ -1019,7 +1019,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_chr_i32
     !
     module procedure nth_chr_i32_i32
@@ -1030,7 +1030,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_chr_i32_i32
     !
@@ -1042,7 +1042,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_chr_i32_i64
     !
@@ -1054,7 +1054,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
     end procedure nth_chr_i64
     !
     module procedure nth_chr_i64_i32
@@ -1065,7 +1065,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_chr_i64_i32
     !
@@ -1077,7 +1077,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid)
+        call nth_impl_chr(values, int(nth, int64), p_value, idx, desc, nlo, is_valid=is_valid, threads=threads)
         index = idx
     end procedure nth_chr_i64_i64
     !
@@ -1089,7 +1089,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
     end procedure nth_date_i32
     !
     module procedure nth_date_i32_i32
@@ -1100,7 +1100,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_date_i32_i32
     !
@@ -1112,7 +1112,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         index = idx
     end procedure nth_date_i32_i64
     !
@@ -1124,7 +1124,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
     end procedure nth_date_i64
     !
     module procedure nth_date_i64_i32
@@ -1135,7 +1135,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_date_i64_i32
     !
@@ -1147,7 +1147,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_date(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         index = idx
     end procedure nth_date_i64_i64
     !
@@ -1159,7 +1159,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
     end procedure nth_time_i32
     !
     module procedure nth_time_i32_i32
@@ -1170,7 +1170,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_time_i32_i32
     !
@@ -1182,7 +1182,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         index = idx
     end procedure nth_time_i32_i64
     !
@@ -1194,7 +1194,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
     end procedure nth_time_i64
     !
     module procedure nth_time_i64_i32
@@ -1205,7 +1205,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_time_i64_i32
     !
@@ -1217,7 +1217,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_time(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         index = idx
     end procedure nth_time_i64_i64
     !
@@ -1229,7 +1229,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
     end procedure nth_ts_i32
     !
     module procedure nth_ts_i32_i32
@@ -1240,7 +1240,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_ts_i32_i32
     !
@@ -1252,7 +1252,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         index = idx
     end procedure nth_ts_i32_i64
     !
@@ -1264,7 +1264,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
     end procedure nth_ts_i64
     !
     module procedure nth_ts_i64_i32
@@ -1275,7 +1275,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_ts_i64_i32
     !
@@ -1287,7 +1287,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_ts(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         index = idx
     end procedure nth_ts_i64_i64
     !
@@ -1299,7 +1299,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
     end procedure nth_strcol_i32
     !
     module procedure nth_strcol_i32_i32
@@ -1310,7 +1310,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_strcol_i32_i32
     !
@@ -1322,7 +1322,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         index = idx
     end procedure nth_strcol_i32_i64
     !
@@ -1334,7 +1334,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
     end procedure nth_strcol_i64
     !
     module procedure nth_strcol_i64_i32
@@ -1345,7 +1345,7 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         call narrow_index(idx, "pf_nth_element", index)
     end procedure nth_strcol_i64_i32
     !
@@ -1357,21 +1357,21 @@ contains
         if (present(descending)) desc = descending
         nlo = .false.
         if (present(nulls_first)) nlo = nulls_first
-        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo)
+        call nth_impl_strcol(values, int(nth, int64), p_value, idx, desc, nlo, threads=threads)
         index = idx
     end procedure nth_strcol_i64_i64
     !
     module procedure quantile_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_i32
     !
     module procedure quantile_i32_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_i32_i32
@@ -1379,7 +1379,7 @@ contains
     module procedure quantile_i32_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_i32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_i32_i64
@@ -1387,14 +1387,14 @@ contains
     module procedure quantile_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_i64
     !
     module procedure quantile_i64_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_i64_i32
@@ -1402,7 +1402,7 @@ contains
     module procedure quantile_i64_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_i64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_i64_i64
@@ -1410,14 +1410,14 @@ contains
     module procedure quantile_f32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_f32
     !
     module procedure quantile_f32_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_f32_i32
@@ -1425,7 +1425,7 @@ contains
     module procedure quantile_f32_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_f32(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_f32_i64
@@ -1433,14 +1433,14 @@ contains
     module procedure quantile_f64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_f64
     !
     module procedure quantile_f64_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_f64_i32
@@ -1448,7 +1448,7 @@ contains
     module procedure quantile_f64_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_f64(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_f64_i64
@@ -1456,14 +1456,14 @@ contains
     module procedure quantile_bool
         integer(int64) :: idx, nn
         !
-        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_bool
     !
     module procedure quantile_bool_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_bool_i32
@@ -1471,7 +1471,7 @@ contains
     module procedure quantile_bool_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_bool(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_bool_i64
@@ -1479,14 +1479,14 @@ contains
     module procedure quantile_chr
         integer(int64) :: idx, nn
         !
-        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_chr
     !
     module procedure quantile_chr_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_chr_i32
@@ -1494,7 +1494,7 @@ contains
     module procedure quantile_chr_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid)
+        call quantile_impl_chr(values, quantile, p_value, idx, nn, rounding, is_valid=is_valid, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_chr_i64
@@ -1502,14 +1502,14 @@ contains
     module procedure quantile_date
         integer(int64) :: idx, nn
         !
-        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_date
     !
     module procedure quantile_date_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_date_i32
@@ -1517,7 +1517,7 @@ contains
     module procedure quantile_date_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_date(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_date_i64
@@ -1525,14 +1525,14 @@ contains
     module procedure quantile_time
         integer(int64) :: idx, nn
         !
-        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_time
     !
     module procedure quantile_time_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_time_i32
@@ -1540,7 +1540,7 @@ contains
     module procedure quantile_time_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_time(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_time_i64
@@ -1548,14 +1548,14 @@ contains
     module procedure quantile_ts
         integer(int64) :: idx, nn
         !
-        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_ts
     !
     module procedure quantile_ts_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_ts_i32
@@ -1563,7 +1563,7 @@ contains
     module procedure quantile_ts_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_ts(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_ts_i64
@@ -1571,14 +1571,14 @@ contains
     module procedure quantile_strcol
         integer(int64) :: idx, nn
         !
-        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
     end procedure quantile_strcol
     !
     module procedure quantile_strcol_i32
         integer(int64) :: idx, nn
         !
-        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
         call narrow_index(idx, "pf_nth_quantile", index)
     end procedure quantile_strcol_i32
@@ -1586,13 +1586,13 @@ contains
     module procedure quantile_strcol_i64
         integer(int64) :: idx, nn
         !
-        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding)
+        call quantile_impl_strcol(values, quantile, p_value, idx, nn, rounding, threads=threads)
         if (present(n_null)) n_null = nn
         index = idx
     end procedure quantile_strcol_i64
     !
     !> Shared worker behind every pf_nth_element specific for a 32-bit integer array.
-    subroutine nth_impl_i32(values, nth, p_value, idx, descending, nulls_first, is_valid)
+    subroutine nth_impl_i32(values, nth, p_value, idx, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         integer(int32), intent(out) :: p_value !! the value at that rank.
@@ -1600,18 +1600,19 @@ contains
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_i32(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid)
+        call extract_i32(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_i32
     !
     !> Shared worker behind every pf_nth_quantile specific for a 32-bit integer array.
-    subroutine quantile_impl_i32(values, quantile, p_value, idx, n_null, rounding, is_valid)
+    subroutine quantile_impl_i32(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
         integer(int32), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         integer(int32), intent(out) :: p_value !! the value at that quantile.
@@ -1619,6 +1620,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1627,7 +1629,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_i32(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid)
+        call extract_i32(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1636,7 +1638,7 @@ contains
     end subroutine quantile_impl_i32
     !
     !> Shared worker behind every pf_nth_element specific for a 64-bit integer array.
-    subroutine nth_impl_i64(values, nth, p_value, idx, descending, nulls_first, is_valid)
+    subroutine nth_impl_i64(values, nth, p_value, idx, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         integer(int64), intent(out) :: p_value !! the value at that rank.
@@ -1644,18 +1646,19 @@ contains
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_i64(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid)
+        call extract_i64(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_i64
     !
     !> Shared worker behind every pf_nth_quantile specific for a 64-bit integer array.
-    subroutine quantile_impl_i64(values, quantile, p_value, idx, n_null, rounding, is_valid)
+    subroutine quantile_impl_i64(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
         integer(int64), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         integer(int64), intent(out) :: p_value !! the value at that quantile.
@@ -1663,6 +1666,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1671,7 +1675,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_i64(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid)
+        call extract_i64(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1680,7 +1684,7 @@ contains
     end subroutine quantile_impl_i64
     !
     !> Shared worker behind every pf_nth_element specific for a 32-bit real array.
-    subroutine nth_impl_f32(values, nth, p_value, idx, descending, nulls_first, is_valid)
+    subroutine nth_impl_f32(values, nth, p_value, idx, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         real(real32), intent(out) :: p_value !! the value at that rank.
@@ -1688,18 +1692,19 @@ contains
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_f32(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid)
+        call extract_f32(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_f32
     !
     !> Shared worker behind every pf_nth_quantile specific for a 32-bit real array.
-    subroutine quantile_impl_f32(values, quantile, p_value, idx, n_null, rounding, is_valid)
+    subroutine quantile_impl_f32(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
         real(real32), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         real(real32), intent(out) :: p_value !! the value at that quantile.
@@ -1707,6 +1712,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1715,7 +1721,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_f32(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid)
+        call extract_f32(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1724,7 +1730,7 @@ contains
     end subroutine quantile_impl_f32
     !
     !> Shared worker behind every pf_nth_element specific for a 64-bit real array.
-    subroutine nth_impl_f64(values, nth, p_value, idx, descending, nulls_first, is_valid)
+    subroutine nth_impl_f64(values, nth, p_value, idx, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         real(real64), intent(out) :: p_value !! the value at that rank.
@@ -1732,18 +1738,19 @@ contains
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_f64(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid)
+        call extract_f64(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_f64
     !
     !> Shared worker behind every pf_nth_quantile specific for a 64-bit real array.
-    subroutine quantile_impl_f64(values, quantile, p_value, idx, n_null, rounding, is_valid)
+    subroutine quantile_impl_f64(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
         real(real64), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         real(real64), intent(out) :: p_value !! the value at that quantile.
@@ -1751,6 +1758,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1759,7 +1767,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_f64(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid)
+        call extract_f64(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1768,7 +1776,7 @@ contains
     end subroutine quantile_impl_f64
     !
     !> Shared worker behind every pf_nth_element specific for a logical array.
-    subroutine nth_impl_bool(values, nth, p_value, idx, descending, nulls_first, is_valid)
+    subroutine nth_impl_bool(values, nth, p_value, idx, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         logical, intent(out) :: p_value !! the value at that rank.
@@ -1776,18 +1784,19 @@ contains
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_bool(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid)
+        call extract_bool(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_bool
     !
     !> Shared worker behind every pf_nth_quantile specific for a logical array.
-    subroutine quantile_impl_bool(values, quantile, p_value, idx, n_null, rounding, is_valid)
+    subroutine quantile_impl_bool(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
         logical, intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         logical, intent(out) :: p_value !! the value at that quantile.
@@ -1795,6 +1804,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1803,7 +1813,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_bool(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid)
+        call extract_bool(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1812,7 +1822,7 @@ contains
     end subroutine quantile_impl_bool
     !
     !> Shared worker behind every pf_nth_element specific for a string array.
-    subroutine nth_impl_chr(values, nth, p_value, idx, descending, nulls_first, is_valid)
+    subroutine nth_impl_chr(values, nth, p_value, idx, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
@@ -1820,18 +1830,19 @@ contains
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_chr(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid)
+        call extract_chr(values, buf, descending, nulls_first, "pf_nth_element", is_valid=is_valid, threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_chr
     !
     !> Shared worker behind every pf_nth_quantile specific for a string array.
-    subroutine quantile_impl_chr(values, quantile, p_value, idx, n_null, rounding, is_valid)
+    subroutine quantile_impl_chr(values, quantile, p_value, idx, n_null, rounding, is_valid, threads)
         character(len=*), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -1839,6 +1850,7 @@ contains
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
         logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1847,7 +1859,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_chr(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid)
+        call extract_chr(values, buf, .false., .false., "pf_nth_quantile", is_valid=is_valid, threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1856,31 +1868,33 @@ contains
     end subroutine quantile_impl_chr
     !
     !> Shared worker behind every pf_nth_element specific for a date array.
-    subroutine nth_impl_date(values, nth, p_value, idx, descending, nulls_first)
+    subroutine nth_impl_date(values, nth, p_value, idx, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         type(parquet_date), intent(out) :: p_value !! the value at that rank.
         integer(int64), intent(out) :: idx  !! which element of `values` that was.
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_date(values, buf, descending, nulls_first, "pf_nth_element")
+        call extract_date(values, buf, descending, nulls_first, "pf_nth_element", threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_date
     !
     !> Shared worker behind every pf_nth_quantile specific for a date array.
-    subroutine quantile_impl_date(values, quantile, p_value, idx, n_null, rounding)
+    subroutine quantile_impl_date(values, quantile, p_value, idx, n_null, rounding, threads)
         type(parquet_date), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         type(parquet_date), intent(out) :: p_value !! the value at that quantile.
         integer(int64), intent(out) :: idx     !! which element of `values` that was.
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1889,7 +1903,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_date(values, buf, .false., .false., "pf_nth_quantile")
+        call extract_date(values, buf, .false., .false., "pf_nth_quantile", threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1898,31 +1912,33 @@ contains
     end subroutine quantile_impl_date
     !
     !> Shared worker behind every pf_nth_element specific for a time array.
-    subroutine nth_impl_time(values, nth, p_value, idx, descending, nulls_first)
+    subroutine nth_impl_time(values, nth, p_value, idx, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         type(parquet_time), intent(out) :: p_value !! the value at that rank.
         integer(int64), intent(out) :: idx  !! which element of `values` that was.
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_time(values, buf, descending, nulls_first, "pf_nth_element")
+        call extract_time(values, buf, descending, nulls_first, "pf_nth_element", threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_time
     !
     !> Shared worker behind every pf_nth_quantile specific for a time array.
-    subroutine quantile_impl_time(values, quantile, p_value, idx, n_null, rounding)
+    subroutine quantile_impl_time(values, quantile, p_value, idx, n_null, rounding, threads)
         type(parquet_time), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         type(parquet_time), intent(out) :: p_value !! the value at that quantile.
         integer(int64), intent(out) :: idx     !! which element of `values` that was.
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1931,7 +1947,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_time(values, buf, .false., .false., "pf_nth_quantile")
+        call extract_time(values, buf, .false., .false., "pf_nth_quantile", threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1940,31 +1956,33 @@ contains
     end subroutine quantile_impl_time
     !
     !> Shared worker behind every pf_nth_element specific for a timestamp array.
-    subroutine nth_impl_ts(values, nth, p_value, idx, descending, nulls_first)
+    subroutine nth_impl_ts(values, nth, p_value, idx, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         type(parquet_timestamp), intent(out) :: p_value !! the value at that rank.
         integer(int64), intent(out) :: idx  !! which element of `values` that was.
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = size(values, kind=int64)
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_ts(values, buf, descending, nulls_first, "pf_nth_element")
+        call extract_ts(values, buf, descending, nulls_first, "pf_nth_element", threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         p_value = values(idx)
     end subroutine nth_impl_ts
     !
     !> Shared worker behind every pf_nth_quantile specific for a timestamp array.
-    subroutine quantile_impl_ts(values, quantile, p_value, idx, n_null, rounding)
+    subroutine quantile_impl_ts(values, quantile, p_value, idx, n_null, rounding, threads)
         type(parquet_timestamp), intent(in) :: values(:)
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
         integer(int64), intent(out) :: idx     !! which element of `values` that was.
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -1973,7 +1991,7 @@ contains
         nrows = size(values, kind=int64)
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_ts(values, buf, .false., .false., "pf_nth_quantile")
+        call extract_ts(values, buf, .false., .false., "pf_nth_quantile", threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)
@@ -1982,31 +2000,33 @@ contains
     end subroutine quantile_impl_ts
     !
     !> Shared worker behind every pf_nth_element specific for a packed string column array.
-    subroutine nth_impl_strcol(values, nth, p_value, idx, descending, nulls_first)
+    subroutine nth_impl_strcol(values, nth, p_value, idx, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
         integer(int64), intent(in) :: nth   !! 1-based rank wanted.
         character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
         integer(int64), intent(out) :: idx  !! which element of `values` that was.
         logical, intent(in) :: descending   !! .true. ranks high to low.
         logical, intent(in) :: nulls_first  !! .true. ranks nulls first.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows
         !
         nrows = values%size()
         call check_rank(nth, nrows, "pf_nth_element")
-        call extract_strcol(values, buf, descending, nulls_first, "pf_nth_element")
+        call extract_strcol(values, buf, descending, nulls_first, "pf_nth_element", threads=threads)
         call engine_nth_index(buf, nrows, nth, "pf_nth_element", idx)
         call values%get(idx, p_value, allow_null=.true.)
     end subroutine nth_impl_strcol
     !
     !> Shared worker behind every pf_nth_quantile specific for a packed string column array.
-    subroutine quantile_impl_strcol(values, quantile, p_value, idx, n_null, rounding)
+    subroutine quantile_impl_strcol(values, quantile, p_value, idx, n_null, rounding, threads)
         type(parquet_string_column), intent(in) :: values
         real(real64), intent(in) :: quantile !! position on a 0-1 scale.
         character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
         integer(int64), intent(out) :: idx     !! which element of `values` that was.
         integer(int64), intent(out) :: n_null  !! how many values were null.
         character(len=*), intent(in), optional :: rounding !! rounding token.
+        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.
         type(sort_key_buf), allocatable :: buf(:)
         integer(int64) :: nrows, n_valid, rank
         integer :: mode
@@ -2015,7 +2035,7 @@ contains
         nrows = values%size()
         ! Ascending with nulls LAST, unconditionally: the population is the non-null
         ! values, so a rank in 1..n_valid can never address a null.
-        call extract_strcol(values, buf, .false., .false., "pf_nth_quantile")
+        call extract_strcol(values, buf, .false., .false., "pf_nth_quantile", threads=threads)
         call key_valid_count(buf, nrows, n_valid)
         n_null = nrows - n_valid
         call quantile_rank(quantile, n_valid, mode, "pf_nth_quantile", rank)

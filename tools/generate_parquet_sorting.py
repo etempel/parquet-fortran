@@ -423,6 +423,37 @@ PARTIAL_THREADS_DOC = THREADS_DOC + [
     "            !! not in proportion to the sort.",
 ]
 
+# The same argument on the three SELECTION procedures (P15). Each names what a team does not
+# reach, because on all three the thing the caller thinks they are parallelising -- the selection --
+# is serial. Writing one shared block for all three was rejected: the unreached work differs per
+# procedure, and a doc-comment that says "some of this is serial" without saying which part is
+# exactly the promise `threads=` should not make.
+PARTIAL_SORT_THREADS_DOC = THREADS_DOC + [
+    "            !!",
+    "            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team",
+    "            !! reaches only the key extraction, which walks all `size(values)` elements. The",
+    "            !! selection that makes a partial sort cheap has no threaded form, and the final",
+    "            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`",
+    "            !! to matter in proportion to the extraction, not to the sort.",
+]
+
+NTH_THREADS_DOC = THREADS_DOC + [
+    "            !!",
+    "            !! **The selection itself is SERIAL.** A team reaches only the key extraction,",
+    "            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no",
+    "            !! threaded form. `threads=` is worth passing here when the extraction dominates --",
+    "            !! a string or column key -- and worth nothing on a plain integer array.",
+]
+
+QUANTILE_THREADS_DOC = THREADS_DOC + [
+    "            !!",
+    "            !! **The selection is SERIAL, and so is the null count.** A team reaches only the",
+    "            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which",
+    "            !! sizes the non-null population this quantile is taken over, and the selection",
+    "            !! itself. Threading the count is possible and was deliberately not done here --",
+    "            !! it is a separate change needing its own measurement.",
+]
+
 #: `group_nkeys`, on the two `pf_sort_keys` specifics only -- the per-type ones hold a single key,
 #: so a prefix of it could only ever be the whole thing.
 GROUP_NKEYS_DOC = [
@@ -1639,7 +1670,7 @@ module parquet_sorting
         if not has_sort:
             continue
         w(f"        !> pf_partial_sort over a {what} array: the first `n` in order, as a copy.")
-        w(f"        module subroutine partial_sort_{tag}(values, sorted, n, descending, nulls_first{', is_valid, sorted_valid' if nulls == 'arg' else ''})")
+        w(f"        module subroutine partial_sort_{tag}(values, sorted, n, descending, nulls_first{', is_valid, sorted_valid' if nulls == 'arg' else ''}, threads)")
         w(val_decl(t, "in"))
         if family == "chr":
             w("            character(len=len(values)), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.")
@@ -1652,6 +1683,8 @@ module parquet_sorting
             w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
             w("            logical, allocatable, intent(out), optional :: sorted_valid(:)")
             w("            !! validity of `sorted`, in its order; always allocated when asked for.")
+        for line in PARTIAL_SORT_THREADS_DOC:
+            w(line)
         w(f"        end subroutine partial_sort_{tag}")
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
@@ -1664,7 +1697,7 @@ module parquet_sorting
                 w(f"        !> pf_nth_element over a {what} array, with an {nkname} rank" +
                   (f" and an {iname} index." if ik else " and no index out-argument."))
                 w(f"        module subroutine nth_{tag}_{nk}{sfx}(values, nth, p_value{iarg}, descending, " +
-                  f"nulls_first{', is_valid' if nulls == 'arg' else ''})")
+                  f"nulls_first{', is_valid' if nulls == 'arg' else ''}, threads)")
                 w(val_decl(t, "in"))
                 w(f"            {nkdecl}, intent(in) :: nth !! 1-based rank wanted.")
                 w("    " + pval_decl(t) + " !! the value at that rank.")
@@ -1674,6 +1707,8 @@ module parquet_sorting
                 w("            logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.")
                 if nulls == "arg":
                     w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+                for line in NTH_THREADS_DOC:
+                    w(line)
                 w(f"        end subroutine nth_{tag}_{nk}{sfx}")
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
@@ -1685,7 +1720,7 @@ module parquet_sorting
             w(f"        !> pf_nth_quantile over a {what} array" +
               (f", with an {iname} index." if ik else ", with no index out-argument."))
             w(f"        module subroutine quantile_{tag}{sfx}(values, quantile, p_value{iarg}, rounding" +
-              f"{', is_valid' if nulls == 'arg' else ''}, n_null)")
+              f"{', is_valid' if nulls == 'arg' else ''}, n_null, threads)")
             w(val_decl(t, "in"))
             w("            real(real64), intent(in) :: quantile !! position on a 0-1 scale.")
             w("    " + pval_decl(t) + " !! the value at that quantile.")
@@ -1699,6 +1734,8 @@ module parquet_sorting
             w("            !! int64 out-arguments, so with `n_null` at position 4 a positional call could")
             w("            !! not be told apart from the `index` form. Nothing else here is a character,")
             w("            !! so `rounding` at position 4 disambiguates them.")
+            for line in QUANTILE_THREADS_DOC:
+                w(line)
             w(f"        end subroutine quantile_{tag}{sfx}")
     w("    end interface")
     w("    !")
@@ -4476,7 +4513,7 @@ contains
         w("        if (present(nulls_first)) nlo = nulls_first")
         w(f"        nrows = {rows_expr(t)}")
         w("        call resolve_count(n, nrows, \"pf_partial_sort\", count)")
-        w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_partial_sort\"{iv})")
+        w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_partial_sort\"{iv}, threads=threads)")
         w("        call drive_engine_partial(buf, nrows, count, \"pf_partial_sort\", perm)")
         if family == "chr":
             w("        allocate(character(len=len(values)) :: sorted(count))")
@@ -4515,7 +4552,8 @@ contains
                 w("        if (present(descending)) desc = descending")
                 w("        nlo = .false.")
                 w("        if (present(nulls_first)) nlo = nulls_first")
-                w("        call nth_impl_" + tag + "(values, int(nth, int64), p_value, idx, desc, nlo" + iv + ")")
+                w("        call nth_impl_" + tag + "(values, int(nth, int64), p_value, idx, desc, nlo" + iv +
+                  ", threads=threads)")
                 if ik == "i32":
                     w("        call narrow_index(idx, \"pf_nth_element\", index)")
                 elif ik == "i64":
@@ -4534,7 +4572,8 @@ contains
             w("    module procedure quantile_" + tag + sfx)
             w("        integer(int64) :: idx, nn")
             w("        !")
-            w("        call quantile_impl_" + tag + "(values, quantile, p_value, idx, nn, rounding" + iv + ")")
+            w("        call quantile_impl_" + tag + "(values, quantile, p_value, idx, nn, rounding" + iv +
+              ", threads=threads)")
             w("        if (present(n_null)) n_null = nn")
             if ik == "i32":
                 w("        call narrow_index(idx, \"pf_nth_quantile\", index)")
@@ -4553,7 +4592,8 @@ contains
         getval = ("        call values%get(idx, p_value, allow_null=.true.)" if family == "strcol"
                   else "        p_value = values(idx)")
         w("    !> Shared worker behind every pf_nth_element specific for a " + what + " array.")
-        w("    subroutine nth_impl_" + tag + "(values, nth, p_value, idx, descending, nulls_first" + iarg + ")")
+        w("    subroutine nth_impl_" + tag + "(values, nth, p_value, idx, descending, nulls_first" + iarg +
+          ", threads)")
         w(val_decl(t, "in"))
         w("        integer(int64), intent(in) :: nth   !! 1-based rank wanted.")
         w(pval_decl(t) + " !! the value at that rank.")
@@ -4562,18 +4602,21 @@ contains
         w("        logical, intent(in) :: nulls_first  !! .true. ranks nulls first.")
         if nulls == "arg":
             w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.")
         w("        type(sort_key_buf), allocatable :: buf(:)")
         w("        integer(int64) :: nrows")
         w("        !")
         w("        nrows = " + rows_expr(t))
         w("        call check_rank(nth, nrows, \"pf_nth_element\")")
-        w("        call extract_" + tag + "(values, buf, descending, nulls_first, \"pf_nth_element\"" + iv + ")")
+        w("        call extract_" + tag + "(values, buf, descending, nulls_first, \"pf_nth_element\"" + iv +
+          ", threads=threads)")
         w("        call engine_nth_index(buf, nrows, nth, \"pf_nth_element\", idx)")
         w(getval)
         w("    end subroutine nth_impl_" + tag)
         w("    !")
         w("    !> Shared worker behind every pf_nth_quantile specific for a " + what + " array.")
-        w("    subroutine quantile_impl_" + tag + "(values, quantile, p_value, idx, n_null, rounding" + iarg + ")")
+        w("    subroutine quantile_impl_" + tag + "(values, quantile, p_value, idx, n_null, rounding" + iarg +
+          ", threads)")
         w(val_decl(t, "in"))
         w("        real(real64), intent(in) :: quantile !! position on a 0-1 scale.")
         w(pval_decl(t) + " !! the value at that quantile.")
@@ -4582,6 +4625,7 @@ contains
         w("        character(len=*), intent(in), optional :: rounding !! rounding token.")
         if nulls == "arg":
             w("        logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+        w("        integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.")
         w("        type(sort_key_buf), allocatable :: buf(:)")
         w("        integer(int64) :: nrows, n_valid, rank")
         w("        integer :: mode")
@@ -4590,7 +4634,8 @@ contains
         w("        nrows = " + rows_expr(t))
         w("        ! Ascending with nulls LAST, unconditionally: the population is the non-null")
         w("        ! values, so a rank in 1..n_valid can never address a null.")
-        w("        call extract_" + tag + "(values, buf, .false., .false., \"pf_nth_quantile\"" + iv + ")")
+        w("        call extract_" + tag + "(values, buf, .false., .false., \"pf_nth_quantile\"" + iv +
+          ", threads=threads)")
         w("        call key_valid_count(buf, nrows, n_valid)")
         w("        n_null = nrows - n_valid")
         w("        call quantile_rank(quantile, n_valid, mode, \"pf_nth_quantile\", rank)")

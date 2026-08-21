@@ -2100,7 +2100,7 @@ module parquet_sorting
             !! generic; every other `pf_partial_argsort` specific does use it.
         end subroutine partial_argsort_keys_i64
         !> pf_partial_sort over a 32-bit integer array: the first `n` in order, as a copy.
-        module subroutine partial_sort_i32(values, sorted, n, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine partial_sort_i32(values, sorted, n, descending, nulls_first, is_valid, sorted_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
@@ -2109,9 +2109,21 @@ module parquet_sorting
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order; always allocated when asked for.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_i32
         !> pf_partial_sort over a 64-bit integer array: the first `n` in order, as a copy.
-        module subroutine partial_sort_i64(values, sorted, n, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine partial_sort_i64(values, sorted, n, descending, nulls_first, is_valid, sorted_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
@@ -2120,9 +2132,21 @@ module parquet_sorting
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order; always allocated when asked for.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_i64
         !> pf_partial_sort over a 32-bit real array: the first `n` in order, as a copy.
-        module subroutine partial_sort_f32(values, sorted, n, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine partial_sort_f32(values, sorted, n, descending, nulls_first, is_valid, sorted_valid, threads)
         real(real32), intent(in) :: values(:)
             real(real32), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
@@ -2131,9 +2155,21 @@ module parquet_sorting
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order; always allocated when asked for.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_f32
         !> pf_partial_sort over a 64-bit real array: the first `n` in order, as a copy.
-        module subroutine partial_sort_f64(values, sorted, n, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine partial_sort_f64(values, sorted, n, descending, nulls_first, is_valid, sorted_valid, threads)
         real(real64), intent(in) :: values(:)
             real(real64), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
@@ -2142,9 +2178,21 @@ module parquet_sorting
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order; always allocated when asked for.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_f64
         !> pf_partial_sort over a logical array: the first `n` in order, as a copy.
-        module subroutine partial_sort_bool(values, sorted, n, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine partial_sort_bool(values, sorted, n, descending, nulls_first, is_valid, sorted_valid, threads)
         logical, intent(in) :: values(:)
             logical, allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
@@ -2153,9 +2201,21 @@ module parquet_sorting
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order; always allocated when asked for.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_bool
         !> pf_partial_sort over a string array: the first `n` in order, as a copy.
-        module subroutine partial_sort_chr(values, sorted, n, descending, nulls_first, is_valid, sorted_valid)
+        module subroutine partial_sort_chr(values, sorted, n, descending, nulls_first, is_valid, sorted_valid, threads)
         character(len=*), intent(in) :: values(:)
             character(len=len(values)), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
@@ -2164,42 +2224,101 @@ module parquet_sorting
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
             logical, allocatable, intent(out), optional :: sorted_valid(:)
             !! validity of `sorted`, in its order; always allocated when asked for.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_chr
         !> pf_partial_sort over a date array: the first `n` in order, as a copy.
-        module subroutine partial_sort_date(values, sorted, n, descending, nulls_first)
+        module subroutine partial_sort_date(values, sorted, n, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             type(parquet_date), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_date
         !> pf_partial_sort over a time array: the first `n` in order, as a copy.
-        module subroutine partial_sort_time(values, sorted, n, descending, nulls_first)
+        module subroutine partial_sort_time(values, sorted, n, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             type(parquet_time), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_time
         !> pf_partial_sort over a timestamp array: the first `n` in order, as a copy.
-        module subroutine partial_sort_ts(values, sorted, n, descending, nulls_first)
+        module subroutine partial_sort_ts(values, sorted, n, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             type(parquet_timestamp), allocatable, intent(out) :: sorted(:) !! the first `n`, in order.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection and the gather are SERIAL here, unlike `pf_argsort`.** A team
+            !! reaches only the key extraction, which walks all `size(values)` elements. The
+            !! selection that makes a partial sort cheap has no threaded form, and the final
+            !! `sorted(k) = values(perm(k))` gather is O(`n`) and serial. So expect `threads=`
+            !! to matter in proportion to the extraction, not to the sort.
         end subroutine partial_sort_ts
         !> pf_nth_element over a 32-bit integer array, with an int32 rank and no index out-argument.
-        module subroutine nth_i32_i32(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_i32_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             integer(int32), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i32_i32
         !> pf_nth_element over a 32-bit integer array, with an int32 rank and an int32 index.
-        module subroutine nth_i32_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_i32_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             integer(int32), intent(out) :: p_value !! the value at that rank.
@@ -2207,9 +2326,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i32_i32_i32
         !> pf_nth_element over a 32-bit integer array, with an int32 rank and an int64 index.
-        module subroutine nth_i32_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_i32_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             integer(int32), intent(out) :: p_value !! the value at that rank.
@@ -2217,18 +2347,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i32_i32_i64
         !> pf_nth_element over a 32-bit integer array, with an int64 rank and no index out-argument.
-        module subroutine nth_i32_i64(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_i32_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             integer(int32), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i32_i64
         !> pf_nth_element over a 32-bit integer array, with an int64 rank and an int32 index.
-        module subroutine nth_i32_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_i32_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             integer(int32), intent(out) :: p_value !! the value at that rank.
@@ -2236,9 +2388,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i32_i64_i32
         !> pf_nth_element over a 32-bit integer array, with an int64 rank and an int64 index.
-        module subroutine nth_i32_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_i32_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             integer(int32), intent(out) :: p_value !! the value at that rank.
@@ -2246,18 +2409,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i32_i64_i64
         !> pf_nth_element over a 64-bit integer array, with an int32 rank and no index out-argument.
-        module subroutine nth_i64_i32(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_i64_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             integer(int64), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i64_i32
         !> pf_nth_element over a 64-bit integer array, with an int32 rank and an int32 index.
-        module subroutine nth_i64_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_i64_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             integer(int64), intent(out) :: p_value !! the value at that rank.
@@ -2265,9 +2450,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i64_i32_i32
         !> pf_nth_element over a 64-bit integer array, with an int32 rank and an int64 index.
-        module subroutine nth_i64_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_i64_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             integer(int64), intent(out) :: p_value !! the value at that rank.
@@ -2275,18 +2471,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i64_i32_i64
         !> pf_nth_element over a 64-bit integer array, with an int64 rank and no index out-argument.
-        module subroutine nth_i64_i64(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_i64_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             integer(int64), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i64_i64
         !> pf_nth_element over a 64-bit integer array, with an int64 rank and an int32 index.
-        module subroutine nth_i64_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_i64_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             integer(int64), intent(out) :: p_value !! the value at that rank.
@@ -2294,9 +2512,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i64_i64_i32
         !> pf_nth_element over a 64-bit integer array, with an int64 rank and an int64 index.
-        module subroutine nth_i64_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_i64_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             integer(int64), intent(out) :: p_value !! the value at that rank.
@@ -2304,18 +2533,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_i64_i64_i64
         !> pf_nth_element over a 32-bit real array, with an int32 rank and no index out-argument.
-        module subroutine nth_f32_i32(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_f32_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             real(real32), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f32_i32
         !> pf_nth_element over a 32-bit real array, with an int32 rank and an int32 index.
-        module subroutine nth_f32_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_f32_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             real(real32), intent(out) :: p_value !! the value at that rank.
@@ -2323,9 +2574,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f32_i32_i32
         !> pf_nth_element over a 32-bit real array, with an int32 rank and an int64 index.
-        module subroutine nth_f32_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_f32_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             real(real32), intent(out) :: p_value !! the value at that rank.
@@ -2333,18 +2595,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f32_i32_i64
         !> pf_nth_element over a 32-bit real array, with an int64 rank and no index out-argument.
-        module subroutine nth_f32_i64(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_f32_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             real(real32), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f32_i64
         !> pf_nth_element over a 32-bit real array, with an int64 rank and an int32 index.
-        module subroutine nth_f32_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_f32_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             real(real32), intent(out) :: p_value !! the value at that rank.
@@ -2352,9 +2636,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f32_i64_i32
         !> pf_nth_element over a 32-bit real array, with an int64 rank and an int64 index.
-        module subroutine nth_f32_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_f32_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             real(real32), intent(out) :: p_value !! the value at that rank.
@@ -2362,18 +2657,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f32_i64_i64
         !> pf_nth_element over a 64-bit real array, with an int32 rank and no index out-argument.
-        module subroutine nth_f64_i32(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_f64_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             real(real64), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f64_i32
         !> pf_nth_element over a 64-bit real array, with an int32 rank and an int32 index.
-        module subroutine nth_f64_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_f64_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             real(real64), intent(out) :: p_value !! the value at that rank.
@@ -2381,9 +2698,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f64_i32_i32
         !> pf_nth_element over a 64-bit real array, with an int32 rank and an int64 index.
-        module subroutine nth_f64_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_f64_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             real(real64), intent(out) :: p_value !! the value at that rank.
@@ -2391,18 +2719,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f64_i32_i64
         !> pf_nth_element over a 64-bit real array, with an int64 rank and no index out-argument.
-        module subroutine nth_f64_i64(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_f64_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             real(real64), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f64_i64
         !> pf_nth_element over a 64-bit real array, with an int64 rank and an int32 index.
-        module subroutine nth_f64_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_f64_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             real(real64), intent(out) :: p_value !! the value at that rank.
@@ -2410,9 +2760,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f64_i64_i32
         !> pf_nth_element over a 64-bit real array, with an int64 rank and an int64 index.
-        module subroutine nth_f64_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_f64_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             real(real64), intent(out) :: p_value !! the value at that rank.
@@ -2420,18 +2781,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_f64_i64_i64
         !> pf_nth_element over a logical array, with an int32 rank and no index out-argument.
-        module subroutine nth_bool_i32(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_bool_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             logical, intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_bool_i32
         !> pf_nth_element over a logical array, with an int32 rank and an int32 index.
-        module subroutine nth_bool_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_bool_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             logical, intent(out) :: p_value !! the value at that rank.
@@ -2439,9 +2822,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_bool_i32_i32
         !> pf_nth_element over a logical array, with an int32 rank and an int64 index.
-        module subroutine nth_bool_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_bool_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             logical, intent(out) :: p_value !! the value at that rank.
@@ -2449,18 +2843,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_bool_i32_i64
         !> pf_nth_element over a logical array, with an int64 rank and no index out-argument.
-        module subroutine nth_bool_i64(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_bool_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             logical, intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_bool_i64
         !> pf_nth_element over a logical array, with an int64 rank and an int32 index.
-        module subroutine nth_bool_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_bool_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             logical, intent(out) :: p_value !! the value at that rank.
@@ -2468,9 +2884,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_bool_i64_i32
         !> pf_nth_element over a logical array, with an int64 rank and an int64 index.
-        module subroutine nth_bool_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_bool_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             logical, intent(out) :: p_value !! the value at that rank.
@@ -2478,18 +2905,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_bool_i64_i64
         !> pf_nth_element over a string array, with an int32 rank and no index out-argument.
-        module subroutine nth_chr_i32(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_chr_i32(values, nth, p_value, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_chr_i32
         !> pf_nth_element over a string array, with an int32 rank and an int32 index.
-        module subroutine nth_chr_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_chr_i32_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
@@ -2497,9 +2946,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_chr_i32_i32
         !> pf_nth_element over a string array, with an int32 rank and an int64 index.
-        module subroutine nth_chr_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_chr_i32_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
@@ -2507,18 +2967,40 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_chr_i32_i64
         !> pf_nth_element over a string array, with an int64 rank and no index out-argument.
-        module subroutine nth_chr_i64(values, nth, p_value, descending, nulls_first, is_valid)
+        module subroutine nth_chr_i64(values, nth, p_value, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_chr_i64
         !> pf_nth_element over a string array, with an int64 rank and an int32 index.
-        module subroutine nth_chr_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_chr_i64_i32(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
@@ -2526,9 +3008,20 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_chr_i64_i32
         !> pf_nth_element over a string array, with an int64 rank and an int64 index.
-        module subroutine nth_chr_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid)
+        module subroutine nth_chr_i64_i64(values, nth, p_value, index, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
@@ -2536,217 +3029,492 @@ module parquet_sorting
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_chr_i64_i64
         !> pf_nth_element over a date array, with an int32 rank and no index out-argument.
-        module subroutine nth_date_i32(values, nth, p_value, descending, nulls_first)
+        module subroutine nth_date_i32(values, nth, p_value, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_date), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_date_i32
         !> pf_nth_element over a date array, with an int32 rank and an int32 index.
-        module subroutine nth_date_i32_i32(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_date_i32_i32(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_date), intent(out) :: p_value !! the value at that rank.
             integer(int32), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_date_i32_i32
         !> pf_nth_element over a date array, with an int32 rank and an int64 index.
-        module subroutine nth_date_i32_i64(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_date_i32_i64(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_date), intent(out) :: p_value !! the value at that rank.
             integer(int64), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_date_i32_i64
         !> pf_nth_element over a date array, with an int64 rank and no index out-argument.
-        module subroutine nth_date_i64(values, nth, p_value, descending, nulls_first)
+        module subroutine nth_date_i64(values, nth, p_value, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_date), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_date_i64
         !> pf_nth_element over a date array, with an int64 rank and an int32 index.
-        module subroutine nth_date_i64_i32(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_date_i64_i32(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_date), intent(out) :: p_value !! the value at that rank.
             integer(int32), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_date_i64_i32
         !> pf_nth_element over a date array, with an int64 rank and an int64 index.
-        module subroutine nth_date_i64_i64(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_date_i64_i64(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_date), intent(out) :: p_value !! the value at that rank.
             integer(int64), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_date_i64_i64
         !> pf_nth_element over a time array, with an int32 rank and no index out-argument.
-        module subroutine nth_time_i32(values, nth, p_value, descending, nulls_first)
+        module subroutine nth_time_i32(values, nth, p_value, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_time), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_time_i32
         !> pf_nth_element over a time array, with an int32 rank and an int32 index.
-        module subroutine nth_time_i32_i32(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_time_i32_i32(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_time), intent(out) :: p_value !! the value at that rank.
             integer(int32), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_time_i32_i32
         !> pf_nth_element over a time array, with an int32 rank and an int64 index.
-        module subroutine nth_time_i32_i64(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_time_i32_i64(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_time), intent(out) :: p_value !! the value at that rank.
             integer(int64), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_time_i32_i64
         !> pf_nth_element over a time array, with an int64 rank and no index out-argument.
-        module subroutine nth_time_i64(values, nth, p_value, descending, nulls_first)
+        module subroutine nth_time_i64(values, nth, p_value, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_time), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_time_i64
         !> pf_nth_element over a time array, with an int64 rank and an int32 index.
-        module subroutine nth_time_i64_i32(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_time_i64_i32(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_time), intent(out) :: p_value !! the value at that rank.
             integer(int32), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_time_i64_i32
         !> pf_nth_element over a time array, with an int64 rank and an int64 index.
-        module subroutine nth_time_i64_i64(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_time_i64_i64(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_time), intent(out) :: p_value !! the value at that rank.
             integer(int64), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_time_i64_i64
         !> pf_nth_element over a timestamp array, with an int32 rank and no index out-argument.
-        module subroutine nth_ts_i32(values, nth, p_value, descending, nulls_first)
+        module subroutine nth_ts_i32(values, nth, p_value, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_ts_i32
         !> pf_nth_element over a timestamp array, with an int32 rank and an int32 index.
-        module subroutine nth_ts_i32_i32(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_ts_i32_i32(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that rank.
             integer(int32), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_ts_i32_i32
         !> pf_nth_element over a timestamp array, with an int32 rank and an int64 index.
-        module subroutine nth_ts_i32_i64(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_ts_i32_i64(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that rank.
             integer(int64), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_ts_i32_i64
         !> pf_nth_element over a timestamp array, with an int64 rank and no index out-argument.
-        module subroutine nth_ts_i64(values, nth, p_value, descending, nulls_first)
+        module subroutine nth_ts_i64(values, nth, p_value, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_ts_i64
         !> pf_nth_element over a timestamp array, with an int64 rank and an int32 index.
-        module subroutine nth_ts_i64_i32(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_ts_i64_i32(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that rank.
             integer(int32), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_ts_i64_i32
         !> pf_nth_element over a timestamp array, with an int64 rank and an int64 index.
-        module subroutine nth_ts_i64_i64(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_ts_i64_i64(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that rank.
             integer(int64), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_ts_i64_i64
         !> pf_nth_element over a packed string column array, with an int32 rank and no index out-argument.
-        module subroutine nth_strcol_i32(values, nth, p_value, descending, nulls_first)
+        module subroutine nth_strcol_i32(values, nth, p_value, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_strcol_i32
         !> pf_nth_element over a packed string column array, with an int32 rank and an int32 index.
-        module subroutine nth_strcol_i32_i32(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_strcol_i32_i32(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
             integer(int32), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_strcol_i32_i32
         !> pf_nth_element over a packed string column array, with an int32 rank and an int64 index.
-        module subroutine nth_strcol_i32_i64(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_strcol_i32_i64(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int32), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
             integer(int64), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_strcol_i32_i64
         !> pf_nth_element over a packed string column array, with an int64 rank and no index out-argument.
-        module subroutine nth_strcol_i64(values, nth, p_value, descending, nulls_first)
+        module subroutine nth_strcol_i64(values, nth, p_value, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_strcol_i64
         !> pf_nth_element over a packed string column array, with an int64 rank and an int32 index.
-        module subroutine nth_strcol_i64_i32(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_strcol_i64_i32(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
             integer(int32), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_strcol_i64_i32
         !> pf_nth_element over a packed string column array, with an int64 rank and an int64 index.
-        module subroutine nth_strcol_i64_i64(values, nth, p_value, index, descending, nulls_first)
+        module subroutine nth_strcol_i64_i64(values, nth, p_value, index, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int64), intent(in) :: nth !! 1-based rank wanted.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that rank.
             integer(int64), intent(out) :: index !! which element of `values` that was.
             logical, intent(in), optional :: descending !! .true. ranks high to low.
             logical, intent(in), optional :: nulls_first !! .true. ranks nulls first.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL.** A team reaches only the key extraction,
+            !! which walks all `size(values)` elements; `engine_nth_index` is O(n) and has no
+            !! threaded form. `threads=` is worth passing here when the extraction dominates --
+            !! a string or column key -- and worth nothing on a plain integer array.
         end subroutine nth_strcol_i64_i64
         !> pf_nth_quantile over a 32-bit integer array, with no index out-argument.
-        module subroutine quantile_i32(values, quantile, p_value, rounding, is_valid, n_null)
+        module subroutine quantile_i32(values, quantile, p_value, rounding, is_valid, n_null, threads)
         integer(int32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int32), intent(out) :: p_value !! the value at that quantile.
@@ -2757,9 +3525,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_i32
         !> pf_nth_quantile over a 32-bit integer array, with an int32 index.
-        module subroutine quantile_i32_i32(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_i32_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         integer(int32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int32), intent(out) :: p_value !! the value at that quantile.
@@ -2771,9 +3551,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_i32_i32
         !> pf_nth_quantile over a 32-bit integer array, with an int64 index.
-        module subroutine quantile_i32_i64(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_i32_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         integer(int32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int32), intent(out) :: p_value !! the value at that quantile.
@@ -2785,9 +3577,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_i32_i64
         !> pf_nth_quantile over a 64-bit integer array, with no index out-argument.
-        module subroutine quantile_i64(values, quantile, p_value, rounding, is_valid, n_null)
+        module subroutine quantile_i64(values, quantile, p_value, rounding, is_valid, n_null, threads)
         integer(int64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int64), intent(out) :: p_value !! the value at that quantile.
@@ -2798,9 +3602,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_i64
         !> pf_nth_quantile over a 64-bit integer array, with an int32 index.
-        module subroutine quantile_i64_i32(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_i64_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         integer(int64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int64), intent(out) :: p_value !! the value at that quantile.
@@ -2812,9 +3628,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_i64_i32
         !> pf_nth_quantile over a 64-bit integer array, with an int64 index.
-        module subroutine quantile_i64_i64(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_i64_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         integer(int64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             integer(int64), intent(out) :: p_value !! the value at that quantile.
@@ -2826,9 +3654,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_i64_i64
         !> pf_nth_quantile over a 32-bit real array, with no index out-argument.
-        module subroutine quantile_f32(values, quantile, p_value, rounding, is_valid, n_null)
+        module subroutine quantile_f32(values, quantile, p_value, rounding, is_valid, n_null, threads)
         real(real32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real32), intent(out) :: p_value !! the value at that quantile.
@@ -2839,9 +3679,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_f32
         !> pf_nth_quantile over a 32-bit real array, with an int32 index.
-        module subroutine quantile_f32_i32(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_f32_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         real(real32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real32), intent(out) :: p_value !! the value at that quantile.
@@ -2853,9 +3705,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_f32_i32
         !> pf_nth_quantile over a 32-bit real array, with an int64 index.
-        module subroutine quantile_f32_i64(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_f32_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         real(real32), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real32), intent(out) :: p_value !! the value at that quantile.
@@ -2867,9 +3731,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_f32_i64
         !> pf_nth_quantile over a 64-bit real array, with no index out-argument.
-        module subroutine quantile_f64(values, quantile, p_value, rounding, is_valid, n_null)
+        module subroutine quantile_f64(values, quantile, p_value, rounding, is_valid, n_null, threads)
         real(real64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real64), intent(out) :: p_value !! the value at that quantile.
@@ -2880,9 +3756,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_f64
         !> pf_nth_quantile over a 64-bit real array, with an int32 index.
-        module subroutine quantile_f64_i32(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_f64_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         real(real64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real64), intent(out) :: p_value !! the value at that quantile.
@@ -2894,9 +3782,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_f64_i32
         !> pf_nth_quantile over a 64-bit real array, with an int64 index.
-        module subroutine quantile_f64_i64(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_f64_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         real(real64), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             real(real64), intent(out) :: p_value !! the value at that quantile.
@@ -2908,9 +3808,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_f64_i64
         !> pf_nth_quantile over a logical array, with no index out-argument.
-        module subroutine quantile_bool(values, quantile, p_value, rounding, is_valid, n_null)
+        module subroutine quantile_bool(values, quantile, p_value, rounding, is_valid, n_null, threads)
         logical, intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             logical, intent(out) :: p_value !! the value at that quantile.
@@ -2921,9 +3833,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_bool
         !> pf_nth_quantile over a logical array, with an int32 index.
-        module subroutine quantile_bool_i32(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_bool_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         logical, intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             logical, intent(out) :: p_value !! the value at that quantile.
@@ -2935,9 +3859,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_bool_i32
         !> pf_nth_quantile over a logical array, with an int64 index.
-        module subroutine quantile_bool_i64(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_bool_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         logical, intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             logical, intent(out) :: p_value !! the value at that quantile.
@@ -2949,9 +3885,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_bool_i64
         !> pf_nth_quantile over a string array, with no index out-argument.
-        module subroutine quantile_chr(values, quantile, p_value, rounding, is_valid, n_null)
+        module subroutine quantile_chr(values, quantile, p_value, rounding, is_valid, n_null, threads)
         character(len=*), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -2962,9 +3910,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_chr
         !> pf_nth_quantile over a string array, with an int32 index.
-        module subroutine quantile_chr_i32(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_chr_i32(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         character(len=*), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -2976,9 +3936,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_chr_i32
         !> pf_nth_quantile over a string array, with an int64 index.
-        module subroutine quantile_chr_i64(values, quantile, p_value, index, rounding, is_valid, n_null)
+        module subroutine quantile_chr_i64(values, quantile, p_value, index, rounding, is_valid, n_null, threads)
         character(len=*), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -2990,9 +3962,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_chr_i64
         !> pf_nth_quantile over a date array, with no index out-argument.
-        module subroutine quantile_date(values, quantile, p_value, rounding, n_null)
+        module subroutine quantile_date(values, quantile, p_value, rounding, n_null, threads)
         type(parquet_date), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_date), intent(out) :: p_value !! the value at that quantile.
@@ -3002,9 +3986,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_date
         !> pf_nth_quantile over a date array, with an int32 index.
-        module subroutine quantile_date_i32(values, quantile, p_value, index, rounding, n_null)
+        module subroutine quantile_date_i32(values, quantile, p_value, index, rounding, n_null, threads)
         type(parquet_date), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_date), intent(out) :: p_value !! the value at that quantile.
@@ -3015,9 +4011,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_date_i32
         !> pf_nth_quantile over a date array, with an int64 index.
-        module subroutine quantile_date_i64(values, quantile, p_value, index, rounding, n_null)
+        module subroutine quantile_date_i64(values, quantile, p_value, index, rounding, n_null, threads)
         type(parquet_date), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_date), intent(out) :: p_value !! the value at that quantile.
@@ -3028,9 +4036,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_date_i64
         !> pf_nth_quantile over a time array, with no index out-argument.
-        module subroutine quantile_time(values, quantile, p_value, rounding, n_null)
+        module subroutine quantile_time(values, quantile, p_value, rounding, n_null, threads)
         type(parquet_time), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_time), intent(out) :: p_value !! the value at that quantile.
@@ -3040,9 +4060,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_time
         !> pf_nth_quantile over a time array, with an int32 index.
-        module subroutine quantile_time_i32(values, quantile, p_value, index, rounding, n_null)
+        module subroutine quantile_time_i32(values, quantile, p_value, index, rounding, n_null, threads)
         type(parquet_time), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_time), intent(out) :: p_value !! the value at that quantile.
@@ -3053,9 +4085,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_time_i32
         !> pf_nth_quantile over a time array, with an int64 index.
-        module subroutine quantile_time_i64(values, quantile, p_value, index, rounding, n_null)
+        module subroutine quantile_time_i64(values, quantile, p_value, index, rounding, n_null, threads)
         type(parquet_time), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_time), intent(out) :: p_value !! the value at that quantile.
@@ -3066,9 +4110,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_time_i64
         !> pf_nth_quantile over a timestamp array, with no index out-argument.
-        module subroutine quantile_ts(values, quantile, p_value, rounding, n_null)
+        module subroutine quantile_ts(values, quantile, p_value, rounding, n_null, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
@@ -3078,9 +4134,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_ts
         !> pf_nth_quantile over a timestamp array, with an int32 index.
-        module subroutine quantile_ts_i32(values, quantile, p_value, index, rounding, n_null)
+        module subroutine quantile_ts_i32(values, quantile, p_value, index, rounding, n_null, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
@@ -3091,9 +4159,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_ts_i32
         !> pf_nth_quantile over a timestamp array, with an int64 index.
-        module subroutine quantile_ts_i64(values, quantile, p_value, index, rounding, n_null)
+        module subroutine quantile_ts_i64(values, quantile, p_value, index, rounding, n_null, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             type(parquet_timestamp), intent(out) :: p_value !! the value at that quantile.
@@ -3104,9 +4184,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_ts_i64
         !> pf_nth_quantile over a packed string column array, with no index out-argument.
-        module subroutine quantile_strcol(values, quantile, p_value, rounding, n_null)
+        module subroutine quantile_strcol(values, quantile, p_value, rounding, n_null, threads)
         type(parquet_string_column), intent(in) :: values
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -3116,9 +4208,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_strcol
         !> pf_nth_quantile over a packed string column array, with an int32 index.
-        module subroutine quantile_strcol_i32(values, quantile, p_value, index, rounding, n_null)
+        module subroutine quantile_strcol_i32(values, quantile, p_value, index, rounding, n_null, threads)
         type(parquet_string_column), intent(in) :: values
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -3129,9 +4233,21 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_strcol_i32
         !> pf_nth_quantile over a packed string column array, with an int64 index.
-        module subroutine quantile_strcol_i64(values, quantile, p_value, index, rounding, n_null)
+        module subroutine quantile_strcol_i64(values, quantile, p_value, index, rounding, n_null, threads)
         type(parquet_string_column), intent(in) :: values
             real(real64), intent(in) :: quantile !! position on a 0-1 scale.
             character(len=:), allocatable, intent(out) :: p_value !! the value at that quantile.
@@ -3142,6 +4258,18 @@ module parquet_sorting
             !! int64 out-arguments, so with `n_null` at position 4 a positional call could
             !! not be told apart from the `index` form. Nothing else here is a character,
             !! so `rounding` at position 4 disambiguates them.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection is SERIAL, and so is the null count.** A team reaches only the
+            !! key extraction. Two O(n) passes after it stay serial: `key_valid_count`, which
+            !! sizes the non-null population this quantile is taken over, and the selection
+            !! itself. Threading the count is possible and was deliberately not done here --
+            !! it is a separate change needing its own measurement.
         end subroutine quantile_strcol_i64
     end interface
     !

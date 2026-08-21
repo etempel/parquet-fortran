@@ -112,6 +112,33 @@ elif [[ "$FLAGS_LINE" != *" -O"* ]] && ! compiler_defaults_to_optimised; then
     [[ "${SKIP_OPT_CHECK:-0}" == "0" ]] && exit 1
 fi
 
+# THE SAME CHECK FOR THE C++ HALF, and it is not redundant: fpm derives the C/C++ compiler from the
+# FORTRAN one's family, and for a family it does not recognise as a C family it emits NO profile
+# flags for that half at all. Measured on this repository: `--profile release` gives
+# cxx_compile_flags `-O3 -funroll-loops` under gfortran and NOTHING under nagfor or flang -- so the
+# Arrow layer in src/parquet_wrapper.cpp compiles at the C++ compiler's own default, which is -O0
+# for gcc and clang. Every phase this benchmark reports except `engine+open` is timed inside that file.
+#     The failure mode is the one this project's tooling rules exist to prevent: the run passes the
+# Fortran check above, prints a plausible table, and every C++-side figure in it is wrong.
+# Demonstrated on benchmark_sort_readtime under nagfor at n = 10**6: the `bind` phase reported
+# 25.9% of the open with an unoptimised C++ half and 2.9% with -O3, and the total went 97.45 ms to
+# 36.91 ms. Nothing in the output distinguished the two.
+CXX_FLAGS_LINE="$(fpm build --profile release --show-model 2>/dev/null \
+                  | grep -o 'cxx_compile_flags="[^"]*"' | head -n 1 || true)"
+if [[ -z "$CXX_FLAGS_LINE" ]]; then
+    echo "benchmark_sort_readtime.sh: could not read cxx_compile_flags from --show-model;" >&2
+    echo "  refusing to produce numbers. SKIP_OPT_CHECK=1 overrides, and SAY SO IN THE REPORT." >&2
+    [[ "${SKIP_OPT_CHECK:-0}" == "0" ]] && exit 1
+elif [[ "$CXX_FLAGS_LINE" != *" -O"* ]] && ! compiler_defaults_to_optimised; then
+    echo "benchmark_sort_readtime.sh: '--profile release' produced NO optimisation flag for the C++ half:" >&2
+    echo "  $CXX_FLAGS_LINE" >&2
+    echo "  This is normal for nagfor and flang -- fpm gives their C/C++ half no profile flags." >&2
+    echo "  Append one yourself (append, never assign -- FPM_CXXFLAGS carries Arrow's paths):" >&2
+    echo "      FPM_CXXFLAGS=\"\${FPM_CXXFLAGS:-} -O3\" tools/benchmark_sort_readtime.sh" >&2
+    echo "  and record in the report that you did. SKIP_OPT_CHECK=1 overrides this check." >&2
+    [[ "${SKIP_OPT_CHECK:-0}" == "0" ]] && exit 1
+fi
+
 mkdir -p test_run
 fpm build --profile release >/dev/null || die "build failed."
 

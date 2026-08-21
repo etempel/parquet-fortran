@@ -222,7 +222,13 @@ contains
         type(parquet_read_qc) :: rqc
         type(parquet_column_info) :: cinfo
         type(parquet_table_metadata) :: tmeta
-        type(parquet_string_column) :: sc
+        ! `target` is REQUIRED, not decorative: `%view` associates the returned handle's `%col`
+        ! with its own `intent(in), target` dummy, and F2018 15.5.2.4 leaves that pointer
+        ! UNDEFINED on return when the actual argument is not itself a target. gfortran, ifx
+        ! and flang all run the handle happily; nagfor's -C=dangling (the `nagdeb` profile)
+        ! aborts with "Dangling pointer SELF%COL used as argument to intrinsic function
+        ! ASSOCIATED". See CLAUDE.md's note on %view_all for the same trap.
+        type(parquet_string_column), target :: sc
         type(parquet_string) :: sview
         type(parquet_timestamp) :: ts
         type(parquet_maml_file) :: mf

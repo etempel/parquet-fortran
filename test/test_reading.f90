@@ -3031,6 +3031,7 @@ contains
         integer(int32) :: id(200), lo_bits(200), hi_bits(200), again(200)
         integer(int64) :: n_lo, n_hi, n_again
         integer :: i
+        logical :: same
         integer(int64), parameter :: base = 1234_int64
         integer(int64), parameter :: shifted = 1234_int64 + 4294967296_int64   ! base + 2**32
         character(len=*), parameter :: out_file = "test_run/test_sample_seed_full_width.parquet"
@@ -3055,11 +3056,23 @@ contains
         call parquet_read_column(reader, "id", again(1:n_again))
         call parquet_close_reader(reader)
 
-        call check(error, .not. (n_lo == n_hi .and. all(lo_bits(1:n_lo) == hi_bits(1:n_hi))), &
+        ! Both comparisons are NESTED rather than written as `count == count .and. all(...)`.
+        ! Fortran does not short-circuit `.and.`, so the one-line form evaluates the `all()` even
+        ! when the two counts differ -- and then compares two sections of DIFFERENT extent, which is
+        ! non-conforming. It is also the normal case here rather than an edge case: two seeds are
+        ! meant to select different row COUNTS, so the guard fails almost every run. gfortran runs
+        ! straight past it; nagfor's -C=array (the `nagdeb` profile) aborts with
+        ! "Rank 1 of HI_BITS(1:N_HI) has extent 102 instead of 99". See CLAUDE.md, "`.and.` does not
+        ! short-circuit".
+        same = .false.
+        if (n_lo == n_hi) same = all(lo_bits(1:n_lo) == hi_bits(1:n_hi))
+        call check(error, .not. same, &
             "seeds differing only above bit 31 must select different rows -- identical rows mean " // &
             "the seed is being truncated to 32 bits somewhere on the path")
         if (allocated(error)) return
-        call check(error, n_hi == n_again .and. all(hi_bits(1:n_hi) == again(1:n_again)), &
+        same = .false.
+        if (n_hi == n_again) same = all(hi_bits(1:n_hi) == again(1:n_again))
+        call check(error, same, &
             "a seed above huge(int32) must still reproduce exactly across two opens")
     end subroutine test_sample_seed_is_full_width
     !

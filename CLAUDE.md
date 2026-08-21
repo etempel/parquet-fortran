@@ -2973,6 +2973,26 @@ applied to the harness instead of the source.
   mask-consumed check, once in a test comparing two sample draws. Both times the guarded form looked
   obviously safe.
 
+  **It has now bitten a THIRD time, in the same test file, and the third instance says something the
+  first two did not: the mismatch can be the NORMAL case rather than an edge case.**
+  `test_sample_seed_is_full_width` asserted `.not. (n_lo == n_hi .and. all(lo_bits(1:n_lo) ==
+  hi_bits(1:n_hi)))` — and the whole point of that test is that two seeds select *different* row
+  counts, so the `all()` compared sections of different extent on almost every run. It sat there
+  green under gfortran, ifx and flang.
+  **`fpm test --profile nagdeb` is the sharpest detector available for this class** — nagfor's
+  `-C=array` names the array, the section and both extents (*"Rank 1 of HI_BITS(1:N_HI) has extent
+  102 instead of 99"*), deterministically, at every thread count. `--profile debug` on gfortran
+  catches it too; nothing else in the fleet does. **A regex cannot find these reliably** — a scan
+  tight enough to avoid false positives found nothing, and a loose one reported only fixed-index
+  accesses — so the checked build is the check.
+
+  **And when this fires under threads it can present as a SEGFAULT rather than as the runtime
+  error**: several test-drive threads reporting a fatal error at once is the `abort()`-from-many-
+  threads hazard documented above, so the first symptom may be `exit code 11` with no message. Run
+  the suite again single-threaded (`OMP_NUM_THREADS=1`) before concluding anything about a
+  segfault under `nagdeb` — that is what turned this one from "an intermittent nagfor bug" into a
+  one-line source defect.
+
   **The same non-short-circuiting is also a PERFORMANCE hazard, and there it is compiler-dependent
   in a way that hides on gfortran.** `if (cheap_test .and. expensive_call() == 0)` may evaluate the
   expensive half unconditionally. Measured instance: `table_resolve`'s
@@ -3360,24 +3380,33 @@ grep '^Questionable:' <log> | grep 'thread-safe' | grep -oE 'from scope [A-Z0-9_
 A scope name that matches a `module`/`submodule` in `src/` is process-global; anything else is a
 procedure and can be skipped.
 
-**`-C=all` is NOT the checked profile to use — `fpm.toml`'s `nagdeb` feature is, and the two
-checks it leaves out are each left out for a stated reason.** `nagfor` is the only compiler here
-with real runtime checking, and under `nagdeb` the whole suite passes (1783/0/0, zero crashes, zero
-hangs). Under `-C=all` it is unusable: 243 of 824 error scenarios die on SIGSEGV, SIGBUS or a 120 s
-timeout.
+**`-C=all` is NOT the checked profile to use — `fpm.toml`'s `nagdeb` feature is, and the ONE check
+it leaves out is left out for a stated reason.** `nagfor` is the only compiler here with real
+runtime checking. Under bare `-C=all` the suite is unusable: 243 of 824 error scenarios die on
+SIGSEGV, SIGBUS or a 120 s timeout. **Run it and read what it says** — `nagdeb` has found two real
+standard violations that nothing else in the fleet can see, and it will find more, because it is
+the only profile that checks anything at runtime.
 
-- **`-C=intovf` is NAG's `-ftrapv`, and the whole suite now PASSES under it** —
-  `fpm test --profile nagdeb --flag "-C=intovf"` reports **1783 passed / 0 failed**. It used to
-  trap the deliberate wrapping multiplies in `src/parquet_random.f90`; since 2026-08-20 **nagfor
-  takes a third, overflow-free arm** of that file's route (e) fork (`PF_SAFE64`), so there is no
-  overflow left for it to trap. `-ftrapv` on gfortran is a *different* question and still aborts,
-  because gfortran takes the int128 arm and `-ftrapv` instruments elsewhere — see
+- **`-C=intovf` is NAG's `-ftrapv`, and `-C=all` ALREADY IMPLIES IT** — so it is in `nagdeb`, and
+  passing `--flag "-C=intovf"` on top changes nothing. Verified directly rather than assumed, with a
+  three-line program: `nagfor -C=all` aborts on `huge(int32) + 1` with *"INTEGER(int32) overflow"*,
+  while bare `-C` and a flagless build both wrap silently; `-C=all` does **not** check undefined
+  variables, which is the separate exclusion below. It used to trap the deliberate wrapping
+  multiplies in `src/parquet_random.f90`; since 2026-08-20 **nagfor takes a third, overflow-free
+  arm** of that file's route (e) fork (`PF_SAFE64`), so there is no overflow left for it to trap.
+  `-ftrapv` on gfortran is a *different* question and still aborts, because gfortran takes the
+  int128 arm and `-ftrapv` instruments elsewhere — see
   [Compiler & language gotchas](#compiler--language-gotchas).
-  **It is still not in the `nagdeb` flag list, and the reason is a nagfor bug rather than this
-  code**: under `-C=intovf` *and* threads, the `reading` suite segfaults intermittently — 1 run in
-  3, exit 139, no overflow message, while it passes single-threaded and passes without the flag.
-  That is the overflow instrumentation not being thread-safe. Adding it by default would make the
-  profile flaky, so pass it explicitly, and re-run a failure before believing it.
+  **An earlier version of this note said the opposite** — that `-C=intovf` was excluded from
+  `nagdeb`, that it should be passed explicitly, and that an intermittent `reading` segfault under
+  it was "the overflow instrumentation not being thread-safe". All three were wrong. The flag was
+  never excludable from a `-C=all` profile; the `reading` failure had a cause **in this repository**
+  (a non-short-circuiting `.and.` comparing two array sections of different extent — see the
+  worked example below); and the segfault was that same abort reported from several threads at once,
+  which is the `abort()`-from-many-threads hazard documented under "Compiler & language gotchas",
+  not an overflow problem. **The general lesson is the expensive one: a flag blamed for a failure is
+  a hypothesis, and "it passes without the flag" is exactly what a real defect that only a checked
+  build can see looks like.**
   **ifx deliberately keeps the wrapping arm**: the overflow-free spelling is not free, measured at
   **1.67x** on `pf_random_at` under nagfor (8.82 → 21.49 ns on machine A) and 1.94x on a gfortran
   build forced onto that arm. Correctness is identical on all three arms and asserted bit-for-bit

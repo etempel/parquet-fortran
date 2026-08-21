@@ -51,20 +51,26 @@ nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=do
 
 # Paranoid debugging build: every -C= check nagfor 7.2 can actually run against this project.
 #
-# Two of them are deliberately absent, and each absence is load-bearing rather than untried:
+# ONE of them is deliberately absent, and that absence is load-bearing rather than untried. The
+# other entry below is kept because it corrects a claim this file used to make:
 #
-#   -C=intovf    NOW PASSES, and is left out only because of a nagfor bug unrelated to this code.
-#                It used to trap the deliberate wrapping multiplies in src/parquet_random.f90;
-#                those are gone under nagfor, which since 2026-08-20 takes a third, overflow-free
-#                arm of that file's route (e) fork (PF_SAFE64 -- see its header). ifx keeps the
-#                wrapping arm, which is 1.67x faster there and is what that split buys.
-#                    fpm test --profile nagdeb --flag "-C=intovf"     -> 1783 passed, 0 failed
-#                The reason it is not simply added to the flags below: under -C=intovf AND
-#                threads, the `reading` suite segfaults intermittently -- measured at 1 run in 3,
-#                exit 139, no overflow message; it passes single-threaded and passes without the
-#                flag, so this is nagfor's overflow instrumentation not being thread-safe rather
-#                than anything here. Adding it by default would make this profile flaky. Pass it
-#                explicitly when you want it, and re-run a failure before believing it.
+#   -C=intovf    IS ALREADY ON. `-C=all` implies it -- verified directly rather than assumed, with
+#                a three-line program: `nagfor -C=all` aborts on `huge(int32) + 1` with
+#                "INTEGER(int32) overflow", bare `-C` and a flagless build both wrap silently, and
+#                `-C=all` does NOT check undefined variables. So there is nothing to add, and
+#                passing `--flag "-C=intovf"` on top changes nothing.
+#                    An earlier version of this comment listed it here as deliberately EXCLUDED,
+#                advised passing it explicitly, and blamed an intermittent `reading` segfault on
+#                "nagfor's overflow instrumentation not being thread-safe". That was wrong twice
+#                over: the flag was never excludable from this profile, and the `reading` failure
+#                had a cause in this repository -- a non-short-circuiting `.and.` in
+#                test_sample_seed_is_full_width comparing two array sections of DIFFERENT extent,
+#                which -C=array reports deterministically at every thread count. The segfault was
+#                that same abort reported from several threads at once. It is fixed.
+#                    The wrapping multiplies in src/parquet_random.f90 that used to trap here are
+#                gone under nagfor, which since 2026-08-20 takes a third, overflow-free arm of that
+#                file's route (e) fork (PF_SAFE64 -- see its header). ifx keeps the wrapping arm,
+#                which is 1.67x faster there and is what that split buys.
 #   -C=undefined THREE nagfor 7.2 defects plus ONE documented limitation, none a finding about
 #                this code. The three defects were compile-time and are FIXED here, so the project
 #                now BUILDS cleanly under -C=undefined; the limitation is a runtime miscompilation

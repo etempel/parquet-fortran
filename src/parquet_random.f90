@@ -91,30 +91,56 @@
 module parquet_random
 
     use iso_fortran_env, only: int32, int64, real32, real64
+    use parquet_expkey, only: exp_key, ek_round => ek_rnd
+    use parquet_ziggurat, only: zig_layers, zig_r, zig_w, zig_k, zig_f
 
-    ! **This module has NO dependency beyond `iso_fortran_env`, and that is the point of it.**
-    ! A program that only draws random numbers links nothing else -- no settings, no sorting, and
-    ! so no `parquet_bindings` and no Arrow. Everything that needed more than the bare generator
-    ! (the permutation, the subset/resample forms, the weighted draw) lives in `parquet_sampling`,
-    ! which is free to import whatever it needs precisely because this one does not.
+    ! **This module depends on `iso_fortran_env` and on ONE project module, and both halves of that
+    ! matter.** A program that only draws random numbers links no settings, no sorting, and so no
+    ! `parquet_bindings` and no Arrow. Everything that needed more than the bare generator (the
+    ! permutation, the subset/resample forms, the weighted draw) lives in `parquet_sampling`, which
+    ! is free to import whatever it needs precisely because this one is not.
+    !
+    ! Both imports are admissible because each is itself a leaf -- `iso_fortran_env` and nothing
+    ! else -- so the standalone scripts can compile them alongside this file. The distributions
+    ! need both: `parquet_expkey` because `-log(u)` from libm would make every `_portable` draw a
+    ! per-libm value, which is exactly the property class this module exists to avoid, and
+    ! `parquet_ziggurat` because 771 layer constants belong in a generated data module rather than
+    ! in the middle of this one.
     !
     ! **Adding a `use` here is therefore a decision, not a detail.** The leaf property is what lets
     ! `tools/check_random_kernels.sh` and `tools/check_exp_key.sh` compile the kernel standalone,
-    ! against several compilers and flag sets, without an Arrow install -- so the first import that
-    ! reaches outside `iso_fortran_env` breaks both checks, and they are the only evidence that the
-    ! two arms of the route (e) fork agree. `parquet_settings_base` exists for the case where a
-    ! setting genuinely is needed; reach for that one, never `parquet_settings`.
+    ! against several compilers and flag sets, without an Arrow install. The rule, enforced by
+    ! `check_parquet_random_stays_leaf` in `tools/check_source_conventions.py`, has two clauses: an
+    ! imported module must transitively reach nothing but COMPILER-SUPPLIED modules, and it must
+    ! appear in BOTH standalone scripts' `SRC` lists. `parquet_settings_base` is admissible under
+    ! the first clause for the case where a setting genuinely is needed; reach for that one, never
+    ! `parquet_settings`.
 
     implicit none
     private
 
     public :: pf_random_algorithm
+    public :: pf_exp_algorithm
+    public :: pf_normal_algorithm
+    public :: pf_gamma_algorithm
+    public :: pf_poisson_algorithm
     public :: pf_random_at
     public :: pf_random32_at
     public :: pf_random_bits_at
     public :: pf_random_int_at
     public :: pf_random_fill_draws
     public :: pf_random_fill_streams
+    public :: pf_random_exp_at
+    public :: pf_random_exp_portable_at
+    public :: pf_random_fill_exp
+    public :: pf_random_fill_exp_portable
+    public :: pf_random_normal_at
+    public :: pf_random_normal_portable_at
+    public :: pf_random_fill_normal
+    public :: pf_random_fill_normal_portable
+    public :: parquet_debug_normal_path
+    public :: parquet_debug_gamma_path
+    public :: parquet_debug_poisson_path
     public :: pf_random_seed
     public :: pf_random_key
     public :: parquet_debug_random_uses_int128
@@ -133,6 +159,101 @@ module parquet_random
     !! cipher, the key and counter layout, the word order, the rejection rule and the retry key are
     !! all identical between the two.
     character(len=*), parameter :: pf_random_algorithm = "philox4x32-10/v2"
+
+    ! ---- Frozen contract identifiers for the DISTRIBUTIONS ----
+    !
+    ! One identifier per distribution family, separate from `pf_random_algorithm` and from each
+    ! other. The separation is the point: a program that records the uniform contract must not be
+    ! told its uniform draws moved because a distribution's internals changed, and a program that
+    ! records one distribution must not be told so by another's. `pf_random_algorithm` does not
+    ! move during Phase 3; if it does, something has gone wrong.
+    !
+    ! Where a family has two realisations, ONE identifier covers both -- a program recording a
+    ! single string wants to know whether either form moved, and two strings for one distribution
+    ! invites recording only one.
+
+    !> Identifies the exponential mapping, covering **both** realisations: the transform, the
+    !! `1 - u` convention that keeps a draw finite, which logarithm each realisation uses, and the
+    !! two-word cost they share.
+    !!
+    !! One identifier for the pair, per the rule above -- a program recording a single string wants
+    !! to know whether either form moved. The two halves after the slash name the two logarithms:
+    !! `libm` for `pf_random_exp_at` (fast, bit-identical for a given libm) and `expkey` for
+    !! `pf_random_exp_portable_at` (`parquet_expkey`'s frozen transform, identical on every
+    !! platform and compiler).
+    character(len=*), parameter :: pf_exp_algorithm = "exp:-log(1-u)/libm+expkey/v1"
+
+    !> Identifies the normal mapping, covering **both** realisations and every part of each that
+    !! decides a value: the Ziggurat's layer count and the construction that solved for its
+    !! tables, the polar variant, both rejection loops' draw order and word cost, and the
+    !! sub-stream labels the coordinate-addressed forms derive.
+    !!
+    !! `ziggurat256` is `%normal`/`pf_random_normal_at` -- 256 equal-area layers from
+    !! `parquet_ziggurat`, with libm `log`/`exp` in the tail and the wedge test, so bit-identical
+    !! for a given libm. `polar` is `%normal_portable`/`pf_random_normal_portable_at` -- Marsaglia's
+    !! polar method over `parquet_expkey`'s frozen logarithm and IEEE `sqrt`, identical on every
+    !! platform.
+    !!
+    !! **It moves if `parquet_ziggurat` is regenerated with a different layer count**, because
+    !! every value moves with it. It does NOT move when `pf_random_algorithm` does, and vice
+    !! versa: a program recording one must not be told the other changed.
+    character(len=*), parameter :: pf_normal_algorithm = "normal:ziggurat256+polar/libm+expkey/v1"
+
+    !> Identifies the Gamma mapping: Marsaglia-Tsang's squeeze-and-log rejection, the
+    !! `Gamma(a) = Gamma(a+1) * u**(1/a)` boost that extends it below `shape = 1`, the draw order
+    !! within a candidate, and -- named explicitly, because it decides every value -- **which normal
+    !! the inner loop consumes**.
+    !!
+    !! **The dependency has to be in the string.** Gamma draws a normal per candidate, so a change
+    !! to the normal changes every Gamma value; a program recording only this identifier would
+    !! otherwise miss it. `normal=ziggurat256` is that statement, and it makes
+    !! `pf_normal_algorithm`'s first component load-bearing here too.
+    !!
+    !! **Bit-identical for a given libm only, and there is no portable form** (Q3-9). The boost
+    !! needs `u**(1/a)` -- a `pow` this project has not frozen and does not intend to -- so a
+    !! `%gamma_portable` could not keep the promise its name would imply, whatever the rest of the
+    !! algorithm did. Do not add one for symmetry with `%normal`.
+    character(len=*), parameter :: pf_gamma_algorithm = &
+        "gamma:marsaglia-tsang+boost/normal=ziggurat256/libm/v1"
+
+    !> Identifies the Poisson mapping: both algorithms, the crossover between them, and each one's
+    !! draw order.
+    !!
+    !! **The crossover is contract, not a tuning knob**, which is why it is in the string: it
+    !! decides which algorithm runs and therefore which value comes back. Below `lambda = 10` the
+    !! draw is Knuth's product of uniforms, which is exact and terminates unconditionally; at or
+    !! above it, Hoermann's transformed rejection with squeeze (PTRS), which is `O(1)` in `lambda`
+    !! where Knuth is `O(lambda)`.
+    !!
+    !! Bit-identical for a given libm: PTRS needs `log` and `log_gamma`, and Knuth needs `exp`.
+    character(len=*), parameter :: pf_poisson_algorithm = "poisson:knuth|10|ptrs/libm/v1"
+
+    !> Where Poisson switches from Knuth's product to PTRS. **Frozen contract; see
+    !! `pf_poisson_algorithm`.** Knuth costs one uniform per unit of `lambda`, PTRS a constant two
+    !! per candidate at about 99 % acceptance, and they cross in this region; the exact point is
+    !! arbitrary within it and is fixed here so that a value never depends on a build.
+    real(real64), parameter :: poisson_crossover = 10.0_real64
+
+    !> Label separating the coordinate-addressed Ziggurat's sub-streams from every other family.
+    !!
+    !! **Not decoration -- `feature_risks.md` Risk-123.** Without it, `pf_random_normal_at` and
+    !! `pf_random_normal_portable_at` would run their rejection loops over the SAME words at the
+    !! same coordinate, so two draws a caller believes are independent would be two different
+    !! functions of one uniform. Every marginal test still passes in that state; only a joint test
+    !! sees it. The two values below need only differ from each other and from 0.
+    integer(int64), parameter :: normal_zig_label = 4839268151750326891_int64
+    !> Label separating the coordinate-addressed polar form's sub-streams. See `normal_zig_label`.
+    integer(int64), parameter :: normal_polar_label = 1572035988640217453_int64
+
+    !> Smallest `u1**2 + u2**2` the polar form accepts, `2**-53`.
+    !!
+    !! The rejection loop already refuses `s >= 1`; this refuses the other end, and it is a domain
+    !! guard rather than a distributional choice. `exp_key` is frozen and verified over
+    !! `[2**-53, 1]` and no wider, so accepting a smaller `s` would call it outside the range
+    !! `tools/check_exp_key.sh` sweeps. The probability of refusing a candidate for this reason is
+    !! about `2**-53`, so the distortion is some twelve orders of magnitude below anything
+    !! measurable -- and, being a comparison against a constant, it is exactly reproducible.
+    real(real64), parameter :: polar_min_s = 2.0_real64**(-53)
 
     ! ---- Philox4x32-10 constants (verified against Random123) ----
 
@@ -397,8 +518,195 @@ module parquet_random
         module procedure pf_random_fill_streams_i64_i64
     end interface pf_random_fill_streams
 
+    ! ================================================================================
+    ! Tier 0 -- distributions
+    ! ================================================================================
+    !
+    ! Every distribution here is addressed exactly as the uniforms are, by `(seed, i [, draw])`,
+    ! and every one has its own frozen contract identifier. What differs between them is whether
+    ! the tier-1 stream walk gives the SAME values at the same positions:
+    !
+    !   distribution   consumption   tier 0 == tier 1?
+    !   exponential    fixed, 2 w    YES -- one draw of `pf_random_at` transformed
+    !   normal         variable      no  -- see `pf_random_normal_at`
+    !
+    ! A rejection algorithm consumes a number of words that depends on the values it drew, so
+    ! nobody -- not the library, not the caller -- can say where value `k` of a stream walk begins
+    ! without having drawn the preceding `k-1`. The coordinate-addressed forms sidestep that by
+    ! giving each value its own derived sub-stream; the stream walk cannot, because its whole
+    ! purpose is to be a walk. The exponential is the one distribution where the question does not
+    ! arise.
 
+    !> One `Exp(1)` draw: value `draw` (default 1) of stream `i` under `seed`.
+    !!
+    !! `i` is `integer(int32)` or `integer(int64)`; `seed` and `draw` are `integer(int64)`. The
+    !! result is in `[0, 36.7368]` -- `-log` of the smallest uniform this generator can produce.
+    !!
+    !! The mapping is `-log(1 - u)` where `u` is exactly `pf_random_at(seed, i, draw)`, so the
+    !! draw is **bit-identical for a given libm**: the logarithm is the intrinsic one, and libm
+    !! is not part of any contract this project controls. `pf_random_exp_portable_at` is the same
+    !! value computed through a frozen logarithm, identical on every platform -- and about 3x the
+    !! cost, which is why this is the default rather than that one.
+    !!
+    !! **`1 - u`, not `u`, and that is contract.** `pf_random_at` can return exactly 0 and can
+    !! never return 1, so `-log(u)` would be infinite once in 2**53 draws while `-log(1 - u)` is
+    !! finite always. The cost is that the draw can be exactly 0, which is correct and harmless.
+    !!
+    !! **Two words, the same two `pf_random_at` reads at that coordinate**, so tier 0, tier 1 and
+    !! the bulk fill are the same value computed the same way -- which the normal's forms
+    !! deliberately are not, its consumption being variable (`pf_random_normal_at` says why).
+    !!
+    !! **"The same way" is not quite "bit for bit", and the reason is the libm promise showing its
+    !! teeth inside one program.** A compiler may serve `log` from a VECTOR libm inside the bulk
+    !! fill's loop and a scalar one in this elemental call, and the two variants need not agree in
+    !! the last bit. Measured on machine B: gfortran gives identical values on all three tiers,
+    !! while ifx at its default `-fp-model=fast` differs on 21 of 64 by at most **2 ulp**.
+    !! `pf_random_exp_portable_at` has no such exposure -- its logarithm is this library's own and
+    !! there is no vector variant to substitute -- and its three tiers agree exactly everywhere.
+    !!
+    !! **What is exact on every tier and every compiler is CHUNK INVARIANCE**, which is the
+    !! property that matters: a fill split at any boundary, in any order, on any number of threads
+    !! gives the same values as one whole fill. That is asserted directly, and it holds because a
+    !! given tier uses one code path for every element regardless of how many there are.
+    interface pf_random_exp_at
+        module procedure pf_random_exp_at_i32
+        module procedure pf_random_exp_at_i64
+    end interface pf_random_exp_at
 
+    !> `pf_random_exp_at`'s value computed through a frozen logarithm: **identical on every
+    !! platform, compiler and flag set**, not merely for a given libm.
+    !!
+    !! Same arguments, same range, same two words, same `1 - u` convention. The only difference is
+    !! which logarithm: `parquet_expkey`'s transform, built from IEEE `+ - * /` with rounding
+    !! barriers no compiler may reorder, rather than libm's. The two agree to about 2 ulp, which is
+    !! eleven orders of magnitude below the Monte Carlo error of anything that could measure the
+    !! difference -- so this is a choice about **reproducibility**, never about accuracy.
+    !!
+    !! **It costs about 3x**, measured on machine B (gfortran 15.2.1, `-O3 -funroll-loops`): the
+    !! bulk fill 39.4 ns per value against 11.2, the scalar draw 81.3 against 27.0. The frozen
+    !! transform is twelve barriered Horner steps, each a store and a reload, so it neither
+    !! vectorises nor pipelines while a libm `log` does both. Reach for it when a stored result
+    !! must reproduce across machines; take the default otherwise.
+    !!
+    !! **Not `pure`**, because the frozen transform's rounding barrier is a `volatile` local and a
+    !! pure procedure may not have one. Elemental use still works, but a caller's own `pure`
+    !! procedure and a `do concurrent` body cannot reach it -- `pf_random_exp_at` can, and
+    !! `pf_random_fill_exp_portable` works outside the construct.
+    interface pf_random_exp_portable_at
+        module procedure pf_random_exp_portable_at_i32
+        module procedure pf_random_exp_portable_at_i64
+    end interface pf_random_exp_portable_at
+
+    !> Fills `v` with consecutive `Exp(1)` draws of one stream, starting at `draw` (default 1).
+    !!
+    !! `v` is a rank-1 `real(real64)` array, `intent(out)`; `i` is `integer(int32)` or
+    !! `integer(int64)`; `seed` and `draw` are `integer(int64)`. Element `k` is exactly
+    !! `pf_random_exp_at(seed, i, draw+k-1)` -- to within the libm caveat that entry describes,
+    !! and **exactly** as far as chunking is concerned: a prefix is a prefix and a fill split at
+    !! any boundary agrees with a whole one, on every compiler. A zero-sized `v` is a defined
+    !! no-op.
+    !!
+    !! **Precondition on the draw axis: `draw + size(v) - 1` must not exceed `huge(int64)`** --
+    !! the same bound, for the same reason, as `pf_random_fill_draws`.
+    !!
+    !! **No `threads=`, deliberately.** Every element is a pure function of its coordinates, so the
+    !! caller wraps their own `!$omp parallel do` around any chunking they like and gets the same
+    !! answer at any thread count. An internal thread count would be less flexible and no faster.
+    interface pf_random_fill_exp
+        module procedure pf_random_fill_exp_i32
+        module procedure pf_random_fill_exp_i64
+    end interface pf_random_fill_exp
+
+    !> `pf_random_fill_exp` through the frozen logarithm; element `k` is exactly
+    !! `pf_random_exp_portable_at(seed, i, draw+k-1)`.
+    !!
+    !! Same arguments and same preconditions as `pf_random_fill_exp`, and the same reasons for
+    !! taking no `threads=`. Not `pure`, for the reason `pf_random_exp_portable_at` gives.
+    interface pf_random_fill_exp_portable
+        module procedure pf_random_fill_exp_portable_i32
+        module procedure pf_random_fill_exp_portable_i64
+    end interface pf_random_fill_exp_portable
+
+    !> One standard normal draw: value `draw` (default 1) of stream `i` under `seed`.
+    !!
+    !! `i` is `integer(int32)` or `integer(int64)`; `seed` and `draw` are `integer(int64)`. Mean 0,
+    !! variance 1, and the whole real line is reachable up to what the tail algorithm can produce.
+    !!
+    !! **Ziggurat over 256 equal-area layers** (`parquet_ziggurat`), which accepts 98.5 % of draws
+    !! after one 64-bit read and falls back to a wedge test or a tail walk otherwise. Bit-identical
+    !! **for a given libm**: the wedge test needs `exp` and the tail needs `log`.
+    !! `pf_random_normal_portable_at` is the same distribution through a frozen logarithm, identical
+    !! on every platform.
+    !!
+    !! **This does NOT equal `%normal` at the same coordinate, and that is deliberate.** A rejection
+    !! algorithm consumes a number of words that depends on the values it drew, so no caller can
+    !! say where value `k` of a stream walk begins without having drawn the preceding `k-1` -- which
+    !! would make a chunked or threaded fill impossible. The coordinate-addressed forms sidestep
+    !! that by giving each `(i, draw)` its own derived sub-stream, so this value is a pure function
+    !! of its coordinates and a bulk fill splits anywhere. The stream walk cannot do that, because
+    !! being a walk is its purpose. See `pf_normal_algorithm`, and `pf_random_exp_at` for the one
+    !! distribution where the two DO agree.
+    !!
+    !! **Independent of `pf_random_normal_portable_at` at the same coordinate**, by construction:
+    !! the two derive their sub-streams through different labels, so they are two normals rather
+    !! than two functions of one uniform. Same for either one against its own stream walk.
+    interface pf_random_normal_at
+        module procedure pf_random_normal_at_i32
+        module procedure pf_random_normal_at_i64
+    end interface pf_random_normal_at
+
+    !> A standard normal that is **identical on every platform, compiler and flag set**, not merely
+    !! for a given libm.
+    !!
+    !! Same arguments and same distribution as `pf_random_normal_at`; a different algorithm, and so
+    !! a different value at the same coordinate. **Marsaglia's polar method**: draw a point in the
+    !! square, reject it unless it lands in the unit disc, and map the survivor through
+    !! `sqrt(-2*log(s)/s)`. Every step is IEEE `+ - * /` and `sqrt` -- both correctly rounded by the
+    !! standard -- over `parquet_expkey`'s frozen logarithm, with rounding barriers on the two
+    !! squares and on the argument of the `sqrt` so that no compiler may fuse or regroup them.
+    !!
+    !! **It costs more than the Ziggurat, in two ways.** It rejects 21.5 % of candidate pairs
+    !! rather than 1.5 % of single draws, it discards the second variate the method produces (a
+    !! stream that kept it would have hidden state, so `%rewind` would stop being exact), and its
+    !! logarithm is about 3x libm's. Reach for it when a stored result must reproduce across
+    !! machines; take `pf_random_normal_at` otherwise.
+    !!
+    !! **Not `pure`**, because the frozen transform's rounding barrier is a `volatile` local and a
+    !! pure procedure may not have one. Elemental use still works, but a caller's own `pure`
+    !! procedure and a `do concurrent` body cannot reach it -- `pf_random_normal_at` can.
+    interface pf_random_normal_portable_at
+        module procedure pf_random_normal_portable_at_i32
+        module procedure pf_random_normal_portable_at_i64
+    end interface pf_random_normal_portable_at
+
+    !> Fills `v` with consecutive standard normal draws of one stream, starting at `draw`.
+    !!
+    !! `v` is a rank-1 `real(real64)` array, `intent(out)`; `i` is `integer(int32)` or
+    !! `integer(int64)`; `seed` and `draw` are `integer(int64)`. Element `k` is exactly
+    !! `pf_random_normal_at(seed, i, draw+k-1)`, so a prefix is a prefix and a chunked fill agrees
+    !! with a whole one. A zero-sized `v` is a defined no-op.
+    !!
+    !! **This is why the coordinate-addressed realisation exists.** Each element runs its own
+    !! rejection loop in its own sub-stream, so the fill splits at any boundary and gives the same
+    !! answer at any thread count -- which a stream walk cannot, at any speed. It takes no
+    !! `threads=` for exactly that reason: the caller wraps `!$omp parallel do` around whatever
+    !! chunking they like.
+    !!
+    !! **It does not agree with a loop of `%normal`.** See `pf_random_normal_at`.
+    interface pf_random_fill_normal
+        module procedure pf_random_fill_normal_i32
+        module procedure pf_random_fill_normal_i64
+    end interface pf_random_fill_normal
+
+    !> `pf_random_fill_normal` through the polar method and the frozen logarithm; element `k` is
+    !! exactly `pf_random_normal_portable_at(seed, i, draw+k-1)`.
+    !!
+    !! Same arguments and same preconditions, and the same reasons for taking no `threads=`. Not
+    !! `pure`, for the reason `pf_random_normal_portable_at` gives.
+    interface pf_random_fill_normal_portable
+        module procedure pf_random_fill_normal_portable_i32
+        module procedure pf_random_fill_normal_portable_i64
+    end interface pf_random_fill_normal_portable
 
 
     !> Derives an independent seed from a seed and a label, so one seed can fan out into families.
@@ -456,11 +764,26 @@ module parquet_random
     !!
     !! **Position is measured in 32-bit words, 1-based, and the word cost of each producer is
     !! contract** -- `%position` and `%rewind` are denominated in it: `%uniform` 2,
-    !! `%uniform32` 1, `%bits` 2, `%int_range` 2. `%int_range` additionally starts on a word PAIR
-    !! boundary, advancing one word first if a `%uniform32` has left the cursor odd. This is what
-    !! keeps an `%int_range` equal to the `pf_random_int_at` at the same coordinate rather than
-    !! re-reading a word a previous draw already used. It cost 4 words plus up to 3 of alignment
-    !! until `pf_random_algorithm` reached `/v2`, when the integer generic's stride became 2.
+    !! `%uniform32` 1, `%bits` 2, `%int_range` 2, `%exp` 2, `%exp_portable` 2. `%int_range` and the
+    !! two `%exp` forms additionally
+    !! start on a word PAIR boundary, advancing one word first if a `%uniform32` has left the
+    !! cursor odd. This is what keeps them equal to the `pf_random_int_at`/`pf_random_exp_at` at
+    !! the same coordinate rather than re-reading a word a previous draw already used. `%int_range`
+    !! cost 4 words plus up to 3 of alignment until `pf_random_algorithm` reached `/v2`, when the
+    !! integer generic's stride became 2.
+    !!
+    !! **A producer whose cost is VARIABLE cannot be predicted, only observed.** Every producer
+    !! listed above has a fixed cost, so a caller can compute where the stream will be after a
+    !! known sequence of draws. `%normal` and `%normal_portable` cannot: each runs a rejection loop
+    !! and consumes a number of words that depends on the values it drew -- 2 words in 98.5 % of
+    !! `%normal`'s draws and more otherwise, a multiple of 4 for `%normal_portable`. `%position`
+    !! stays exact for those, because it reports where the stream *is*; only predicting it in
+    !! advance becomes impossible. Checkpoint and restart (`%position` then `%rewind`) therefore
+    !! keep working for every producer, while arithmetic on positions stops.
+    !!
+    !! **A variable-cost producer's value is NOT the coordinate-addressed one at the same
+    !! position**, and that is the price of a bulk fill being splittable at all -- see
+    !! `pf_random_normal_at`, which explains why no implementation can have both.
     !!
     !! **The type is plain scalars: no allocatable components, no `FINAL`, deliberately and
     !! permanently.** gfortran does not reliably default-initialise an OpenMP `private()` copy of a
@@ -501,6 +824,15 @@ module parquet_random
         procedure, private :: int_range_i64 => stream_int_range_i64  !! `%int_range`, `int64`
         !> Next integer in `[lo, hi]`, exactly unbiased; costs one word pair, taken pair-aligned.
         generic :: int_range => int_range_i32, int_range_i64
+        procedure :: exp => stream_exp              !! Next `Exp(1)`; costs one word pair, pair-aligned.
+        procedure :: exp_portable => stream_exp_portable  !! `%exp` through the frozen log; same cost.
+        procedure :: normal => stream_normal        !! Next standard normal; VARIABLE cost, pair-aligned.
+        procedure :: normal_portable => stream_normal_portable  !! `%normal` frozen; variable cost.
+        procedure :: gamma => stream_gamma          !! Next `Gamma(shape, 1)`; VARIABLE cost.
+        procedure, private :: poisson_i32 => stream_poisson_i32 !! `%poisson`, `int32` result
+        procedure, private :: poisson_i64 => stream_poisson_i64 !! `%poisson`, `int64` result
+        !> Next `Poisson(lambda)` count, into an `int32` or `int64`; VARIABLE cost.
+        generic :: poisson => poisson_i32, poisson_i64
         procedure, private :: fill_arr_r64 => stream_fill_r64        !! `%fill`, `real64`
         procedure, private :: fill_arr_r32 => stream_fill_r32        !! `%fill`, `real32`
         procedure, private :: fill_arr_i32 => stream_fill_i32        !! `%fill`, `int32`
@@ -604,6 +936,156 @@ contains
         integer(int64) :: r                         !! a uniform integer in `[min(lo,hi), max(lo,hi)]`
         r = int_at_impl(seed, i, lo, hi, draw_or_1(draw))
     end function pf_random_int_at_i64
+
+    !> `pf_random_exp_at` for an `integer(int32)` stream index.
+    pure elemental function pf_random_exp_at_i32(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: r                           !! an `Exp(1)` draw in `[0, 36.7368]`
+        r = exp_of(seed, int(i, int64), draw_or_1(draw))
+    end function pf_random_exp_at_i32
+
+    !> `pf_random_exp_at` for an `integer(int64)` stream index.
+    pure elemental function pf_random_exp_at_i64(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: r                           !! an `Exp(1)` draw in `[0, 36.7368]`
+        r = exp_of(seed, i, draw_or_1(draw))
+    end function pf_random_exp_at_i64
+
+    !> `pf_random_exp_portable_at` for an `integer(int32)` stream index.
+    !!
+    !! `impure` because `exp_key` is: the frozen transform's rounding barrier is a `volatile`
+    !! local, and a pure procedure may not have one. Elemental use is unaffected.
+    impure elemental function pf_random_exp_portable_at_i32(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: r                           !! an `Exp(1)` draw in `[0, 36.7368]`
+        r = exp_portable_of(seed, int(i, int64), draw_or_1(draw))
+    end function pf_random_exp_portable_at_i32
+
+    !> `pf_random_exp_portable_at` for an `integer(int64)` stream index.
+    impure elemental function pf_random_exp_portable_at_i64(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: r                           !! an `Exp(1)` draw in `[0, 36.7368]`
+        r = exp_portable_of(seed, i, draw_or_1(draw))
+    end function pf_random_exp_portable_at_i64
+
+    !> `pf_random_fill_exp` from an `integer(int32)` stream index.
+    pure subroutine pf_random_fill_exp_i32(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_exp(seed, int(i, int64), v, draw_or_1(draw))
+    end subroutine pf_random_fill_exp_i32
+
+    !> `pf_random_fill_exp` from an `integer(int64)` stream index.
+    pure subroutine pf_random_fill_exp_i64(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_exp(seed, i, v, draw_or_1(draw))
+    end subroutine pf_random_fill_exp_i64
+
+    !> `pf_random_fill_exp_portable` from an `integer(int32)` stream index.
+    subroutine pf_random_fill_exp_portable_i32(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_exp_portable(seed, int(i, int64), v, draw_or_1(draw))
+    end subroutine pf_random_fill_exp_portable_i32
+
+    !> `pf_random_fill_exp_portable` from an `integer(int64)` stream index.
+    subroutine pf_random_fill_exp_portable_i64(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_exp_portable(seed, i, v, draw_or_1(draw))
+    end subroutine pf_random_fill_exp_portable_i64
+
+    !> `pf_random_normal_at` for an `integer(int32)` stream index.
+    pure elemental function pf_random_normal_at_i32(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: r                           !! a standard normal draw
+        r = normal_at_impl(seed, int(i, int64), draw_or_1(draw))
+    end function pf_random_normal_at_i32
+
+    !> `pf_random_normal_at` for an `integer(int64)` stream index.
+    pure elemental function pf_random_normal_at_i64(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: r                           !! a standard normal draw
+        r = normal_at_impl(seed, i, draw_or_1(draw))
+    end function pf_random_normal_at_i64
+
+    !> `pf_random_normal_portable_at` for an `integer(int32)` stream index.
+    !!
+    !! `impure` because `exp_key` is: the frozen transform's rounding barrier is a `volatile`
+    !! local, and a pure procedure may not have one. Elemental use is unaffected.
+    impure elemental function pf_random_normal_portable_at_i32(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: r                           !! a standard normal draw
+        r = normal_portable_at_impl(seed, int(i, int64), draw_or_1(draw))
+    end function pf_random_normal_portable_at_i32
+
+    !> `pf_random_normal_portable_at` for an `integer(int64)` stream index.
+    impure elemental function pf_random_normal_portable_at_i64(seed, i, draw) result(r)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: r                           !! a standard normal draw
+        r = normal_portable_at_impl(seed, i, draw_or_1(draw))
+    end function pf_random_normal_portable_at_i64
+
+    !> `pf_random_fill_normal` from an `integer(int32)` stream index.
+    pure subroutine pf_random_fill_normal_i32(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_normal(seed, int(i, int64), v, draw_or_1(draw))
+    end subroutine pf_random_fill_normal_i32
+
+    !> `pf_random_fill_normal` from an `integer(int64)` stream index.
+    pure subroutine pf_random_fill_normal_i64(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_normal(seed, i, v, draw_or_1(draw))
+    end subroutine pf_random_fill_normal_i64
+
+    !> `pf_random_fill_normal_portable` from an `integer(int32)` stream index.
+    subroutine pf_random_fill_normal_portable_i32(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_normal_portable(seed, int(i, int64), v, draw_or_1(draw))
+    end subroutine pf_random_fill_normal_portable_i32
+
+    !> `pf_random_fill_normal_portable` from an `integer(int64)` stream index.
+    subroutine pf_random_fill_normal_portable_i64(seed, i, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index; every value is valid
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in), optional :: draw !! 1-based starting value index; absent means 1
+        call fill_normal_portable(seed, i, v, draw_or_1(draw))
+    end subroutine pf_random_fill_normal_portable_i64
 
     !> `pf_random_fill_draws` filling `real64` from an `integer(int32)` stream index.
     pure subroutine pf_random_fill_draws_r64_i32(seed, i, v, draw)
@@ -886,6 +1368,79 @@ contains
     !! into key words 0 and 1 (low half first), `stream` into counter words 2 and 3, and `index`
     !! into counter words 0 and 1. So KAT 2 — every counter and key word `0xffffffff` — is the call
     !! `parquet_debug_random_block(-1_int64, -1_int64, -1_int64, ...)`.
+    !> Reports which branch a coordinate-addressed normal draw took, and what it cost. **Test-only.**
+    !!
+    !! Public only because it has to be: this module reaches no `bind(C)` surface, so the C++-side
+    !! debug-hook convention the rest of the library uses is unavailable to it (see CLAUDE.md, "A
+    !! Fortran-side debug hook has to be PUBLIC, so prefer a C++ one"). It is excluded from
+    !! README.md's API overview and no library code calls it.
+    !!
+    !! **It is an OBSERVATION hook, not an override**, which is why it needs no process-global
+    !! state at all: it re-runs the same construction the ordinary call runs and reports what
+    !! happened. (It is not `pure` only because it can be asked for the polar form, which routes
+    !! through `exp_key`.) A test asserts that all three Ziggurat branches occur over a fixture and
+    !! the reported value equals the ordinary call's -- without which a rejection branch could be
+    !! compiled and never entered while every test passed.
+    !!
+    !! `path` is 1 for the immediate rectangle acceptance, 2 for the wedge test and 3 for the tail;
+    !! the polar form has one acceptance branch and always reports 1, its rejections showing up as
+    !! `pairs > 2`. `pairs` counts 32-bit word PAIRS, so the word cost is twice it.
+    !> Reports which branch a `%gamma` draw took. **Test-only**; see `parquet_debug_normal_path`
+    !! for why a Fortran-side hook has to be public here.
+    !!
+    !! It advances `rng` exactly as `%gamma` does and returns the same value, so a test can walk a
+    !! stream through it and census the branches. `path` is 1 for a squeeze acceptance and 2 for
+    !! the full logarithmic test, plus 2 more when the `shape < 1` boost was applied -- so all four
+    !! combinations are distinguishable.
+    pure subroutine parquet_debug_gamma_path(rng, shape, r, path, squeeze_ok)
+        type(pf_random_stream), intent(inout) :: rng    !! the stream to advance, as `%gamma` would
+        real(real64), intent(in) :: shape               !! the shape parameter; must be > 0
+        real(real64), intent(out) :: r                  !! the draw, equal to `%gamma`'s
+        integer(int32), intent(out) :: path             !! 1/2 squeeze/log; +2 when boosted
+        logical, intent(out), optional :: squeeze_ok    !! `.false.` iff the squeeze accepted a
+                                                        !! candidate the full test would reject
+        call gamma_draw(rng, shape, r, path, squeeze_ok)
+    end subroutine parquet_debug_gamma_path
+
+    !> Reports which algorithm and branch a `%poisson` draw took. **Test-only**; see
+    !! `parquet_debug_normal_path`.
+    !!
+    !! `path` is 1 for Knuth's product, 2 for a PTRS candidate taken by the fast acceptance region
+    !! and 3 for one taken by the full logarithmic test. Forcing the OTHER algorithm is not
+    !! offered, and does not need to be: which one runs is decided by `lambda` alone, so a test
+    !! reaches either by choosing a `lambda` on the side it wants -- and that is a better test,
+    !! because it exercises the crossover as it actually ships.
+    pure subroutine parquet_debug_poisson_path(rng, lambda, k, path, squeeze_ok)
+        type(pf_random_stream), intent(inout) :: rng    !! the stream to advance, as `%poisson` would
+        real(real64), intent(in) :: lambda              !! the mean; must be >= 0 and finite
+        integer(int64), intent(out) :: k                !! the count, equal to `%poisson`'s
+        integer(int32), intent(out) :: path             !! 1 Knuth, 2 PTRS fast, 3 PTRS log test
+        logical, intent(out), optional :: squeeze_ok    !! `.false.` iff the fast region accepted a
+                                                        !! candidate the full test would reject
+        call poisson_draw(rng, lambda, k, path, squeeze_ok)
+    end subroutine parquet_debug_poisson_path
+
+    subroutine parquet_debug_normal_path(seed, i, draw, portable, x, path, pairs)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: i             !! stream index
+        integer(int64), intent(in) :: draw          !! 1-based value index
+        logical, intent(in) :: portable             !! `.true.` for the polar form, `.false.` Ziggurat
+        real(real64), intent(out) :: x              !! the draw, equal to the ordinary call's
+        integer(int32), intent(out) :: path         !! 1 rectangle, 2 wedge, 3 tail
+        integer(int64), intent(out) :: pairs        !! word pairs the rejection loop consumed
+        ! `draw_or_1` rather than `draw`, so a clamped draw reports what the ordinary call does.
+        ! Without it, `draw = 0` derives label 0 here and label 1 there, and the hook silently
+        ! describes a different construction than the one it is meant to observe.
+        if (portable) then
+            path = 1
+            call polar_normal(pf_random_key(pf_random_key(seed, normal_polar_label), draw_or_1(draw)), &
+                              i, 1_int64, x, pairs)
+        else
+            call zig_normal(pf_random_key(pf_random_key(seed, normal_zig_label), draw_or_1(draw)), &
+                            i, 1_int64, x, pairs, path)
+        end if
+    end subroutine parquet_debug_normal_path
+
     pure subroutine parquet_debug_random_block(key, stream, index, w0, w1, w2, w3)
         integer(int64), intent(in) :: key           !! 64-bit key: key words 0 and 1, low half first
         integer(int64), intent(in) :: stream        !! splits into counter words 2 and 3
@@ -1091,6 +1646,269 @@ contains
         if (present(draw)) d = draw
         if (d < 1_int64) d = 1_int64
     end function draw_or_1
+
+    ! ================================================================================
+    ! Distribution mappings
+    ! ================================================================================
+
+    !> The exponential mapping: the uniform at `(seed, stream, draw)`, transformed to `Exp(1)`.
+    !!
+    !! **The single place `-log(1 - u)` is written for the fast realisation**, so its three tiers
+    !! cannot drift: the tier-0 specifics, the bulk fill's per-element step and `stream_exp` all
+    !! reach the value through here or through the identical expression `fill_exp` inlines.
+    !! `1 - u` rather than `u` is contract -- see `pf_random_exp_at`.
+    pure function exp_of(seed, stream, draw) result(e)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        integer(int64), intent(in) :: draw          !! 1-based value index
+        real(real64) :: e                           !! an `Exp(1)` draw in `[0, 36.7368]`
+        e = -log(1.0_real64 - to_real64(bits_of(seed, stream, draw)))
+    end function exp_of
+
+    !> `exp_of` through `parquet_expkey`'s frozen transform, for the `_portable` realisation.
+    !!
+    !! Not `pure`, because `exp_key` is not -- see `pf_random_exp_portable_at`. The uniform this
+    !! transforms is bit-for-bit the one `exp_of` transforms at the same coordinate; only the
+    !! logarithm differs, and the two agree to about 2 ulp.
+    function exp_portable_of(seed, stream, draw) result(e)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        integer(int64), intent(in) :: draw          !! 1-based value index
+        real(real64) :: e                           !! an `Exp(1)` draw in `[0, 36.7368]`
+        e = exp_key(1.0_real64 - to_real64(bits_of(seed, stream, draw)))
+    end function exp_portable_of
+
+    !> Fills `v` with consecutive `Exp(1)` draws, by filling uniforms in bulk and transforming.
+    !!
+    !! The uniform fill is where the amortisation is -- it enciphers once per PAIR of values,
+    !! where a loop of `exp_of` would encipher once per value -- and the transform is then a
+    !! separate pass over an array already in cache. Both passes together still beat the scalar
+    !! loop, and the UNIFORMS are identical either way, since `fill_r64` is contractually equal to
+    !! the matching `pf_random_at` calls -- only the logarithm can differ, and only because a
+    !! compiler may vectorise this loop's `log` and not the scalar path's (see
+    !! `pf_random_exp_at`). Measured on machine B (gfortran 15.2.1, `-O3
+    !! -funroll-loops`, 4M values): 8.67 ns per value for the uniform fill alone, 11.16 with this
+    !! transform on top -- so the exponential costs 29 % more than a uniform, against the 3.5x
+    !! `fill_exp_portable` costs.
+    pure subroutine fill_exp(seed, stream, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: draw          !! 1-based starting value index
+        integer(int64) :: k, m
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        call fill_r64(seed, stream, v, draw)
+        do k = 1_int64, m
+            v(k) = -log(1.0_real64 - v(k))
+        end do
+    end subroutine fill_exp
+
+    !> `fill_exp` through the frozen transform. Not `pure`, for `exp_key`'s reason.
+    subroutine fill_exp_portable(seed, stream, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: draw          !! 1-based starting value index
+        integer(int64) :: k, m
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        call fill_r64(seed, stream, v, draw)
+        do k = 1_int64, m
+            v(k) = exp_key(1.0_real64 - v(k))
+        end do
+    end subroutine fill_exp_portable
+
+    !> The Ziggurat draw, reading word pairs `draw0, draw0+1, ...` of one `(key, stream)`.
+    !!
+    !! **One implementation, both tiers.** The coordinate-addressed forms call it with a derived
+    !! sub-key and `draw0 = 1`; the stream walk calls it with the stream's own key and whatever
+    !! pair the cursor is on, then advances by the pairs it reports. That is what keeps the two
+    !! tiers from drifting apart algorithmically even though they deliberately produce different
+    !! values -- the difference is entirely in the key, and is visible at the call sites.
+    !!
+    !! **The 64 bits are split three ways, disjointly.** Bits 0-7 pick the layer, bit 8 the sign,
+    !! and bits 11-63 are the uniform (`to_real64` shifts right by 11). Reusing the same bits for
+    !! the layer and the value -- as the original 1990s formulation does, for want of a 64-bit
+    !! draw -- is the correlation Leong et al. found in it; here there is no reason to.
+    !!
+    !! `path` reports which branch produced the value: 1 the immediate rectangle acceptance
+    !! (98.5 % of draws), 2 the wedge test, 3 the tail. It exists so a test can assert that all
+    !! three were reached -- a rejection branch that is compiled and never entered would otherwise
+    !! pass every test ever written for it. Nothing in the library reads it.
+    pure subroutine zig_normal(key, stream, draw0, x, pairs, path)
+        integer(int64), intent(in) :: key           !! the family this draw reads
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        integer(int64), intent(in) :: draw0         !! 1-based pair index to start reading at
+        real(real64), intent(out) :: x              !! a standard normal draw
+        integer(int64), intent(out) :: pairs        !! word pairs consumed; at least 1
+        integer(int32), intent(out) :: path         !! 1 rectangle, 2 wedge, 3 tail
+        integer(int64) :: b, d
+        integer(int32) :: i
+        real(real64) :: u, xx, y, ta, tb
+
+        d = draw0
+        do
+            b = bits_of(key, stream, d)
+            d = d + 1_int64
+            i = int(iand(b, int(zig_layers - 1, int64)), int32)
+            u = to_real64(b)
+            if (u < zig_k(i)) then
+                xx = u * zig_w(i)                   ! wholly inside the curve: no further work
+                path = 1
+                exit
+            end if
+            if (i == 0) then
+                ! The tail, beyond `zig_r`. Marsaglia's exponential-rejection form: accept
+                ! `zig_r + ta` when `2*tb >= ta*ta` for two independent Exp(1) draws, which is
+                ! exactly the conditional density of a normal above `zig_r`.
+                path = 3
+                do
+                    ta = -log(1.0_real64 - to_real64(bits_of(key, stream, d))) / zig_r
+                    tb = -log(1.0_real64 - to_real64(bits_of(key, stream, d + 1_int64)))
+                    d = d + 2_int64
+                    if (tb + tb >= ta * ta) exit
+                end do
+                xx = zig_r + ta
+                exit
+            end if
+            xx = u * zig_w(i)
+            ! The wedge between the layer's inner and outer edges: accept if a uniform height in
+            ! `[f(w(i)), f(w(i-1))]` falls below the curve at `xx`.
+            y = zig_f(i) + to_real64(bits_of(key, stream, d)) * (zig_f(i - 1) - zig_f(i))
+            d = d + 1_int64
+            if (y < exp(-0.5_real64 * xx * xx)) then
+                path = 2
+                exit
+            end if
+        end do
+        ! The sign comes from bit 8 of whichever pattern produced the accepted magnitude, which
+        ! on the tail path is the one that selected layer 0 -- it is untouched by the tail walk.
+        if (btest(b, 8)) xx = -xx
+        x = xx
+        pairs = d - draw0
+    end subroutine zig_normal
+
+    !> The polar draw, reading word pairs `draw0, draw0+1, ...` of one `(key, stream)`.
+    !!
+    !! Two uniforms per candidate, mapped into the square `[-1,1)**2`, rejected unless they land
+    !! in the unit disc -- so 21.5 % of candidate PAIRS are rejected, against the Ziggurat's 1.5 %
+    !! of single draws. `pairs` is therefore always even and is 2 about 78.5 % of the time.
+    !!
+    !! **The second variate is discarded, deliberately.** The polar method produces two normals
+    !! per accepted candidate and a generator that cached the mate would carry state beyond its
+    !! word position, which would make `%rewind` inexact and a chunked fill wrong. Half the output
+    !! is the price of the position being the whole state.
+    !!
+    !! **Three rounding barriers, and each one closes a specific rewrite** that `-ffast-math` (and
+    !! ifx's default `-fp-model=fast`) is entitled to make. Everything else here is a single IEEE
+    !! operation, and `sqrt` is correctly rounded by the standard. See `parquet_expkey`'s own note
+    !! on the reassociation that broke that transform once already.
+    !!
+    !! **The two on `u1*u1` and `u2*u2` are MEASURED as load-bearing**, not argued: that sum is the
+    !! exact shape a compiler contracts into an FMA, which rounds once where IEEE rounds twice.
+    !! Removing them and rebuilding the golden vectors on machine B (gfortran 15.2.1) moves **12 of
+    !! 144** rows under `-O3 -march=native` and under `-O3 -ffast-math -march=native`, and moves
+    !! nothing under `-O2` or under a plain `-Ofast`. **`-march=native` is what decides it, not the
+    !! optimisation level** -- baseline x86-64 has no FMA to contract into -- which is the same
+    !! architecture gating that once hid this hazard in `exp_key`, and the reason a sweep that omits
+    !! it proves nothing.
+    !!
+    !! **The one on `sqrt(q + q)` is insurance, and that is stated rather than implied.** Without
+    !! it the argument is still an expression and a compiler is licensed to rewrite `sqrt(2*t/s)` as
+    !! `sqrt(2*t)/sqrt(s)`, which rounds differently. Removing it moves **no** row under any of the
+    !! four flag sets above, so gfortran does not currently make that rewrite. It costs one store
+    !! and one reload per accepted draw and closes a rewrite the standard permits; the same
+    !! reasoning kept `ek_rnd(small - logm)` in `exp_key`, which only ifx ever needed.
+    !!
+    !! Not `pure`, because `exp_key` is not.
+    subroutine polar_normal(key, stream, draw0, x, pairs)
+        integer(int64), intent(in) :: key           !! the family this draw reads
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        integer(int64), intent(in) :: draw0         !! 1-based pair index to start reading at
+        real(real64), intent(out) :: x              !! a standard normal draw
+        integer(int64), intent(out) :: pairs        !! word pairs consumed; even, at least 2
+        integer(int64) :: d
+        real(real64) :: a1, a2, u1, u2, s, q
+
+        d = draw0
+        do
+            a1 = to_real64(bits_of(key, stream, d))
+            a2 = to_real64(bits_of(key, stream, d + 1_int64))
+            d = d + 2_int64
+            u1 = (a1 + a1) - 1.0_real64             ! `a + a` is exact, so this rounds once
+            u2 = (a2 + a2) - 1.0_real64
+            s = ek_round(u1 * u1) + ek_round(u2 * u2)
+            if (s < 1.0_real64 .and. s >= polar_min_s) exit
+        end do
+        q = exp_key(s) / s                          ! `exp_key(s)` is `-log(s)`
+        x = u1 * sqrt(ek_round(q + q))
+        pairs = d - draw0
+    end subroutine polar_normal
+
+    !> `pf_random_normal_at`'s sub-stream construction, in one place so both tiers cannot drift.
+    !!
+    !! Value `(i, draw)` gets its own family: the label separates this realisation from every
+    !! other, and nesting `draw` inside it gives each draw of each stream an independent infinite
+    !! sub-stream for its rejection loop to walk. `pf_random_key` derivations compose by nesting,
+    !! which is what makes that legal rather than merely plausible.
+    pure function normal_at_impl(seed, stream, draw) result(x)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        integer(int64), intent(in) :: draw          !! 1-based value index
+        real(real64) :: x                           !! a standard normal draw
+        integer(int64) :: pairs
+        integer(int32) :: path
+        call zig_normal(pf_random_key(pf_random_key(seed, normal_zig_label), draw), &
+                        stream, 1_int64, x, pairs, path)
+    end function normal_at_impl
+
+    !> `pf_random_normal_portable_at`'s sub-stream construction. See `normal_at_impl`.
+    function normal_portable_at_impl(seed, stream, draw) result(x)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        integer(int64), intent(in) :: draw          !! 1-based value index
+        real(real64) :: x                           !! a standard normal draw
+        integer(int64) :: pairs
+        call polar_normal(pf_random_key(pf_random_key(seed, normal_polar_label), draw), &
+                          stream, 1_int64, x, pairs)
+    end function normal_portable_at_impl
+
+    !> Fills `v` with consecutive Ziggurat normals, hoisting the label derivation out of the loop.
+    !!
+    !! There is no block-level amortisation to be had here, unlike `fill_exp`: every element runs
+    !! its own rejection loop in its own family, so the fill is exactly a loop of scalar draws with
+    !! one `pf_random_key` chain lifted out of it. That is the cost of being splittable, and it is
+    !! what lets a caller thread the fill themselves.
+    pure subroutine fill_normal(seed, stream, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: draw          !! 1-based starting value index
+        integer(int64) :: k, m, root, pairs
+        integer(int32) :: path
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        root = pf_random_key(seed, normal_zig_label)
+        do k = 1_int64, m
+            call zig_normal(pf_random_key(root, draw + k - 1_int64), stream, 1_int64, v(k), pairs, path)
+        end do
+    end subroutine fill_normal
+
+    !> `fill_normal` through the polar method. Not `pure`, for `exp_key`'s reason.
+    subroutine fill_normal_portable(seed, stream, v, draw)
+        integer(int64), intent(in) :: seed          !! the stream family's seed
+        integer(int64), intent(in) :: stream        !! which stream of that family
+        real(real64), intent(out) :: v(:)           !! filled with values `draw .. draw+size(v)-1`
+        integer(int64), intent(in) :: draw          !! 1-based starting value index
+        integer(int64) :: k, m, root, pairs
+        m = size(v, kind=int64)
+        if (m <= 0_int64) return                    ! a zero-sized fill is a defined no-op
+        root = pf_random_key(seed, normal_polar_label)
+        do k = 1_int64, m
+            call polar_normal(pf_random_key(root, draw + k - 1_int64), stream, 1_int64, v(k), pairs)
+        end do
+    end subroutine fill_normal_portable
 
     ! ================================================================================
     ! Bulk fills
@@ -2465,6 +3283,271 @@ contains
         call take_pair(self, d)
         r = int(int_at_impl(self%key, self%stream, int(lo, int64), int(hi, int64), d), int32)
     end subroutine stream_int_range_i32
+
+    !> `%exp`: the next `Exp(1)` draw, taking one pair-aligned word pair.
+    !!
+    !! **Pair-aligned like `%int_range`, not free-running like `%uniform`**, and the promise that
+    !! buys is unconditional: the value is exactly `pf_random_exp_at(seed, stream, d)` for the
+    !! draw `d` it consumed, whatever the cursor was beforehand. `%uniform` agrees with its
+    !! coordinate-addressed twin only while the cursor stays even, which it does unless a
+    !! `%uniform32` has been mixed in. The price is at most one wasted word after such a mix.
+    pure subroutine stream_exp(self, x)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: x                  !! an `Exp(1)` draw in `[0, 36.7368]`
+        integer(int64) :: d
+        call take_pair(self, d)
+        x = exp_of(self%key, self%stream, d)
+    end subroutine stream_exp
+
+    !> `%exp_portable`: the same draw through the frozen logarithm. Not `pure`, per `exp_key`.
+    subroutine stream_exp_portable(self, x)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: x                  !! an `Exp(1)` draw in `[0, 36.7368]`
+        integer(int64) :: d
+        call take_pair(self, d)
+        x = exp_portable_of(self%key, self%stream, d)
+    end subroutine stream_exp_portable
+
+    !> `%normal`: the next Ziggurat normal, consuming as many pairs as its rejection loop needed.
+    !!
+    !! **The one producer here that cannot advance before it reads**, because how far to advance is
+    !! what the read decides. The invariant every other producer keeps -- that an exhausted stream
+    !! aborts having written and moved nothing -- is preserved anyway by computing into a local and
+    !! assigning `x` only after `advance_by` has accepted the cost.
+    pure subroutine stream_normal(self, x)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: x                  !! a standard normal draw
+        integer(int64) :: d, pairs
+        integer(int32) :: path
+        real(real64) :: v
+        call align_to_pair(self)
+        d = self%pos / 2_int64 + 1_int64
+        call zig_normal(self%key, self%stream, d, v, pairs, path)
+        call advance_by(self, 2_int64 * pairs)
+        x = v
+    end subroutine stream_normal
+
+    !> `%gamma`: the next `Gamma(shape, 1)` draw, by Marsaglia-Tsang rejection.
+    !!
+    !! **Tier 1 only, deliberately** -- there is no `pf_random_gamma_at` and no bulk fill. The
+    !! sub-stream construction §3.4 of `feature_random_phase3.md` describes would make them
+    !! possible, and the surface is already wide; if they are ever wanted, the construction and its
+    !! independence obligations are the same as the normal's.
+    !!
+    !! `shape` is the Gamma shape parameter `a`, strictly positive; the scale is 1, so a caller
+    !! wanting `Gamma(a, theta)` multiplies by `theta`. The mean is `shape` and the variance is
+    !! `shape`.
+    !!
+    !! **Two rejection loops, not one.** The inner one redraws a normal until `1 + c*x > 0`, which
+    !! happens for about `Phi(-3*sqrt(a - 1/3))` of draws and so essentially never above `a = 1`;
+    !! the outer one is the squeeze-then-log acceptance, which accepts about 95 % of candidates on
+    !! the squeeze alone. Consumption is therefore variable and unpredictable -- see
+    !! `pf_random_stream`'s note on what `%position` still guarantees.
+    !!
+    !! **`shape < 1` is supported through a boost**, `Gamma(a) = Gamma(a+1) * u**(1/a)`, at the
+    !! cost of one extra uniform and a libm `pow`. Restricting the domain to `shape >= 1` instead
+    !! was considered and rejected (Q3-4): a partial procedure is a worse API than a per-libm
+    !! promise, and Gamma is per-libm regardless. **`1 - u` rather than `u`** in the boost, so the
+    !! draw cannot come back exactly 0.
+    pure subroutine stream_gamma(self, shape, r)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: shape               !! the shape parameter; must be > 0
+        real(real64), intent(out) :: r                  !! a `Gamma(shape, 1)` draw, strictly positive
+        integer(int32) :: path
+        call gamma_draw(self, shape, r, path)
+    end subroutine stream_gamma
+
+    !> The Gamma draw, with the accepting branch reported. See `stream_gamma`.
+    !!
+    !! `path` is 1 when the squeeze accepted and 2 when the full logarithmic test did, plus 2 more
+    !! when the `shape < 1` boost was applied -- so 3 and 4 are those same two branches under a
+    !! boost. It exists so a test can assert every branch was reached; nothing in the library reads
+    !! it.
+    pure subroutine gamma_draw(self, shape, r, path, squeeze_ok)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: shape               !! the shape parameter; must be > 0
+        real(real64), intent(out) :: r                  !! a `Gamma(shape, 1)` draw
+        integer(int32), intent(out) :: path             !! 1/2 squeeze/log; +2 when boosted
+        logical, intent(out), optional :: squeeze_ok    !! see below; test-only, costs a `log` when asked
+        real(real64) :: a, d, c, x, v, u, boost
+        logical :: boosted
+
+        if (.not. (shape > 0.0_real64)) then
+            error stop "pf_random_stream%gamma: the shape parameter must be strictly positive " // &
+                       "(a Gamma distribution is not defined for shape <= 0, and NaN is not a shape)"
+        end if
+        call align_to_pair(self)
+        a = shape
+        boost = 1.0_real64
+        boosted = .false.
+        if (a < 1.0_real64) then
+            ! Gamma(a) = Gamma(a+1) * U**(1/a). `1 - u` so the boost cannot be exactly 0.
+            call stream_uniform(self, u)
+            boost = (1.0_real64 - u) ** (1.0_real64 / a)
+            a = a + 1.0_real64
+            boosted = .true.
+        end if
+        d = a - 1.0_real64 / 3.0_real64
+        c = 1.0_real64 / sqrt(9.0_real64 * d)
+        do
+            do
+                call stream_normal(self, x)
+                v = 1.0_real64 + c * x
+                if (v > 0.0_real64) exit
+            end do
+            v = v * v * v
+            call stream_uniform(self, u)
+            ! The squeeze: cheap, and correct because `1 - 0.0331*x**4` lies below the true
+            ! acceptance probability everywhere. It takes about 95 % of candidates.
+            if (u < 1.0_real64 - 0.0331_real64 * x ** 4) then
+                path = 1
+                ! The squeeze is valid only if everything it accepts the full test would accept
+                ! too. That is an EXACT property, so a test can check it directly rather than
+                ! hoping a distributional gate resolves the distortion -- which it will not: an
+                ! over-aggressive squeeze biases the draw by parts in ten thousand. Evaluated only
+                ! when a caller asks, so the shipped path still costs one comparison.
+                if (present(squeeze_ok)) &
+                    squeeze_ok = log(u) < 0.5_real64 * x * x + d * (1.0_real64 - v + log(v))
+                exit
+            end if
+            if (log(u) < 0.5_real64 * x * x + d * (1.0_real64 - v + log(v))) then
+                path = 2
+                if (present(squeeze_ok)) squeeze_ok = .true.   ! nothing was shortcut here
+                exit
+            end if
+        end do
+        r = boost * d * v
+        ! The boost is orthogonal to which acceptance branch fired, so it is encoded as an offset
+        ! rather than overwriting: 1/2 unboosted squeeze/log, 3/4 the same two under a boost. An
+        ! earlier version set `path = 3` outright and made the inner branch invisible for every
+        ! `shape < 1` draw -- which is exactly the half of the domain the boost exists for.
+        if (boosted) path = path + 2
+    end subroutine gamma_draw
+
+    !> `%poisson` into an `integer(int32)`.
+    !!
+    !! Refuses a count that does not fit rather than narrowing it, which would silently return a
+    !! plausible wrong number. Reaching that needs a `lambda` of order `2**31`, at which point the
+    !! `int64` specific is what the caller wants.
+    pure subroutine stream_poisson_i32(self, lambda, k)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: lambda              !! the mean; must be >= 0 and finite
+        integer(int32), intent(out) :: k                !! a `Poisson(lambda)` count
+        integer(int64) :: k64
+        integer(int32) :: path
+        call poisson_draw(self, lambda, k64, path)
+        if (k64 > int(huge(1_int32), int64)) then
+            error stop "pf_random_stream%poisson: the drawn count does not fit in an integer(int32); " // &
+                       "pass an integer(int64) result for a lambda this large"
+        end if
+        k = int(k64, int32)
+    end subroutine stream_poisson_i32
+
+    !> `%poisson` into an `integer(int64)`.
+    pure subroutine stream_poisson_i64(self, lambda, k)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: lambda              !! the mean; must be >= 0 and finite
+        integer(int64), intent(out) :: k                !! a `Poisson(lambda)` count
+        integer(int32) :: path
+        call poisson_draw(self, lambda, k, path)
+    end subroutine stream_poisson_i64
+
+    !> The Poisson draw, with the algorithm and accepting branch reported.
+    !!
+    !! **Two algorithms with a frozen crossover** (`poisson_crossover`), and both must stay: Knuth's
+    !! product of uniforms is exact and terminates unconditionally but costs one uniform per unit of
+    !! `lambda`, while PTRS is constant-cost but needs `log_gamma` and a rejection loop. Neither is
+    !! a fallback for the other -- which one runs is contract, published through
+    !! `pf_poisson_algorithm`, because it decides the value.
+    !!
+    !! `path` is 1 for Knuth, 2 for a PTRS candidate taken by the fast acceptance region, and 3 for
+    !! one taken by the full logarithmic test. Nothing in the library reads it.
+    pure subroutine poisson_draw(self, lambda, k, path, squeeze_ok)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(in) :: lambda              !! the mean; must be >= 0 and finite
+        integer(int64), intent(out) :: k                !! a `Poisson(lambda)` count
+        integer(int32), intent(out) :: path             !! 1 Knuth, 2 PTRS fast, 3 PTRS log test
+        logical, intent(out), optional :: squeeze_ok    !! see below; test-only, costs a `log` when asked
+        real(real64) :: lim, p, u, uu, vv, us, b, aa, inv_alpha, v_r, kr
+
+        if (.not. (lambda >= 0.0_real64)) then
+            error stop "pf_random_stream%poisson: lambda must be at least 0 (a Poisson " // &
+                       "distribution is not defined for a negative mean, and NaN is not a mean)"
+        end if
+        if (lambda > real(huge(1_int64), real64) / 16.0_real64) then
+            error stop "pf_random_stream%poisson: lambda is so large that a drawn count could " // &
+                       "overflow integer(int64); this is far past where a Poisson draw is meaningful"
+        end if
+        call align_to_pair(self)
+        if (lambda < poisson_crossover) then
+            ! Knuth: multiply uniforms until the product drops below exp(-lambda). Exact, and it
+            ! terminates unconditionally because every uniform is strictly below 1. Costs
+            ! `lambda + 1` uniforms on average, which is why it is not used above the crossover.
+            path = 1
+            if (present(squeeze_ok)) squeeze_ok = .true.       ! Knuth shortcuts nothing
+            lim = exp(-lambda)
+            p = 1.0_real64
+            k = 0_int64
+            do
+                call stream_uniform(self, u)
+                p = p * u
+                if (p <= lim) exit
+                k = k + 1_int64
+            end do
+            return
+        end if
+        ! PTRS (Hoermann 1993): transformed rejection with a squeeze. Two uniforms per candidate,
+        ! about 99 % accepted, and the cost does not grow with lambda.
+        b = 0.931_real64 + 2.53_real64 * sqrt(lambda)
+        aa = -0.059_real64 + 0.02483_real64 * b
+        inv_alpha = 1.1239_real64 + 1.1328_real64 / (b - 3.4_real64)
+        v_r = 0.9277_real64 - 3.6224_real64 / (b - 2.0_real64)
+        do
+            call stream_uniform(self, uu)
+            call stream_uniform(self, vv)
+            uu = uu - 0.5_real64
+            us = 0.5_real64 - abs(uu)
+            ! `kind=int64` is load-bearing: bare `floor` returns a DEFAULT integer, so for a
+            ! lambda above 2**31 the candidate wraps to a negative count and the draw comes back
+            ! as -2147483648. Caught by scenario_random_poisson_int32_overflow, whose own control
+            ! -- the same lambda into an int64 -- was returning the wrapped value too.
+            kr = real(floor((2.0_real64 * aa / us + b) * uu + lambda + 0.43_real64, int64), real64)
+            if (us >= 0.07_real64 .and. vv <= v_r) then
+                path = 2
+                ! PTRS's fast region is a rectangle the algorithm asserts lies wholly INSIDE the
+                ! acceptance region, so the full test is skipped there. That containment is an
+                ! exact property and is checkable directly -- which matters here more than
+                ! anywhere, because a widened fast region biases the draw by parts in ten
+                ! thousand and no feasible sample size resolves that. Evaluated only on request.
+                if (present(squeeze_ok)) &
+                    squeeze_ok = log(vv * inv_alpha / (aa / (us * us) + b)) <= &
+                                 kr * log(lambda) - lambda - log_gamma(kr + 1.0_real64)
+                k = int(kr, int64)
+                return
+            end if
+            if (kr < 0.0_real64 .or. (us < 0.013_real64 .and. vv > us)) cycle
+            if (log(vv * inv_alpha / (aa / (us * us) + b)) <= &
+                kr * log(lambda) - lambda - log_gamma(kr + 1.0_real64)) then
+                path = 3
+                if (present(squeeze_ok)) squeeze_ok = .true.   ! nothing was shortcut here
+                k = int(kr, int64)
+                return
+            end if
+        end do
+    end subroutine poisson_draw
+
+    !> `%normal_portable`: the next polar normal. Not `pure`, per `exp_key`. See `stream_normal`.
+    subroutine stream_normal_portable(self, x)
+        class(pf_random_stream), intent(inout) :: self  !! the stream to advance
+        real(real64), intent(out) :: x                  !! a standard normal draw
+        integer(int64) :: d, pairs
+        real(real64) :: v
+        call align_to_pair(self)
+        d = self%pos / 2_int64 + 1_int64
+        call polar_normal(self%key, self%stream, d, v, pairs)
+        call advance_by(self, 2_int64 * pairs)
+        x = v
+    end subroutine stream_normal_portable
 
     !> `%fill` for a `real64` array.
     !!

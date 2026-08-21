@@ -60,7 +60,7 @@ trap '[ "$finished" = "1" ] || { echo "benchmark_random_kernels: TERMINATED EARL
 
 # src/parquet_random.f90 imports nothing but iso_fortran_env and the leaf settings module (and
 # omp_lib under _OPENMP), which is exactly what makes this standalone compile possible at all.
-SRC="src/parquet_random.f90 tools/benchmark_random_kernels.f90"
+SRC="src/parquet_expkey.f90 src/parquet_ziggurat.f90 src/parquet_random.f90 tools/benchmark_random_kernels.f90"
 ABS_SRC=""
 for f in $SRC; do ABS_SRC="$ABS_SRC $ROOT_DIR/$f"; done
 

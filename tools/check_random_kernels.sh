@@ -101,7 +101,7 @@ esac
 # all. Everything needing more than the generator now lives in src/parquet_sampling.f90, which is
 # deliberately not compiled here. If a `use` is ever added to parquet_random, adding its module to
 # SRC is the WRONG fix; the right one is to move whatever needed it into parquet_sampling.
-SRC="src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
+SRC="src/parquet_expkey.f90 src/parquet_ziggurat.f90 src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
 REPO="$PWD"
 ABS_SRC=""
 for f in $SRC; do ABS_SRC="$ABS_SRC $REPO/$f"; done

@@ -874,7 +874,9 @@ declared), and `src/parquet_tables.f90`, `src/parquet_tables_access.f90`,
 `src/parquet_sorting_select.f90`, `src/parquet_sorting_search.f90`, `src/parquet_sorting_unique.f90`,
 `src/parquet_sorting_reduce.f90`
 (from `tools/generate_parquet_sorting.py`, which imports the nine SCALAR rows of that same kind table
-and adds the three types that are not `parquet_column` storage kinds at all). `src/parquet_table_example.f90` is emitted by
+and adds the three types that are not `parquet_column` storage kinds at all), and
+`src/parquet_ziggurat.f90` (from `tools/generate_parquet_ziggurat.py`, whose 771 constants are the
+unique solution of one equation rather than a table anyone chose — see its `--self-test`). `src/parquet_table_example.f90` is emitted by
 `tools/generate_user_table_code.py` from `table_types/maml_example4.maml` (see "Role-A MAMLs live in
 `table_types/`" below) — it ships as a worked example and nothing else in the library uses it, but it
 is committed and `--check`ed exactly like the rest. **`src/parquet_tables.f90` is
@@ -958,8 +960,10 @@ parquet_core                    (module — core API + cross-subtree private-hel
 parquet_bindings                (module — independent C++ interop)
 parquet_strings                 (module — independent element domain)
 parquet_temporal                (module — independent element domain)
-parquet_random                  (module — LEAF: iso_fortran_env and nothing else, enforced)
-parquet_expkey                  (module — LEAF: the frozen -log(u) transform, likewise)
+parquet_random                  (module — the generator AND the four distributions; reaches only
+                                 parquet_expkey and parquet_ziggurat, both leaves — enforced)
+parquet_expkey                  (module — LEAF: the frozen -log(u) transform)
+parquet_ziggurat                (module — LEAF, GENERATED, data only: the normal's layer tables)
 parquet_sampling                (module — permutations/subsets/resampling/weighted draws;
                                  uses parquet_random + parquet_sorting + parquet_expkey)
 parquet_maml_base               (module — generated)
@@ -1229,7 +1233,14 @@ So:
   `check_parquet_random_stays_leaf` (`tools/check_source_conventions.py`), in two clauses: every
   project module reached, transitively, must itself reach nothing but **compiler-supplied** modules
   (`iso_fortran_env`, `iso_c_binding`, `ieee_arithmetic`, `omp_lib`); and every such module must
-  appear in **both** standalone scripts' `SRC` lists.
+  appear in the `SRC` list of **every `tools/*.sh` that compiles `parquet_random`**. That second
+  list is **derived by globbing**, not enumerated — an enumerated one goes stale in the direction
+  that stops checking, and did: it named two scripts while `tools/check_random_ubsan.sh` was a
+  third, still listing `src/parquet_settings_base.f90` (removed at the `parquet_sampling` split)
+  and neither module `parquet_random` had gained since. `tools/check_exp_key.sh` is correctly
+  outside that set and must stay outside it — it compiles `src/parquet_expkey.f90` ALONE, which is
+  the whole reason the frozen transform can be swept across compilers, and a separate clause fails
+  if it ever grows a `parquet_random` entry.
 - **The rule is NOT "imports nothing outside `iso_fortran_env`", and that wording is a trap.**
   `parquet_settings_base` imports `omp_lib` inside `#ifdef _OPENMP` — and was the FIRST entry in
   `check_random_kernels.sh`'s `SRC` list for months, passing throughout, because that script

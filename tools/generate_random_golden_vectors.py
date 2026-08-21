@@ -65,6 +65,8 @@ plus a regeneration -- never an edit to the table.
 """
 
 import argparse
+import decimal
+import math
 import pathlib
 import struct
 import sys
@@ -252,6 +254,188 @@ def fill_at(seed, stream, count, draw=1):
     return [at(seed, stream, draw + k) for k in range(count)]
 
 
+# ---------------------------------------------------------------------------------------------
+# The exponential mapping, both realisations.
+#
+# `pf_random_exp_at` is `-log(1 - u)` with the INTRINSIC logarithm, so its value is bit-identical
+# only for a given libm and cannot be frozen as a bit pattern.  It is pinned instead against an
+# arbitrary-precision logarithm (`decimal`, 60 digits, correctly rounded to double), with the
+# suite allowing a few ulp -- which is what a libm promise is worth and no more.
+#
+# `pf_random_exp_portable_at` routes through `parquet_expkey`'s frozen transform, which is exact
+# bit contract.  `exp_key_oracle` below is an INDEPENDENT re-derivation of it in Python rather
+# than a translation of the Fortran: Python's float arithmetic is IEEE double with round-to-
+# nearest on every operation, which is precisely what the Fortran's `volatile` barriers force, so
+# the two agree bit for bit with no rounding directives needed on this side.
+# ---------------------------------------------------------------------------------------------
+
+EK_SQRT_HALF = 0.70710678118654752440
+EK_LOG2_HI = 6.93147180369123816490e-01
+EK_LOG2_LO = 1.90821492927058770002e-10
+EK_C = [1.00000000000000000000, 0.33333333333333333333, 0.20000000000000000000,
+        0.14285714285714285714, 0.11111111111111111111, 0.09090909090909090909,
+        0.07692307692307692308, 0.06666666666666666667, 0.05882352941176470588,
+        0.05263157894736842105, 0.04761904761904761905, 0.04347826086956521739]
+
+
+def exp_key_oracle(u):
+    """`parquet_expkey`'s frozen `-log(u)`, re-derived.  Exact bit contract for `u` in [2**-53, 1].
+
+    Every arithmetic step below is one IEEE double operation, in the order the Fortran writes
+    them -- that ordering IS the algorithm, which is why the Fortran needs barriers to hold it
+    and why this must not be "simplified" into a fused or regrouped form.
+    """
+    m, k = math.frexp(u)                        # u = m * 2**k with m in [0.5, 1)
+    if m < EK_SQRT_HALF:
+        m = m + m
+        k = k - 1
+    f = (m - 1.0) / (m + 1.0)
+    s = f * f
+    poly = EK_C[11]
+    for i in range(10, -1, -1):
+        poly = poly * s + EK_C[i]
+    logm = (f + f) * poly
+    en = float(-k)
+    return en * EK_LOG2_HI + (en * EK_LOG2_LO - logm)
+
+
+def neg_log_reference(x):
+    """`-log(x)` at 60 significant digits, correctly rounded to double.
+
+    Independent of libm and of the frozen transform alike, so it is evidence about both.
+    """
+    if x <= 0.0:
+        return float("inf")
+    with decimal.localcontext() as ctx:
+        ctx.prec = 60
+        return float(-decimal.Decimal(x).ln())
+
+
+def exp_reference(u):
+    """The value `pf_random_exp_at(seed, i, draw)` must land within a few ulp of, given `u`.
+
+    `1 - u` is formed in EXACT arithmetic here and in `real64` in the library, and the two agree:
+    every uniform this generator produces is `j * 2**-53` for an integer `j < 2**53`, so `1 - u`
+    is `(2**53 - j) * 2**-53` and needs no more than 53 bits.  The subtraction is therefore not a
+    rounding step on either side, and the whole error budget belongs to the logarithm.
+    """
+    with decimal.localcontext() as ctx:
+        ctx.prec = 60
+        return neg_log_reference(float(decimal.Decimal(1) - decimal.Decimal(u)))
+
+
+def exp_portable_at(seed, stream, draw=1):
+    """`pf_random_exp_portable_at`: exact bit contract."""
+    return exp_key_oracle(1.0 - at(seed, stream, draw))
+
+
+def exp_ref_at(seed, stream, draw=1):
+    """The arbitrary-precision value `pf_random_exp_at` must land within a few ulp of."""
+    return exp_reference(at(seed, stream, draw))
+
+
+# ---------------------------------------------------------------------------------------------
+# The normal, both realisations.
+#
+# The layer tables are IMPORTED from the generator that emits them rather than re-derived here:
+# two copies of 771 constants is a much worse failure than one slightly awkward import, and this
+# way a change to the ziggurat's construction cannot silently leave the golden vectors describing
+# the old one.
+#
+# The labels below must equal `normal_zig_label` / `normal_polar_label` in
+# `src/parquet_random.f90`.  They are what separate the two realisations' sub-streams from each
+# other and from the stream walk; `self_test` checks that they differ and that the separation
+# actually decorrelates the two, which is the property `feature_risks.md` Risk-123 is about.
+# ---------------------------------------------------------------------------------------------
+
+NORMAL_ZIG_LABEL = 4839268151750326891
+NORMAL_POLAR_LABEL = 1572035988640217453
+POLAR_MIN_S = 2.0 ** -53
+
+_ZIG = None
+
+
+def zig_tables():
+    """`(r, v, w, k, f)` from `tools/generate_parquet_ziggurat.py`, loaded once."""
+    global _ZIG
+    if _ZIG is None:
+        import importlib.util
+        path = pathlib.Path(__file__).resolve().parent / "generate_parquet_ziggurat.py"
+        spec = importlib.util.spec_from_file_location("generate_parquet_ziggurat", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _ZIG = mod.tables()
+    return _ZIG
+
+
+def zig_normal(key, stream, draw0=1):
+    """The Ziggurat draw.  Returns `(x, pairs, path)`; see `zig_normal` in parquet_random.f90.
+
+    `path` is 1 for the immediate rectangle acceptance, 2 for the wedge test, 3 for the tail.
+    """
+    r, _, w, k, fy = zig_tables()
+    n = len(w)
+    d = draw0
+    while True:
+        b = bits_at(key, stream, d)
+        d += 1
+        i = b & (n - 1)
+        u = float(b >> 11) * (2.0 ** -53)
+        if u < k[i]:
+            return sign_of(b, u * w[i]), d - draw0, 1
+        if i == 0:
+            while True:
+                ta = -math.log(1.0 - float(bits_at(key, stream, d) >> 11) * (2.0 ** -53)) / r
+                tb = -math.log(1.0 - float(bits_at(key, stream, d + 1) >> 11) * (2.0 ** -53))
+                d += 2
+                if tb + tb >= ta * ta:
+                    break
+            return sign_of(b, r + ta), d - draw0, 3
+        xx = u * w[i]
+        y = fy[i] + float(bits_at(key, stream, d) >> 11) * (2.0 ** -53) * (fy[i - 1] - fy[i])
+        d += 1
+        if y < math.exp(-0.5 * xx * xx):
+            return sign_of(b, xx), d - draw0, 2
+
+
+def sign_of(b, x):
+    """Bit 8 of the pattern that produced the magnitude decides the sign."""
+    return -x if (b >> 8) & 1 else x
+
+
+def polar_normal(key, stream, draw0=1):
+    """Marsaglia's polar draw over the frozen logarithm.  Returns `(x, pairs)`.
+
+    Every arithmetic step is one IEEE double operation, in the order the Fortran writes them --
+    the barriers there exist to hold exactly this order, so writing it any other way here would
+    make the oracle model a different algorithm.
+    """
+    d = draw0
+    while True:
+        a1 = float(bits_at(key, stream, d) >> 11) * (2.0 ** -53)
+        a2 = float(bits_at(key, stream, d + 1) >> 11) * (2.0 ** -53)
+        d += 2
+        u1 = (a1 + a1) - 1.0
+        u2 = (a2 + a2) - 1.0
+        s = u1 * u1 + u2 * u2
+        if s < 1.0 and s >= POLAR_MIN_S:
+            break
+    q = exp_key_oracle(s) / s
+    return u1 * math.sqrt(q + q), d - draw0
+
+
+def normal_at(seed, stream, draw=1):
+    """`pf_random_normal_at`: the Ziggurat in its own derived sub-stream."""
+    d = clamp_draw(draw)
+    return zig_normal(random_key(random_key(seed, NORMAL_ZIG_LABEL), d), stream, 1)
+
+
+def normal_portable_at(seed, stream, draw=1):
+    """`pf_random_normal_portable_at`: the polar form in its own derived sub-stream."""
+    d = clamp_draw(draw)
+    return polar_normal(random_key(random_key(seed, NORMAL_POLAR_LABEL), d), stream, 1)
+
+
 def fill_at32(seed, stream, count, draw=1):
     return [at32(seed, stream, draw + k) for k in range(count)]
 
@@ -437,6 +621,96 @@ def self_test():
     # Two consecutive integer draws must share one block, which is what the bulk fill amortises.
     eq("int draws 1 and 2 share block 0", ((1 - 1) // 2, (2 - 1) // 2), (0, 0))
 
+    # ---- the exponential ---------------------------------------------------------------------
+    #
+    # The frozen transform is checked against the arbitrary-precision logarithm rather than
+    # against itself: `exp_key_oracle` is a re-derivation, so agreeing with the Fortran proves
+    # only that two implementations of the same recipe agree. What makes the recipe RIGHT is that
+    # it lands within a couple of ulp of `decimal`'s `ln`, which knows nothing about it.
+    worst = 0.0
+    for e in range(-52, 1):                     # every binade a `1 - u` can occupy
+        for frac in (0.0, 0.3, 0.5, 0.7, 0.999999):
+            u = math.ldexp(1.0 + frac, e - 1)
+            if not (2.0 ** -53 <= u <= 1.0):
+                continue
+            got, want = exp_key_oracle(u), neg_log_reference(u)
+            if want != 0.0:
+                ulp = abs(got - want) / math.ulp(want)
+                worst = max(worst, ulp)
+    if worst > 2.5:
+        bad.append("exp_key_oracle is %.2f ulp from the arbitrary-precision log (want <= 2.5) -- "
+                   "the re-derivation does not match the transform it models" % worst)
+
+    # The `1 - u` convention, which is what stops a draw being infinite. `u` can be exactly 0
+    # (probability 2**-53) and can never be 1, so `-log(u)` would be infinite and `-log(1-u)` is
+    # finite always. Asserted on the constants rather than on a coordinate, since no coordinate
+    # in this grid reaches either endpoint.
+    eq("u = 0 gives a finite draw", exp_key_oracle(1.0 - 0.0), 0.0)
+    eq("the largest draw is -log(2**-53)", "%.10f" % exp_key_oracle(2.0 ** -53), "36.7368005697")
+    if not math.isinf(neg_log_reference(0.0)):
+        bad.append("exp_reference(1.0) is finite -- the `1 - u` convention is what keeps a draw "
+                   "finite, and a grid reaching u = 1 would have to be refused, not rounded")
+
+    # The exponential reads the SAME uniform as `pf_random_at` at that coordinate. Without this
+    # the two tables could drift onto different draw mappings and each stay self-consistent.
+    for d in (1, 2, 3, 5):
+        eq("exp at draw %d transforms at() at draw %d" % (d, d),
+           exp_portable_at(12345, 1, d), exp_key_oracle(1.0 - at(12345, 1, d)))
+
+    # ---- the normal ----------------------------------------------------------------------------
+    #
+    # The oracle is checked against the DISTRIBUTION rather than against a second implementation,
+    # because there is no second implementation to check it against. A transcription error in the
+    # ziggurat walk almost always shows up in the fourth moment even when the first two survive.
+    for label, fn in (("ziggurat", normal_at), ("polar", normal_portable_at)):
+        n = 40000
+        vals = [fn(4242, 1, d)[0] for d in range(1, n + 1)]
+        mean = sum(vals) / n
+        var = sum(x * x for x in vals) / n - mean * mean
+        kurt = sum(x ** 4 for x in vals) / n
+        if abs(mean) > 4.0 / math.sqrt(n):
+            bad.append("%s oracle mean %.5f is more than 4 SE from 0" % (label, mean))
+        if abs(var - 1.0) > 5.0 * math.sqrt(2.0 / n):
+            bad.append("%s oracle variance %.5f is more than 5 SE from 1" % (label, var))
+        if abs(kurt - 3.0) > 6.0 * math.sqrt(96.0 / n):
+            bad.append("%s oracle kurtosis %.5f is more than 6 SE from 3 -- the tails are wrong, "
+                       "which is what a mis-walked ziggurat looks like when the first two moments "
+                       "survive" % (label, kurt))
+
+    # Risk-123: the two realisations must not read the same words at the same coordinate. Asserted
+    # STRUCTURALLY -- the two sub-keys, and hence the first word pair each one reads, must differ --
+    # because a statistical test cannot see this coupling at all.
+    #
+    # **That is measured, not assumed, and it is the interesting part.** Running both realisations
+    # over the SAME sub-key (a deliberate coupling: they then transform the very same 64 bits) and
+    # correlating 40000 pairs gives r = -0.00005, which is 0.01 standard errors from zero. A
+    # correlation test would pass the broken construction as confidently as the correct one. The
+    # reason is that the two algorithms extract different functions of the same bits -- the
+    # Ziggurat's sign is bit 8 and the polar's is bit 63 of the same word, so even the signs are
+    # independent -- and linear correlation is blind to that kind of dependence. Risk-123's own
+    # measured instance was likewise invisible to every marginal test and showed up only as a 66 %
+    # agreement in one rare joint cell.
+    #
+    # So the check that has power here is the exact one. The Fortran suite carries the joint-cell
+    # statistic (`test_normal_realisations_independent`), which does have power, together with a
+    # deliberately coupled control arm to prove it.
+    for d in (1, 2, 3, 17, 1000):
+        kz = random_key(random_key(4242, NORMAL_ZIG_LABEL), d)
+        kp = random_key(random_key(4242, NORMAL_POLAR_LABEL), d)
+        eq("normal sub-keys differ at draw %d" % d, kz == kp, False)
+        eq("normal first word pairs differ at draw %d" % d,
+           bits_at(kz, 1, 1) == bits_at(kp, 1, 1), False)
+
+    eq("the two normal labels differ", NORMAL_ZIG_LABEL == NORMAL_POLAR_LABEL, False)
+
+    # Consumption shape, which is contract for the stream walk.
+    for d in range(1, 400):
+        _, pp = normal_portable_at(12345, 1, d)
+        if pp % 2 != 0 or pp < 2:
+            bad.append("polar consumed %d pairs at draw %d -- it reads two uniforms per candidate, "
+                       "so the count must be even and at least 2" % (pp, d))
+            break
+
     return bad
 
 
@@ -542,6 +816,85 @@ FILL_CASES = [
 ]
 
 
+#: Coordinates the exponential tables cover.  The uniform grid is reused deliberately -- the
+#: exponential is a transform of `pf_random_at` at the same coordinate, so any row where the two
+#: tables disagree about which uniform was read is a defect in exactly one of them.
+def exp_rows():
+    """(seed, stream, draw, u, portable, reference) over the scalar grid, plus the extremes."""
+    rows = []
+    for seed in SEEDS:
+        for stream in STREAMS:
+            for draw in DRAWS:
+                u = at(seed, stream, draw)
+                rows.append((seed, stream, draw, u,
+                             exp_key_oracle(1.0 - u), exp_reference(u)))
+    return rows
+
+
+def normal_rows():
+    """(seed, stream, draw, zig, zig_pairs, zig_path, polar, polar_pairs) over the grid + extras.
+
+    The grid alone is nearly all path 1 -- 98.5 % of candidates accept immediately, which is the
+    whole point of a Ziggurat -- so a table built from it would leave the wedge and tail branches
+    unpinned, and a change to either would move no golden value.  The scan below therefore hunts
+    deterministically for coordinates that reach them, and the same for polar draws that take more
+    than one candidate pair.  This is CLAUDE.md's "check WHICH CODE PATH the test actually
+    reaches" applied to a table rather than to a test.
+    """
+    rows, seen = [], set()
+
+    def add(seed, stream, draw):
+        if (seed, stream, draw) in seen:
+            return False
+        seen.add((seed, stream, draw))
+        z, zp, zpath = normal_at(seed, stream, draw)
+        p, pp = normal_portable_at(seed, stream, draw)
+        rows.append((seed, stream, draw, z, zp, zpath, p, pp))
+        return True
+
+    for seed in SEEDS:
+        for stream in STREAMS:
+            for draw in DRAWS:
+                add(seed, stream, draw)
+
+    # Deterministic hunt on one coordinate line, taking the first few of each shape. Bounded so a
+    # construction change that made a branch unreachable fails here rather than looping forever.
+    want = {2: 6, 3: 6}
+    want_polar = 6
+    want_zig_retry = 6
+    for draw in range(1, 200001):
+        if not want and want_polar == 0 and want_zig_retry == 0:
+            break
+        z, zp, zpath = normal_at(12345, 1, draw)
+        p, pp = normal_portable_at(12345, 1, draw)
+        take = False
+        if zpath in want:
+            want[zpath] -= 1
+            if want[zpath] == 0:
+                del want[zpath]
+            take = True
+        # A Ziggurat draw that took more than two pairs WITHOUT entering the tail is one whose
+        # wedge test REJECTED a candidate. That is the only shape that pins the wedge's accept/
+        # reject decision: a row the wedge merely accepted has the same value and the same cost
+        # whether the test is right or wrong, because the value does not depend on the height
+        # drawn. Confirmed by mutation -- comparing against `zig_f(i+1)` instead of `zig_f(i-1)`
+        # makes the wedge accept unconditionally, and every other check in the suite survives it.
+        if zpath != 3 and zp >= 3 and want_zig_retry > 0:
+            want_zig_retry -= 1
+            take = True
+        if pp >= 4 and want_polar > 0:
+            want_polar -= 1
+            take = True
+        if take:
+            add(12345, 1, draw)
+    if want or want_polar or want_zig_retry:
+        raise SystemExit("normal_rows: could not reach every branch within 200000 draws "
+                         "(missing ziggurat paths %s, %d polar retries, %d wedge rejections) -- "
+                         "the construction has changed and the table would no longer pin them"
+                         % (sorted(want), want_polar, want_zig_retry))
+    return rows
+
+
 def fill_rows():
     """(seed, stream, start, count) plus the flattened real64 and real32 expectations."""
     meta, v64, v32 = [], [], []
@@ -617,6 +970,8 @@ def gen_module():
     ints = int_rows() + retrying_int_rows()
     keys = [(seed, label, signed64(random_key(seed, label))) for seed, label, _ in KEY_CASES]
     fill_meta, fill64, fill32 = fill_rows()
+    exps = exp_rows()
+    normals = normal_rows()
 
     L = []
     L.append(BANNER)
@@ -731,6 +1086,77 @@ def gen_module():
                [int_literal(struct.unpack("<q", struct.pack("<d", v))[0], "int64") for v in fill64])
     L += array("integer(int32)", "fill_at32_bits", "n_fill_values",
                [int_literal(struct.unpack("<i", struct.pack("<f", v))[0], "int32") for v in fill32])
+    L.append("")
+
+    # -- the exponential ---------------------------------------------------------------------------
+    L.append("    ! ---- pf_random_exp_at / pf_random_exp_portable_at ----")
+    L.append("    !")
+    L.append("    ! The same grid of coordinates as the scalar table above, on purpose: an")
+    L.append("    ! exponential draw is a transform of pf_random_at at the SAME coordinate, so any")
+    L.append("    ! row where the two tables disagree about which uniform was read is a defect in")
+    L.append("    ! exactly one of them. exp_u repeats that uniform so the suite can say which.")
+    L.append("    !")
+    L.append("    ! The two realisations are pinned DIFFERENTLY, and the difference is the whole")
+    L.append("    ! point of there being two:")
+    L.append("    !")
+    L.append("    !   exp_portable_bits  EXACT. parquet_expkey's frozen transform, re-derived in")
+    L.append("    !                      Python rather than translated, and asserted bit for bit.")
+    L.append("    !   exp_ref_bits       -log(1-u) at 60 significant digits, correctly rounded.")
+    L.append("    !                      pf_random_exp_at uses the INTRINSIC log, so it is only")
+    L.append("    !                      bit-identical for a given libm and must be asserted to a")
+    L.append("    !                      few ulp of this. Asserting it exactly would make the suite")
+    L.append("    !                      fail on the next libm, which is not what it is testing.")
+    L.append("    !")
+    L.append("    ! exp_ref_bits is independent of libm AND of the frozen transform, so it is")
+    L.append("    ! evidence about both: the portable column's own accuracy is checkable against it")
+    L.append("    ! without a second implementation of the transform.")
+    L.append("    integer, parameter :: n_exp = %d" % len(exps))
+    L += array("integer(int64)", "exp_seed", "n_exp", [int_literal(r[0], "int64") for r in exps])
+    L += array("integer(int64)", "exp_stream", "n_exp", [int_literal(r[1], "int64") for r in exps])
+    L += array("integer(int64)", "exp_draw", "n_exp", [int_literal(r[2], "int64") for r in exps])
+    L += array("integer(int64)", "exp_u_bits", "n_exp",
+               [int_literal(struct.unpack("<q", struct.pack("<d", r[3]))[0], "int64") for r in exps])
+    L += array("integer(int64)", "exp_portable_bits", "n_exp",
+               [int_literal(struct.unpack("<q", struct.pack("<d", r[4]))[0], "int64") for r in exps])
+    L += array("integer(int64)", "exp_ref_bits", "n_exp",
+               [int_literal(struct.unpack("<q", struct.pack("<d", r[5]))[0], "int64") for r in exps])
+    L.append("")
+
+    # -- the normal ---------------------------------------------------------------------------
+    L.append("    ! ---- pf_random_normal_at / pf_random_normal_portable_at ----")
+    L.append("    !")
+    L.append("    ! The scalar grid, plus coordinates hunted deterministically until every branch")
+    L.append("    ! is represented: a table built from the grid alone would be ~98.5 %% path 1 and")
+    L.append("    ! would leave the wedge and tail unpinned, so a change to either would move no")
+    L.append("    ! golden value at all.")
+    L.append("    !")
+    L.append("    ! norm_zig_path  1 immediate rectangle acceptance, 2 wedge test, 3 tail.")
+    L.append("    ! norm_zig_pairs / norm_polar_pairs  word PAIRS the rejection loop consumed. The")
+    L.append("    !                consumption is contract for the stream walk, and a table with no")
+    L.append("    !                entry above the minimum would pass against a loop that never")
+    L.append("    !                rejects anything.")
+    L.append("    !")
+    L.append("    ! **The two columns are pinned to different strengths, and the reason is the")
+    L.append("    ! algorithms rather than a choice.** The polar form is exact bit contract on")
+    L.append("    ! every platform: IEEE + - * / and sqrt over the frozen logarithm, nothing else.")
+    L.append("    ! The Ziggurat reaches libm `exp` in its wedge test and libm `log` in its tail,")
+    L.append("    ! so a path-2 or path-3 row is only bit-identical FOR A GIVEN libm -- which is")
+    L.append("    ! exactly what pf_normal_algorithm promises for it. A path-1 row touches no libm")
+    L.append("    ! and is exact everywhere. The suite asserts accordingly.")
+    L.append("    integer, parameter :: n_norm = %d" % len(normals))
+    L += array("integer(int64)", "norm_seed", "n_norm", [int_literal(r[0], "int64") for r in normals])
+    L += array("integer(int64)", "norm_stream", "n_norm", [int_literal(r[1], "int64") for r in normals])
+    L += array("integer(int64)", "norm_draw", "n_norm", [int_literal(r[2], "int64") for r in normals])
+    L += array("integer(int64)", "norm_zig_bits", "n_norm",
+               [int_literal(struct.unpack("<q", struct.pack("<d", r[3]))[0], "int64") for r in normals])
+    L += array("integer(int64)", "norm_zig_pairs", "n_norm",
+               [int_literal(r[4], "int64") for r in normals])
+    L += array("integer(int32)", "norm_zig_path", "n_norm",
+               [int_literal(r[5], "int32") for r in normals])
+    L += array("integer(int64)", "norm_polar_bits", "n_norm",
+               [int_literal(struct.unpack("<q", struct.pack("<d", r[6]))[0], "int64") for r in normals])
+    L += array("integer(int64)", "norm_polar_pairs", "n_norm",
+               [int_literal(r[7], "int64") for r in normals])
     L.append("")
     L.append("end module test_random_vectors")
     L.append("")

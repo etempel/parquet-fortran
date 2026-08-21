@@ -72,7 +72,7 @@ esac
 
 # parquet_settings_base first: parquet_random uses it and this is a plain ordered compile. It is the
 # leaf settings module, which is what keeps this standalone compile possible at all.
-SRC="src/parquet_settings_base.f90 src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
+SRC="src/parquet_expkey.f90 src/parquet_ziggurat.f90 src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
 ABS_SRC=""
 for f in $SRC; do ABS_SRC="$ABS_SRC $REPO/$f"; done
 

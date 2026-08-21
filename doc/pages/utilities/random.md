@@ -118,6 +118,9 @@ All the scalar draws are `pure elemental`, so they accept conformable arrays as 
 For bulk work, prefer the scalar call inside your own loop or one of the two fills; a whole-array
 elemental call over a constructed index array is much slower than any of them.
 
+Beyond the uniforms there are four **distributions** — exponential, normal, Gamma and Poisson. They
+are addressed the same way and are documented in [Distributions](#distributions) below.
+
 ### Which fill: the two axes
 
 The two fills walk the two axes, and the names say which:
@@ -674,6 +677,178 @@ or accepts a wrapping product under an assumption verified on that compiler rath
 **Both paths produce identical values**, which the suite asserts on every machine it runs on, and
 `pf_random_algorithm` is the same either way. The choice is made at compile time from the compiler
 in use; there is nothing to configure, and deliberately no way to override it.
+
+## Distributions
+
+Four distributions are built on the uniforms: **exponential**, **normal**, **Gamma** and
+**Poisson**. Every one of them is addressed exactly as the uniforms are — a coordinate, or a walk
+along a stream — and every one has its own frozen contract identifier, so a program recording
+`pf_random_algorithm` is not told its uniform draws moved because a Ziggurat layer count changed.
+
+### The promise table
+
+This is the single source of truth for what each name promises. Read it before choosing between two
+that look interchangeable, because two of them are not.
+
+| procedure | reproducibility | bulk == stream walk? |
+|---|---|---|
+| `%exp`, `pf_random_exp_at`, `pf_random_fill_exp` | given libm | **yes**, to a couple of ulp — see below |
+| `%exp_portable`, `pf_random_exp_portable_at`, `pf_random_fill_exp_portable` | **every platform** | **yes**, exactly |
+| `%normal`, `pf_random_normal_at`, `pf_random_fill_normal` | given libm | **no** — see below |
+| `%normal_portable`, `pf_random_normal_portable_at`, `pf_random_fill_normal_portable` | **every platform** | **no** |
+| `%gamma(shape)` | given libm | n/a (no bulk form) |
+| `%poisson(lambda)` | given libm | n/a (no bulk form) |
+
+Two things that table is saying, and both matter more than they look:
+
+**"Given libm" versus "every platform".** Everything in this module is *deterministic* — a value is
+a pure function of its coordinates, on any machine, always. What differs is whether the last bit
+survives a change of C library: a draw that reaches `log` or `exp` is bit-identical only for a given
+libm, because libm is not part of any contract this project controls. The `_portable` forms avoid
+that by routing through a frozen logarithm built from IEEE arithmetic alone, which no compiler may
+reorder. That is a choice about **reproducibility across machines**, never about accuracy — the two
+forms agree to about two units in the last place.
+
+**A name without `_portable` is the default realisation, and every default is "given libm".** The
+suffix's absence says only "this is the default", not what promise the default carries — `%gamma`
+and `%poisson` have no portable twin at all.
+
+### The exponential
+
+`Exp(1)`, mean 1, in `[0, 36.7368]`. Multiply by a mean to rescale, or divide by a rate.
+
+```fortran
+x = pf_random_exp_at(seed, i)            ! value 1 of stream i
+x = pf_random_exp_at(seed, i, 7_int64)   ! value 7
+call rng%exp(x)                          ! the next one along a stream
+call pf_random_fill_exp(seed, i, v)      ! v(k) is value k
+```
+
+The mapping is `-log(1 - u)` where `u` is exactly `pf_random_at(seed, i, draw)`. **`1 - u`, not `u`,
+is contract**: a uniform can be exactly 0 and can never be 1, so `-log(u)` would be infinite once in
+2⁵³ draws while this is finite always.
+
+**It is the one distribution whose three tiers are the same value computed the same way**, because
+it consumes a fixed two words. Everything else here is a rejection algorithm — see [Why the normal's
+bulk form differs from its stream walk](#why-the-normals-bulk-form-differs-from-its-stream-walk).
+
+One caveat, and it is the libm promise showing up inside a single program rather than across
+machines: a compiler may serve `log` from a **vector** libm inside the bulk fill's loop and a scalar
+one in the elemental call, and the two need not agree in the last bit. gfortran gives identical
+values on all three tiers; ifx at its default `-fp-model=fast` differs on about a third of them, by
+at most 2 ulp. `pf_random_exp_portable_at` has no such exposure — its logarithm is this library's
+own — and its three tiers agree exactly everywhere.
+
+**What is exact on every tier and every compiler is that a fill splits.** `v(1:3)` filled alone is
+the first three of `v(1:6)`, at any chunking, on any number of threads. That is the promise the
+module exists for, and it is unaffected.
+
+**`pf_random_exp_portable_at` costs about 3x** — 39.4 ns per value against 11.2 on a bulk fill,
+81.3 against 27.0 scalar (machine B, gfortran 15.2.1, `-O3 -funroll-loops`). The frozen logarithm is
+twelve barriered Horner steps, each a store and a reload, so it neither vectorises nor pipelines
+where a libm `log` does both. Reach for it when a stored result must reproduce across machines.
+
+### The normal
+
+Standard normal, mean 0 and variance 1.
+
+```fortran
+x = pf_random_normal_at(seed, i)                   ! Ziggurat; fast
+x = pf_random_normal_portable_at(seed, i)          ! polar method; identical everywhere
+call rng%normal(x)
+call rng%normal_portable(x)
+call pf_random_fill_normal(seed, i, v)
+call pf_random_fill_normal_portable(seed, i, v)
+```
+
+The default is a **Ziggurat** over 256 equal-area layers, which accepts 98.5 % of candidates after a
+single 64-bit read and falls back to a wedge test or a tail walk otherwise. The portable form is
+**Marsaglia's polar method**, which needs only a logarithm and a square root — the first frozen, the
+second required by IEEE to be correctly rounded.
+
+The two are **independent** at the same coordinate, not two views of one draw: they derive separate
+sub-streams. That is deliberate, so a program using both is not quietly correlating them.
+
+### Why the normal's bulk form differs from its stream walk
+
+This is the one surprise in the module, and it is forced rather than chosen.
+
+A rejection algorithm consumes a number of words that depends on the values it drew. So nobody —
+not this library, not you — can say where value `k` of a stream walk begins without having drawn the
+preceding `k-1`. A bulk fill that walked a stream could therefore not be split at any boundary, by
+anyone, at any speed.
+
+The coordinate-addressed forms sidestep it by giving each `(i, draw)` its own derived sub-stream, so
+every value is a pure function of its coordinates and a fill splits anywhere:
+
+```fortran
+!$omp parallel do
+do chunk = 1, nchunk
+    call pf_random_fill_normal(seed, i, v(lo(chunk):hi(chunk)), draw=lo(chunk))
+end do
+```
+
+That gives the same answer at any thread count and any chunking, which is the module's headline
+property applied to the most-used distribution. **The cost is that a loop of `%normal` and a
+`pf_random_fill_normal` over one seed give different numbers.** Both are correct draws from the same
+distribution; they are different realisations, exactly as `pf_weighted_draw` and
+`pf_weighted_permutation` are. The promise table above says which procedures this applies to, and it
+is a user obligation to take it into account.
+
+The exponential is exempt because its consumption is fixed, which is why its row reads "yes".
+
+### Gamma and Poisson
+
+Both are stream-only: there is no `pf_random_gamma_at`, no bulk fill, and no `_portable` twin.
+
+```fortran
+call rng%gamma(shape, x)        ! Gamma(shape, 1) -- multiply by theta for another scale
+call rng%poisson(lambda, k)     ! k is integer(int32) or integer(int64)
+```
+
+**`%gamma`** takes any `shape > 0`. The scale is 1, so `Gamma(a, theta)` is `theta * rng%gamma(a)`;
+the mean and the variance are both `shape`. Below `shape = 1` the draw goes through the boost
+`Gamma(a) = Gamma(a+1) * u**(1/a)`, which costs one extra uniform and a `pow` — and which is why
+there is deliberately **no `%gamma_portable`**: `pow` is not frozen, so such a procedure could not
+keep the promise its name would imply.
+
+**`%poisson`** takes any `lambda >= 0` (0 always draws 0). Below `lambda = 10` it uses Knuth's
+product of uniforms, which is exact and terminates unconditionally; at or above it, transformed
+rejection, whose cost does not grow with `lambda`. **The crossover is frozen contract**, published
+through `pf_poisson_algorithm`, because it decides which value comes back — it is not a tuning knob
+and there is no setting for it. The `int32` result refuses a count that does not fit rather than
+narrowing it; pass an `integer(int64)` for a `lambda` that large.
+
+Both refuse a parameter outside their domain — a non-positive shape, a negative mean, a NaN in
+either — rather than returning something plausible.
+
+### The frozen contract identifiers
+
+One per distribution family, separate from `pf_random_algorithm` and from each other:
+
+| identifier | covers |
+|---|---|
+| `pf_exp_algorithm` | both exponential realisations: the mapping, the `1 - u` convention, the two-word cost, and which logarithm each form uses |
+| `pf_normal_algorithm` | both normal realisations: the layer count and table construction, the polar variant, both rejection loops' draw order and cost, and the sub-stream labels |
+| `pf_gamma_algorithm` | the Marsaglia–Tsang variant, the `shape < 1` boost, **and which normal the inner loop consumes** |
+| `pf_poisson_algorithm` | both algorithms, the crossover `lambda`, and each one's draw order |
+
+A family's identifier names **both** of its realisations where it has two: a program recording one
+string wants to know whether either form moved.
+
+`pf_gamma_algorithm` names the normal it consumes because a change to the normal changes every Gamma
+value — a program recording only Gamma's identifier would otherwise miss it.
+
+### What a variable cost means for `%position`
+
+`%position` stays exact for every producer, including the rejection-based ones: it reports where the
+stream *is*. What stops being possible is **predicting** it. A fixed-cost producer lets you compute
+where a stream will be after a known sequence of draws (`%uniform` 2 words, `%uniform32` 1, `%bits`
+2, `%int_range` 2, `%exp` 2, all of the last three pair-aligned); `%normal`, `%normal_portable`,
+`%gamma` and `%poisson` do not.
+
+So checkpoint and restart — save `%position()`, `%rewind` to it later — keeps working for every
+producer. Arithmetic on positions does not.
 
 ## Weighted draws without replacement
 

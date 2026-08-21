@@ -54,6 +54,7 @@ program check_random_kernels
     call check_golden_int()
     call check_golden_key()
     call check_golden_fill()
+    call check_golden_portable_dist()
     call check_literal_seed_shapes()
     call check_variable_shapes()
     call check_integer_widths()
@@ -130,6 +131,39 @@ contains
             end do
         end do
     end subroutine check_golden_fill
+
+    !> Every `_portable` distribution draw, which is the ONLY place this sweep can assert a
+    !> floating-point transform exactly.
+    !!
+    !! **The default realisations are deliberately absent.** `pf_random_exp_at` routes through the
+    !! intrinsic `log`, so its last bit belongs to whichever libm the configuration links and to
+    !! whatever `-Ofast` is entitled to substitute for it -- asserting it here would make this
+    !! script fail on a flag set it is meant to be checking. The `_portable` forms route through
+    !! `parquet_expkey`'s frozen transform instead and must be bit-identical at every optimisation
+    !! setting, which is exactly what this sweep is for.
+    !!
+    !! `tools/check_exp_key.sh` sweeps the transform in isolation; this sweeps its COMPOSITION with
+    !! the generator, which is a different claim -- the `1 - u` step and the argument's provenance
+    !! are here and not there.
+    subroutine check_golden_portable_dist()
+        integer :: k
+        do k = 1, n_exp
+            if (transfer(pf_random_exp_portable_at(exp_seed(k), exp_stream(k), exp_draw(k)), 0_int64) &
+                /= exp_portable_bits(k)) call bad("golden pf_random_exp_portable_at")
+        end do
+        do k = 1, n_norm
+            if (transfer(pf_random_normal_portable_at(norm_seed(k), norm_stream(k), norm_draw(k)), 0_int64) &
+                /= norm_polar_bits(k)) call bad("golden pf_random_normal_portable_at")
+            ! A path-1 Ziggurat draw reaches no libm either -- it is `u * zig_w(i)` and a sign --
+            ! so it is exact on every configuration too, and asserting it here is what sweeps the
+            ! layer table's own arithmetic across optimisation settings. Paths 2 and 3 use libm
+            ! exp/log and are deliberately left to the test suite, which knows which libm it has.
+            if (norm_zig_path(k) == 1_int32) then
+                if (transfer(pf_random_normal_at(norm_seed(k), norm_stream(k), norm_draw(k)), 0_int64) &
+                    /= norm_zig_bits(k)) call bad("golden pf_random_normal_at (path 1)")
+            end if
+        end do
+    end subroutine check_golden_portable_dist
 
     !> Literal-constant seed at the call site, over three stream-range shapes that are compiled
     !> differently from one another.

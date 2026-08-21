@@ -383,6 +383,18 @@ contains
                 test_random_stream_exhausted_aborts), &
             new_unittest("a stream refuses a rewind below position 1", &
                 test_random_stream_rewind_below_one_aborts), &
+            new_unittest("a gamma draw refuses a shape that is not strictly positive", &
+                test_random_gamma_shape_not_positive_aborts), &
+            new_unittest("a gamma draw refuses a NaN shape", &
+                test_random_gamma_shape_nan_aborts), &
+            new_unittest("a poisson draw refuses a negative lambda", &
+                test_random_poisson_lambda_negative_aborts), &
+            new_unittest("a poisson draw refuses a NaN lambda", &
+                test_random_poisson_lambda_nan_aborts), &
+            new_unittest("a poisson draw refuses a lambda whose count could overflow int64", &
+                test_random_poisson_lambda_too_large_aborts), &
+            new_unittest("a poisson count that does not fit an int32 is refused, not narrowed", &
+                test_random_poisson_int32_overflow_aborts), &
             new_unittest("a resample of an empty population aborts", &
                 test_random_resample_empty_population_aborts), &
             new_unittest("an int32 resample of a wider-than-int32 population aborts", &
@@ -4086,6 +4098,69 @@ contains
             failure_message="rewinding below position 1 was expected to abort", &
             required_stderr="position must be at least 1")
     end subroutine test_random_stream_rewind_below_one_aborts
+
+    !> `%gamma(0.0)`: see scenario_random_gamma_shape_not_positive.
+    subroutine test_random_gamma_shape_not_positive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_gamma_shape_not_positive", &
+            expect_abort=.true., &
+            failure_message="a gamma draw with shape 0 was expected to abort", &
+            required_stderr="shape parameter must be strictly positive")
+    end subroutine test_random_gamma_shape_not_positive_aborts
+
+    !> `%gamma(NaN)`: see scenario_random_gamma_shape_nan. Distinct from the scenario above
+    !> because a `shape <= 0` guard would pass a NaN through while a `.not. (shape > 0)` one does
+    !> not, and only a NaN fixture can tell the two spellings apart.
+    subroutine test_random_gamma_shape_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_gamma_shape_nan", &
+            expect_abort=.true., &
+            failure_message="a gamma draw with a NaN shape was expected to abort", &
+            required_stderr="shape parameter must be strictly positive")
+    end subroutine test_random_gamma_shape_nan_aborts
+
+    !> `%poisson(-1.0)`: see scenario_random_poisson_lambda_negative.
+    subroutine test_random_poisson_lambda_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_poisson_lambda_negative", &
+            expect_abort=.true., &
+            failure_message="a poisson draw with a negative lambda was expected to abort", &
+            required_stderr="lambda must be at least 0")
+    end subroutine test_random_poisson_lambda_negative_aborts
+
+    !> `%poisson(NaN)`: see scenario_random_poisson_lambda_nan, and the NaN note on the gamma pair.
+    subroutine test_random_poisson_lambda_nan_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_poisson_lambda_nan", &
+            expect_abort=.true., &
+            failure_message="a poisson draw with a NaN lambda was expected to abort", &
+            required_stderr="lambda must be at least 0")
+    end subroutine test_random_poisson_lambda_nan_aborts
+
+    !> `%poisson(1e19)`: see scenario_random_poisson_lambda_too_large.
+    subroutine test_random_poisson_lambda_too_large_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_poisson_lambda_too_large", &
+            expect_abort=.true., &
+            failure_message="a poisson draw with an unrepresentable lambda was expected to abort", &
+            required_stderr="lambda is so large that a drawn count could overflow")
+    end subroutine test_random_poisson_lambda_too_large_aborts
+
+    !> `%poisson` into an int32 that cannot hold the count: see
+    !> scenario_random_poisson_int32_overflow.
+    subroutine test_random_poisson_int32_overflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "random_poisson_int32_overflow", &
+            expect_abort=.true., &
+            failure_message="a poisson count too large for an int32 was expected to abort", &
+            required_stderr="does not fit in an integer(int32)")
+    end subroutine test_random_poisson_int32_overflow_aborts
 
     !> `m < 1` on a resample: see scenario_random_resample_empty_population. The control draws
     !> FOUR values from a population of one -- `size(idx) > m`, which this procedure allows and its

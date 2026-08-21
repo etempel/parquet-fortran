@@ -185,6 +185,10 @@ something a reader is expected to have.
 | [Risk-118](#risk-118--a-chi-square-threshold-chosen-at-one-ensemble-size-is-not-a-threshold) | A chi-square threshold chosen at ONE ensemble size is not a threshold | 4 — covered |
 | [Risk-124](#risk-124--this-library-may-not-raise-an-ieee-flag-in-a-caller-whose-traps-are-unmasked) | This library may not RAISE an IEEE flag in a caller whose traps are unmasked | 4 — covered |
 | [Risk-125](#risk-125--the-most-negative-int64-constant-in-a-runtime-expression-is-wrong-under-nagfor) | The most-negative int64 CONSTANT in a runtime expression is wrong under nagfor | 4 — covered |
+| [Risk-126](#risk-126--a-squeeze-that-accepts-outside-the-acceptance-region-biases-the-draw-invisibly) | A SQUEEZE that accepts outside the acceptance region biases the draw invisibly | 4 — covered |
+| [Risk-127](#risk-127--floor-returns-a-default-integer-so-a-large-candidate-wraps-silently) | `floor()` returns a DEFAULT integer, so a large candidate wraps silently | 4 — covered |
+| [Risk-128](#risk-128--an-fma-barrier-is-architecture-gated-so-a-flag-sweep-without--marchnative-proves-nothing) | An FMA barrier is ARCHITECTURE-gated, so a flag sweep without `-march=native` proves nothing | 4 — covered |
+| [Risk-129](#risk-129--for-a-given-libm-is-violated-inside-one-program-by-a-vector-variant) | "For a given libm" is violated INSIDE one program, by a vector variant | 4 — covered |
 
 ---
 
@@ -192,7 +196,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-126**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-130**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -5533,3 +5537,131 @@ rather than a correctness necessity.
 - **Other most-negative constants are safe only because of how they are USED.** `SIGN_BIT`
   (`parquet_random`) and `SORT_SIGN_BIT` (`parquet_sorting_engine`) appear solely inside `ieor`.
   A future arithmetic or comparison use of either inherits this entry.
+
+### Risk-126 — A SQUEEZE that accepts outside the acceptance region biases the draw invisibly
+
+**Covered** by `test_squeezes_are_valid` (`test/test_random_dist.f90`), which re-evaluates the full
+logarithmic test on every candidate a squeeze accepted and requires agreement — exactly, with no
+threshold and no sampling error.
+
+A rejection sampler's *squeeze* is a cheap sufficient condition standing in for an expensive exact
+one: if it accepts, the exact test would have accepted too, so the exact test is skipped. Both of
+this library's rejection samplers use one — Gamma's `u < 1 - 0.0331*x**4` and Poisson's PTRS
+fast-acceptance rectangle `us >= 0.07 .and. vv <= v_r`.
+
+**The only way a squeeze can be wrong is by accepting something the exact test would reject, and
+that bias is far too small for any feasible sample to resolve.** Measured on machine B, sample mean
+at `lambda = 12` over 10**6 draws (baseline 11.9944070):
+
+| mutation | measured mean | detectable? |
+|---|---|---|
+| PTRS `v_r` widened by 0.03 | **11.9944070** — identical, bit for bit | no |
+| PTRS `aa` coefficient perturbed by 8 % | within the noise floor | no |
+| PTRS's `0.43` centring offset dropped | 11.9770960, i.e. 0.14 % | ~5 SE at 10**6; invisible at 4x10**5 |
+| Gamma's `0.0331` raised to `0.1` (more conservative) | unchanged — a genuine no-op | n/a, and correctly so |
+
+The first three survived **every** moment check and **every** chi-square in the suite, including a
+20-cell test against the exact pmf at 4x10**5 draws. The fourth is the direction that is safe: a
+squeeze may be as conservative as it likes and stay correct, at a cost in speed only.
+
+**The rule: where an optimisation is a SUFFICIENT CONDITION for an exact test, test the implication,
+not the distribution.** Re-running the exact test on what the squeeze accepted is `O(1)` extra work
+behind an optional argument, it is deterministic, and it catches all four mutations above on the
+first draw. A distributional gate can only see a shortcut that is grossly wrong.
+
+**This generalises past `parquet_random`.** The same shape is anywhere a fast path shortcuts a slow
+one and is meant to agree with it: the sort's counting fast path, `screen_row_groups`' footer
+prescreen, `column_has_nulls_from_footer`. An A/B equality over a fixture is the weak form of this
+test; asserting the implication on every element the fast path handled is the strong one.
+
+### Risk-127 — `floor()` returns a DEFAULT integer, so a large candidate wraps silently
+
+**Covered** by `random_poisson_int32_overflow` and `random_poisson_lambda_too_large`
+(`test/error_scenarios.f90`), whose controls draw at `lambda = 4x10**9` and `10**12` and must
+succeed.
+
+`FLOOR(A)` without a `KIND=` argument returns a **default integer**, whatever `A`'s type. Assigning
+it to a `real(real64)` does not save it: the truncation to `int32` happens inside the intrinsic. So
+
+```fortran
+kr = floor(<something around lambda>)          ! kr is real64 -- and this still wraps
+```
+
+silently produced `-2147483648` for every Poisson draw with `lambda` above `2**31`. Nothing warned,
+the value was in range for the type, and the abort that should have followed never fired because the
+`int64` path returned the wrapped value too.
+
+**What made it visible was an error scenario's CONTROL, not its assertion.** The scenario exists to
+prove that an `int32` result refuses a count that does not fit; its control — the same `lambda` into
+an `int64`, which must succeed — printed the wrapped number. A scenario written without a control
+would have passed, because the `int32` form did abort, just not for the reason claimed.
+
+**Rule: any `floor`, `ceiling`, `nint` or `int` whose argument can exceed `2**31` needs an explicit
+`kind=int64`.** Grep for the bare forms when touching numeric code that scales with a caller's
+parameter, and give every "this is refused" error scenario a control that must succeed.
+
+### Risk-128 — An FMA barrier is ARCHITECTURE-gated, so a flag sweep without `-march=native` proves nothing
+
+**Covered** by `test_normal_golden` (`test/test_random_dist.f90`) and by
+`tools/check_random_kernels.sh`, which asserts the `_portable` draws bit-for-bit at every
+optimisation setting it sweeps.
+
+`polar_normal` (`src/parquet_random.f90`) computes `s = ek_round(u1*u1) + ek_round(u2*u2)`. Without
+those two barriers the expression is `a*b + c*d`, which a compiler may contract into an FMA —
+rounding once where IEEE rounds twice — and the `_portable` promise of a value identical on every
+platform is gone.
+
+**Removing them moves 12 of 144 golden rows under `-O3 -march=native` and under
+`-O3 -ffast-math -march=native`, and NOTHING under `-O2` or a plain `-Ofast`.** The optimisation
+level is not what decides it: baseline x86-64 has no FMA to contract into, so a sweep that omits
+`-march=native` reports the unbarriered code as perfectly reproducible. This is the same trap that
+hid the identical hazard in `exp_key` for months, and it is why the sweep's configuration list
+includes an architecture-targeted arm.
+
+**Two rules.** A fingerprint sweep must include an arm that enables the target's FMA, or it is
+evidence about a machine without one. And a barrier kept for a rewrite no current compiler makes —
+`sqrt(ek_round(q + q))` is one; removing it moves no row on gfortran — should say in the source that
+it is insurance and name the rewrite it closes, so the next reader can tell it apart from one that
+is measured.
+
+### Risk-129 — "For a given libm" is violated INSIDE one program, by a vector variant
+
+**Covered** by `test_exp_cross_form` (`test/test_random_dist.f90`), which asserts the portable
+column exactly, the fast column to 4 ulp, and **chunk invariance exactly at every split size** on
+both.
+
+A distribution that reaches `log` or `exp` is documented as bit-identical *for a given libm*. That
+reads as a statement about other machines. It is not only that: **a compiler may serve the same
+function from a VECTOR libm inside a loop and a scalar one outside it, within one binary**, and the
+two variants need not agree in the last bit.
+
+Measured on machine B: `pf_random_fill_exp` and `pf_random_exp_at` read the same uniforms and apply
+the same transform, and
+
+| compiler | disagreement |
+|---|---|
+| gfortran 15.2.1, fpm default | none — identical on all three tiers |
+| ifx 2026.1.1, default `-fp-model=fast` | **21 of 64 values, by at most 2 ulp** |
+
+`pf_random_exp_portable_at` has no such exposure and agreed exactly on both: its logarithm is this
+library's own, and there is no vector variant of it to substitute.
+
+**What must never break is CHUNK INVARIANCE, and it is a different property from tier agreement.**
+A fill split at any boundary must give the same values as one whole fill — that is what "the same
+answer at any thread count" reduces to for a bulk form, and it is the module's headline promise. It
+survives here because a given tier uses ONE code path for every element however many there are: SVML
+handles a short remainder with masked vector operations rather than falling back to the scalar
+routine. A sweep over every split size from 1 to 16 is what checks it; asserting a prefix at one
+convenient length would not.
+
+**Three rules for anyone adding a distribution or a bulk fill:**
+
+- **Do not assert exact agreement between a libm-backed bulk form and its scalar twin.** It will
+  pass on gfortran and fail on ifx, and the failure is not a defect. Assert a few ulp, and assert
+  chunk invariance exactly.
+- **Do not "fix" it with a `NOVECTOR` directive.** Directives are advisory (CLAUDE.md's `noinline`
+  lesson), so a contract resting on one is not a contract — and the vectorised form is both faster
+  and, as measured, chunk-invariant anyway.
+- **A `_portable` form is the escape hatch and should be documented as such.** It is the only thing
+  in this module that can promise a stored value reproduces across compilers, and this is one of the
+  reasons why.

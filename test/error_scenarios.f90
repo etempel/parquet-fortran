@@ -562,6 +562,18 @@ program error_scenarios
         call scenario_random_stream_exhausted()
     case ("random_stream_rewind_below_one")
         call scenario_random_stream_rewind_below_one()
+    case ("random_gamma_shape_not_positive")
+        call scenario_random_gamma_shape_not_positive()
+    case ("random_gamma_shape_nan")
+        call scenario_random_gamma_shape_nan()
+    case ("random_poisson_lambda_negative")
+        call scenario_random_poisson_lambda_negative()
+    case ("random_poisson_lambda_nan")
+        call scenario_random_poisson_lambda_nan()
+    case ("random_poisson_lambda_too_large")
+        call scenario_random_poisson_lambda_too_large()
+    case ("random_poisson_int32_overflow")
+        call scenario_random_poisson_int32_overflow()
     case ("random_resample_empty_population")
         call scenario_random_resample_empty_population()
     case ("random_resample_int32_too_narrow")
@@ -14895,6 +14907,84 @@ contains
         call rng%rewind(0_int64)   ! -> aborts
         print '(a,i0)', "unexpectedly rewound below the start, position ", rng%position()
     end subroutine scenario_random_stream_rewind_below_one
+
+    !> A Gamma distribution is not defined for a non-positive shape, so the draw refuses rather
+    !! than returning something plausible. The control is the smallest shape the boost branch is
+    !! written for, which is any positive value at all.
+    subroutine scenario_random_gamma_shape_not_positive()
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%gamma(0.001_real64, x)           ! control: a tiny but legal shape
+        print '(a,es12.5)', "drew a gamma with shape 0.001: ", x
+        call rng%gamma(0.0_real64, x)   ! -> aborts
+        print '(a,es12.5)', "unexpectedly drew a gamma with shape 0: ", x
+    end subroutine scenario_random_gamma_shape_not_positive
+
+    !> A NaN shape must abort rather than loop or return a NaN. The guard is written `.not. (shape
+    !! > 0)` rather than `shape <= 0` for exactly this reason: every comparison against a NaN is
+    !! false, so the second form would wave it through.
+    subroutine scenario_random_gamma_shape_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_random_stream) :: rng
+        real(real64) :: x
+        call rng%seed(1_int64, 1_int64)
+        call rng%gamma(2.0_real64, x)             ! control: an ordinary shape
+        print '(a,es12.5)', "drew a gamma with shape 2: ", x
+        call rng%gamma(ieee_value(0.0_real64, ieee_quiet_nan), x)   ! -> aborts
+        print '(a,es12.5)', "unexpectedly drew a gamma with a NaN shape: ", x
+    end subroutine scenario_random_gamma_shape_nan
+
+    !> A Poisson mean cannot be negative. `lambda = 0` is legal and always gives 0, which is the
+    !! control here -- a guard written `lambda > 0` would refuse it wrongly.
+    subroutine scenario_random_poisson_lambda_negative()
+        type(pf_random_stream) :: rng
+        integer(int64) :: k
+        call rng%seed(1_int64, 1_int64)
+        call rng%poisson(0.0_real64, k)           ! control: lambda 0 is legal, and always draws 0
+        print '(a,i0)', "drew a poisson with lambda 0: ", k
+        call rng%poisson(-1.0_real64, k)   ! -> aborts
+        print '(a,i0)', "unexpectedly drew a poisson with a negative lambda: ", k
+    end subroutine scenario_random_poisson_lambda_negative
+
+    !> A NaN mean must abort. `.not. (lambda >= 0)` is what catches it; `lambda < 0` would not.
+    subroutine scenario_random_poisson_lambda_nan()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_random_stream) :: rng
+        integer(int64) :: k
+        call rng%seed(1_int64, 1_int64)
+        call rng%poisson(4.0_real64, k)           ! control: an ordinary mean
+        print '(a,i0)', "drew a poisson with lambda 4: ", k
+        call rng%poisson(ieee_value(0.0_real64, ieee_quiet_nan), k)   ! -> aborts
+        print '(a,i0)', "unexpectedly drew a poisson with a NaN lambda: ", k
+    end subroutine scenario_random_poisson_lambda_nan
+
+    !> A mean so large that a drawn count could overflow `integer(int64)` is refused up front,
+    !! rather than silently returning a wrapped one. The control is a mean far larger than anything
+    !! a real model uses and still safely inside the bound.
+    subroutine scenario_random_poisson_lambda_too_large()
+        type(pf_random_stream) :: rng
+        integer(int64) :: k
+        call rng%seed(1_int64, 1_int64)
+        call rng%poisson(1.0e12_real64, k)        ! control: enormous, and still representable
+        print '(a,i0)', "drew a poisson with lambda 1e12: ", k
+        call rng%poisson(1.0e19_real64, k)   ! -> aborts
+        print '(a,i0)', "unexpectedly drew a poisson with an unrepresentable lambda: ", k
+    end subroutine scenario_random_poisson_lambda_too_large
+
+    !> An `integer(int32)` result refuses a count that does not fit rather than narrowing it. The
+    !! control is the same mean into an `integer(int64)`, which is what the caller should use.
+    subroutine scenario_random_poisson_int32_overflow()
+        type(pf_random_stream) :: rng
+        integer(int64) :: k64
+        integer(int32) :: k32
+        call rng%seed(1_int64, 1_int64)
+        call rng%poisson(4.0e9_real64, k64)       ! control: the same draw, wide enough to hold it
+        print '(a,i0)', "drew a poisson with lambda 4e9 into an int64: ", k64
+        call rng%seed(1_int64, 1_int64)
+        call rng%poisson(4.0e9_real64, k32)   ! -> aborts
+        print '(a,i0)', "unexpectedly narrowed a poisson count into an int32: ", k32
+    end subroutine scenario_random_poisson_int32_overflow
 
     !> `m < 1` names no population to draw from. The control is `m == 1`, the smallest that exists.
     !!

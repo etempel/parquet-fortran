@@ -1040,13 +1040,21 @@ def check_parquet_random_stays_leaf():
     if problems:
         return problems
 
-    # Clause 2: the scripts must actually compile everything the closure names.
-    for script in ("check_random_kernels.sh", "check_exp_key.sh"):
-        sp = REPO_ROOT / "tools" / script
-        if not sp.is_file():
-            problems.append("tools/%s is missing, so the leaf rule's SRC cross-check cannot run"
-                            % script)
-            continue
+    # Clause 2: every script that COMPILES parquet_random must list everything the closure names.
+    #
+    # The script list is derived rather than enumerated, because an enumerated one goes stale in
+    # the direction that stops checking: a new standalone script would simply never be looked at.
+    # `tools/check_exp_key.sh` is correctly excluded by this rule and must stay excluded -- it
+    # compiles `parquet_expkey` ALONE, which is the whole reason the frozen transform can be swept
+    # across compilers at all, and requiring parquet_random's closure there would force that
+    # script to grow the very dependency it exists without.
+    scripts = sorted(p for p in (REPO_ROOT / "tools").glob("*.sh")
+                     if "src/parquet_random.f90" in p.read_text())
+    if not scripts:
+        return ["no tools/*.sh compiles src/parquet_random.f90, so the leaf rule's SRC "
+                "cross-check has nothing to check -- this check must never pass by finding "
+                "nothing (check_random_kernels.sh is the one that must be there)"]
+    for sp in scripts:
         text = sp.read_text()
         for mod in sorted(reached):
             if ("src/%s.f90" % mod) not in text:
@@ -1054,7 +1062,20 @@ def check_parquet_random_stays_leaf():
                     "src/parquet_random.f90 reaches %s, but tools/%s does not list "
                     "src/%s.f90 in SRC -- that script is a plain ordered compile with no "
                     "dependency resolver, so it will fail to build or will silently compile a "
-                    "different set than this rule assumes" % (mod, script, mod))
+                    "different set than this rule assumes" % (mod, sp.name, mod))
+
+    # And the frozen transform's own check must stay standalone, which is a property of that
+    # script rather than of parquet_random: the moment it compiles the generator too, it stops
+    # being able to sweep `exp_key` on a machine with no Arrow and the sweep quietly narrows.
+    ek = REPO_ROOT / "tools" / "check_exp_key.sh"
+    if not ek.is_file():
+        problems.append("tools/check_exp_key.sh is missing, so the frozen transform is no longer "
+                        "swept across compilers at all")
+    elif "src/parquet_random.f90" in ek.read_text():
+        problems.append("tools/check_exp_key.sh now compiles src/parquet_random.f90, which defeats "
+                        "its purpose: it exists to compile src/parquet_expkey.f90 ALONE, so the "
+                        "frozen -log(u) transform can be swept under compilers and flag sets "
+                        "without the rest of this library being buildable")
     return problems
 
 

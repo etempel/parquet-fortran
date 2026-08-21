@@ -37,6 +37,7 @@ program tester
     use test_random, only : collect_tests_parquet_random, collect_tests_parquet_random_perm
     use test_random_omp, only : collect_tests_parquet_random_omp
     use test_random_weighted, only : collect_tests_parquet_random_weighted
+    use test_random_dist, only : collect_tests_parquet_random_dist
     use parquet_bindings, only : parquet_warmup_memory_pool
     !
     implicit none
@@ -93,7 +94,8 @@ program tester
         new_testsuite("random", collect_tests_parquet_random), &
         new_testsuite("random_perm", collect_tests_parquet_random_perm), &
         new_testsuite("random_omp", collect_tests_parquet_random_omp), &
-        new_testsuite("random_weighted", collect_tests_parquet_random_weighted) &
+        new_testsuite("random_weighted", collect_tests_parquet_random_weighted), &
+        new_testsuite("random_dist", collect_tests_parquet_random_dist) &
         ]
     !
     ! command line argument for a specific testsuite and test

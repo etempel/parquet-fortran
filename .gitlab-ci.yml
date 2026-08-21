@@ -120,6 +120,8 @@ lint:
     - bash tools/generate_parquet_maml.sh base --check
     - python3 tools/generate_user_table_code.py --self-test
     - python3 tools/generate_user_table_code.py --check
+    - python3 tools/generate_parquet_ziggurat.py --self-test
+    - python3 tools/generate_parquet_ziggurat.py --check
     - python3 tools/generate_random_golden_vectors.py --self-test
     - python3 tools/generate_random_golden_vectors.py --check
 

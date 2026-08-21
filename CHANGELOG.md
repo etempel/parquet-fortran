@@ -659,8 +659,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A counter-based random number generator, `parquet_random`** (`pf_random_at`, `pf_random32_at`,
   `pf_random_bits_at`, `pf_random_int_at`, `pf_random_fill_draws`, `pf_random_fill_streams`,
   `pf_random_seed`, `pf_random_key`, `pf_random_perm_at`, `pf_random_permutation`,
-  `pf_random_subset`, `pf_random_resample`,
-  `pf_random_algorithm`, `pf_random_perm_algorithm`), re-exported by `use parquet`. It splits in two
+  `pf_random_subset`, `pf_random_resample`, `pf_random_exp_at`, `pf_random_exp_portable_at`,
+  `pf_random_fill_exp`, `pf_random_fill_exp_portable`, `pf_random_normal_at`,
+  `pf_random_normal_portable_at`, `pf_random_fill_normal`, `pf_random_fill_normal_portable`,
+  `pf_random_algorithm`, `pf_random_perm_algorithm`, `pf_exp_algorithm`, `pf_normal_algorithm`,
+  `pf_gamma_algorithm`, `pf_poisson_algorithm`), re-exported by `use parquet`. It splits in two
   for anyone importing a module directly: `parquet_random` is the generator and depends on
   `iso_fortran_env` alone, so it links without the Arrow/Parquet C++ stack, while `parquet_sampling`
   holds everything that draws from a *population* — `pf_random_perm_at`, `pf_random_permutation`,
@@ -693,6 +696,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinate-addressed calls give at the same positions, so the two forms are interchangeable; it
   holds no allocatable components and no finalizer, which is what makes a per-thread instance safe
   on both compilers.
+  **Four distributions are built on the same addressing** — exponential, normal, Gamma and Poisson —
+  each with its own frozen contract identifier, so a change to one never reports the uniform draws as
+  having moved. `pf_random_exp_at`/`%exp`/`pf_random_fill_exp` give `Exp(1)` as `-log(1 - u)` (the
+  `1 - u` convention is what keeps a draw finite), and `pf_random_normal_at`/`%normal`/
+  `pf_random_fill_normal` give a standard normal by a 256-layer Ziggurat whose tables are solved for
+  rather than pasted. Both also ship a **`_portable` twin** — `%exp_portable`, `%normal_portable` and
+  their tier-0 and bulk forms — whose value is identical on every platform, compiler and flag set
+  rather than only for a given libm, by routing through a frozen logarithm built from IEEE arithmetic
+  with rounding barriers no compiler may reorder; the twin costs about 3x and is what to reach for
+  when a stored result must reproduce across machines. `%gamma(shape)` (Marsaglia-Tsang, any
+  `shape > 0`, scale 1) and `%poisson(lambda)` (Knuth's product below `lambda = 10`, transformed
+  rejection at or above it, into an `int32` or `int64` count) are stream-only and have no portable
+  twin, Gamma's `shape < 1` boost needing a `pow` that could not keep such a promise anyway.
+  **One asymmetry is deliberate and documented**: the normal's bulk fill does not agree value for
+  value with a loop of `%normal`, because a rejection algorithm's consumption cannot be predicted, so
+  no stream walk can be split at a boundary by anyone — the coordinate-addressed forms give each
+  value its own derived sub-stream instead, which is what makes a fill splittable anywhere and
+  bit-identical at any thread count. The exponential is exempt, its consumption being fixed at two
+  words, so its three tiers do agree.
   **Permutations are coordinate-addressed too**: `pf_random_perm_at(seed, m, k)` is element `k` of a
   permutation of `1 .. m`, computed in constant time and constant memory from its coordinates alone,
   so a subset needs no separate algorithm and no array — the first `n` values *are* a uniform random

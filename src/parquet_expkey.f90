@@ -41,6 +41,7 @@ module parquet_expkey
     private
 
     public :: exp_key
+    public :: ek_rnd
     public :: exp_key_contract_ok
     public :: parquet_debug_exp_key
     public :: parquet_debug_set_exp_key_contract
@@ -107,6 +108,14 @@ contains
     !! Do not make this `pure` (a pure procedure may not have a `volatile` local -- that
     !! restriction is what the directive form was working around), do not drop the `volatile`, and
     !! do not "simplify" the call sites back to bare arithmetic.
+    !!
+    !! **Public because a second module needs the same barrier for the same reason.**
+    !! `parquet_random`'s polar normal composes `sqrt` and a division around `exp_key`, and those
+    !! compositions are exposed to exactly the fusions and regroupings this closes -- so it imports
+    !! this as `ek_round`. It is not part of the library's user-facing surface (`parquet_expkey` is
+    !! not re-exported by the `parquet` facade, and every importer re-hides it), and it is not a
+    !! general-purpose utility: it exists to hold ONE expression's grouping, and a caller reaching
+    !! for it should be able to name the rewrite it is stopping.
     function ek_rnd(x) result(y)
         real(real64), intent(in) :: x   !! the product to round
         real(real64) :: y               !! the same value, rounded to real64

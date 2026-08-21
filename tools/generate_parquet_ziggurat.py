@@ -39,14 +39,23 @@ so it gives the same digits on every platform and every Python build.  The tail 
 `decimal` equivalent of `erfc`, so it is summed from its own Taylor series below.  Rounding to
 `real64` happens once, at emission.
 
-Two rules follow for anyone editing this file:
+Three rules follow for anyone editing this file:
 
   * **Do not reintroduce `math.` anywhere in the derivation.**  It will appear to work, and the
     committed table will silently become whatever the last machine to regenerate it produced.
+  * **Do not reduce a list of floats either -- not `sum()`, not `min`/`max` over a running
+    total.**  This is the same hazard in different clothes and it bit later, in the one place the
+    rule above did not name: `acceptance_rate` computed `sum(k) / len(k)` over 256 doubles, which
+    is deterministic for a given interpreter and NOT across interpreters -- CPython 3.12 switched
+    builtin `sum()` over floats to Neumaier compensated summation, so 3.13 emits a last bit that
+    3.11 does not.  `--check` then failed on a machine that had changed nothing but its Python.
+    Sum in `decimal` and round once, as everything else here does.
   * **`--self-test` re-derives the whole thing at two different working precisions and requires
     identical doubles.**  That is the check that would have caught the original defect, and it is
     the reason the search precision below can be chosen for speed without anyone having to argue
-    about whether it is enough.
+    about whether it is enough.  Note it would NOT have caught the second one: it compares the
+    TABLES across two precisions, and both arms would have called the same `sum()`.  A value that
+    is derived but not tabulated has only `--check` standing behind it.
 
 WHY THIS IS A GENERATOR AND NOT A PASTED TABLE.  A ziggurat table is 771 floating-point constants
 whose only correctness argument is the construction that produced them.  A pasted table can be
@@ -233,8 +242,22 @@ def acceptance_rate(k):
     of "which branch produced this value": conditioning on acceptance raises the observed
     immediate-acceptance share from this 0.985 to about 0.992.  Measured, not derived -- a path
     census over 200000 draws gives 0.9918 / 0.0080 / 0.00024 for rectangle / wedge / tail.
+
+    Summed in `decimal` rather than as `sum(k) / len(k)`, for the same reason the derivation above
+    avoids `math.`: **a float reduction is not reproducible across Python versions.**  CPython 3.12
+    changed builtin `sum()` over floats to Neumaier compensated summation, so the naive left-to-
+    right loop it used before gives a DIFFERENT last bit -- 0.9850809499905379 against
+    0.9850809499905381 for this table, measured on 3.13 against the committed value.  That is one
+    ulp in a constant nothing reads, and it still broke `--check` on a machine whose Python simply
+    differed from the one that last regenerated the file.  Summing the exact decimal values and
+    rounding once gives the correctly-rounded mean (it agrees with `math.fsum`) on every build.
     """
-    return sum(k) / float(len(k))
+    with localcontext() as ctx:
+        ctx.prec = FINAL_PREC
+        total = Decimal(0)
+        for x in k:
+            total += Decimal(x)          # exact for a float; a no-op for a Decimal
+        return float(total / Decimal(len(k)))
 
 
 def self_test():

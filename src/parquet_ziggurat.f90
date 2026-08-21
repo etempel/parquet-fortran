@@ -42,7 +42,7 @@ module parquet_ziggurat
 
     !> Fraction of draws accepted with no wedge test and no tail walk: 0.98508.
     !! Published for the same reason as `zig_v`; nothing reads it.
-    real(real64), parameter :: zig_accept_rate = 0.9850809499905379_real64
+    real(real64), parameter :: zig_accept_rate = 0.9850809499905381_real64
 
     !> Layer half-widths. A draw is `u * zig_w(i)`. Index 0 is the base strip and is
     !! WIDER than `zig_r`, because its area has to cover the tail as well.

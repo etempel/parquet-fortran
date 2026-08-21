@@ -37,9 +37,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_i32(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_i32(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_i32_i32
     !
     module procedure partial_argsort_i32_i64
@@ -54,7 +54,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_i32(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_i32(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_i32_i64
@@ -71,9 +71,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_i64(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_i64(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_i64_i32
     !
     module procedure partial_argsort_i64_i64
@@ -88,7 +88,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_i64(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_i64(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_i64_i64
@@ -105,9 +105,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_f32(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_f32(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_f32_i32
     !
     module procedure partial_argsort_f32_i64
@@ -122,7 +122,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_f32(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_f32(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_f32_i64
@@ -139,9 +139,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_f64(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_f64(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_f64_i32
     !
     module procedure partial_argsort_f64_i64
@@ -156,7 +156,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_f64(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_f64(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_f64_i64
@@ -173,9 +173,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_bool(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_bool(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_bool_i32
     !
     module procedure partial_argsort_bool_i64
@@ -190,7 +190,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_bool(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_bool(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_bool_i64
@@ -207,9 +207,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_chr(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_chr(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_chr_i32
     !
     module procedure partial_argsort_chr_i64
@@ -224,7 +224,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_chr(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid)
+        call extract_chr(values, buf, desc, nlo, "pf_partial_argsort", is_valid=is_valid, threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_chr_i64
@@ -241,9 +241,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_date(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_date(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_date_i32
     !
     module procedure partial_argsort_date_i64
@@ -258,7 +258,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_date(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_date(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_date_i64
@@ -275,9 +275,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_time(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_time(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_time_i32
     !
     module procedure partial_argsort_time_i64
@@ -292,7 +292,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_time(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_time(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_time_i64
@@ -309,9 +309,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_ts(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_ts(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_ts_i32
     !
     module procedure partial_argsort_ts_i64
@@ -326,7 +326,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = size(values, kind=int64)
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_ts(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_ts(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_ts_i64
@@ -343,9 +343,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = values%size()
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_strcol(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_strcol(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_strcol_i32
     !
     module procedure partial_argsort_strcol_i64
@@ -360,7 +360,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = values%size()
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_strcol(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_strcol(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_strcol_i64
@@ -377,9 +377,9 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = values%length()
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_col(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_col(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_col_i32
     !
     module procedure partial_argsort_col_i64
@@ -394,7 +394,7 @@ contains
         if (present(nulls_first)) nlo = nulls_first
         nrows = values%length()
         call resolve_count(n, nrows, "pf_partial_argsort", count)
-        call extract_col(values, buf, desc, nlo, "pf_partial_argsort")
+        call extract_col(values, buf, desc, nlo, "pf_partial_argsort", threads=threads)
         call drive_engine_partial(buf, nrows, count, "pf_partial_argsort", perm64)
         call move_alloc(perm64, perm)
     end procedure partial_argsort_col_i64
@@ -410,7 +410,7 @@ contains
         call resolve_count(n, keys%nrows, "pf_partial_argsort", count)
         call drive_engine_partial(keys%keys(1:keys%nkeys), keys%nrows, count, &
             "pf_partial_argsort", perm64)
-        call narrow_perm(perm64, "pf_partial_argsort", perm)
+        call narrow_perm(perm64, "pf_partial_argsort", perm, threads=threads)
     end procedure partial_argsort_keys_i32
     !
     module procedure partial_argsort_keys_i64

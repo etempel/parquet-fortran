@@ -3722,6 +3722,55 @@ extern "C"
 	int64_t parquet_debug_get_filter_eval_nanos(void) { return g_debug_filter_eval_nanos; }
 	int64_t parquet_debug_get_filter_mask_nanos(void) { return g_debug_filter_mask_nanos; }
 
+	// The same idea for the READ-TIME SORT -- parquet_open_reader(..., sort_by=) and
+	// parquet_reader_set_sort. Added for feature_sort.md's P13, whose whole first step is that the
+	// post-R1 phase shares had been DERIVED from a pre-R1 measurement rather than measured.
+	//
+	// The phases, in the order one sort walks them, and why each is separate:
+	//
+	//   info  -- parquet_reader_sort_key_info: binds the key to report its family and size to
+	//            Fortran, which then allocates the buffers. Separate from `bind` below because
+	//            bind_one_sort_key runs in BOTH, so this counter is what makes the second run
+	//            visible instead of hiding inside one total.
+	//   bind  -- the same reduction again inside parquet_reader_sort_key_fetch. Arrow's own decode
+	//            is shared (get_single_chunk_array caches), so what repeats is sort_bind_arrow_key's
+	//            O(rows) materialisation -- for a string key, a vector<string> of one string a row.
+	//   copy  -- the memcpy/offset walk handing that reduction to Fortran-owned buffers.
+	//   perm  -- building the arrow::Int64Array from the permutation Fortran computed.
+	//   take  -- arrow::compute::Take over every column already in column_cache. This is the phase
+	//            P13 is about: it was ~30% of a string-keyed sort before R1 and, since R1 cut the
+	//            permutation build by roughly an order of magnitude without touching it, a much
+	//            larger share afterwards.
+	//
+	// take_columns counts the Take calls, because "how long" is not interpretable without "how many"
+	// -- the loop's cost is per CACHED column, which is the key columns plus anything prefetched.
+	//
+	// Not part of the library's behaviour: nothing reads these but a benchmark, and they are plain
+	// non-atomic int64 because a sort installs once per reader open, on one thread.
+	static int64_t g_debug_sort_info_nanos = 0;
+	static int64_t g_debug_sort_bind_nanos = 0;
+	static int64_t g_debug_sort_copy_nanos = 0;
+	static int64_t g_debug_sort_perm_nanos = 0;
+	static int64_t g_debug_sort_take_nanos = 0;
+	static int64_t g_debug_sort_take_columns = 0;
+
+	void parquet_debug_reset_sort_phase_nanos(void)
+	{
+		g_debug_sort_info_nanos = 0;
+		g_debug_sort_bind_nanos = 0;
+		g_debug_sort_copy_nanos = 0;
+		g_debug_sort_perm_nanos = 0;
+		g_debug_sort_take_nanos = 0;
+		g_debug_sort_take_columns = 0;
+	}
+
+	int64_t parquet_debug_get_sort_info_nanos(void) { return g_debug_sort_info_nanos; }
+	int64_t parquet_debug_get_sort_bind_nanos(void) { return g_debug_sort_bind_nanos; }
+	int64_t parquet_debug_get_sort_copy_nanos(void) { return g_debug_sort_copy_nanos; }
+	int64_t parquet_debug_get_sort_perm_nanos(void) { return g_debug_sort_perm_nanos; }
+	int64_t parquet_debug_get_sort_take_nanos(void) { return g_debug_sort_take_nanos; }
+	int64_t parquet_debug_get_sort_take_columns(void) { return g_debug_sort_take_columns; }
+
 	// Same idea, for the fixed-width space-padded string read (parquet_read_string_column). Two
 	// phases, because the only question anyone asks about that path is whether its per-element work
 	// is worth optimising, and that cannot be answered without knowing what share of the read it is:
@@ -7090,7 +7139,10 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		SortKeyData key;
-		if (!bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap)) return 1;
+		auto t_info = std::chrono::steady_clock::now();
+		bool bound = bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap);
+		charge_phase(t_info, g_debug_sort_info_nanos);
+		if (!bound) return 1;
 
 		*nbytes = 0;
 		switch (key.kind)
@@ -7123,7 +7175,10 @@ extern "C"
 	{
 		auto reader_handle = as_reader_handle(handle);
 		SortKeyData key;
-		if (!bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap)) return 1;
+		auto t_bind = std::chrono::steady_clock::now();
+		bool bound = bind_one_sort_key(reader_handle, name, descending != 0, nulls_first != 0, key, err_out, err_cap);
+		auto t_copy = charge_phase(t_bind, g_debug_sort_bind_nanos);
+		if (!bound) return 1;
 
 		switch (key.kind)
 		{
@@ -7150,6 +7205,7 @@ extern "C"
 		{
 			for (size_t i = 0; i < key.valid.size(); ++i) valid[i] = static_cast<int8_t>(key.valid[i]);
 		}
+		charge_phase(t_copy, g_debug_sort_copy_nanos);
 		return 0;
 	}
 
@@ -7164,6 +7220,7 @@ extern "C"
 		const char *key_text, char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
+		auto t_perm = std::chrono::steady_clock::now();
 		arrow::Int64Builder perm_builder;
 		auto append_status = perm_builder.AppendValues(perm, n);
 		if (!append_status.ok())
@@ -7182,6 +7239,7 @@ extern "C"
 		// GCOVR_EXCL_STOP
 		reader_handle->sort_perm = perm_array;
 		if (key_text != nullptr) reader_handle->sort_key_text = key_text;
+		auto t_take = charge_phase(t_perm, g_debug_sort_perm_nanos);
 
 		// Every key column was decoded above, before sort_perm existed, and any column the caller
 		// prefetched earlier is in the same position -- re-Take the whole cache so nothing can be
@@ -7197,7 +7255,9 @@ extern "C"
 			}
 			// GCOVR_EXCL_STOP
 			entry.second = taken.ValueOrDie().make_array();
+			++g_debug_sort_take_columns;
 		}
+		charge_phase(t_take, g_debug_sort_take_nanos);
 		return 0;
 	}
 

@@ -291,7 +291,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`, use `omp_get_max_threads()`
   automatically — and stay serial inside an OpenMP parallel region, since a nested region is the
   caller's business. An optional `threads=` turns that down (`threads=1` forces serial) and is
-  honoured wherever it is given; `pf_sort_threads()` reports what an automatic sort would do. The
+  honoured wherever it is given; `pf_sort_threads()` reports what an automatic sort would do.
+  `pf_partial_argsort` takes `threads=` as well, on every one of its forms, but threads less of the
+  work than a full sort does: the key extraction and the int32 narrowing take the team while the
+  selection between them stays serial, so it helps in proportion to the array rather than to `n`
+  (`pf_partial_sort` has no `threads=` yet). The
   resolved count is also clamped to the CPU affinity the process actually has, since threads cannot
   escape their mask, and a one-per-process warning says so when the clamp bites -- an
   `OMP_PROC_BIND` setting combined with `OMP_PLACES=cores` otherwise disables threading silently

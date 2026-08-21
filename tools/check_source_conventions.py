@@ -2388,7 +2388,75 @@ def check_noinline_directives_are_paired():
     return problems
 
 
+def check_threads_are_forwarded():
+    """A sorting procedure that takes `threads` must hand it to every callee that takes one.
+
+    **This is a lint check because no test can be one.** Dropping a `threads=threads` from a call
+    does not change any answer -- the callee simply resolves the AUTOMATIC count instead of the
+    requested one -- so the sort still returns a bit-identical permutation and the whole suite
+    stays green. What breaks is the documented contract that `threads=1` forces serial and that
+    `threads=n` is a ceiling: both silently become "use the machine". Confirmed by mutation while
+    `pf_partial_argsort` was given its own `threads=` (feature_sort.md's P10): stripping the
+    plumbing from all 24 generated bodies left every test in the `sorting` suite passing.
+
+    Matched by SHAPE, in both directions, so it cannot go stale the way an enumerated list does:
+    the set of procedures that take `threads` is read from the two spec files rather than listed
+    here, and a call is only checked when its CALLEE is in that set. That is what keeps the
+    extraction kernels out of it -- `extract_i32_par` takes a resolved `team`, not a request -- and
+    what makes a new threaded helper covered on the day it is added.
+
+    Forwarding positionally counts: `resolve_thread_count(threads, n, nth)` is how every extractor
+    does it. Passing a LITERAL (`threads=1`) does not -- that is the mutation this exists to catch.
+    """
+    specs = [SRC / "parquet_sorting.f90", SRC / "parquet_argsort.f90"]
+    missing = [s for s in specs if not s.is_file()]
+    if missing:
+        return ["tools/check_source_conventions.py: %s not found -- this check has gone stale and "
+                "is silently testing nothing" % ", ".join(m.name for m in missing)]
+    takes = set()
+    for spec in specs:
+        text = spec.read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"^\s*module subroutine (\w+)\((.*?)\)\s*$", text, re.M):
+            if re.search(r"\bthreads\b", m.group(2)):
+                takes.add(m.group(1))
+    problems = []
+    if not takes:
+        return ["no sorting procedure declaring a `threads` dummy was found at all -- either the "
+                "argument was removed library-wide or this check's pattern has gone stale; either "
+                "way it must not report success"]
+    bodies = sorted(SRC.glob("parquet_sorting_*.f90")) + [SRC / "parquet_argsort_kernel.f90"]
+    checked = 0
+    for path in bodies:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"^    module procedure (\w+)\s*$(.*?)^    end procedure \1\s*$",
+                             text, re.M | re.S):
+            name, body = m.group(1), m.group(2)
+            if name not in takes:
+                continue
+            for call in re.finditer(r"call (\w+)\(((?:[^()]|\([^()]*\))*)\)", body, re.S):
+                callee, args = call.group(1), call.group(2)
+                # A procedure calling ITSELF is a recursive forward, not a drop.
+                if callee not in takes or callee == name:
+                    continue
+                checked += 1
+                flat = " ".join(args.split())
+                parts = [a.strip() for a in re.split(r",(?![^()]*\))", flat)]
+                if not any(a == "threads" or a == "threads=threads" for a in parts):
+                    problems.append(
+                        "%s: %s calls %s without forwarding `threads` -- the callee will resolve "
+                        "the automatic count, so an explicit threads= is silently ignored (%s)"
+                        % (path.name, name, callee, flat[:90]))
+    if checked == 0:
+        problems.append(
+            "no call from one threads-taking sorting procedure to another was found -- the "
+            "`module procedure` pattern has probably gone stale, so this check is testing nothing")
+    return problems
+
+
 CHECKS = (
+    ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
     ("benchmark build-tree names carry the compiler", check_build_tree_names_carry_the_compiler),
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("MAML block headers are matched case-insensitively", check_maml_keys_case_insensitive),

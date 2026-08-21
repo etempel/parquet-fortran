@@ -344,6 +344,9 @@ call pf_nth_quantile(v, 0.5d0, med)       ! the median of the non-null values
 all 100, in order — so an `n` derived from a fraction, a config value or a post-filter row count
 needs no `min(n, size(v))` of your own. A *negative* `n` is still an error.
 
+`pf_partial_argsort` also takes `threads=`; what it does and does not thread is set out under
+[What `threads=` reaches in a partial sort](#what-threads-reaches-in-a-partial-sort).
+
 **"The last N" is `descending=.true.`**, not a separate procedure:
 
 ```fortran
@@ -579,6 +582,8 @@ module whose length comes from two inputs rather than one.
 **Sorting is parallel by default.** `pf_argsort`, `pf_sort`, `pf_unique_count`, `pf_unique` and
 `pf_rank` all use the machine automatically, as do the read-time
 `parquet_open_reader(..., sort_by=)` and `parquet_table%sort_by`. There is nothing to switch on.
+`pf_partial_argsort` takes `threads=` too, but threads less of its work — see
+[What `threads=` reaches in a partial sort](#what-threads-reaches-in-a-partial-sort) below.
 
 `threads=` is therefore how you turn parallelism **down**, not up:
 
@@ -666,6 +671,33 @@ beat every row of this table regardless of `threads=`.
 A threaded sort allocates one extra scratch buffer the size of the permutation, so peak memory is
 roughly **twice** a serial sort's — 16 bytes per row instead of 8. On a billion-row argsort that is
 16 GB instead of 8. Pass `threads=1` where that matters more than the time.
+
+### What `threads=` reaches in a partial sort
+
+`pf_partial_argsort` accepts `threads=` on every form — over an array or a `pf_sort_keys`, into an
+int32 or an int64 permutation — with the same meaning and the same defaults as everywhere else, and
+with the same guarantee that the answer never changes.
+
+**It threads less of the work than `pf_argsort` does, and it is worth knowing which part.** A
+partial sort has three stages: reading the values into the engine's key form, selecting the `n`
+smallest, and handing back the indices. The first walks every element and the third walks `n` of
+them, and both take the team. **The selection in the middle stays serial** — it is what makes a
+partial sort cheaper than a full one, and it has no threaded form.
+
+So `threads=` helps here in proportion to the *array*, not in proportion to `n`:
+
+```fortran
+call pf_partial_argsort(flux, brightest, n=10, threads=8)   ! the read of flux is threaded
+call pf_partial_argsort(flux, brightest, n=10, threads=1)   ! wholly serial
+```
+
+On a large array and a small `n` that reading is most of the cost, which is exactly the case this
+argument exists for. `pf_partial_sort` — the value-returning form — has no `threads=` yet.
+
+One specific takes the argument and can do nothing with it: `pf_partial_argsort(keys, perm, n)` on a
+`pf_sort_keys` producing an **int64** permutation. Its keys were already built by `%add`, so there
+is nothing to read, and an int64 permutation needs no narrowing. It is accepted so that the generic
+behaves uniformly rather than rejecting an argument its int32 sibling takes.
 
 ## What is not here yet
 

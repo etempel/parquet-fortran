@@ -81,6 +81,7 @@ To generate the executables:
 | `benchmark_stage7` | `app/benchmark_stage7.f90` | Driven by `tools/benchmark_stage7.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_sort_engine` | `app/benchmark_sort_engine.f90` | Driven by `tools/benchmark_sort_engine.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_sort_comparator` | `app/benchmark_sort_comparator.f90` | Driven by `tools/benchmark_sort_comparator.sh` — see [Other tools/ helpers](#other-tools-helpers). |
+| `benchmark_sort_readtime` | `app/benchmark_sort_readtime.f90` | Driven by `tools/benchmark_sort_readtime.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `probe_isnan` | `app/probe_isnan.f90` | Driven by `tools/probe_isnan.sh`. A **temporary diagnostic** for the Stage 1e comparator campaign — what one NaN test costs, per toolchain. Delete both once that question is answered. |
 | `benchmark_strings` | `app/benchmark_strings.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
 | `benchmark_string_threads` | `app/benchmark_string_threads.f90` | Driven by `tools/benchmark_strings.sh` — see [Other tools/ helpers](#other-tools-helpers). |
@@ -732,6 +733,36 @@ tools/benchmark_sort_comparator.sh                              # the default sw
 tools/benchmark_sort_comparator.sh --rows=8192 --reps=8192      # a larger working set
 ROUNDS=9 tools/benchmark_sort_comparator.sh                     # more rounds on a busy machine
 ```
+
+`tools/benchmark_sort_readtime.sh` answers a different question again: where a **read-time** sort
+spends its time. It drives `app/benchmark_sort_readtime.f90`, which opens a reader with `sort_by=`
+and reads the C++ phase counters around each stage of the install — the key bind, the repeat bind,
+the copy-out to Fortran, the `arrow::Int64Array` build and the `arrow::compute::Take` loop — so the
+shares are measured rather than inferred. It exists because those shares had previously been
+*derived* from a measurement taken before the sort was routed to the Fortran engine, and a derived
+share is not a measurement; see `feature_sort.md`'s P13 for what it found.
+
+Two things about reading its output. **`engine+open` is DERIVED**, being the wall clock minus the
+five C++ phases, so it holds `pf_argsort`, the reader open itself and the allocation between them —
+`benchmark_sort_engine.sh` is what measures the engine, and this row must not be quoted as an engine
+figure. And **read `take` against the `column(s) taken` count in each heading**: the Take loop runs
+once per column in the reader's cache, and a sort may only be installed before any column is read,
+so that cache holds the sort's own key columns and nothing else. `KEYS=2` is the arm that shows the
+scaling; there is deliberately no prefetch arm, because prefetch-then-sort is not a reachable shape.
+
+| variable | default | meaning |
+|---|---|---|
+| `SIZES` | `1000000,20000000` | row counts, comma-separated. The fixture is ~56 bytes/row on disk. |
+| `REPS` | `3` | timed opens per figure. The best **total** is kept, with that run's own phases — a per-phase minimum would sum to a total nothing measured. |
+| `KEY` | `both` | `int64` / `string` / `both`. The string key is the interesting one: `Take` on a variable-length column rebuilds offsets and copies the payload. |
+| `KEYS` | `1` | sort keys per run; `2` adds a second key and doubles the Take loop. |
+| `KEEP` | `0` | `1` leaves the fixtures under `test_run/` for a re-run. |
+
+```bash
+tools/benchmark_sort_readtime.sh
+SIZES=20000000 KEY=string KEYS=2 tools/benchmark_sort_readtime.sh
+```
+
 
 `tools/benchmark_table.sh` measures what the `parquet_table` layer costs against reading and
 writing columns directly, on one synthetic float64 file. It drives `app/benchmark_table.f90`

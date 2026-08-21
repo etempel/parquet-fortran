@@ -223,6 +223,10 @@ contains
             new_unittest("nkeys_added counts %add calls, not engine keys", test_nkeys_added_counts_adds), &
             new_unittest("is_sorted accepts a pf_sort_keys", test_is_sorted_keys), &
             new_unittest("partial_argsort accepts a pf_sort_keys", test_partial_argsort_keys), &
+            new_unittest("partial_argsort: threads= never changes the answer", &
+                test_partial_argsort_threads_answer), &
+            new_unittest("partial_argsort: the threaded tail passes agree with the serial ones", &
+                test_partial_argsort_threads_tail), &
             new_unittest("engine: integer keys match the C++ comparators", test_engine_conf_int), &
             new_unittest("engine: real keys with NaNs match the C++ comparators", test_engine_conf_real), &
             new_unittest("engine: string keys match the C++ comparators", test_engine_conf_str), &
@@ -1887,6 +1891,137 @@ contains
         call check(error, all(int(part, int64) == p64), &
             "the int32 and int64 partial permutation forms must agree")
     end subroutine test_partial_argsort
+    !
+    !> `threads=` on `pf_partial_argsort` is a performance control and nothing else -- the same
+    !! contract `pf_argsort` carries, asserted across the whole generic.
+    !!
+    !! **What this one asserts is API SURFACE, and it deliberately does not skip without OpenMP.**
+    !! Every specific of the generic must accept the argument -- the four shapes below are the four
+    !! that exist (array/`pf_sort_keys` x int32/int64 permutation) -- and none may answer
+    !! differently for it. That claim is meaningful on a serial build too, where it says the
+    !! argument is accepted and ignored correctly.
+    !!
+    !! **It is NOT evidence that anything ran in parallel**, and cannot be: at this size the tail
+    !! floor (`tail_team`, src/parquet_argsort_kernel.f90) declines a team whatever is asked for.
+    !! `test_partial_argsort_threads_tail` is the one that forces the threaded passes to execute.
+    subroutine test_partial_argsort_threads_answer(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(8) = [30, 10, 50, 20, 60, 40, 15, 55]
+        integer(int32) :: mag(8) = [3, 1, 3, 1, 3, 1, 2, 2]
+        type(pf_sort_keys) :: k
+        integer(int32), allocatable :: ref32(:), got32(:)
+        integer(int64), allocatable :: ref64(:), got64(:)
+        !
+        call pf_partial_argsort(v, ref32, 4, threads=1)
+        call pf_partial_argsort(v, got32, 4, threads=4)
+        call check(error, all(got32 == ref32), &
+            "array form, int32 perm: threads= must not change the answer")
+        if (allocated(error)) return
+        call pf_partial_argsort(v, got32, 4)
+        call check(error, all(got32 == ref32), &
+            "array form, int32 perm: omitting threads= must not change it either")
+        if (allocated(error)) return
+        !
+        call pf_partial_argsort(v, ref64, 4, threads=1)
+        call pf_partial_argsort(v, got64, 4, threads=4)
+        call check(error, all(got64 == ref64), &
+            "array form, int64 perm: threads= must not change the answer")
+        if (allocated(error)) return
+        call check(error, all(int(ref32, int64) == ref64), &
+            "the int32 and int64 array forms must still agree under threads=")
+        if (allocated(error)) return
+        !
+        call k%add(mag)
+        call k%add(v)
+        call pf_partial_argsort(k, ref64, 3, threads=1)
+        call pf_partial_argsort(k, got64, 3, threads=4)
+        call check(error, all(got64 == ref64), &
+            "pf_sort_keys form, int64 perm: threads= must not change the answer")
+        if (allocated(error)) return
+        call pf_partial_argsort(k, got32, 3, threads=4)
+        call check(error, all(int(got32, int64) == ref64), &
+            "pf_sort_keys form, int32 perm: threads= must not change the answer")
+    end subroutine test_partial_argsort_threads_answer
+    !
+    !> The threaded halves of `pf_partial_argsort` -- the key extraction and the int32 narrowing --
+    !! must agree with the serial ones. This is the test that makes `threads=` mean something.
+    !!
+    !! **Forcing the floor is the whole point.** `tail_team` declines a team below
+    !! `max(32768, 1024*nt)` elements, which no test fixture reaches, so without
+    !! `parquet_debug_set_sort_tail_min_rows` both arms would run the SAME serial code and the
+    !! equality below would hold for the wrong reason -- CLAUDE.md's "a threshold no test-sized
+    !! fixture can reach is a threshold no test exercises".
+    !!
+    !! **What it can and cannot see.** With the floor at 1 and `threads=4`, `extract_i32` and
+    !! `narrow_perm` take their `!$omp parallel do` branches, so a plumbing error in either is a
+    !! wrong answer here. It cannot assert *that* a team was opened: the tail passes report no
+    !! team size, and the engine's own `parquet_debug_sort_threads_used` describes the full sort's
+    !! radix, which a partial sort never enters. The selection stays serial by design, so there is
+    !! nothing further to observe -- verified instead by mutation (dropping either `threads=` from
+    !! the generated body must fail this test).
+    subroutine test_partial_argsort_threads_tail(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: n = 4096
+        integer(int32) :: v(n)
+        logical :: mask(n)
+        integer(int32), allocatable :: ref32(:), got32(:)
+        integer(int64), allocatable :: ref64(:), got64(:)
+        integer(int32), allocatable :: refnull(:), gotnull(:)
+        integer :: i
+        !
+        ! Preconditions, declared rather than assumed: with the threaded branches preprocessed out,
+        ! or on a machine where an explicit threads= clamps back to 1, both arms below are the same
+        ! serial code and every assertion passes without testing anything.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the threaded extraction and narrowing " // &
+            "(extract_* and narrow_perm, src/parquet_argsort_kernel.f90) sit inside " // &
+            "#ifdef _OPENMP, so both arms below would run the same serial code and the " // &
+            "equality would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: resolve_thread_count clamps " // &
+                "an explicit threads= to omp_get_num_procs(), so threads=4 resolves to 1 here " // &
+                "and no tail pass is threaded")
+            return
+        end if
+#endif
+        !
+        ! Deliberately not sorted, not reverse-sorted, and carrying duplicates, so a narrowing that
+        ! dropped or reordered entries cannot coincide with the right answer.
+        do i = 1, n
+            v(i) = int(mod(i * 7919, 1021), int32)
+            mask(i) = (mod(i, 17) /= 0)
+        end do
+        !
+        ! Captured and restored BEFORE the first assertion: every `check` can return early, and a
+        ! leaked floor would silently rethread every later test in this suite.
+        call parquet_debug_set_sort_tail_min_rows(1_int64)
+        call pf_partial_argsort(v, got32, 64, threads=4)
+        call pf_partial_argsort(v, got64, 64, threads=4)
+        call pf_partial_argsort(v, gotnull, 64, is_valid=mask, threads=4)
+        call parquet_debug_set_sort_tail_min_rows(-1_int64)
+        !
+        call pf_partial_argsort(v, ref32, 64, threads=1)
+        call pf_partial_argsort(v, ref64, 64, threads=1)
+        call pf_partial_argsort(v, refnull, 64, is_valid=mask, threads=1)
+        !
+        call check(error, size(got32) == 64, "the forced-floor run must still return n indices")
+        if (allocated(error)) return
+        call check(error, all(got32 == ref32), &
+            "a threaded extraction and narrowing must give the serial int32 answer")
+        if (allocated(error)) return
+        call check(error, all(got64 == ref64), &
+            "a threaded extraction must give the serial int64 answer")
+        if (allocated(error)) return
+        call check(error, all(int(got32, int64) == got64), &
+            "the threaded int32 and int64 forms must agree with each other")
+        if (allocated(error)) return
+        ! The mask travels through the same threaded extraction as the values, so a null placed by
+        ! the wrong thread's chunk is a wrong answer this arm sees and the unmasked ones cannot.
+        call check(error, all(gotnull == refnull), &
+            "a threaded extraction must place nulls exactly as the serial one does")
+    end subroutine test_partial_argsort_threads_tail
     !
     !> "The last N" is `descending=.true.`, not a separate procedure -- so it must equal the tail
     !> of an ascending full sort, reversed.

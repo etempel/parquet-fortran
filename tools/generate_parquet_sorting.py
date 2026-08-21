@@ -408,6 +408,21 @@ THREADS_DOC = [
     "            !! governs row counts and indices here does not apply.",
 ]
 
+# `pf_partial_argsort`'s own threading note. The argument means LESS here than it does on
+# `pf_argsort`, and saying so at the declaration is the whole point: the selection is serial, so a
+# caller who reads `threads=` as "this sort is now parallel" would be wrong. What the team does
+# reach is the two whole-ARRAY passes either side of it -- the extraction, which is O(nrows), and
+# the int32 narrowing, which is O(n). `sort_partial_permutation` has no threaded form.
+PARTIAL_THREADS_DOC = THREADS_DOC + [
+    "            !!",
+    "            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only",
+    "            !! the key extraction (which walks all `size(values)` elements) and, for an int32",
+    "            !! permutation, the narrowing. Those are the two whole-array passes either side of",
+    "            !! the selection; the selection is what makes a partial sort cheap and is not",
+    "            !! threaded. So expect `threads=` to matter here in proportion to the extraction,",
+    "            !! not in proportion to the sort.",
+]
+
 #: `group_nkeys`, on the two `pf_sort_keys` specifics only -- the per-type ones hold a single key,
 #: so a prefix of it could only ever be the whole thing.
 GROUP_NKEYS_DOC = [
@@ -1587,7 +1602,7 @@ module parquet_sorting
         tag, decl, what, family, nulls, has_sort, _ = t
         for ik, idecl, iname in IDX_KINDS:
             w(f"        !> pf_partial_argsort over a {what} array, returning an {iname} permutation.")
-            w(f"        module subroutine partial_argsort_{tag}_{ik}(values, perm, n, descending, nulls_first{', is_valid' if nulls == 'arg' else ''})")
+            w(f"        module subroutine partial_argsort_{tag}_{ik}(values, perm, n, descending, nulls_first{', is_valid' if nulls == 'arg' else ''}, threads)")
             w(val_decl(t, "in"))
             w(f"            {idecl}, allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.")
             w("            integer, intent(in) :: n !! leading elements to order; clamped to the size.")
@@ -1595,16 +1610,29 @@ module parquet_sorting
             w("            logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.")
             if nulls == "arg":
                 w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
+            for line in PARTIAL_THREADS_DOC:
+                w(line)
             w(f"        end subroutine partial_argsort_{tag}_{ik}")
     for ik, idecl, iname in IDX_KINDS:
         w(f"        !> pf_partial_argsort over a multi-key `pf_sort_keys`, returning an {iname} permutation.")
         w("        !!")
-        w("        !! Each key carries its own `descending`/`nulls_first` from `%add`. No `threads`:")
-        w("        !! the partial sort is not threaded, as its per-type specifics already reflect.")
-        w(f"        module subroutine partial_argsort_keys_{ik}(keys, perm, n)")
+        w("        !! Each key carries its own `descending`/`nulls_first` from `%add`.")
+        w(f"        module subroutine partial_argsort_keys_{ik}(keys, perm, n, threads)")
         w("            class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.")
         w(f"            {idecl}, allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.")
         w("            integer, intent(in) :: n !! leading rows to order; clamped to the row count.")
+        for line in PARTIAL_THREADS_DOC:
+            w(line)
+        if ik == "i64":
+            # Stated rather than quietly tolerated: this is the ONE specific of the generic where
+            # the argument reaches nothing. It is accepted anyway, because a generic whose int64
+            # form rejects an argument its int32 form accepts is a worse API than an inert dummy --
+            # and because it becomes live the moment anything else on this path is threaded.
+            w("            !!")
+            w("            !! **Accepted and inert on THIS specific.** A `pf_sort_keys` arrives with its")
+            w("            !! keys already built, so there is no extraction to thread, and an int64")
+            w("            !! permutation needs no narrowing. It is taken for consistency across the")
+            w("            !! generic; every other `pf_partial_argsort` specific does use it.")
         w(f"        end subroutine partial_argsort_keys_{ik}")
     for t in TYPES:
         tag, decl, what, family, nulls, has_sort, _ = t
@@ -4400,10 +4428,13 @@ contains
             w("        if (present(nulls_first)) nlo = nulls_first")
             w(f"        nrows = {rows_expr(t)}")
             w("        call resolve_count(n, nrows, \"pf_partial_argsort\", count)")
-            w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_partial_argsort\"{iv})")
+            # `threads` reaches the extraction and the narrowing and NOT drive_engine_partial --
+            # the selection has no threaded form, and passing an argument it would ignore would
+            # make the plumbing read as though it did. See PARTIAL_THREADS_DOC.
+            w(f"        call extract_{tag}(values, buf, desc, nlo, \"pf_partial_argsort\"{iv}, threads=threads)")
             w("        call drive_engine_partial(buf, nrows, count, \"pf_partial_argsort\", perm64)")
             if ik == "i32":
-                w("        call narrow_perm(perm64, \"pf_partial_argsort\", perm)")
+                w("        call narrow_perm(perm64, \"pf_partial_argsort\", perm, threads=threads)")
             else:
                 w("        call move_alloc(perm64, perm)")
             w(f"    end procedure partial_argsort_{tag}_{ik}")
@@ -4422,7 +4453,7 @@ contains
         w("        call drive_engine_partial(keys%keys(1:keys%nkeys), keys%nrows, count, &")
         w("            \"pf_partial_argsort\", perm64)")
         if ik == "i32":
-            w("        call narrow_perm(perm64, \"pf_partial_argsort\", perm)")
+            w("        call narrow_perm(perm64, \"pf_partial_argsort\", perm, threads=threads)")
         else:
             w("        call move_alloc(perm64, perm)")
         w(f"    end procedure partial_argsort_keys_{ik}")

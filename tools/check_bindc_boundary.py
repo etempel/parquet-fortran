@@ -20,17 +20,18 @@ regex misses one or both (see CLAUDE.md's "Why the earlier check found only 113 
   2. Every one of the 20 functions writes `result(...)` *after* `bind(C, name="...")`, not before
      -- `function NAME(args) &\n    bind(C, name="...") result(r)`.
 
-Also scans test/error_scenarios.f90, test/test_temporal.f90, test/test_sorting.f90 and
-app/benchmark_table.f90: these declare their own local `bind(C)` debug-hook interfaces (hand-written
-per scenario, duplicated across several call sites), declared far from parquet_bindings.f90 and so,
-per CLAUDE.md, the most likely place for a future mismatch to slip in unnoticed. A handful of those
-bind to the C RUNTIME rather than to this project's own C++ (see LIBC_SYMBOLS below); they are
-allow-listed by name, not by "ignore anything unmatched", so a typo'd parquet_* binding still fails.
+Also scans every test/*.f90 and app/*.f90 that declares a `bind(C, name=` of its own: these
+are the local debug-hook interfaces (hand-written per scenario, duplicated across several
+call sites) that this project's convention deliberately keeps OUT of parquet_bindings.f90,
+and being declared far from it they are, per CLAUDE.md, the most likely place for a future
+mismatch to slip in unnoticed. A handful of those bind to the C RUNTIME rather than to this
+project's own C++ (see LIBC_SYMBOLS below); they are allow-listed by name, not by "ignore
+anything unmatched", so a typo'd parquet_* binding still fails.
 
-**Add a file here whenever one starts declaring its own `bind(C)` interface.** Nothing detects a
-file that is missing from this list -- it simply goes unchecked, silently and indefinitely, which is
-the failure mode CLAUDE.md's "A static check that enumerates names goes stale silently" warns about.
-The last two entries were added only when the co-ranked merge work put three more hooks in them.
+**Nothing needs adding here when a new file declares a `bind(C)` interface** -- the source
+list is globbed by shape (`_fortran_files` below), which is what closes CLAUDE.md's "a static
+check that enumerates names goes stale silently". It was a hand-kept list of five paths until
+2026-08-21, and a benchmark that had grown its own hooks was simply not being checked.
 
 What this does NOT check (see CLAUDE.md's "What this check does not cover" note): length/ownership
 contracts (does the C++ side write exactly as many elements as Fortran allocated?), array
@@ -49,13 +50,31 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FORTRAN_FILES = [
-    REPO_ROOT / "src" / "parquet_bindings.f90",
-    REPO_ROOT / "test" / "error_scenarios.f90",
-    REPO_ROOT / "test" / "test_temporal.f90",
-    REPO_ROOT / "test" / "test_sorting.f90",
-    REPO_ROOT / "app" / "benchmark_table.f90",
-]
+def _fortran_files():
+    """Every Fortran source declaring a `bind(C, name=...)` interface, found by SHAPE.
+
+    `src/parquet_bindings.f90` is the library's own boundary and is always included. The rest are
+    the hand-written local debug-hook interfaces that this project's convention deliberately keeps
+    OUT of that file (see CLAUDE.md, "A Fortran-side debug hook has to be PUBLIC, so prefer a C++
+    one") -- they live in whichever test or benchmark uses them.
+
+    **Globbed rather than listed, and that is the point.** This was a hand-maintained list of five
+    paths, so a new benchmark declaring its own hook was simply not checked, and nothing said so --
+    CLAUDE.md's "a static check that enumerates names goes stale silently", in its exact shape. A
+    file with no `bind(C, name=` is skipped, so adding one costs nothing until it declares a hook.
+    """
+    files = [REPO_ROOT / "src" / "parquet_bindings.f90"]
+    for folder in ("test", "app"):
+        for path in sorted((REPO_ROOT / folder).glob("*.f90")):
+            try:
+                if "bind(C, name=" in path.read_text(encoding="utf-8", errors="replace"):
+                    files.append(path)
+            except OSError:
+                continue
+    return files
+
+
+FORTRAN_FILES = _fortran_files()
 CPP_FILE = REPO_ROOT / "src" / "parquet_wrapper.cpp"
 
 # Fortran kind -> (base_type, is_pointer_kind). is_pointer_kind is True only for c_ptr, which
@@ -149,7 +168,14 @@ def join_continuations(text):
     return re.sub(r"\n\s*&", "\n", joined)
 
 
+# The optional TYPE PREFIX -- `integer(c_int64_t) function f() bind(C, name=...)` -- is the
+# third spelling this file has to know about, alongside the two `result(...)` positions below.
+# It carries the result type in the header rather than in a declaration inside the body, so
+# without it such a function's result is unresolvable and gets reported as a mismatch that is
+# not one. Two hooks in app/benchmark_stage7.f90 are written that way, and they were invisible
+# until this checker started finding its sources by shape instead of from a hand-kept list.
 FORTRAN_BINDC_RE = re.compile(
+    r"(?:(\w+\s*\([^)]*\))\s+)?"
     r"\b(subroutine|function)\s+(\w+)\s*\(([^)]*)\)\s*"
     r"(?:result\s*\(\s*(\w+)\s*\)\s*)?"
     r"bind\s*\(\s*C\s*,\s*name\s*=\s*[\"'](\w+)[\"']\s*\)\s*"
@@ -207,7 +233,7 @@ def collect_fortran_symbols(path):
     text = join_continuations(text)
     results = {}
     for m in FORTRAN_BINDC_RE.finditer(text):
-        kind_word, local_name, params, result_before, c_name, result_after = m.groups()
+        type_prefix, kind_word, local_name, params, result_before, c_name, result_after = m.groups()
         result_var = result_before or result_after
         dummy_names = [p.strip().split("(")[0] for p in params.split(",") if p.strip()]
         start = m.end()
@@ -225,7 +251,20 @@ def collect_fortran_symbols(path):
             args.append(normalize_fortran_dummy(kind, has_value))
         ret = None
         if kind_word.lower() == "function":
-            if result_var and result_var in decls:
+            if type_prefix and not result_var:
+                # Prefix form: the type is in the header, so there is no declaration to look
+                # up. `has_value=True` for the same reason as the branch below -- a function
+                # result is never passed by reference.
+                low = type_prefix.lower()
+                if "c_ptr" in low:
+                    prefix_kind = "c_ptr"
+                elif "character" in low:
+                    prefix_kind = "char"
+                else:
+                    km = re.search(r"\(([a-z0-9_]+)\)", low)
+                    prefix_kind = km.group(1) if km else None
+                ret = normalize_fortran_dummy(prefix_kind, has_value=True)
+            elif result_var and result_var in decls:
                 kind, _has_value = decls[result_var]
                 # A function result is inherently "the value" (never passed by reference), so
                 # compute its expected depth as if `value` had been declared -- a scalar result

@@ -1579,210 +1579,525 @@ module parquet_sorting
     ! ---- pf_partial_sort and pf_partial_argsort (parquet_sorting_select) ----
     interface
         !> pf_partial_argsort over a 32-bit integer array, returning an int32 permutation.
-        module subroutine partial_argsort_i32_i32(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_i32_i32(values, perm, n, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_i32_i32
         !> pf_partial_argsort over a 32-bit integer array, returning an int64 permutation.
-        module subroutine partial_argsort_i32_i64(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_i32_i64(values, perm, n, descending, nulls_first, is_valid, threads)
         integer(int32), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_i32_i64
         !> pf_partial_argsort over a 64-bit integer array, returning an int32 permutation.
-        module subroutine partial_argsort_i64_i32(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_i64_i32(values, perm, n, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_i64_i32
         !> pf_partial_argsort over a 64-bit integer array, returning an int64 permutation.
-        module subroutine partial_argsort_i64_i64(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_i64_i64(values, perm, n, descending, nulls_first, is_valid, threads)
         integer(int64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_i64_i64
         !> pf_partial_argsort over a 32-bit real array, returning an int32 permutation.
-        module subroutine partial_argsort_f32_i32(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_f32_i32(values, perm, n, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_f32_i32
         !> pf_partial_argsort over a 32-bit real array, returning an int64 permutation.
-        module subroutine partial_argsort_f32_i64(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_f32_i64(values, perm, n, descending, nulls_first, is_valid, threads)
         real(real32), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_f32_i64
         !> pf_partial_argsort over a 64-bit real array, returning an int32 permutation.
-        module subroutine partial_argsort_f64_i32(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_f64_i32(values, perm, n, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_f64_i32
         !> pf_partial_argsort over a 64-bit real array, returning an int64 permutation.
-        module subroutine partial_argsort_f64_i64(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_f64_i64(values, perm, n, descending, nulls_first, is_valid, threads)
         real(real64), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_f64_i64
         !> pf_partial_argsort over a logical array, returning an int32 permutation.
-        module subroutine partial_argsort_bool_i32(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_bool_i32(values, perm, n, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_bool_i32
         !> pf_partial_argsort over a logical array, returning an int64 permutation.
-        module subroutine partial_argsort_bool_i64(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_bool_i64(values, perm, n, descending, nulls_first, is_valid, threads)
         logical, intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_bool_i64
         !> pf_partial_argsort over a string array, returning an int32 permutation.
-        module subroutine partial_argsort_chr_i32(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_chr_i32(values, perm, n, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_chr_i32
         !> pf_partial_argsort over a string array, returning an int64 permutation.
-        module subroutine partial_argsort_chr_i64(values, perm, n, descending, nulls_first, is_valid)
+        module subroutine partial_argsort_chr_i64(values, perm, n, descending, nulls_first, is_valid, threads)
         character(len=*), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
             logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_chr_i64
         !> pf_partial_argsort over a date array, returning an int32 permutation.
-        module subroutine partial_argsort_date_i32(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_date_i32(values, perm, n, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_date_i32
         !> pf_partial_argsort over a date array, returning an int64 permutation.
-        module subroutine partial_argsort_date_i64(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_date_i64(values, perm, n, descending, nulls_first, threads)
         type(parquet_date), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_date_i64
         !> pf_partial_argsort over a time array, returning an int32 permutation.
-        module subroutine partial_argsort_time_i32(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_time_i32(values, perm, n, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_time_i32
         !> pf_partial_argsort over a time array, returning an int64 permutation.
-        module subroutine partial_argsort_time_i64(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_time_i64(values, perm, n, descending, nulls_first, threads)
         type(parquet_time), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_time_i64
         !> pf_partial_argsort over a timestamp array, returning an int32 permutation.
-        module subroutine partial_argsort_ts_i32(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_ts_i32(values, perm, n, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_ts_i32
         !> pf_partial_argsort over a timestamp array, returning an int64 permutation.
-        module subroutine partial_argsort_ts_i64(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_ts_i64(values, perm, n, descending, nulls_first, threads)
         type(parquet_timestamp), intent(in) :: values(:)
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_ts_i64
         !> pf_partial_argsort over a packed string column array, returning an int32 permutation.
-        module subroutine partial_argsort_strcol_i32(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_strcol_i32(values, perm, n, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_strcol_i32
         !> pf_partial_argsort over a packed string column array, returning an int64 permutation.
-        module subroutine partial_argsort_strcol_i64(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_strcol_i64(values, perm, n, descending, nulls_first, threads)
         type(parquet_string_column), intent(in) :: values
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_strcol_i64
         !> pf_partial_argsort over a type-erased column array, returning an int32 permutation.
-        module subroutine partial_argsort_col_i32(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_col_i32(values, perm, n, descending, nulls_first, threads)
         type(parquet_column), intent(in) :: values
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_col_i32
         !> pf_partial_argsort over a type-erased column array, returning an int64 permutation.
-        module subroutine partial_argsort_col_i64(values, perm, n, descending, nulls_first)
+        module subroutine partial_argsort_col_i64(values, perm, n, descending, nulls_first, threads)
         type(parquet_column), intent(in) :: values
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading elements to order; clamped to the size.
             logical, intent(in), optional :: descending !! .true. sorts high to low; default .false.
             logical, intent(in), optional :: nulls_first !! .true. places nulls first; default .false.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_col_i64
         !> pf_partial_argsort over a multi-key `pf_sort_keys`, returning an int32 permutation.
         !!
-        !! Each key carries its own `descending`/`nulls_first` from `%add`. No `threads`:
-        !! the partial sort is not threaded, as its per-type specifics already reflect.
-        module subroutine partial_argsort_keys_i32(keys, perm, n)
+        !! Each key carries its own `descending`/`nulls_first` from `%add`.
+        module subroutine partial_argsort_keys_i32(keys, perm, n, threads)
             class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
             integer(int32), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading rows to order; clamped to the row count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
         end subroutine partial_argsort_keys_i32
         !> pf_partial_argsort over a multi-key `pf_sort_keys`, returning an int64 permutation.
         !!
-        !! Each key carries its own `descending`/`nulls_first` from `%add`. No `threads`:
-        !! the partial sort is not threaded, as its per-type specifics already reflect.
-        module subroutine partial_argsort_keys_i64(keys, perm, n)
+        !! Each key carries its own `descending`/`nulls_first` from `%add`.
+        module subroutine partial_argsort_keys_i64(keys, perm, n, threads)
             class(pf_sort_keys), intent(in) :: keys !! the keys, primary first.
             integer(int64), allocatable, intent(out) :: perm(:) !! the first `n` 1-based indices.
             integer, intent(in) :: n !! leading rows to order; clamped to the row count.
+            integer, intent(in), optional :: threads
+            !! how many threads to sort with. ABSENT means auto: `omp_get_max_threads()` when the
+            !! caller is not already inside an OpenMP parallel region, and serial when they are.
+            !! `threads=1` forces serial. Deliberately a single default-kind `integer` with no
+            !! int64 form -- a thread count cannot exceed int32, so the dual-kind rule that
+            !! governs row counts and indices here does not apply.
+            !!
+            !! **The selection itself is SERIAL here, unlike `pf_argsort`.** A team reaches only
+            !! the key extraction (which walks all `size(values)` elements) and, for an int32
+            !! permutation, the narrowing. Those are the two whole-array passes either side of
+            !! the selection; the selection is what makes a partial sort cheap and is not
+            !! threaded. So expect `threads=` to matter here in proportion to the extraction,
+            !! not in proportion to the sort.
+            !!
+            !! **Accepted and inert on THIS specific.** A `pf_sort_keys` arrives with its
+            !! keys already built, so there is no extraction to thread, and an int64
+            !! permutation needs no narrowing. It is taken for consistency across the
+            !! generic; every other `pf_partial_argsort` specific does use it.
         end subroutine partial_argsort_keys_i64
         !> pf_partial_sort over a 32-bit integer array: the first `n` in order, as a copy.
         module subroutine partial_sort_i32(values, sorted, n, descending, nulls_first, is_valid, sorted_valid)

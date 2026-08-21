@@ -356,7 +356,13 @@ _ZIG = None
 
 
 def zig_tables():
-    """`(r, v, w, k, f)` from `tools/generate_parquet_ziggurat.py`, loaded once."""
+    """`(r, v, w, k, f)` from `tools/generate_parquet_ziggurat.py`, as `real64`, loaded once.
+
+    **`as_floats()`, not `tables()`** -- that generator derives in `decimal` and rounds once at
+    emission, so `tables()` hands back `Decimal`s.  This oracle must model what the Fortran
+    actually holds, which is the rounded table in `src/parquet_ziggurat.f90`, so it takes the
+    rounded form.  Using the `Decimal`s here would model a ziggurat the library does not have.
+    """
     global _ZIG
     if _ZIG is None:
         import importlib.util
@@ -364,7 +370,7 @@ def zig_tables():
         spec = importlib.util.spec_from_file_location("generate_parquet_ziggurat", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        _ZIG = mod.tables()
+        _ZIG = mod.as_floats()
     return _ZIG
 
 

@@ -189,6 +189,7 @@ something a reader is expected to have.
 | [Risk-127](#risk-127--floor-returns-a-default-integer-so-a-large-candidate-wraps-silently) | `floor()` returns a DEFAULT integer, so a large candidate wraps silently | 4 — covered |
 | [Risk-128](#risk-128--an-fma-barrier-is-architecture-gated-so-a-flag-sweep-without--marchnative-proves-nothing) | An FMA barrier is ARCHITECTURE-gated, so a flag sweep without `-march=native` proves nothing | 4 — covered |
 | [Risk-129](#risk-129--for-a-given-libm-is-violated-inside-one-program-by-a-vector-variant) | "For a given libm" is violated INSIDE one program, by a vector variant | 4 — covered |
+| [Risk-130](#risk-130--a-generator-that-derives-through-libm-emits-a-different-table-on-every-machine) | A GENERATOR that derives through libm emits a different table on every machine | 4 — covered |
 
 ---
 
@@ -196,7 +197,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-130**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-131**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -5665,3 +5666,42 @@ convenient length would not.
 - **A `_portable` form is the escape hatch and should be documented as such.** It is the only thing
   in this module that can promise a stored value reproduces across compilers, and this is one of the
   reasons why.
+
+### Risk-130 — A GENERATOR that derives through libm emits a different table on every machine
+
+**Covered** by `tools/generate_parquet_ziggurat.py --self-test`, which re-derives the whole table
+at a higher working precision and requires **identical doubles** — run in CI's lint stage and by
+`tools/run_lint_check.sh`.
+
+`src/parquet_ziggurat.f90` holds 771 constants that decide every value `pf_random_normal_at` and
+`%normal` return. They are the unique solution of one equation, and the first version of the
+generator solved it in `float`, through `math.exp`, `math.log`, `math.sqrt` and `math.erfc` — all
+libm, none correctly rounded, none identical between glibc versions.
+
+**The symptom was the mildest one available and it still cost a CI run**: `--check` failed against a
+file generated on a developer machine. The failure mode it warns of is much worse — a generator
+whose output nobody else can reproduce is a generator whose committed output nobody can verify, and
+the next person to regenerate it silently replaces the table with their machine's version.
+
+**The amplification is what makes this fatal rather than cosmetic.** The construction walks 255
+layers downward from `R`, each step feeding the next, so a **one-ulp** change in `R` moves **254 of
+the 255 widths** — measured. And `R` comes out of a bisection whose residual is a libm expression,
+so any last-bit disagreement re-rolls essentially the whole table. The drift was visible in the
+result: the float version's narrowest layer was `0.2152418959849138` against the correct
+`0.2152418959848817`, wrong in the 13th digit, and its `R` printed as `...092` where the published
+constant is `...088`.
+
+**Rules for any generator that emits floating-point constants:**
+
+- **Derive in `decimal`, not in `float`.** It is exact arithmetic at a stated precision with
+  correctly-rounded `exp`, `ln` and `sqrt`, so it gives the same digits on every platform and every
+  Python build. Round to `real64` once, at emission. Where `decimal` has no equivalent — there is no
+  `erfc` — sum the series directly rather than reaching back to `math`.
+- **`--self-test` must re-derive at a DIFFERENT working precision and require the same output.**
+  That is the check with power here: the property checks (equal areas, closure at the peak, the
+  published anchors) all passed on the libm version, because it was solving the right equation
+  slightly wrongly. Verified in both directions — halving the bisection steps and lowering the
+  working precision each make it fire, the latter with "255 of 256 widths move".
+- **A consumer of the table must take the ROUNDED form.** `generate_random_golden_vectors.py`'s
+  Ziggurat oracle calls `as_floats()`, not `tables()`: the Fortran holds the rounded constants, so
+  an oracle built on the `Decimal`s would model a ziggurat the library does not have.

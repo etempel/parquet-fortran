@@ -17,8 +17,36 @@ Usage:  tools/generate_parquet_ziggurat.py [--check] [--self-test]
 
   --check      regenerate into memory and compare with the committed file; exit 1 on difference.
   --self-test  re-derive the construction's defining properties -- equal areas, the closure at
-               the peak, the published (R, V) pair, monotonicity, and the acceptance ratio --
-               and exit 1 if any of them fails.
+               the peak, the published (R, V) pair, monotonicity, the acceptance ratio, and that
+               the answer does not depend on the working precision -- and exit 1 if any fails.
+
+EVERY NUMBER HERE IS COMPUTED IN `decimal`, NOT IN FLOAT, AND THAT IS THE WHOLE DIFFERENCE BETWEEN
+A GENERATOR ANYONE CAN VERIFY AND ONE THAT ONLY WORKS ON THE MACHINE THAT RAN IT.  The first
+version of this script used `math.exp`, `math.log`, `math.sqrt` and `math.erfc` -- all libm, none
+of them correctly rounded, and none of them identical between glibc versions.  `--check` therefore
+FAILED IN CI against a file generated on a developer machine, which is the mildest symptom
+available: the table it produced there was a different table, not a rounding of the same one.
+
+The amplification is what makes that fatal rather than cosmetic.  The construction walks 255 layers
+from `R` downward, each step feeding the next, so a **one-ulp** change in `R` moves **254 of the
+255 widths** -- measured, not estimated.  `R` itself comes out of a bisection whose residual is a
+libm expression, so a last-bit disagreement anywhere in libm re-rolls essentially the whole table.
+The float version's accumulated drift was visible in the result: its narrowest layer came out
+0.2152418959849138 against the correct 0.2152418959848817, wrong in the 13th digit.
+
+`decimal` is exact arithmetic at a stated precision with correctly-rounded `exp`, `ln` and `sqrt`,
+so it gives the same digits on every platform and every Python build.  The tail integral has no
+`decimal` equivalent of `erfc`, so it is summed from its own Taylor series below.  Rounding to
+`real64` happens once, at emission.
+
+Two rules follow for anyone editing this file:
+
+  * **Do not reintroduce `math.` anywhere in the derivation.**  It will appear to work, and the
+    committed table will silently become whatever the last machine to regenerate it produced.
+  * **`--self-test` re-derives the whole thing at two different working precisions and requires
+    identical doubles.**  That is the check that would have caught the original defect, and it is
+    the reason the search precision below can be chosen for speed without anyone having to argue
+    about whether it is enough.
 
 WHY THIS IS A GENERATOR AND NOT A PASTED TABLE.  A ziggurat table is 771 floating-point constants
 whose only correctness argument is the construction that produced them.  A pasted table can be
@@ -45,18 +73,31 @@ bits, and the base strip -- the only one needing special handling -- lands on in
 """
 
 import argparse
-import math
 import pathlib
 import sys
-from decimal import Decimal, getcontext
-
-getcontext().prec = 60
+from decimal import Decimal, getcontext, localcontext
 
 #: Layers.  256 is the usual choice for a 64-bit draw: the index costs 8 bits, which leaves 53 for
 #: the uniform and one for the sign inside a single 64-bit pattern, so a normal draw reads exactly
 #: one word pair in the common case.  Raising it would improve the acceptance rate by very little
 #: and cost another bit out of the same pattern.
 N_LAYERS = 256
+
+#: Working precision for the bisection, and for the single final walk.  The search is the
+#: expensive half -- one full 255-layer walk per iteration -- so it runs lower.  Neither number is
+#: load-bearing: `--self-test` re-derives everything at a different pair and requires the same
+#: doubles, which is what makes them a speed choice rather than an accuracy claim.
+SEARCH_PREC = 30
+FINAL_PREC = 45
+
+#: Bisection steps from the bracket below.  `9.5 / 2**80` is about 8e-24, and the walk amplifies an
+#: error in R by roughly three orders of magnitude, so this leaves R pinned far tighter than the
+#: 2.8e-17 ulp of the narrowest width it has to produce.
+SEARCH_ITERS = 80
+
+#: pi to 75 digits.  A mathematical constant, independently checkable, and needed because the tail
+#: integral is `sqrt(pi/2)` minus a series.
+PI = Decimal("3.141592653589793238462643383279502884197169399375105820974944592307816406286")
 
 WIDTH = 128           # emitted lines stay inside the project's 132-column limit
 
@@ -72,21 +113,40 @@ BANNER = """!===========================================
 
 def f(x):
     """The half-normal shape `exp(-x*x/2)`, unnormalised.  `f(0) = 1`."""
-    return math.exp(-0.5 * x * x)
+    return (-(x * x) / 2).exp()
 
 
 def f_inv(y):
-    """The `x >= 0` with `f(x) = y`.  Inverse of `f` on the half-line."""
-    return math.sqrt(-2.0 * math.log(y))
+    """The `x >= 0` with `f(x) = y`.  Inverse of `f` on the half-line; `y` must be in (0, 1)."""
+    return (-2 * y.ln()).sqrt()
+
+
+def half_normal_0_to_r(r):
+    """`integral_0^r exp(-x*x/2) dx`, from its Taylor series.
+
+    `decimal` has no `erfc`, so this is summed directly: the integrand's series integrates term by
+    term to `sum_n (-1)**n r**(2n+1) / (2**n n! (2n+1))`.  It alternates, so it loses digits to
+    cancellation for large `r` -- about 21 of them at `r = 10`, the top of the bisection bracket --
+    which is why the working precision has plenty of headroom and why `--self-test` checks the
+    answer at two of them.
+    """
+    r2 = r * r
+    term = r                                   # n = 0
+    total = r
+    n = 0
+    guard = Decimal(10) ** (-(getcontext().prec + 5))
+    while True:
+        n += 1
+        term = -term * r2 / (2 * n)
+        add = term / (2 * n + 1)
+        total += add
+        if abs(add) < guard * (abs(total) + 1):
+            return total
 
 
 def tail_area(r):
-    """Area under `f` beyond `r`, i.e. `integral_r^inf exp(-x*x/2) dx`.
-
-    `erfc` gives it in closed form, so this is not a quadrature and carries no tolerance of its
-    own: `integral_r^inf exp(-x*x/2) dx = sqrt(pi/2) * erfc(r/sqrt(2))`.
-    """
-    return math.sqrt(math.pi / 2.0) * math.erfc(r / math.sqrt(2.0))
+    """Area under `f` beyond `r`, i.e. `integral_r^inf exp(-x*x/2) dx`."""
+    return (PI / 2).sqrt() - half_normal_0_to_r(r)
 
 
 def build(r, n=N_LAYERS):
@@ -102,20 +162,20 @@ def build(r, n=N_LAYERS):
     one equation `r` has to satisfy.
     """
     v = r * f(r) + tail_area(r)
-    xs = [0.0] * n
+    xs = [Decimal(0)] * n
     xs[n - 1] = r
     y = f(r)
     for i in range(n - 1, 1, -1):
         y = y + v / xs[i]
-        if y >= 1.0:
+        if y >= 1:
             # `r` is too small: the stack reaches the peak before it has used every layer.
-            return xs, v, y - 1.0 + (i - 1)
+            return xs, v, y - 1 + (i - 1)
         xs[i - 1] = f_inv(y)
     xs[0] = v / f(r)                      # the base strip's width, tail area included
-    return xs, v, f(xs[1]) + v / xs[1] - 1.0
+    return xs, v, f(xs[1]) + v / xs[1] - 1
 
 
-def solve_r(n=N_LAYERS):
+def solve_r(n=N_LAYERS, prec=SEARCH_PREC, iters=SEARCH_ITERS):
     """Bisect for the `r` that makes the ziggurat close exactly at the peak.
 
     The residual DECREASES in `r`, which is what makes bisection sufficient -- and which is the
@@ -123,35 +183,45 @@ def solve_r(n=N_LAYERS):
     `f` falls faster than `r` rises, so a larger `r` gives a SMALLER shared area, hence smaller
     steps, hence a stack that runs out of layers below the peak.
     """
-    lo, hi = 0.5, 10.0                    # residual(0.5) > 0 (overshoots), residual(10) < 0
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        _, _, residual = build(mid, n)
-        if residual > 0.0:
-            lo = mid
-        else:
-            hi = mid
-    return 0.5 * (lo + hi)
+    with localcontext() as ctx:
+        ctx.prec = prec
+        lo, hi = Decimal("0.5"), Decimal(10)   # residual(0.5) > 0, residual(10) < 0
+        for _ in range(iters):
+            mid = (lo + hi) / 2
+            _, _, residual = build(mid, n)
+            if residual > 0:
+                lo = mid
+            else:
+                hi = mid
+        return +((lo + hi) / 2)
 
 
-def tables(n=N_LAYERS):
-    """`(r, v, w, k, fy)` for the solved ziggurat -- the five things the module publishes."""
-    r = solve_r(n)
-    w, v, _ = build(r, n)
-    k = [0.0] * n
-    # Layer i accepts immediately when `u < k(i)`, i.e. when the draw falls inside layer i-1's
-    # width, which is wholly under the curve. Layer 1 has no layer below it that is narrower --
-    # it contains the peak -- so it never accepts immediately.
-    k[0] = r / w[0]                       # the base strip's rectangle part; beyond it is the tail
-    k[1] = 0.0
-    for i in range(2, n):
-        k[i] = w[i - 1] / w[i]
-    fy = [f(x) for x in w]
-    fy[0] = 1.0                           # never used by layer 0; makes layer 1's wedge reach the peak
-    return r, v, w, k, fy
+def tables(n=N_LAYERS, search_prec=SEARCH_PREC, final_prec=FINAL_PREC):
+    """`(r, v, w, k, fy)` for the solved ziggurat, as `Decimal` -- the five things published."""
+    r = solve_r(n, prec=search_prec)
+    with localcontext() as ctx:
+        ctx.prec = final_prec
+        w, v, _ = build(+Decimal(r), n)
+        k = [Decimal(0)] * n
+        # Layer i accepts immediately when `u < k(i)`, i.e. when the draw falls inside layer i-1's
+        # width, which is wholly under the curve. Layer 1 has no layer below it that is narrower --
+        # it contains the peak -- so it never accepts immediately.
+        k[0] = r / w[0]                   # the base strip's rectangle part; beyond it is the tail
+        k[1] = Decimal(0)
+        for i in range(2, n):
+            k[i] = w[i - 1] / w[i]
+        fy = [f(x) for x in w]
+        fy[0] = Decimal(1)                # never used by layer 0; makes layer 1's wedge reach the peak
+        return r, v, w, k, fy
 
 
-def acceptance_rate(w, k, fy, n=N_LAYERS):
+def as_floats(n=N_LAYERS, search_prec=SEARCH_PREC, final_prec=FINAL_PREC):
+    """`tables()` rounded to `real64` -- the only place the derivation meets binary floating point."""
+    r, v, w, k, fy = tables(n, search_prec, final_prec)
+    return float(r), float(v), [float(x) for x in w], [float(x) for x in k], [float(x) for x in fy]
+
+
+def acceptance_rate(k):
     """Fraction of CANDIDATES accepted without a wedge test or a tail walk.
 
     Each layer is chosen with probability 1/n and accepts immediately with probability `k(i)`, so
@@ -164,68 +234,89 @@ def acceptance_rate(w, k, fy, n=N_LAYERS):
     immediate-acceptance share from this 0.985 to about 0.992.  Measured, not derived -- a path
     census over 200000 draws gives 0.9918 / 0.0080 / 0.00024 for rectangle / wedge / tail.
     """
-    return sum(k) / float(n)
+    return sum(k) / float(len(k))
 
 
 def self_test():
     """Re-derive the construction's defining properties.  Returns a list of failure descriptions."""
     bad = []
     r, v, w, k, fy = tables()
+    rf, vf, wf, kf, fyf = float(r), float(v), [float(x) for x in w], [float(x) for x in k], \
+        [float(x) for x in fy]
 
-    # 1. Every region has the same area. This is the definition of a ziggurat, and it is the
-    #    property a mistyped digit breaks while leaving everything else looking reasonable.
-    worst = 0.0
-    for i in range(2, N_LAYERS):
-        area = w[i] * (f(w[i - 1]) - f(w[i]))
-        worst = max(worst, abs(area - v) / v)
-    base = r * f(r) + tail_area(r)
-    worst = max(worst, abs(base - v) / v)
-    top = w[1] * (1.0 - f(w[1]))
-    worst = max(worst, abs(top - v) / v)
-    if worst > 1e-12:
-        bad.append("regions are not equal in area: worst relative deviation %.3e (want <= 1e-12)"
-                   % worst)
+    with localcontext() as ctx:
+        ctx.prec = FINAL_PREC
 
-    # 2. The stack closes at the peak: layer 1's top edge is f = 1 exactly.
-    residual = f(w[1]) + v / w[1] - 1.0
-    if abs(residual) > 1e-12:
-        bad.append("the ziggurat does not close at the peak: residual %.3e (want <= 1e-12)"
-                   % residual)
+        # 1. Every region has the same area. This is the definition of a ziggurat, and it is the
+        #    property a mistyped digit breaks while leaving everything else looking reasonable.
+        worst = Decimal(0)
+        for i in range(2, N_LAYERS):
+            area = w[i] * (f(w[i - 1]) - f(w[i]))
+            worst = max(worst, abs(area - v) / v)
+        base = r * f(r) + tail_area(r)
+        worst = max(worst, abs(base - v) / v)
+        top = w[1] * (1 - f(w[1]))
+        worst = max(worst, abs(top - v) / v)
+        # The bound is set by SEARCH_ITERS, not by the arithmetic: the bisection pins `R` to
+        # about 8e-24 and the 255-step walk amplifies an error there by some three orders of
+        # magnitude, so ~1e-21 is the floor. 1e-18 leaves margin and is still six orders better
+        # than the libm version of this script could manage.
+        if worst > Decimal("1e-18"):
+            bad.append("regions are not equal in area: worst relative deviation %.3e "
+                       "(want <= 1e-18)" % float(worst))
 
-    # 3. The published (R, V) for a 256-layer normal ziggurat, as an INDEPENDENT anchor -- these
+        # 2. The stack closes at the peak: layer 1's top edge is f = 1 exactly.
+        residual = f(w[1]) + v / w[1] - 1
+        if abs(residual) > Decimal("1e-18"):
+            bad.append("the ziggurat does not close at the peak: residual %.3e (want <= 1e-18)"
+                       % float(residual))
+
+    # 3. THE CHECK THE ORIGINAL VERSION OF THIS SCRIPT DID NOT HAVE, and the one that would have
+    #    caught its defect: the answer must not depend on the arithmetic used to reach it. A
+    #    derivation in `decimal` is platform-independent; one in libm is not, and the first version
+    #    of this generator emitted a different table on CI than on the machine that committed it.
+    r2, v2, w2, k2, fy2 = as_floats(search_prec=SEARCH_PREC + 12, final_prec=FINAL_PREC + 12)
+    if (r2, v2, w2, k2, fy2) != (rf, vf, wf, kf, fyf):
+        nw = sum(1 for a, b in zip(w2, wf) if a != b)
+        bad.append("re-deriving at a higher working precision gives a DIFFERENT table (%d of %d "
+                   "widths move), so the emitted values depend on the arithmetic rather than on "
+                   "the construction -- the working precision is too low, or something in the "
+                   "derivation is not exact" % (nw, N_LAYERS))
+
+    # 4. The published (R, V) for a 256-layer normal ziggurat, as an INDEPENDENT anchor -- these
     #    are the numbers every implementation of this table agrees on, and reproducing them is
     #    what says the bisection above solved the same equation everyone else solved.
-    if abs(r - 3.6541528853610088) > 1e-12:
-        bad.append("R = %.16f does not reproduce the published 3.6541528853610088" % r)
-    if abs(v - 0.00492867323399) > 1e-12:
-        bad.append("V = %.14f does not reproduce the published 0.00492867323399" % v)
+    if abs(rf - 3.6541528853610088) > 1e-12:
+        bad.append("R = %.16f does not reproduce the published 3.6541528853610088" % rf)
+    if abs(vf - 0.00492867323399) > 1e-12:
+        bad.append("V = %.14f does not reproduce the published 0.00492867323399" % vf)
 
-    # 4. Monotonicity, which the algorithm's immediate-acceptance test depends on: a layer must be
+    # 5. Monotonicity, which the algorithm's immediate-acceptance test depends on: a layer must be
     #    at least as wide as the one above it, or `u < zig_k(i)` would accept points outside the
     #    curve. Layer 0 is excluded -- the base strip is wider than R on purpose.
     for i in range(2, N_LAYERS):
-        if not (w[i - 1] < w[i]):
+        if not (wf[i - 1] < wf[i]):
             bad.append("layer widths are not increasing at i = %d" % i)
             break
-    if not (w[0] > r):
+    if not (wf[0] > rf):
         bad.append("the base strip (%.6f) is not wider than R (%.6f), which it must be because "
-                   "it carries the tail's area as well" % (w[0], r))
-    if k[1] != 0.0:
+                   "it carries the tail's area as well" % (wf[0], rf))
+    if kf[1] != 0.0:
         bad.append("zig_k(1) is not 0: layer 1 contains the peak and has no inner rectangle")
 
-    # 5. Every k is a fraction, and every f a probability. A ratio above 1 would accept a point
+    # 6. Every k is a fraction, and every f a probability. A ratio above 1 would accept a point
     #    beyond the layer's own width.
     for i in range(N_LAYERS):
-        if not (0.0 <= k[i] <= 1.0):
-            bad.append("zig_k(%d) = %r is outside [0, 1]" % (i, k[i]))
+        if not (0.0 <= kf[i] <= 1.0):
+            bad.append("zig_k(%d) = %r is outside [0, 1]" % (i, kf[i]))
             break
-        if not (0.0 < fy[i] <= 1.0):
-            bad.append("zig_f(%d) = %r is outside (0, 1]" % (i, fy[i]))
+        if not (0.0 < fyf[i] <= 1.0):
+            bad.append("zig_f(%d) = %r is outside (0, 1]" % (i, fyf[i]))
             break
 
-    # 6. The speed claim. A correct 256-layer table accepts about 99 % of draws with no further
+    # 7. The speed claim. A correct 256-layer table accepts about 99 % of draws with no further
     #    work; a table that is wrong in a way the checks above miss usually shows up here.
-    rate = acceptance_rate(w, k, fy)
+    rate = acceptance_rate(kf)
     if not (0.98 <= rate <= 0.995):
         bad.append("the immediate-acceptance rate is %.4f, outside the 0.98-0.995 a correct "
                    "256-layer table gives" % rate)
@@ -263,8 +354,8 @@ def array(name, size_expr, items, indent=4):
 
 
 def gen_module():
-    r, v, w, k, fy = tables()
-    rate = acceptance_rate(w, k, fy)
+    r, v, w, k, fy = as_floats()
+    rate = acceptance_rate(k)
 
     L = [BANNER, ""]
     L.append("!> Layer tables for the Ziggurat normal draw. **Data only -- no procedures.**")
@@ -343,10 +434,11 @@ def main(argv):
                 print("  " + line)
             print("The construction is wrong. Do NOT regenerate from it.")
             return 1
-        r, v, w, k, fy = tables()
+        r, v, w, k, fy = as_floats()
         print("generate_parquet_ziggurat.py: self-test OK (%d equal-area regions, closure at the "
-              "peak, published R = %.16f and V = %.14f, %.4f immediate acceptance)."
-              % (N_LAYERS, r, v, acceptance_rate(w, k, fy)))
+              "peak, published R = %.16f and V = %.14f, %.4f immediate acceptance, and an "
+              "identical table at a higher working precision)."
+              % (N_LAYERS, r, v, acceptance_rate(k)))
         return 0
 
     text = gen_module()

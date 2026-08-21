@@ -459,7 +459,7 @@ type(parquet_reader) :: reader
 integer(int64) :: nrows
 integer(int32), allocatable :: id(:)
 
-call parquet_open_reader(reader, "data.parquet", sample_fraction=0.1_real64, sample_seed=42)
+call parquet_open_reader(reader, "data.parquet", sample_fraction=0.1_real64, sample_seed=42_int64)
 call parquet_get_nrows(reader, nrows)      ! already the post-sample row count
 allocate(id(nrows))
 call parquet_read_column(reader, "id", id) ! already just the sampled rows
@@ -470,8 +470,9 @@ call parquet_close_reader(reader)
   current/default behavior. Must not be negative or `NaN` — either aborts immediately with `error
   stop`. Exactly `0.0` deterministically yields zero rows (not just with overwhelming
   probability).
-- `sample_seed` (`integer(int32)`, optional): omitted, or `<= 0`, draws a fresh seed from entropy
-  — a different sample each time you open the file. A positive value makes the draw reproducible:
+- `sample_seed` (`integer(int64)`, optional — write the literal as `42_int64`): omitted, or
+  `<= 0`, draws a fresh seed from entropy — a different sample each time you open the file. A
+  positive value makes the draw reproducible:
   the same `sample_fraction`/`sample_seed` pair always selects the exact same rows. Whichever seed
   actually gets used (caller-supplied or entropy-drawn) is reported by
   `parquet_close_reader(..., print_stat=.true.)` (a `sample: fraction=... seed=...` line) — read
@@ -496,3 +497,34 @@ call parquet_close_reader(reader)
   The benefit is purely to your own code processing fewer rows afterward. (Combining
   `sample_fraction=` with `filter=` does get the filter's own row-group pruning — the two compose,
   and a sample only ever removes rows the filter already kept.)
+
+### Which rows a seed selects
+
+The draw is this library's own counter-based generator, and the rule is published rather than
+internal — `parquet_sample_algorithm` names it, and it changes only when the rule does:
+
+```fortran
+character(len=:), allocatable :: rule
+rule = parquet_sample_algorithm        ! "sample:bernoulli-u<p/philox/v1"
+```
+
+For physical row `r` (1-based — the row's position in the file as written), the rule is:
+
+```fortran
+key     = pf_random_key(seed, parquet_sample_label)
+u       = pf_random_at(key, 0_int64, r)
+keep    = u < sample_fraction
+```
+
+You can run exactly that yourself to work out which rows a seed will select, without opening the
+file. Three consequences are worth knowing:
+
+- **A row's keep/drop depends on nothing but the seed and the row number.** Not on how the file is
+  read, not on which row groups a filter's statistics screen pruned, not on chunking. Two programs
+  reading the same file with the same seed see the same rows even if one of them filters first.
+- **`parquet_sample_label` keeps your own draws separate.** Passing `sample_seed=42_int64` does not
+  consume or collide with the values `pf_random_at(42_int64, ...)` gives you — the sample derives
+  its own stream through `pf_random_key`, so one seed can safely drive both.
+- **`sample_fraction = 0.0` keeps nothing** because `u` is in `[0, 1)` and no value is below zero,
+  not because of a special case.
+

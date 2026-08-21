@@ -16,6 +16,8 @@ module test_reading
     use parquet_strings, only : parquet_string_column
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
+    use test_random_vectors, only : samp_label, n_samp, n_samp_frac, samp_seed, samp_row, &
+        samp_u_bits, samp_frac_bits, samp_keep
     use test_errors, only : check_scenario_exit_status
     !
     implicit none
@@ -100,6 +102,8 @@ contains
                 test_datetime_array_filtered), &
             new_unittest("int32/boolean/string: row-mode and element-mode reads under an active row filter", &
                 test_array_row_element_mode_filtered), &
+            new_unittest("sample mapping: (seed, row) -> uniform and keep match the frozen oracle", &
+                test_sample_mapping_golden), &
             new_unittest("sample_fraction absent or >= 1.0 reads every row (current/default behavior)", &
                 test_sample_fraction_no_op), &
             new_unittest("sample_fraction == 0.0 deterministically yields zero rows", &
@@ -110,6 +114,10 @@ contains
                 test_sample_fraction_entropy_seed_differs), &
             new_unittest("sample_fraction combined with filter= applies the filter on top of the downsample", &
                 test_sample_fraction_with_filter), &
+            new_unittest("sample_seed uses the full int64 width: two seeds differing only above bit 31 differ", &
+                test_sample_seed_is_full_width), &
+            new_unittest("the deferred draw (filter= follows) selects the same rows as the immediate one", &
+                test_sample_deferred_equals_immediate), &
             new_unittest("plain LIST/LARGE_LIST columns from a foreign-written file (col_size, string length, print_stat)", &
                 test_list_type_foreign_fixture), &
             new_unittest("parquet_column_exists/parquet_get_column_type: all 9 canonical types, group aliases, " // &
@@ -2864,6 +2872,50 @@ contains
     !
     !> parquet_open_reader's sample_fraction=: omitted, exactly 1.0, and above 1.0 must all behave
     !> identically to not passing sample_fraction at all -- every row is read, in original order.
+    !> Freezes parquet_open_reader(..., sample_fraction=)'s row mapping against the generated
+    !> oracle in test_random_vectors, with no reader involved at all -- the reader's agreement with
+    !> the same mapping is a separate test.
+    !>
+    !> Three choices are pinned HERE and nowhere else: the label, the stream index, and the fact
+    !> that a physical row indexes the DRAW axis rather than the stream axis. Every uniform in the
+    !> table is a perfectly valid pf_random_at output under any of those choices, which is why the
+    !> vectors come from an independent Python oracle rather than from a Fortran run -- a table read
+    !> back out of the implementation could only confirm that the implementation agrees with itself.
+    !> Fraction 0.0 is in the table on purpose: it must keep nothing by arithmetic (u is in [0, 1),
+    !> so u < 0.0 is never true) rather than by a special case anyone could delete.
+    subroutine test_sample_mapping_golden(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: k, f
+        integer(int64) :: key
+        real(real64) :: u, frac
+        character(len=64) :: at_row
+        character(len=:), allocatable :: where_
+
+        call check(error, parquet_sample_label == samp_label, &
+            "parquet_sample_label must equal the oracle's frozen samp_label")
+        if (allocated(error)) return
+        call check(error, parquet_sample_algorithm == "sample:bernoulli-u<p/philox/v1", &
+            "parquet_sample_algorithm must name the frozen mapping")
+        if (allocated(error)) return
+
+        do k = 1, n_samp
+            ! Built once per row rather than once per check: CLAUDE.md's character-temporary rule.
+            write (at_row, '(a,i0,a,i0)') "seed ", samp_seed(k), ", row ", samp_row(k)
+            where_ = trim(at_row)
+            key = pf_random_key(samp_seed(k), parquet_sample_label)
+            u = pf_random_at(key, 0_int64, samp_row(k))
+            call check(error, transfer(u, 0_int64) == samp_u_bits(k), &
+                "sample uniform must match the oracle bit for bit at " // where_)
+            if (allocated(error)) return
+            do f = 1, n_samp_frac
+                frac = transfer(samp_frac_bits(f), 0.0_real64)
+                call check(error, (u < frac) .eqv. samp_keep((f - 1) * n_samp + k), &
+                    "sample keep/drop must match the oracle at " // where_)
+                if (allocated(error)) return
+            end do
+        end do
+    end subroutine test_sample_mapping_golden
+
     subroutine test_sample_fraction_no_op(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
@@ -2905,9 +2957,11 @@ contains
         call parquet_close_reader(reader)
     end subroutine test_sample_fraction_no_op
     !
-    !> sample_fraction == 0.0 is special-cased (see parquet_reader_set_sample in
-    !> parquet_wrapper.cpp) to a guaranteed all-false mask -- zero rows every time, not just with
-    !> overwhelming probability.
+    !> sample_fraction == 0.0 yields zero rows every time, not just with overwhelming probability
+    !> -- and by ARITHMETIC rather than by a special case: parquet_apply_sample's uniforms are in
+    !> [0, 1), so `u < 0.0` is never true (see parquet_sample_algorithm, parquet_core.f90). The one
+    !> special case that remains at fraction 0.0 is the reported SEED, which stays 0 because there
+    !> is nothing to reproduce; scenario_print_stat_sampled_rows covers that half.
     subroutine test_sample_fraction_zero(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
@@ -2944,12 +2998,12 @@ contains
         call parquet_write_column(writer, "id", id)
         call parquet_close_writer(writer)
 
-        call parquet_open_reader(reader, out_file, sample_fraction=0.3_real64, sample_seed=1234)
+        call parquet_open_reader(reader, out_file, sample_fraction=0.3_real64, sample_seed=1234_int64)
         call parquet_get_nrows(reader, nrows1)
         call parquet_read_column(reader, "id", back1(1:nrows1))
         call parquet_close_reader(reader)
 
-        call parquet_open_reader(reader, out_file, sample_fraction=0.3_real64, sample_seed=1234)
+        call parquet_open_reader(reader, out_file, sample_fraction=0.3_real64, sample_seed=1234_int64)
         call parquet_get_nrows(reader, nrows2)
         call parquet_read_column(reader, "id", back2(1:nrows2))
         call parquet_close_reader(reader)
@@ -2962,6 +3016,100 @@ contains
         call check(error, all(back1(1:nrows1) == back2(1:nrows2)), &
             "the same sample_fraction/sample_seed should select the exact same rows")
     end subroutine test_sample_fraction_seed_reproducible
+    !
+    !> `sample_seed` is `integer(int64)` and the whole width reaches the draw.
+    !>
+    !> The discriminating pair is the point: `s` and `s + 2**32` differ in NOTHING below bit 32, so
+    !> any truncation to 32 bits anywhere on the path -- the argument, the binding, the key
+    !> derivation -- makes them select the IDENTICAL rows. A single large seed would not show that;
+    !> it would reproduce happily against a truncating implementation. The second assertion then
+    !> checks a seed far above huge(int32) is usable at all, i.e. reproduces across two opens.
+    subroutine test_sample_seed_is_full_width(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: id(200), lo_bits(200), hi_bits(200), again(200)
+        integer(int64) :: n_lo, n_hi, n_again
+        integer :: i
+        integer(int64), parameter :: base = 1234_int64
+        integer(int64), parameter :: shifted = 1234_int64 + 4294967296_int64   ! base + 2**32
+        character(len=*), parameter :: out_file = "test_run/test_sample_seed_full_width.parquet"
+
+        id = [(i, i=1,200)]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64, sample_seed=base)
+        call parquet_get_nrows(reader, n_lo)
+        call parquet_read_column(reader, "id", lo_bits(1:n_lo))
+        call parquet_close_reader(reader)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64, sample_seed=shifted)
+        call parquet_get_nrows(reader, n_hi)
+        call parquet_read_column(reader, "id", hi_bits(1:n_hi))
+        call parquet_close_reader(reader)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64, sample_seed=shifted)
+        call parquet_get_nrows(reader, n_again)
+        call parquet_read_column(reader, "id", again(1:n_again))
+        call parquet_close_reader(reader)
+
+        call check(error, .not. (n_lo == n_hi .and. all(lo_bits(1:n_lo) == hi_bits(1:n_hi))), &
+            "seeds differing only above bit 31 must select different rows -- identical rows mean " // &
+            "the seed is being truncated to 32 bits somewhere on the path")
+        if (allocated(error)) return
+        call check(error, n_hi == n_again .and. all(hi_bits(1:n_hi) == again(1:n_again)), &
+            "a seed above huge(int32) must still reproduce exactly across two opens")
+    end subroutine test_sample_seed_is_full_width
+    !
+    !> The deferred draw and the immediate one select the SAME rows.
+    !>
+    !> A `filter=` with clauses makes parquet_apply_sample hand the mask over to be held rather
+    !> than installed, and parquet_reader_set_filter folds it in later; without one the mask is
+    !> installed straight away. Those are two different code paths through the C++ side, and the
+    !> row set must not depend on which was taken. The filter here keeps every row, so the two
+    !> results are directly comparable: any difference is the deferral, not the filter.
+    !>
+    !> This is what the coordinate-addressed draw buys. Under the sequential engine it replaced,
+    !> the two paths agreed only because the fold loop was careful to step the engine once per
+    !> physical row even for rows it discarded; now they agree by construction.
+    subroutine test_sample_deferred_equals_immediate(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: keeps_everything
+        integer(int32) :: id(200), immediate(200), deferred(200)
+        integer(int64) :: n_immediate, n_deferred
+        integer :: i
+        character(len=*), parameter :: out_file = "test_run/test_sample_deferred_equals_immediate.parquet"
+
+        id = [(i, i=1,200)]
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        call parquet_open_reader(reader, out_file, sample_fraction=0.4_real64, sample_seed=99_int64)
+        call parquet_get_nrows(reader, n_immediate)
+        call parquet_read_column(reader, "id", immediate(1:n_immediate))
+        call parquet_close_reader(reader)
+
+        call keeps_everything%add("id >= 1")
+        call parquet_open_reader(reader, out_file, filter=keeps_everything, &
+            sample_fraction=0.4_real64, sample_seed=99_int64)
+        call parquet_get_nrows(reader, n_deferred)
+        call parquet_read_column(reader, "id", deferred(1:n_deferred))
+        call parquet_close_reader(reader)
+
+        call check(error, n_immediate > 0_int64 .and. n_immediate < 200_int64, &
+            "sample_fraction=0.4 on 200 rows should select some but not all of them")
+        if (allocated(error)) return
+        call check(error, n_immediate == n_deferred, &
+            "the deferred and immediate sample paths must select the same number of rows")
+        if (allocated(error)) return
+        call check(error, all(immediate(1:n_immediate) == deferred(1:n_deferred)), &
+            "the deferred and immediate sample paths must select the exact same rows")
+    end subroutine test_sample_deferred_equals_immediate
     !
     !> sample_seed absent (or <= 0) draws a fresh seed from entropy each time -- two opens of the
     !> same file/sample_fraction should (overwhelmingly likely, for n=200/fraction=0.5) select
@@ -3003,7 +3151,7 @@ contains
     !> Regression test for a real bug found during development: applying the sample mask
     !> immediately (before a filter='s own clause evaluation) made the filter's referenced column
     !> come back already sample-compacted mid-evaluation, crashing Arrow's Filter kernel on a
-    !> length mismatch (see parquet_reader_set_sample's "pending_sample_mask" deferral in
+    !> length mismatch (see parquet_reader_set_sample's `pending_sample_keep` deferral in
     !> parquet_wrapper.cpp, which fixes this). filter= must apply on top of the downsample: every
     !> row in the final result must satisfy both the filter clause and have been selected by the
     !> sample, and the combined result must never exceed what the filter alone would have kept.
@@ -3028,7 +3176,7 @@ contains
         call parquet_close_reader(reader)
         filter_only_nrows = int(nrows, int32)
 
-        call parquet_open_reader(reader, out_file, filter=filt, sample_fraction=0.5_real64, sample_seed=99)
+        call parquet_open_reader(reader, out_file, filter=filt, sample_fraction=0.5_real64, sample_seed=99_int64)
         call parquet_get_nrows(reader, nrows)
         call check(error, nrows > 0_int64, "sample_fraction=0.5 combined with a selective filter should still keep some rows")
         if (allocated(error)) then

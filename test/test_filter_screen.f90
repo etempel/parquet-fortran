@@ -1011,7 +1011,7 @@ contains
         call write_screen_fixture(file, 100, 10)
         call filt%add("id > 75")
         call parquet_set_statistics_prescreen(.true.)
-        call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.5_real64, sample_seed=7)
+        call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.5_real64, sample_seed=7_int64)
         pruned = parquet_debug_get_row_groups_pruned()
         call parquet_get_nrows(reader, n_screened)
         allocate(screened(n_screened))
@@ -1019,7 +1019,7 @@ contains
         call parquet_close_reader(reader)
 
         call parquet_set_statistics_prescreen(.false.)
-        call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.5_real64, sample_seed=7)
+        call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.5_real64, sample_seed=7_int64)
         call parquet_get_nrows(reader, n_plain)
         allocate(plain(n_plain))
         if (n_plain > 0) call parquet_read_column(reader, "id", plain)

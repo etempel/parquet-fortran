@@ -68,6 +68,7 @@ import argparse
 import decimal
 import math
 import pathlib
+import re
 import struct
 import sys
 
@@ -717,6 +718,24 @@ def self_test():
                        "so the count must be even and at least 2" % (pp, d))
             break
 
+    # ---- The row sample's label, cross-checked against the SOURCE ----
+    #
+    # SAMPLE_LABEL is a copy of a value that lives in src/parquet_core.f90, and a copy is exactly
+    # what goes stale. Read the declaration back rather than trusting the constant above: without
+    # this, changing the label in Fortran and forgetting the oracle regenerates a whole table of
+    # plausible, wrong uniforms, and the suite then fails against vectors nobody can explain.
+    # Skipped rather than failed when the source is absent, so the generator still runs standalone.
+    core = pathlib.Path(__file__).resolve().parent.parent / "src" / "parquet_core.f90"
+    if core.exists():
+        m = re.search(r"parquet_sample_label\s*=\s*(-?\d+)_int64", core.read_text())
+        if m is None:
+            bad.append("src/parquet_core.f90 declares no parquet_sample_label -- the oracle's "
+                       "SAMPLE_LABEL cannot be checked against the source")
+        else:
+            eq("SAMPLE_LABEL matches src/parquet_core.f90", SAMPLE_LABEL, int(m.group(1)))
+    eq("the sample label differs from the normal labels",
+       SAMPLE_LABEL in (NORMAL_ZIG_LABEL, NORMAL_POLAR_LABEL, 0), False)
+
     return bad
 
 
@@ -727,6 +746,29 @@ def self_test():
 SEEDS = [0, 1, 12345, -7, INT64_MAX, INT64_MIN]
 STREAMS = [-5, 0, 1, 2, 1000000]
 DRAWS = [0, 1, 2, 5]                              # 0 exercises the clamp
+
+# ---- The reader's row sample (parquet_open_reader(..., sample_fraction=)) ----
+#
+# Not a parquet_random mapping, but a Philox-derived one: parquet_core composes pf_random_key and
+# pf_random_at into a per-row Bernoulli trial, and the composition has its own frozen contract
+# identifier (parquet_sample_algorithm). What the table below pins is exactly the part the two
+# existing tables cannot -- WHICH coordinate row r reads. Three independent choices live in it:
+# the label, the stream index, and the fact that r is the DRAW rather than the stream. Swap the
+# last two and every uniform is still a valid Philox output; only this table notices.
+SAMPLE_LABEL = 4994076164431785653              # src/parquet_core.f90's parquet_sample_label
+SAMPLE_SEEDS = [1, 42, 12345, -7, INT64_MAX]
+SAMPLE_FRACTIONS = [0.0, 0.1, 0.5, 0.9]
+SAMPLE_ROWS = [1, 2, 3, 7, 64, 65, 1000, 1000000]
+
+
+def sample_u(seed, row):
+    """The uniform physical row `row` (1-based) draws under `seed`."""
+    return at(random_key(seed, SAMPLE_LABEL), 0, row)
+
+
+def sample_rows():
+    """[(seed, row, u)] over the grid; the keep table is derived from it per fraction."""
+    return [(seed, row, sample_u(seed, row)) for seed in SAMPLE_SEEDS for row in SAMPLE_ROWS]
 
 
 def scalar_rows():
@@ -978,6 +1020,7 @@ def gen_module():
     fill_meta, fill64, fill32 = fill_rows()
     exps = exp_rows()
     normals = normal_rows()
+    samples = sample_rows()
 
     L = []
     L.append(BANNER)
@@ -1163,6 +1206,38 @@ def gen_module():
                [int_literal(struct.unpack("<q", struct.pack("<d", r[6]))[0], "int64") for r in normals])
     L += array("integer(int64)", "norm_polar_pairs", "n_norm",
                [int_literal(r[7], "int64") for r in normals])
+    L.append("")
+    L.append("    ! ---- The reader's row sample: parquet_open_reader(..., sample_fraction=) ----")
+    L.append("    !")
+    L.append("    ! parquet_core composes pf_random_key and pf_random_at into one Bernoulli trial")
+    L.append("    ! per PHYSICAL row, and parquet_sample_algorithm freezes the composition:")
+    L.append("    !")
+    L.append("    !   key     = pf_random_key(seed, parquet_sample_label)")
+    L.append("    !   u(r)    = pf_random_at(key, 0_int64, r)")
+    L.append("    !   keep(r) = u(r) < sample_fraction")
+    L.append("    !")
+    L.append("    ! The two tables above cannot pin any of that: every uniform below is a perfectly")
+    L.append("    ! valid pf_random_at output, and would stay one if the label changed, if the row")
+    L.append("    ! indexed the STREAM axis instead of the draw axis, or if the stream index were")
+    L.append("    ! anything but 0. Those three choices are what samp_u_bits pins, and samp_label is")
+    L.append("    ! asserted against parquet_sample_label so the oracle and the source cannot drift.")
+    L.append("    !")
+    L.append("    ! samp_keep is flattened: fraction f, row k is samp_keep((f-1) * n_samp + k). It")
+    L.append("    ! pins the comparison direction and the strict `<`, which is why fraction 0.0 is")
+    L.append("    ! in the table -- it must keep NOTHING, by arithmetic rather than a special case.")
+    L.append("    integer(int64), parameter :: samp_label = %s" % int_literal(SAMPLE_LABEL, "int64"))
+    L.append("    integer, parameter :: n_samp = %d" % len(samples))
+    L.append("    integer, parameter :: n_samp_frac = %d" % len(SAMPLE_FRACTIONS))
+    L += array("integer(int64)", "samp_seed", "n_samp", [int_literal(r[0], "int64") for r in samples])
+    L += array("integer(int64)", "samp_row", "n_samp", [int_literal(r[1], "int64") for r in samples])
+    L += array("integer(int64)", "samp_u_bits", "n_samp",
+               [int_literal(struct.unpack("<q", struct.pack("<d", r[2]))[0], "int64") for r in samples])
+    L += array("integer(int64)", "samp_frac_bits", "n_samp_frac",
+               [int_literal(struct.unpack("<q", struct.pack("<d", f))[0], "int64")
+                for f in SAMPLE_FRACTIONS])
+    L += array("logical", "samp_keep", "n_samp_frac * n_samp",
+               [(".true." if r[2] < f else ".false.")
+                for f in SAMPLE_FRACTIONS for r in samples])
     L.append("")
     L.append("end module test_random_vectors")
     L.append("")

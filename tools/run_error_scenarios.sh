@@ -691,6 +691,7 @@ scenarios=(
     "print_stat_released_column:0"
     "print_stat_sorted_rows:0"
     "sample_mask_build_error:1"
+    "sample_mask_length_mismatch:1"
     "string_length_on_non_string_column:1"
     "qc_range_violation_warns:0"
     "qc_range_violation_string_warns:0"

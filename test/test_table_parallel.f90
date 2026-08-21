@@ -136,7 +136,7 @@ contains
                 test_prefetch_filter_parallel_equals_serial), &
             new_unittest("an UNSEEDED sample prefetches in parallel with every column on one sample", &
                 test_prefetch_sample_unseeded_columns_agree), &
-            new_unittest("sample_seed=0 is treated as unseeded and is equally safe in parallel", &
+            new_unittest("sample_seed=0_int64 is treated as unseeded and is equally safe in parallel", &
                 test_prefetch_sample_seed_zero_columns_agree), &
             new_unittest("a masked slice prefetches in parallel with every column on one row set", &
                 test_prefetch_masked_slice_columns_agree), &
@@ -486,7 +486,7 @@ contains
         call check_sampled_prefetch_agrees(error, f, use_zero_seed=.false.)
     end subroutine test_prefetch_sample_unseeded_columns_agree
     !
-    !> `sample_seed=0` is `parquet_open_reader`'s own spelling of "draw a fresh seed", so it is the
+    !> `sample_seed=0_int64` is `parquet_open_reader`'s own spelling of "draw a fresh seed", so it is the
     !> unseeded case wearing an explicit argument -- and it is the one a gate written to test
     !> `allocated(read_sample_seed)` alone would have admitted while every reader drew separately.
     !> N4 resolves it to a real positive seed at open, so it is exactly as safe as the test above;
@@ -504,7 +504,7 @@ contains
     subroutine check_sampled_prefetch_agrees(error, f, use_zero_seed)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
         character(len=*), intent(in) :: f                   !! fixture path, one per caller.
-        logical, intent(in) :: use_zero_seed                !! .true. passes sample_seed=0 explicitly.
+        logical, intent(in) :: use_zero_seed                !! .true. passes sample_seed=0_int64 explicitly.
         type(parquet_table) :: t
         real(real64), allocatable :: a(:), c(:), e(:)
         integer :: used
@@ -513,7 +513,7 @@ contains
         call parquet_reset_settings()
         call parquet_debug_set_prefetch_threads_used(0_c_int64_t)
         if (use_zero_seed) then
-            call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=0_int32)
+            call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=0_int64)
         else
             call parquet_open_table(t, f, sample_fraction=0.5_real64)
         end if

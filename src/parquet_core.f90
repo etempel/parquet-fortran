@@ -69,6 +69,39 @@ module parquet_core
     !> reasonable declaration.
     integer, parameter :: read_qc_max_entry_len = 1024
 
+    !> The frozen contract identifier for `parquet_open_reader(..., sample_fraction=)`'s row draw.
+    !!
+    !! Reading `"sample:bernoulli-u<p/philox/v1"`, it names the mapping below and changes only when
+    !! that mapping changes -- which is what lets a program record, alongside its results, the rule
+    !! by which its rows were chosen, and lets a test fail loudly if the rule moves without anyone
+    !! saying so. Same role as `pf_random_algorithm` plays for the generator itself.
+    !!
+    !! **The mapping in full**, for physical row `r` (1-based: the row's position in the file as
+    !! written, unaffected by any filter, by row-group pruning, and by any row range):
+    !!
+    !! ```
+    !! key     = pf_random_key(seed, parquet_sample_label)
+    !! u(r)    = pf_random_at(key, 0_int64, r)
+    !! keep(r) = u(r) < sample_fraction
+    !! ```
+    !!
+    !! Two consequences worth knowing. `keep(r)` depends on nothing but the seed and the row, so one
+    !! seed selects the same rows however the file is read -- filtered, pruned, chunked or not. And
+    !! `sample_fraction = 0.0` keeps nothing by arithmetic rather than by a special case, `u` being
+    !! in `[0, 1)`.
+    character(len=*), parameter :: parquet_sample_algorithm = "sample:bernoulli-u<p/philox/v1"
+
+    !> Label separating the row sample's stream from every other family drawn from the same seed.
+    !!
+    !! **Not decoration -- feature_risks.md Risk-123.** Without it, `sample_seed=42_int64` would
+    !! draw the very words `pf_random_at(42_int64, 0_int64, ...)` hands a caller, so a program
+    !! seeding both from one number would find its sample correlated with its own draws. Every
+    !! marginal test still passes in that state; only a joint one sees it.
+    !!
+    !! The value is arbitrary beyond having to differ from every other label and from 0, and is
+    !! public so a caller can reproduce the selection outside the library.
+    integer(int64), parameter :: parquet_sample_label = 4994076164431785653_int64
+
     !> Canonical single data-type tokens parquet_column_exists/parquet_get_column_type recognize:
     !> valid_maml_data_types plus the three temporal base tokens ("date"/"time"/"timestamp").
     !> parquet_column_exists additionally accepts the group aliases "int" (int32/int64), "float"
@@ -1181,6 +1214,8 @@ module parquet_core
     public :: parquet_column_info
     public :: parquet_column_type
     public :: parquet_size_auto
+    public :: parquet_sample_algorithm
+    public :: parquet_sample_label
     public :: parquet_table_metadata
     public :: parquet_schema
     public :: parquet_maml_file
@@ -2591,8 +2626,10 @@ module parquet_core
             real(real64), intent(in), optional :: sample_fraction !! Bernoulli row-keep probability in [0.0, 1.0);
             !! omitted or >= 1.0 reads every row; must not be negative or NaN (error stops); exactly
             !! 0.0 yields zero rows deterministically.
-            integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
-            !! omitted or <= 0 draws a fresh seed from entropy.
+            integer(int64), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
+            !! omitted or <= 0 settles a fresh seed. **`integer(int64)` only, deliberately**: one
+            !! seed kind across the whole library, matching every `pf_random_*` seed. Do not add an
+            !! `int32` specific -- a literal is written `42_int64`.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
             logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement; defaults to present(schema)
             !! (on whenever a schema is given), pass .false. to opt out; no-op without a schema.
@@ -2618,8 +2655,10 @@ module parquet_core
             real(real64), intent(in), optional :: sample_fraction !! Bernoulli row-keep probability in [0.0, 1.0);
             !! omitted or >= 1.0 reads every row; must not be negative or NaN (error stops); exactly
             !! 0.0 yields zero rows deterministically.
-            integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
-            !! omitted or <= 0 draws a fresh seed from entropy.
+            integer(int64), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
+            !! omitted or <= 0 settles a fresh seed. **`integer(int64)` only, deliberately**: one
+            !! seed kind across the whole library, matching every `pf_random_*` seed. Do not add an
+            !! `int32` specific -- a literal is written `42_int64`.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
             logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement; defaults to present(schema)
             !! (on whenever a schema is given), pass .false. to opt out; no-op without a schema.
@@ -2642,8 +2681,10 @@ module parquet_core
             real(real64), intent(in), optional :: sample_fraction !! Bernoulli row-keep probability in [0.0, 1.0);
             !! omitted or >= 1.0 reads every row; must not be negative or NaN (error stops); exactly
             !! 0.0 yields zero rows deterministically.
-            integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
-            !! omitted or <= 0 draws a fresh seed from entropy.
+            integer(int64), intent(in), optional :: sample_seed !! >0 for a reproducible sample draw;
+            !! omitted or <= 0 settles a fresh seed. **`integer(int64)` only, deliberately**: one
+            !! seed kind across the whole library, matching every `pf_random_*` seed. Do not add an
+            !! `int32` specific -- a literal is written `42_int64`.
             type(parquet_schema), intent(in), optional :: schema !! schema/qc-maml to validate columns against.
             logical, intent(in), optional :: qc !! enable qc: min/max/miss enforcement; defaults to present(schema)
             !! (on whenever a schema is given), pass .false. to opt out; no-op without a schema.

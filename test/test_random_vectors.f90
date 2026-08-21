@@ -675,4 +675,63 @@ module test_random_vectors
         2_int64, 2_int64, 2_int64, 4_int64, 2_int64, 2_int64, 2_int64, 2_int64, 2_int64, 2_int64, 2_int64, 4_int64, 2_int64, &
         2_int64]
 
+    ! ---- The reader's row sample: parquet_open_reader(..., sample_fraction=) ----
+    !
+    ! parquet_core composes pf_random_key and pf_random_at into one Bernoulli trial
+    ! per PHYSICAL row, and parquet_sample_algorithm freezes the composition:
+    !
+    !   key     = pf_random_key(seed, parquet_sample_label)
+    !   u(r)    = pf_random_at(key, 0_int64, r)
+    !   keep(r) = u(r) < sample_fraction
+    !
+    ! The two tables above cannot pin any of that: every uniform below is a perfectly
+    ! valid pf_random_at output, and would stay one if the label changed, if the row
+    ! indexed the STREAM axis instead of the draw axis, or if the stream index were
+    ! anything but 0. Those three choices are what samp_u_bits pins, and samp_label is
+    ! asserted against parquet_sample_label so the oracle and the source cannot drift.
+    !
+    ! samp_keep is flattened: fraction f, row k is samp_keep((f-1) * n_samp + k). It
+    ! pins the comparison direction and the strict `<`, which is why fraction 0.0 is
+    ! in the table -- it must keep NOTHING, by arithmetic rather than a special case.
+    integer(int64), parameter :: samp_label = 4994076164431785653_int64
+    integer, parameter :: n_samp = 40
+    integer, parameter :: n_samp_frac = 4
+    integer(int64), parameter :: samp_seed(n_samp) = [ &
+        1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 1_int64, 42_int64, 42_int64, 42_int64, 42_int64, &
+        42_int64, 42_int64, 42_int64, 42_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, 12345_int64, &
+        12345_int64, 12345_int64, -7_int64, -7_int64, -7_int64, -7_int64, -7_int64, -7_int64, -7_int64, -7_int64, &
+        9223372036854775807_int64, 9223372036854775807_int64, 9223372036854775807_int64, 9223372036854775807_int64, &
+        9223372036854775807_int64, 9223372036854775807_int64, 9223372036854775807_int64, 9223372036854775807_int64]
+    integer(int64), parameter :: samp_row(n_samp) = [ &
+        1_int64, 2_int64, 3_int64, 7_int64, 64_int64, 65_int64, 1000_int64, 1000000_int64, 1_int64, 2_int64, 3_int64, &
+        7_int64, 64_int64, 65_int64, 1000_int64, 1000000_int64, 1_int64, 2_int64, 3_int64, 7_int64, 64_int64, 65_int64, &
+        1000_int64, 1000000_int64, 1_int64, 2_int64, 3_int64, 7_int64, 64_int64, 65_int64, 1000_int64, 1000000_int64, &
+        1_int64, 2_int64, 3_int64, 7_int64, 64_int64, 65_int64, 1000_int64, 1000000_int64]
+    integer(int64), parameter :: samp_u_bits(n_samp) = [ &
+        4605001362142509561_int64, 4603812233505305561_int64, 4583992557355582560_int64, 4603678625491083699_int64, &
+        4597500692554100212_int64, 4591175307306060344_int64, 4602917222918416013_int64, 4594072993721290720_int64, &
+        4591635747363313104_int64, 4605527984887725913_int64, 4595867851219701196_int64, 4600455769631143792_int64, &
+        4605488390654160763_int64, 4604430959454405643_int64, 4601075403143122452_int64, 4607014487235979479_int64, &
+        4604653839459961125_int64, 4588759676407207760_int64, 4603709176567618200_int64, 4606573209525060307_int64, &
+        4594806119745910600_int64, 4603108213565406644_int64, 4600250077884818610_int64, 4594408520938073296_int64, &
+        4596614518576414404_int64, 4603553086000406029_int64, 4597190025815271632_int64, 4582743079497814048_int64, &
+        4602783564628444719_int64, 4605082115835423482_int64, 4599484221963556230_int64, 4603493479128489511_int64, &
+        4603804197153358168_int64, 4597929480376164500_int64, 4585571202473217440_int64, 4596638322911295080_int64, &
+        4603040898607949466_int64, 4588914484235110528_int64, 4598662130200419796_int64, 4603568488185546361_int64]
+    integer(int64), parameter :: samp_frac_bits(n_samp_frac) = [ &
+        0_int64, 4591870180066957722_int64, 4602678819172646912_int64, 4606281698874543309_int64]
+    logical, parameter :: samp_keep(n_samp_frac * n_samp) = [ &
+        .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., &
+        .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., &
+        .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., .false., &
+        .false., .false., .false., .true., .false., .false., .true., .false., .false., .true., .false., .false., .false., &
+        .false., .false., .false., .false., .false., .true., .false., .false., .false., .false., .false., .false., .false., &
+        .false., .false., .true., .false., .false., .false., .false., .false., .false., .true., .false., .false., .true., &
+        .false., .false., .false., .false., .true., .false., .true., .true., .false., .true., .true., .false., .true., &
+        .true., .false., .false., .true., .false., .false., .true., .false., .false., .true., .false., .true., .true., &
+        .true., .false., .true., .true., .false., .false., .true., .false., .false., .true., .true., .true., .false., .true., &
+        .true., .false., .true., .true., .true., .true., .true., .true., .true., .true., .true., .true., .true., .true., &
+        .true., .true., .true., .false., .true., .true., .true., .false., .true., .true., .true., .true., .true., .true., &
+        .true., .true., .true., .true., .true., .true., .true., .true., .true., .true., .true., .true., .true., .true.]
+
 end module test_random_vectors

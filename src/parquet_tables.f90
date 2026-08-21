@@ -77,7 +77,7 @@ module parquet_tables
     ! sample_fraction= open is settled BEFORE the table's reader is created, so that reader and
     ! every later one (a clone's, a per-thread one) draw the identical rows. It stays out of the
     ! `use parquet` namespace via this module's default-private accessibility.
-    use parquet_bindings, only : parquet_draw_sample_seed
+    use parquet_random, only : pf_random_seed
     !
     implicit none
     private
@@ -350,11 +350,11 @@ module parquet_tables
         logical :: read_qc_soft = .false.                   !! qc_soft as given at open.
         real(real64), allocatable :: read_sample_fraction   !! sample_fraction as given at open.
         !> The seed every reader this table opens will sample with. Allocated and POSITIVE whenever
-        !! `read_sample_fraction` is allocated -- an unseeded open draws one at open time
-        !! (`parquet_draw_sample_seed`) rather than leaving each reader to draw its own. That
-        !! invariant is what makes a `%clone`, a reopen and a per-thread reader all keep the same
-        !! rows; before it existed, an unseeded clone redrew and silently held a different sample.
-        integer(int32), allocatable :: read_sample_seed
+        !! `read_sample_fraction` is allocated -- an unseeded open settles one at open time
+        !! (`pf_random_seed`) rather than leaving each reader to draw its own. That invariant is
+        !! what makes a `%clone`, a reopen and a per-thread reader all keep the same rows; before
+        !! it existed, an unseeded clone redrew and silently held a different sample.
+        integer(int64), allocatable :: read_sample_seed
     end type parquet_table_cache
     !
     !> Which rows to pick out of a column: `1:`, `1:10`, `1:10:2` or an explicit list.
@@ -1302,7 +1302,8 @@ module parquet_tables
             logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
             logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
-            integer(int32), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
+            integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
+            !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
         end subroutine open_table_full
         !> Slice-regime open, int32 row bounds -- see the `parquet_open_table` generic above, which
         !! also explains why there is no `sort` argument here and what `filter=`/`sample_fraction=`
@@ -1319,7 +1320,8 @@ module parquet_tables
             logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
             logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
-            integer(int32), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
+            integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
+            !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
         end subroutine open_table_slice_i32
         !> Slice-regime open, int64 row bounds -- see the `parquet_open_table` generic above.
         module subroutine open_table_slice_i64(table, filename, row_lo, row_hi, maml, filter, qc, &
@@ -1334,7 +1336,8 @@ module parquet_tables
             logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
             logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
             real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
-            integer(int32), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
+            integer(int64), intent(in), optional :: sample_seed !! seed for that draw; omitted = nondeterministic.
+            !! `integer(int64)` only, as everywhere in this library: a literal is `42_int64`.
         end subroutine open_table_slice_i64
         !> Opens a reader on `filename` with whatever read-time transform the table carries in its
         !! `read_*` components already attached -- `cache%reader` itself, or, when `rdr` is given,

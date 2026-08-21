@@ -650,6 +650,8 @@ program error_scenarios
         call scenario_print_stat_sorted_rows()
     case ("sample_mask_build_error")
         call scenario_sample_mask_build_error()
+    case ("sample_mask_length_mismatch")
+        call scenario_sample_mask_length_mismatch()
     case ("string_length_on_non_string_column")
         call scenario_string_length_on_non_string_column()
     case ("qc_range_violation_warns")
@@ -6897,11 +6899,11 @@ contains
     end subroutine scenario_sample_nan_fraction
 
     !> parquet_reader_print_stat's "sample:" line (added alongside the pre-existing "rows: N (of M
-    !> total)" summary -- see scenario_print_stat_filtered_rows above for that one). sample_seed=42
+    !> total)" summary -- see scenario_print_stat_filtered_rows above for that one). sample_seed=42_int64
     !> (> 0) so the reported seed is the exact caller-supplied value, not an entropy-drawn one --
     !> a fraction of exactly 0.0 would also be deterministic, but skips the draw entirely and
-    !> always reports seed=0 regardless of sample_seed (see parquet_reader_set_sample's own
-    !> comment), which wouldn't prove a caller-supplied seed round-trips into this line at all.
+    !> always reports seed=0 regardless of sample_seed (see parquet_apply_sample's own comment in
+    !> parquet_read.f90), which wouldn't prove a caller-supplied seed round-trips into this line.
     subroutine scenario_print_stat_sampled_rows()
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -6915,7 +6917,7 @@ contains
         call parquet_write_column(writer, "a", a_values)
         call parquet_close_writer(writer)
 
-        call parquet_open_reader(reader, out_file, sample_fraction=0.4_real64, sample_seed=42)
+        call parquet_open_reader(reader, out_file, sample_fraction=0.4_real64, sample_seed=42_int64)
         call parquet_close_reader(reader, print_stat=.true.)
         print '(a)', "print_stat covered the sample: fraction=... summary line"
     end subroutine scenario_print_stat_sampled_rows
@@ -7002,6 +7004,48 @@ contains
         call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64)
         print '(a)', "unexpectedly opened a sampled reader despite the forced sample-mask-build error"
     end subroutine scenario_sample_mask_build_error
+
+    !> parquet_reader_set_sample's keep_len guard (parquet_wrapper.cpp): the mask Fortran hands
+    !> over must cover exactly the file's physical rows, or the C++ side would read past its end.
+    !>
+    !> The guard CANNOT fire through the public API -- parquet_apply_sample sizes the mask from
+    !> `parquet_reader_get_total_nrows` on the very handle the C++ side then compares against, so
+    !> the two values come from one source and cannot disagree. It exists because a future change
+    !> could give the length a different origin (a row range, a slice) and the failure would then
+    !> be a silent out-of-bounds read rather than an error; tools/check_bindc_boundary.py checks
+    !> signatures and never buffer lengths, so nothing else covers it. The debug hook below is what
+    !> makes it testable instead of defensive code no fixture can reach: it makes the guard expect
+    !> one row MORE than the file has, so the correct mask Fortran built is rejected.
+    !>
+    !> The control arm matters as much as the abort: the same open runs cleanly with the hook clear
+    !> first, which is what proves the guard is not simply firing unconditionally.
+    subroutine scenario_sample_mask_length_mismatch()
+        interface
+            subroutine parquet_debug_set_force_sample_len_mismatch(enable) &
+                bind(C, name="parquet_debug_set_force_sample_len_mismatch")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero makes the keep_len guard expect one row too many; 0 restores.
+            end subroutine parquet_debug_set_force_sample_len_mismatch
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: v(3) = [1, 2, 3]
+        character(len=*), parameter :: out_file = "test_run/error_scenario_sample_mask_length_mismatch.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        ! Negative control: with the hook clear the identical open must succeed.
+        call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64, sample_seed=5_int64)
+        call parquet_close_reader(reader)
+        print '(a)', "control: the sampled open succeeded with the length hook clear"
+
+        call parquet_debug_set_force_sample_len_mismatch(1)
+        call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64, sample_seed=5_int64)
+        print '(a)', "unexpectedly opened a sampled reader despite the forced mask-length mismatch"
+    end subroutine scenario_sample_mask_length_mismatch
 
     !> parquet_reader_get_string_length's `default:` fallback
     !> (parquet_wrapper.cpp) for a column that isn't string-like/LIST/LARGE_LIST/FIXED_SIZE_LIST

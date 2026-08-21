@@ -54,7 +54,7 @@ contains
         logical, intent(in), optional :: qc_soft  !! warn on a qc violation instead of aborting.
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
-        integer(int32), intent(in), optional :: sample_seed !! seed for that draw.
+        integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`, not `42`.
         integer :: i, j, ncol, n_remap, n_qc, n_units
         integer(int64) :: file_rows
         logical :: masked
@@ -117,10 +117,11 @@ contains
         ! draws happen to keep a different number of rows; when the counts coincide it is a silent
         ! wrong answer, since parquet_check_read_row_count compares counts and not membership.
         !
-        ! Drawn in C++ rather than with RANDOM_NUMBER because parquet_open_table is reachable from
-        ! several threads at once (the documented per-thread-slice shape) and gfortran's RNG state
-        ! is not thread-safe -- resolve_sample_seed (parquet_wrapper.cpp) uses a stack-local engine
-        ! for exactly that reason, and this is the same draw without a reader attached.
+        ! Settled with pf_random_seed rather than with the intrinsic RANDOM_NUMBER because
+        ! parquet_open_table is reachable from several threads at once (the documented
+        ! per-thread-slice shape) and gfortran's own RNG state is not thread-safe. pf_random_seed
+        ! folds a process-wide counter, incremented by an atomic capture, into the clock, so two
+        ! threads settling a seed in the same tick still get different ones.
         !
         ! Unconditional whenever a fraction was given, including for a fraction the reader will
         ! install no draw for (>= 1.0) and one it will reject (negative/NaN): a seed is inert in
@@ -129,9 +130,9 @@ contains
         ! fresh one", so it counts as unseeded here too.
         if (present(sample_fraction)) then
             if (.not. allocated(table%cache%read_sample_seed)) then
-                table%cache%read_sample_seed = parquet_draw_sample_seed()
-            else if (table%cache%read_sample_seed <= 0_int32) then
-                table%cache%read_sample_seed = parquet_draw_sample_seed()
+                table%cache%read_sample_seed = pf_random_seed()
+            else if (table%cache%read_sample_seed <= 0_int64) then
+                table%cache%read_sample_seed = pf_random_seed()
             end if
         end if
         if (sliced) then

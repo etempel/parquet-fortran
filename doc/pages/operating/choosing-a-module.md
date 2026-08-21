@@ -44,7 +44,7 @@ in every one of them.
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
-| `parquet_io` | 40 | **yes** | reading and writing Parquet files, and nothing else |
+| `parquet_io` | 43 | **yes** | reading and writing Parquet files, and nothing else |
 | `parquet_tables` | 64 | **yes** | the `parquet_table` container |
 | `parquet` | 64 | **yes** | everything above, through one `use` |
 
@@ -54,9 +54,15 @@ Two rows deserve a note.
 nothing but a narrower namespace. The table layer sits on the reader, the column container and the
 sorting engine, which between them are almost the whole library.
 
-**`parquet_io` is the one real saving on the Arrow side**, at 40 files against 64: it drops the
-entire table layer, the random-number and sampling modules, and the facade. Reach for it when your
-program opens files, moves columns in and out, and never builds a `parquet_table`.
+**`parquet_io` is the one real saving on the Arrow side**, at 43 files against 64: it drops the
+entire table layer, the sampling module and the facade. Reach for it when your program opens files,
+moves columns in and out, and never builds a `parquet_table`.
+
+It does **not** drop `parquet_random`, and the three files that are not the table layer's are its:
+`parquet_open_reader(..., sample_fraction=)` picks its rows with this library's own generator, so
+the reader genuinely depends on it. Those three (`parquet_random`, `parquet_expkey`,
+`parquet_ziggurat`) are leaves that import nothing but `iso_fortran_env`, so the graph cannot grow
+further through them.
 
 ## Why the numbers jump the way they do
 

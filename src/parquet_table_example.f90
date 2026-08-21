@@ -193,7 +193,7 @@ contains
         logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
-        integer(int32), intent(in), optional :: sample_seed !! seed for that draw.
+        integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`.
         logical, intent(in), optional :: exact !! refuse a kind conversion that would lose a value;
         !! forwarded verbatim to %cast, whose own default applies when this is absent.
         !
@@ -224,7 +224,7 @@ contains
         logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
-        integer(int32), intent(in), optional :: sample_seed !! seed for that draw.
+        integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`.
         logical, intent(in), optional :: exact !! refuse a kind conversion that would lose a value;
         !! forwarded verbatim to %cast, whose own default applies when this is absent.
         !
@@ -255,7 +255,7 @@ contains
         logical, intent(in), optional :: qc_soft !! warn on a qc violation instead of aborting.
         logical, intent(in), optional :: use_threads !! forwarded to parquet_open_reader.
         real(real64), intent(in), optional :: sample_fraction !! keep each row with this probability.
-        integer(int32), intent(in), optional :: sample_seed !! seed for that draw.
+        integer(int64), intent(in), optional :: sample_seed !! seed for that draw; `42_int64`.
         logical, intent(in), optional :: exact !! refuse a kind conversion that would lose a value;
         !! forwarded verbatim to %cast, whose own default applies when this is absent.
         !

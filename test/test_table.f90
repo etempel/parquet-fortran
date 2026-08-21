@@ -9661,13 +9661,13 @@ contains
         character(len=*), parameter :: f = "test_run/table_xform_sample.parquet"
         !
         call write_basic_fixture(f)
-        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=1234_int32)
+        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=1234_int64)
         call check(error, t%nrows() < int(NROW, int64) .and. t%nrows() > 0_int64, &
             "sample_fraction= should keep some but not all of the rows")
         if (allocated(error)) return
         call t%get("i32", a)
 
-        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=1234_int32)
+        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=1234_int64)
         call t%get("i32", b)
         call check(error, size(a) == size(b) .and. all(a == b), &
             "the same sample_seed did not reproduce the same sample")
@@ -9933,7 +9933,7 @@ contains
         character(len=*), parameter :: f = "test_run/table_slice_sample.parquet"
         !
         call write_slice_xform_fixture(f, N, CH)
-        call parquet_open_table(t, f, LO, HI, sample_fraction=0.5_real64, sample_seed=20260802_int32)
+        call parquet_open_table(t, f, LO, HI, sample_fraction=0.5_real64, sample_seed=20260802_int64)
         call check(error, t%nrows() > 0_int64 .and. t%nrows() < int(HI - LO + 1, int64), &
             "a sampled slice should keep some but not all of its own rows")
         if (allocated(error)) return
@@ -9943,7 +9943,7 @@ contains
         if (allocated(error)) return
         ! The draw is seeded, so the same slice asked twice is the same rows -- which also confirms
         ! the range is applied to the draw rather than the draw being redone per open.
-        call parquet_open_table(again, f, LO, HI, sample_fraction=0.5_real64, sample_seed=20260802_int32)
+        call parquet_open_table(again, f, LO, HI, sample_fraction=0.5_real64, sample_seed=20260802_int64)
         call again%get("k", k2)
         call check(error, size(k2) == size(k), "the same seed should keep the same number of rows")
         if (allocated(error)) return
@@ -10062,7 +10062,7 @@ contains
         ! A SAMPLED table with no filter and no sort. It reaches the same on-demand branch as the
         ! filtered case, but through a different predicate -- there is no parquet_filter object
         ! anywhere -- so it is the one narrowing transform the cases above never exercise alone.
-        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=7)
+        call parquet_open_table(t, f, sample_fraction=0.5_real64, sample_seed=7_int64)
         call t%row_group_bounds(tb)
         call t%row_group_bounds(pb, physical=.true.)
         call check(error, all(pb == fb), &

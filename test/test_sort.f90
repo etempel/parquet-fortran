@@ -685,7 +685,7 @@ contains
 
         call write_basic_fixture(file)
         call srt%add("v asc")
-        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=3, sort_by=srt)
+        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=3_int64, sort_by=srt)
         call parquet_get_nrows(reader, nrows)
         call parquet_read_column(reader, "id", ids)
         call parquet_close_reader(reader)

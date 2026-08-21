@@ -21,6 +21,13 @@
 !> (`use parquet_sampling`). Each of those is its own entry module; `use parquet`
 !> is the facade that carries all of them at once.
 !>
+!> That list is about the NAMESPACE, not about what fpm compiles, and
+!> `parquet_random` is the one place the two differ: `pf_random_at` and its
+!> siblings are not reachable from `use parquet_io`, but the reader draws
+!> `sample_fraction=`'s rows with that generator, so its three-file leaf tier is
+!> compiled for this import. The footprint table in
+!> doc/pages/operating/choosing-a-module.md counts them.
+!>
 !> **This module does not make the library Arrow-free.** Reading and writing a
 !> Parquet file *is* the Arrow-facing half of parquet-fortran, so this module's
 !> graph reaches `parquet_bindings` and the C++ wrapper by design -- unlike

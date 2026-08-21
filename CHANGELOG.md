@@ -786,6 +786,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`sample_seed=` is now `integer(int64)`, and `parquet_open_reader(..., sample_fraction=)`
+  selects different rows for a given seed.** Two changes to one feature, and the first is a
+  compile-time break: a call written `sample_seed=42` no longer matches the dummy and must become
+  `sample_seed=42_int64`. One seed kind now runs through the whole library, matching every
+  `pf_random_*` seed; there is deliberately no `int32` form. This applies equally to
+  `parquet_open_table` and to types built by `tools/generate_user_table_code.py`, so a downstream
+  generated table gains the wider argument on its next regeneration.
+
+  The row draw itself moved off C++'s `std::mt19937_64`/`std::uniform_real_distribution` and onto
+  this library's own counter-based generator, so **the same `sample_fraction`/`sample_seed` pair
+  now selects a different subset than it did in 1.0.** What it buys: the mapping is published and
+  frozen rather than internal — `parquet_sample_algorithm` names it and `parquet_sample_label` lets
+  you reproduce a selection yourself, without opening the file — and it is pinned by golden vectors
+  derived from an independent oracle. A row's keep/drop now depends on the seed and the physical
+  row number and on nothing else, where previously it depended on how many draws had preceded it,
+  which meant a row group skipped by a filter's statistics screen had to be drawn for and discarded
+  or the same seed would silently pick different rows. Reproducibility is also no longer at the
+  mercy of the C++ standard library: `std::uniform_real_distribution`'s mapping onto a `double` is
+  implementation-defined, so "the same seed selects the same rows" was never a promise the standard
+  underwrote across libstdc++ and libc++. The library now contains exactly one generator, and
+  `tools/check_source_conventions.py` fails the build if a second one appears.
+
 - **The settings that are mirrored to the C++ side now take effect when a reader or writer is
   opened, rather than the instant they are set.** This affects `parquet_set_verbosity`,
   `parquet_set_message_stream`, `parquet_set_sort_counting_path` and

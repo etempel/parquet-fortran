@@ -833,6 +833,13 @@ One per distribution family, separate from `pf_random_algorithm` and from each o
 | `pf_gamma_algorithm` | the Marsaglia–Tsang variant, the `shape < 1` boost, **and which normal the inner loop consumes** |
 | `pf_poisson_algorithm` | both algorithms, the crossover `lambda`, and each one's draw order |
 
+One more lives outside this module, and is listed here because a program recording contracts wants
+all of them in one place: **`parquet_sample_algorithm`** (from `parquet_core`, so `use parquet_io` or
+`use parquet` reaches it) names the row mapping `parquet_open_reader(..., sample_fraction=)` uses.
+That draw is composed from `pf_random_key` and `pf_random_at` — the reader has no generator of its
+own — so `pf_random_algorithm` moving would move it too, which is why it has its own string. See
+[Random downsampling](../io/filter-sort-sample.html#which-rows-a-seed-selects) for the mapping.
+
 A family's identifier names **both** of its realisations where it has two: a program recording one
 string wants to know whether either form moved.
 

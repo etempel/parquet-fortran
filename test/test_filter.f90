@@ -638,7 +638,7 @@ contains
         character(len=*), parameter :: file = "test_run/filter_chunked_sampled.parquet"
 
         call write_chunked_fixture(file, 9, 3)
-        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=11)
+        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=11_int64)
         call parquet_get_chunk_size(reader, chunk_rows, row_group=2_int64)
         call check(error, chunk_rows == 3_int64, "a near-1.0 sample must keep all 3 rows of row group 2")
         if (allocated(error)) then
@@ -661,7 +661,7 @@ contains
 
         call write_chunked_fixture(file, 12, 4)
         call filt%add("v > 5")
-        call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.999999_real64, sample_seed=3)
+        call parquet_open_reader(reader, file, filter=filt, sample_fraction=0.999999_real64, sample_seed=3_int64)
         call parquet_get_nrows(reader, nrows)
         total = 0_int64
         do rg = 1, 3
@@ -1106,7 +1106,7 @@ contains
         character(len=*), parameter :: file = "test_run/filter_set_with_sample.parquet"
 
         call write_grid_fixture(file)
-        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=7)
+        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=7_int64)
         call parquet_get_nrows(reader, nrows_sampled)
         call check(error, nrows_sampled == 10, "set_filter with sample: expected the near-1.0 draw to keep every row")
         if (allocated(error)) then
@@ -1311,7 +1311,7 @@ contains
         character(len=*), parameter :: file = "test_run/filter_row_element_sampled.parquet"
 
         call write_vector_fixture(file, 12, 3)
-        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=11)
+        call parquet_open_reader(reader, file, sample_fraction=0.999999_real64, sample_seed=11_int64)
         call parquet_get_nrows(reader, nrows)
         call check(error, nrows == 12_int64, "the near-1.0 draw must keep every row")
         if (allocated(error)) then

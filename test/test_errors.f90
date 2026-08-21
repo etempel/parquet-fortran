@@ -626,6 +626,8 @@ contains
                 test_print_stat_sampled_rows), &
             new_unittest("a forced sample-mask-build failure aborts via a clean error stop", &
                 test_sample_mask_build_error_aborts), &
+            new_unittest("a sample mask whose length disagrees with the file's row count aborts", &
+                test_sample_mask_length_mismatch_aborts), &
             new_unittest("string length query on a non-string column aborts", &
                 test_string_length_on_non_string_column_aborts), &
             new_unittest("qc-maml: unrecognized miss: value aborts", &
@@ -5411,6 +5413,39 @@ contains
             failure_message="a forced sample-mask-build failure was expected to abort", &
             required_stderr="parquet_open_reader: forced debug error: sample mask build failed")
     end subroutine test_sample_mask_build_error_aborts
+
+    !> parquet_reader_set_sample's keep_len guard: the mask Fortran builds must cover exactly the
+    !> file's physical rows. Unreachable through the public API (both sides take the count from one
+    !> handle), so the scenario forces the guard to expect one row too many -- and runs the same
+    !> open with the hook clear first, which is what proves the guard is not firing unconditionally.
+    subroutine test_sample_mask_length_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: saw_control, saw_message
+
+        call run_error_scenario("sample_mask_length_mismatch", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "a sample mask disagreeing with the file's row count was expected to abort")
+        if (allocated(error)) return
+
+        ! The negative control comes FIRST, and is the half that gives the abort its meaning: a
+        ! guard that fired unconditionally would pass the assertion above just as happily.
+        call scenario_capture_contains(out_file, err_file, &
+            "control: the sampled open succeeded with the length hook clear", saw_control)
+        call check(error, saw_control, &
+            "the identical open must succeed with the length hook clear, or the abort below " // &
+            "proves only that the guard fires, not that it fires for the right reason")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, &
+            "sample mask covers 3 rows but the file has 4", saw_message)
+        call check(error, saw_message, &
+            "the abort must name both the mask's length and the file's row count")
+    end subroutine test_sample_mask_length_mismatch_aborts
 
     !> parquet_reader_get_string_length's `default:` fallback for a column that isn't
     !> string-like/LIST-typed at all -- reached via a plain `throw`, not report_fatal_error, but

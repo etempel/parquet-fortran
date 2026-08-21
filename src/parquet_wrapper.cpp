@@ -54,7 +54,6 @@
 #include <limits>
 #include <numeric>
 #include <mutex>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -535,25 +534,23 @@ extern "C"
 		// it for a reproducible repeat.
 		bool has_sample = false;
 		double sample_fraction = 0.0;
-		int32_t sample_seed_used = 0;
+		int64_t sample_seed_used = 0;
 		// Set when parquet_reader_set_sample was told a filter= will also be applied right after:
-		// the draw itself is DEFERRED to parquet_reader_set_filter rather than performed here.
-		// Two independent reasons, both load-bearing:
+		// the caller-supplied keep mask is held HERE and folded in by parquet_reader_set_filter
+		// rather than installed immediately. One reason, and it is about ordering alone:
+		// installing a sample mask now would make every subsequent column read -- including the
+		// filter's own referenced columns, read while parquet_reader_set_filter evaluates its
+		// clauses -- come back already sample-compacted, breaking the row-index alignment clause
+		// evaluation depends on (confirmed by a real Arrow "must all be the same length" crash
+		// when this wasn't deferred).
 		//
-		//   * Correctness. Installing a sample mask immediately would make every subsequent column
-		//     read -- including the filter's own referenced columns, read while
-		//     parquet_reader_set_filter evaluates its clauses -- come back already sample-compacted,
-		//     breaking the row-index alignment clause evaluation depends on (confirmed by a real
-		//     Arrow "must all be the same length" crash when this wasn't deferred).
-		//   * Memory. The filter's statistics screen has not run yet at set_sample time, so which
-		//     row groups survive is not yet known. Drawing later, inside set_filter, means the draw
-		//     only has to be STORED for the rows that survive screening/scoping -- see live_mask.
-		//
-		// The seed is still chosen (and reported back to the caller) here, so a deferred draw is as
-		// reproducible as an immediate one; only the Bernoulli trials themselves are deferred.
+		// It is NOT about which rows survive the screen. The mask spans the file's physical rows
+		// and each entry depends only on (seed, row), so a deferred fold and an immediate install
+		// select identically; the screen cannot move a single decision. That was not true while
+		// the draw was a sequential engine stepped once per row, and the difference is why this
+		// vector can simply be indexed by physical row below.
 		bool has_pending_sample = false;
-		double pending_sample_fraction = 0.0;
-		int32_t pending_sample_seed = 0;
+		std::vector<uint8_t> pending_sample_keep;
 		// Access bookkeeping for parquet_reader_print_stat only: was_prefetched
 		// is set for every column index named in a parquet_reader_prefetch_columns
 		// call (whether or not it actually triggered a read that time -- see
@@ -5325,110 +5322,53 @@ extern "C"
 		}
 	}
 
-	// Random-downsampling support for parquet_open_reader(..., sample_fraction=). Fills `combined`
-	// (already sized total_nrows, all zero) with a fresh Bernoulli(sample_fraction) draw per row --
-	// row i is kept iff a uniform [0,1) draw is <= sample_fraction. Seeds either deterministically
-	// from `seed` (when has_seed and seed > 0) or from entropy (std::random_device); either way,
-	// *actual_seed_out is filled with whichever seed the draw actually used, so a non-deterministic
-	// run's seed can be read back afterward (see parquet_reader_print_stat) and reused for a
-	// reproducible repeat. The entropy-drawn seed is deliberately kept in [1, INT32_MAX] -- a
-	// negative or zero seed_used would round-trip back through parquet_open_reader's own
-	// "sample_seed <= 0 means draw a fresh seed" convention as "no seed", breaking that promise.
-	// Uses a local (stack-scoped) engine -- no shared/global RNG state -- so this stays safe under
-	// this library's documented "many threads, each opening its own reader" concurrency pattern
-	// (see doc/pages/operating/thread-safety.md); gfortran's own RANDOM_NUMBER/RANDOM_SEED state has no such
-	// guarantee, which is why this draw is done here rather than on the Fortran side.
-	static int32_t resolve_sample_seed(int32_t seed, bool has_seed)
-	{
-		if (has_seed && seed > 0) return seed;
-		std::random_device rd;
-		std::uniform_int_distribution<int32_t> seed_dist(1, std::numeric_limits<int32_t>::max());
-		return seed_dist(rd);
-	}
+	// Random-downsampling support for parquet_open_reader(..., sample_fraction=). The Bernoulli
+	// trials are NOT made here: parquet_apply_sample (parquet_read.f90) builds the whole
+	// per-PHYSICAL-row keep mask with this library's own counter-based generator and hands it over
+	// as `keep`, one byte per row of the file. parquet_sample_algorithm (parquet_core.f90) states
+	// the frozen mapping; test/test_random_vectors.f90 pins it against an independent oracle.
+	//
+	// WHY THE MASK ARRIVES READY-MADE RATHER THAN BEING DRAWN HERE, because the previous shape is
+	// the one a reader will expect. The draw used to be a std::mt19937_64 stepped once per row, so
+	// row i's decision depended on how many draws had preceded it. That made two things true at
+	// once: a row group the statistics screen pruned still had to be drawn for and discarded, or
+	// the same seed would select different rows depending on an unrelated optimisation; and
+	// std::uniform_real_distribution is unspecified across standard library implementations, so
+	// "the same seed selects the same rows" was a promise the C++ standard did not underwrite.
+	// keep[i] is now a pure function of (seed, i). Nothing downstream can shift it, the deferred
+	// and immediate paths below are identical by construction rather than by discipline, and the
+	// mapping is frozen and tested rather than inherited from whichever libstdc++ is installed.
 
-	// The same draw, without a reader: a caller that needs a sample seed BEFORE any reader exists.
-	// parquet_table is the one caller -- it settles the seed at open time so that its own reader,
-	// a %clone's reader and every per-thread reader all sample the identical rows (an unseeded
-	// clone used to redraw, which is a wrong answer whenever the two draws happen to keep the same
-	// number of rows). Doing it here rather than with Fortran's RANDOM_NUMBER is what keeps that
-	// path thread-safe, for the reason resolve_sample_seed's own comment gives. Always positive,
-	// so the result round-trips back through sample_seed= as a real seed rather than as "no seed".
-	int32_t parquet_draw_sample_seed(void)
-	{
-		return resolve_sample_seed(0, false);
-	}
+	// Test-only: makes the length guard below reject a length that is in fact correct. The guard
+	// cannot otherwise be reached -- Fortran sizes the mask from this same handle's total_nrows --
+	// so without this hook it would be defensive code no test could exercise. Reached only through
+	// the local bind(C) interface in test/error_scenarios.f90.
+	// Its setter, parquet_debug_set_force_sample_len_mismatch, sits with the other debug setters
+	// further down; only the flag lives here, next to the guard it forces.
+	static bool g_debug_force_sample_len_mismatch = false;
 
-	// One Bernoulli(sample_fraction) trial per PHYSICAL row of the file, streamed rather than
-	// materialized: the caller walks the file's rows in order and calls next() exactly once per
-	// row, storing the answer only where it has somewhere to put it.
-	//
-	// CALL next() ONCE PER PHYSICAL ROW, IN FILE ORDER, INCLUDING FOR ROWS NOTHING WILL KEEP.
-	// The engine advances once per call, so skipping a row group would shift every later row's
-	// draw, and the same seed would then select different rows depending on whether the statistics
-	// screen happened to prune something -- a silent, invisible dependence of a documented
-	// reproducible result on an unrelated optimization. Drawing for every row and discarding the
-	// ones with nowhere to go keeps a deferred, screened draw bit-identical to an immediate,
-	// unscreened one. The cost is arithmetic, not memory; a per-row Bernoulli draw is
-	// O(total_nrows) in time either way (feature_filter.md's counter-based sample RNG is what
-	// would remove even that, and is deliberately out of scope here).
-	//
-	// A default-constructed instance is inactive and answers true for every row, so a caller with
-	// no sample can drive the same loop without branching.
-	//
-	// (A plain struct rather than a callback template: this whole file sits inside one extern "C"
-	// block, where templates are not allowed. Member functions keep C++ linkage regardless.)
-	struct SampleDraw
-	{
-		bool active = false;
-		double fraction = 0.0;
-		std::mt19937_64 engine;
-		std::uniform_real_distribution<double> dist{0.0, 1.0};
-
-		void start(double sample_fraction, int32_t seed)
-		{
-			active = true;
-			fraction = sample_fraction;
-			engine.seed(static_cast<uint64_t>(seed));
-		}
-		// sample_fraction == 0.0 is a guaranteed all-false result (deterministic zero rows) rather
-		// than a near-zero draw probability, and consumes no randomness at all.
-		bool next()
-		{
-			if (!active) return true;
-			if (fraction <= 0.0) return false;
-			return dist(engine) <= fraction;
-		}
-	};
-
-	// Validates nothing (sample_fraction/sample_seed are already fully validated Fortran-side --
-	// see parquet_open_reader_base's NaN/negative checks) and applies a Bernoulli(sample_fraction)
-	// row mask to `handle`, called from parquet_open_reader_base right after the reader is created
-	// and before any filter=/qc setup. sample_fraction is assumed already in [0.0, 1.0) by the
-	// caller; exactly 0.0 yields a guaranteed all-false mask (deterministic zero rows) rather than
-	// relying on a near-zero draw probability -- see stream_sample_draw.
-	//
-	// filter_will_follow (set by the Fortran caller from its own "will parquet_apply_filter run
-	// right after this" check, i.e. present(filter) .and. filter%n > 0): when true, NOTHING is drawn
-	// here -- only the fraction and the resolved seed are recorded, and parquet_reader_set_filter
-	// performs the draw itself once it knows which row groups survive (see has_pending_sample's own
-	// comment for both reasons). nrows is left untouched in that case too; set_filter finalizes it.
-	// When false, this draws and installs immediately, exactly as if no filter were ever coming --
-	// a sample-only reader has nothing to screen with, so every row group is live and the mask spans
-	// the whole file.
-	//
-	// has_sample/sample_fraction/sample_seed_used (for parquet_reader_print_stat) are always set
-	// immediately either way, regardless of deferral, and *actual_seed_out always reports the seed
-	// the draw will actually use -- so a caller can read back a non-deterministic run's seed and
-	// reuse it for a reproducible repeat whether or not the draw was deferred. Returns 0 on success;
-	// on the (not fixture-triggerable in practice on its own) BooleanBuilder allocation failure
-	// below, returns 1 and writes a reason into err_out (truncated to err_cap).
-	// g_debug_force_sample_mask_error (see its own comment, near
-	// parquet_debug_set_force_sample_mask_error further down) lets test/error_scenarios.f90 exercise
-	// this failure return -- and the Fortran-side error stop that surfaces it (parquet_apply_sample,
-	// parquet_read.f90) -- without needing a genuine allocation failure.
+	// See parquet_debug_set_force_sample_mask_error further down for what this one forces.
 	static bool g_debug_force_sample_mask_error = false;
-	int64_t parquet_reader_set_sample(void *handle, double sample_fraction, int32_t seed, int8_t has_seed,
-		int8_t filter_will_follow, int32_t *actual_seed_out, char *err_out, int64_t err_cap)
+
+	// Applies the caller-built Bernoulli row mask to `handle`, called from parquet_apply_sample
+	// (parquet_read.f90) right after the reader is created and before any filter=/qc setup.
+	// sample_fraction and seed_used are recorded for parquet_reader_print_stat's "sample:" line
+	// only -- every keep/drop decision is already in `keep`, which spans the file's PHYSICAL rows,
+	// all keep_len == total_nrows of them, one byte each, nonzero meaning keep.
+	//
+	// filter_will_follow (set by the Fortran caller from `present(filter) .and. filter%n > 0`):
+	// when true the mask is only STASHED here, and parquet_reader_set_filter folds it in once it
+	// knows which row groups survive. That deferral is about ORDERING and nothing else now --
+	// installing a mask here would make the filter's own referenced columns come back already
+	// sample-compacted while its clauses are being evaluated, breaking the row-index alignment
+	// clause evaluation depends on (confirmed by a real Arrow "must all be the same length" crash
+	// when this wasn't deferred). It is NO LONGER about which rows survive screening: the mask is
+	// the same either way, which is exactly what the coordinate-addressed draw bought.
+	//
+	// Returns 0 on success; 1 with a reason in err_out on a length disagreement or on the (not
+	// fixture-triggerable on its own) BooleanBuilder allocation failure inside install_row_mask.
+	int64_t parquet_reader_set_sample(void *handle, double sample_fraction, int64_t seed_used,
+		const int8_t *keep, int64_t keep_len, int8_t filter_will_follow, char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
 
@@ -5438,17 +5378,28 @@ extern "C"
 			return 1;
 		}
 
-		// sample_fraction == 0.0 does no draw at all, so it has no seed to report.
-		*actual_seed_out = (sample_fraction > 0.0) ? resolve_sample_seed(seed, has_seed != 0) : 0;
+		// Fortran sizes the mask from this handle's own total_nrows, so this cannot fire through the
+		// public API. It is here because the two sides could drift -- a future row-ranged or
+		// otherwise derived length is the obvious way -- and the failure would then be a silent
+		// out-of-bounds read rather than an error. tools/check_bindc_boundary.py checks signatures,
+		// never buffer lengths, so nothing else covers this.
+		int64_t expected = reader_handle->total_nrows + (g_debug_force_sample_len_mismatch ? 1 : 0);
+		if (keep_len != expected)
+		{
+			std::snprintf(err_out, static_cast<size_t>(err_cap),
+				"sample mask covers %lld rows but the file has %lld",
+				static_cast<long long>(keep_len), static_cast<long long>(expected));
+			return 1;
+		}
+
 		reader_handle->has_sample = true;
 		reader_handle->sample_fraction = sample_fraction;
-		reader_handle->sample_seed_used = *actual_seed_out;
+		reader_handle->sample_seed_used = seed_used;
 
 		if (filter_will_follow != 0)
 		{
 			reader_handle->has_pending_sample = true;
-			reader_handle->pending_sample_fraction = sample_fraction;
-			reader_handle->pending_sample_seed = *actual_seed_out;
+			reader_handle->pending_sample_keep.assign(keep, keep + keep_len);
 			return 0;
 		}
 
@@ -5458,10 +5409,8 @@ extern "C"
 		reader_handle->row_groups_pruned = 0;
 		int64_t live_rows = assign_row_group_live_offsets(reader_handle);
 		std::vector<uint8_t> combined(static_cast<size_t>(live_rows), 0);
-		SampleDraw draw;
-		draw.start(sample_fraction, *actual_seed_out);
 		// Every row group is live here, so the live-row index and the physical row index coincide.
-		for (int64_t i = 0; i < live_rows; ++i) combined[static_cast<size_t>(i)] = draw.next() ? 1 : 0;
+		for (int64_t i = 0; i < live_rows; ++i) combined[static_cast<size_t>(i)] = keep[i] != 0 ? 1 : 0;
 
 		if (!install_row_mask(reader_handle, combined, err_out, err_cap)) return 1; // GCOVR_EXCL_LINE
 		return 0;
@@ -6540,24 +6489,20 @@ extern "C"
 		// nothing for the screen or the stack machine to walk).
 		if (n <= 0 && !scoped && !row_ranged) return 0;
 
-		// The sample draw that has to be folded in, if any, and where it comes from. Both forms are
+		// The row sample that has to be folded in, if any, and where it comes from. Both forms are
 		// applied once at the very end, after unknown has collapsed to false -- never as the
 		// starting value of the expression's own evaluation, or an OR could resurrect a
 		// non-sampled row.
-		bool draw_sample = false;
-		double sample_fraction = 0.0;
-		int32_t sample_seed = 0;
+		std::vector<uint8_t> sample_keep;
 		std::shared_ptr<arrow::BooleanArray> prior_mask;
 		std::vector<int64_t> prior_offsets;
 		if (reader_handle->has_pending_sample)
 		{
-			// parquet_reader_set_sample ran first and deferred its draw to here (see
-			// has_pending_sample's own comment), both so every column read below is still
-			// raw/unfiltered while clauses are evaluated, and so the draw only has to be stored for
-			// rows the screen below leaves live.
-			draw_sample = true;
-			sample_fraction = reader_handle->pending_sample_fraction;
-			sample_seed = reader_handle->pending_sample_seed;
+			// parquet_reader_set_sample ran first and stashed its caller-built mask here (see
+			// has_pending_sample's own comment), so that every column read below is still
+			// raw/unfiltered while clauses are evaluated. It spans the file's PHYSICAL rows.
+			sample_keep = std::move(reader_handle->pending_sample_keep);
+			reader_handle->pending_sample_keep.clear();
 			reader_handle->has_pending_sample = false;
 		}
 		else if (reader_handle->live_mask)
@@ -6857,30 +6802,28 @@ extern "C"
 		// becomes the two-valued mask Arrow needs, and it is why a Null row never survives without
 		// an explicit is_null clause.
 		//
-		// The walk is over PHYSICAL rows, row group by row group, for the sample draw's sake: its
-		// engine must advance once per physical row whether or not that row has a slot in the mask,
-		// or the same seed would pick different rows depending on what the screen pruned (see
-		// stream_sample_draw). Rows in an excluded row group are drawn for and discarded; every
-		// other row's answer lands at its own live-space offset.
+		// The walk is over PHYSICAL rows, row group by row group, because two of the things folded
+		// in here are addressed physically: the row range compares against the file's own row
+		// numbers, and sample_keep is indexed by physical row. An excluded row group has no slot in
+		// `combined` and is simply stepped over -- which it could NOT be while the sample was drawn
+		// by a sequential engine, since skipping a row group would then have shifted every later
+		// row's draw. keep[i] now depends only on (seed, i), so nothing here can move a decision.
 		auto t_mask = std::chrono::steady_clock::now();
 		{
-			SampleDraw draw;
-			if (draw_sample) draw.start(sample_fraction, sample_seed);
+			const bool have_sample = !sample_keep.empty();
 			for (int64_t rg = 1; rg <= reader_handle->num_row_groups; ++rg)
 			{
 				int64_t rows = row_group_rows(reader_handle, rg);
 				int64_t first_row = reader_handle->row_group_offsets[static_cast<size_t>(rg - 1)];
 				int64_t live_off = reader_handle->row_group_live_offsets[static_cast<size_t>(rg - 1)];
 				int64_t prior_off = prior_mask ? prior_offsets[static_cast<size_t>(rg - 1)] : -1;
+				if (live_off < 0) continue; // excluded row group: no slots to write
 				for (int64_t i = 0; i < rows; ++i)
 				{
-					// Drawn for unconditionally, so the engine advances once per physical row.
-					bool sampled = draw.next();
-					if (live_off < 0) continue; // excluded row group: no slot, draw discarded
 					size_t slot = static_cast<size_t>(live_off + i);
 					bool keep = combined[slot] == kTrue;
 					if (keep && row_ranged) keep = (first_row + i + 1 >= row_lo && first_row + i + 1 <= row_hi);
-					if (keep) keep = sampled;
+					if (keep && have_sample) keep = sample_keep[static_cast<size_t>(first_row + i)] != 0;
 					if (keep && prior_mask) keep = prior_mask->Value(prior_off + i);
 					combined[slot] = keep ? 1 : 0;
 				}
@@ -8643,8 +8586,8 @@ extern "C"
 		}
 		if (reader_handle->has_sample)
 		{
-			std::fprintf(stdout, "sample: fraction=%.6g seed=%d\n", reader_handle->sample_fraction,
-				reader_handle->sample_seed_used);
+			std::fprintf(stdout, "sample: fraction=%.6g seed=%lld\n", reader_handle->sample_fraction,
+				static_cast<long long>(reader_handle->sample_seed_used));
 		}
 		// The whole expression, as re-rendered from the parse tree. The per-column "filter" cell
 		// below can only list the leaves that mention that column, which is lossy the moment an
@@ -11998,6 +11941,17 @@ extern "C"
 	void parquet_debug_set_force_sample_mask_error(int enable)
 	{
 		g_debug_force_sample_mask_error = (enable != 0);
+	}
+
+	// Forces parquet_reader_set_sample's keep_len guard to reject a length that is in fact correct
+	// (it compares against total_nrows + 1 while set). The guard is UNREACHABLE through the public
+	// API -- parquet_apply_sample sizes the mask from the same handle's total_nrows, so the two
+	// values come from one source and cannot differ -- and this hook is what makes it testable
+	// rather than defensive code no fixture can reach. See error_scenarios.f90's
+	// sample_mask_length_mismatch.
+	void parquet_debug_set_force_sample_len_mismatch(int enable)
+	{
+		g_debug_force_sample_len_mismatch = (enable != 0);
 	}
 
 	// Test-only: returns g_debug_physical_column_read_count (see its own comment) -- lets

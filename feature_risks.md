@@ -189,6 +189,7 @@ something a reader is expected to have.
 | [Risk-127](#risk-127--floor-returns-a-default-integer-so-a-large-candidate-wraps-silently) | `floor()` returns a DEFAULT integer, so a large candidate wraps silently | 4 — covered |
 | [Risk-128](#risk-128--an-fma-barrier-is-architecture-gated-so-a-flag-sweep-without--marchnative-proves-nothing) | An FMA barrier is ARCHITECTURE-gated, so a flag sweep without `-march=native` proves nothing | 4 — covered |
 | [Risk-129](#risk-129--for-a-given-libm-is-violated-inside-one-program-by-a-vector-variant) | "For a given libm" is violated INSIDE one program, by a vector variant | 4 — covered |
+| [Risk-131](#risk-131--the-row-samples-mask-is-indexed-by-live-row-instead-of-physical-row) | The row sample's mask is indexed by LIVE row instead of PHYSICAL row | 4 — covered |
 | [Risk-130](#risk-130--a-generator-that-derives-through-libm-emits-a-different-table-on-every-machine) | A GENERATOR that derives through libm emits a different table on every machine | 4 — covered |
 
 ---
@@ -197,7 +198,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-131**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-132**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -5666,6 +5667,40 @@ convenient length would not.
 - **A `_portable` form is the escape hatch and should be documented as such.** It is the only thing
   in this module that can promise a stored value reproduces across compilers, and this is one of the
   reasons why.
+
+### Risk-131 — The row sample's mask is indexed by LIVE row instead of PHYSICAL row
+
+**Covered** by `test_sample_composes` (`test/test_filter_screen.f90`), which compares a
+filtered+sampled read against the same read with `parquet_set_statistics_prescreen(.false.)` and
+asserts the identical rows — with `parquet_debug_get_row_groups_pruned()` as the negative control,
+because two arms that pruned nothing would agree while proving nothing. **Verified by mutation**:
+changing `first_row + i` to `live_off + i` in `parquet_reader_set_filter`'s fold loop
+(`parquet_wrapper.cpp`) makes it fail.
+
+`parquet_apply_sample` (`parquet_read.f90`) builds one byte per **physical** row of the file, and
+the fold loop must index it that way. Every other quantity in that loop is in live space —
+`combined[slot]`, `live_off`, `prior_off` — so `sample_keep[live_off + i]` is the natural thing to
+write and is wrong the moment the statistics screen prunes anything: rows shift by however many
+rows the pruned row groups held, and the reader silently returns a different subset. Nothing
+aborts, the row count is plausible, and only an A/B against an unpruned read can see it.
+
+**What this still forbids.** The mask is physical; the row range and `sample_keep` are the two
+things in that loop that are, which is the whole reason the walk is over physical rows at all. If
+a future change makes the loop live-space-only, the sample must be re-indexed, not just moved.
+
+**And the reason this is a risk rather than a note: the property is FREE now and was not before.**
+Under the `std::mt19937_64` draw this replaced, agreement between the pruned and unpruned arms was
+maintained by discipline — the loop stepped the engine once per physical row even for rows it
+discarded, guarded by a comment in capitals. `keep(r)` now depends only on `(seed, r)`, so the
+screen cannot move a decision by construction. That makes the indexing the only remaining way to
+break it, and it is a one-token edit.
+
+**A sibling guard needs its hook kept.** `parquet_reader_set_sample`'s `keep_len` check is
+unreachable through the public API — Fortran sizes the mask from the same handle's `total_nrows` —
+so it is exercised only through `parquet_debug_set_force_sample_len_mismatch`, by the
+`sample_mask_length_mismatch` error scenario, whose control arm opens the same reader with the hook
+clear. Delete the hook and the guard becomes untestable defensive code; delete the guard and a
+future length with a different origin becomes a silent out-of-bounds read.
 
 ### Risk-130 — A GENERATOR that derives through libm emits a different table on every machine
 

@@ -99,7 +99,12 @@ measure_module() {
         tail -n 25 "$_probe/build.log" >&2
         exit 1
     fi
-    grep -oE '[a-z_0-9]+\.(f90|cpp)' "$_probe/build.log" | grep -v '^m\.f90$' | sort -u
+    # LC_ALL=C, or the ORDER of this list depends on the caller's locale and every section
+    # reshuffles: under en_US.UTF-8 collation punctuation is weighted differently, so
+    # parquet_settings_base.f90 sorts before parquet_settings.f90 while under C it sorts after.
+    # tools/module_footprints.txt was generated under C, and a regeneration from a UTF-8 shell
+    # produces a diff touching all nine sections in which the one real change is invisible.
+    grep -oE '[a-z_0-9]+\.(f90|cpp)' "$_probe/build.log" | grep -v '^m\.f90$' | LC_ALL=C sort -u
 }
 
 # Reads one module's expected file list out of the committed expectation file.

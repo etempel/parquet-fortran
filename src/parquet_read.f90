@@ -18,6 +18,12 @@ submodule (parquet_core) parquet_read
     ! so c_loc/c_null_ptr/c_int/c_int8_t all arrive by host association, and naming them again is
     ! a symbol conflict rather than a clarification.
     use parquet_sorting, only: pf_sort_keys, pf_argsort
+    ! The row sample DRAWS ITS OWN MASK HERE, from the library's own counter-based generator, so
+    ! that parquet_open_reader(..., sample_fraction=) and a caller's own pf_random_* draws come
+    ! from one specified, tested generator instead of two. parquet_random is a leaf importing only
+    ! iso_fortran_env, so this import is acyclic and costs the graph three files; see
+    ! parquet_sample_algorithm (parquet_core.f90) for the mapping it composes.
+    use parquet_random, only: pf_random_key, pf_random_fill_draws, pf_random_seed
     use iso_c_binding
     use iso_fortran_env, only: int8, int32, int64, real64
     use parquet_bindings
@@ -44,6 +50,16 @@ submodule (parquet_core) parquet_read
     integer, parameter :: filter_leaf_name_len = 64
     integer, parameter :: filter_leaf_op_len = 16
     integer, parameter :: filter_leaf_value_len = 512
+
+    !> How many uniforms parquet_apply_sample materialises at a time while building its row mask.
+    !>
+    !! A bound on SCRATCH, never on the answer. `pf_random_fill_draws` is a prefix-consistent view
+    !! of one stream -- filling `v(1:3)` alone gives the first three of `v(1:6)` -- so chunking at
+    !! any size yields the identical mask. That is `parquet_sample_algorithm`'s "keep(r) depends
+    !! only on (seed, r)" applied to this loop, and it is why the constant may be changed freely.
+    !! 1024 `real64` is 8 KiB: small enough to stay an ordinary automatic array, large enough that
+    !! the per-call overhead of the fill disappears against the per-row work.
+    integer, parameter :: sample_fill_chunk = 1024
 
     !> Fixed width of the packed sort-key column-name array crossing the bind(C) boundary, the
     !> sort counterpart of filter_leaf_name_len above. Declared once here and host-associated to
@@ -334,43 +350,81 @@ contains
             end do
         end do
     end subroutine pack_fixed_width_strings
-    !> Draws a Bernoulli(sample_fraction) row mask (see parquet_reader_set_sample in
-    !> parquet_wrapper.cpp) and applies it to `reader` -- called from parquet_open_reader right
-    !> after the reader itself is created and before any filter=/qc setup. sample_fraction must
-    !> already be validated by the caller (not negative, not NaN, < 1.0); sample_seed <= 0 (or
-    !> absent) draws a fresh entropy seed. The seed actually used is always reported back via
-    !> parquet_reader_print_stat, whether caller-supplied or entropy-drawn, so a non-deterministic
-    !> run's seed can be read back and reused later.
+    !> Builds this reader's Bernoulli(sample_fraction) row mask and hands it to the C++ side --
+    !> called from parquet_open_reader right after the reader itself is created and before any
+    !> filter=/qc setup. sample_fraction must already be validated by the caller (not negative, not
+    !> NaN, < 1.0); sample_seed <= 0 (or absent) settles a fresh entropy seed. The seed actually
+    !> used is always reported back via parquet_reader_print_stat, whether caller-supplied or
+    !> drawn, so a non-deterministic run's seed can be read back and reused later.
+    !>
+    !> **The draw happens here, in Fortran, not in C++**, and the mapping is the frozen one
+    !> `parquet_sample_algorithm` (parquet_core.f90) states. Its one property everything else rests
+    !> on: row r's keep/drop depends on nothing but `(seed, r)`. That is what makes the chunked
+    !> fill below, a pruned row group, and the deferral described next all incapable of moving a
+    !> single decision -- and it is why the C++ side can simply index the mask by physical row.
     !>
     !> filter_will_follow must be .true. iff parquet_open_reader_base is also about to call
     !> parquet_apply_filter right after this (i.e. present(filter) .and. filter%n > 0) -- when it
-    !> is, the C++ side defers installing this draw as the reader's active mask until
-    !> parquet_reader_set_filter folds it in, so the filter's own clause evaluation still sees raw,
-    !> unmasked column data; installing it here immediately would otherwise make those columns come
-    !> back already sample-compacted mid-evaluation (see parquet_reader_set_sample's own comment in
-    !> parquet_wrapper.cpp for the crash this avoids).
+    !> is, the C++ side holds the mask rather than installing it, so the filter's own clause
+    !> evaluation still sees raw, unmasked column data; installing it immediately would otherwise
+    !> make those columns come back already sample-compacted mid-evaluation (see
+    !> parquet_reader_set_sample's own comment in parquet_wrapper.cpp for the crash this avoids).
+    !> WHICH rows are selected is identical either way; the deferral is about ordering alone.
     subroutine parquet_apply_sample(reader, sample_fraction, sample_seed, filter_will_follow)
         type(parquet_reader), intent(inout) :: reader !! open reader gaining the sample mask.
         real(real64), intent(in) :: sample_fraction !! fraction of rows to keep, already validated to be in [0.0, 1.0).
-        integer(int32), intent(in), optional :: sample_seed !! >0 for a reproducible draw; absent/<=0 draws from entropy.
+        integer(int64), intent(in), optional :: sample_seed !! >0 for a reproducible draw; absent/<=0 settles a fresh one.
         logical, intent(in) :: filter_will_follow !! .true. iff parquet_apply_filter also runs right after this.
-        integer(c_int32_t) :: seed_value, actual_seed
-        integer(c_int8_t) :: has_seed_flag
+        integer(int64) :: seed_used, key, nrows, lo, n, k
+        integer(c_int8_t), allocatable :: keep(:)
+        real(real64) :: u(sample_fill_chunk)
         character(len=1024) :: c_err
         integer(c_long_long) :: status
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
-        seed_value = 0_c_int32_t
-        has_seed_flag = 0_c_int8_t
-        if (present(sample_seed)) then
-            seed_value = int(sample_seed, kind=c_int32_t)
-            has_seed_flag = 1_c_int8_t
+        ! A fraction of exactly 0.0 keeps nothing whatever the seed is, so it settles no seed and
+        ! reports 0 -- long-documented behaviour, and what makes "there are no rows to reproduce"
+        ! exactly true. Note this is a SEPARATE special case from the draw itself, which needs
+        ! none: u is in [0, 1), so `u < 0.0` is never true and the loop below would keep nothing
+        ! anyway. Do not fold the two together.
+        seed_used = 0_int64
+        if (sample_fraction > 0.0_real64) then
+            ! `sample_seed <= 0` is parquet_open_reader's own spelling of "settle a fresh one", and
+            ! pf_random_seed is always in [1, huge(int64)], so a settled seed can never read back
+            ! through sample_seed= as "no seed".
+            seed_used = pf_random_seed()
+            if (present(sample_seed)) then
+                if (sample_seed > 0_int64) seed_used = sample_seed
+            end if
+        end if
+
+        nrows = int(parquet_reader_get_total_nrows(reader%handle), int64)
+        ! max(.., 1) only so the actual argument is never zero-sized: keep_len still says 0, and
+        ! the C++ side then reads nothing. A zero-sized actual passed to an assumed-size dummy is
+        ! what nagfor's -C=array objects to, and it costs one byte to avoid.
+        allocate(keep(max(nrows, 1_int64)))
+        keep = 0_c_int8_t
+
+        if (sample_fraction > 0.0_real64 .and. nrows > 0_int64) then
+            key = pf_random_key(seed_used, parquet_sample_label)
+            lo = 1_int64
+            do while (lo <= nrows)
+                n = min(int(sample_fill_chunk, int64), nrows - lo + 1_int64)
+                ! Row r is draw r of stream 0. The fill is a prefix-consistent view of that one
+                ! stream, so this chunk boundary cannot change any element -- see
+                ! sample_fill_chunk's own note.
+                call pf_random_fill_draws(key, 0_int64, u(1:n), lo)
+                do k = 1, n
+                    if (u(k) < sample_fraction) keep(lo + k - 1_int64) = 1_c_int8_t
+                end do
+                lo = lo + n
+            end do
         end if
 
         c_err = ""
-        status = parquet_reader_set_sample(reader%handle, real(sample_fraction, kind=c_double), seed_value, &
-            has_seed_flag, merge(1_c_int8_t, 0_c_int8_t, filter_will_follow), actual_seed, c_err, &
-            int(len(c_err), kind=c_long_long))
+        status = parquet_reader_set_sample(reader%handle, real(sample_fraction, kind=c_double), &
+            int(seed_used, kind=c_int64_t), keep, int(nrows, kind=c_int64_t), &
+            merge(1_c_int8_t, 0_c_int8_t, filter_will_follow), c_err, int(len(c_err), kind=c_long_long))
 
         if (status /= 0) then
             call reader_filename_suffix(reader, name_suffix)

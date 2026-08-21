@@ -876,6 +876,49 @@ def check_env_covers_every_setting():
     return problems
 
 
+def check_one_random_number_generator():
+    """The library draws every random number from parquet_random -- src/parquet_wrapper.cpp may not
+    reach for C++'s own generators.
+
+    `parquet_open_reader(..., sample_fraction=)` used to draw its row mask with std::mt19937_64 fed
+    through std::uniform_real_distribution, which made this library ship TWO generators: one frozen,
+    golden-vectored and tested against an arbitrary-precision oracle, and one specified nowhere.
+    Two things followed, and both were invisible to `fpm test`. std::uniform_real_distribution's
+    mapping from engine output to a double is implementation-defined, so "the same seed selects the
+    same rows" was a promise the C++ standard did not underwrite across libstdc++ and libc++. And a
+    sequential engine made row i's decision depend on how many draws preceded it, so a pruned row
+    group had to be drawn for and discarded or the same seed would silently select different rows.
+
+    The draw is Fortran's now (parquet_apply_sample, src/parquet_read.f90), and this check is what
+    stops the second generator coming back. It matches by CONSTRUCT rather than by a remembered list
+    of names, so a future `std::ranlux48` or `std::bernoulli_distribution` is caught too -- see
+    CLAUDE.md's "A static check that enumerates names goes stale silently".
+
+    If C++ ever genuinely needs a random number, the answer is the same one the OpenMP thread counts
+    already use: resolve it in Fortran and pass the resolved VALUE across the bind(C) boundary.
+    """
+    path = SRC / "parquet_wrapper.cpp"
+    if not path.exists():
+        return ["src/parquet_wrapper.cpp not found -- this check cannot have run"]
+    banned = re.compile(
+        r"\b(?:std::)?(?:mt19937(?:_64)?|minstd_rand\w*|ranlux\d+\w*|knuth_b|default_random_engine"
+        r"|random_device|seed_seq|linear_congruential_engine|subtract_with_carry_engine"
+        r"|mersenne_twister_engine|\w+_distribution)\b|#\s*include\s*<random>"
+        r"|\b(?:std::)?(?:rand|srand|drand48|lrand48|random|srandom|arc4random)\s*\(")
+    problems = []
+    for n, raw in enumerate(path.read_text().splitlines(), start=1):
+        line = raw.split("//", 1)[0]                      # a comment may name what was removed
+        m = banned.search(line)
+        if m:
+            problems.append(
+                "src/parquet_wrapper.cpp:%d: `%s` -- this library has ONE generator and it is "
+                "parquet_random. A C++-side draw is unspecified across standard libraries and "
+                "cannot be golden-vectored; resolve the value in Fortran and pass it across the "
+                "bind(C) boundary, exactly as parquet_apply_sample does for the row sample."
+                % (n, m.group(0)))
+    return problems
+
+
 def check_single_cpp_translation_unit():
     """CLAUDE.md's TU-split note -- splitting parquet_wrapper.cpp silently forks every file-scope
     `static`, and nothing diagnoses it.
@@ -2360,6 +2403,7 @@ CHECKS = (
     ("no direct printing outside the emit channels", check_no_direct_printing),
     ("the row-group sizing arithmetic exists once", check_row_group_sizing_not_duplicated),
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
+    ("the C++ side draws no random numbers of its own", check_one_random_number_generator),
     ("every setting has an environment variable", check_env_covers_every_setting),
     ("parquet_strings does not reach parquet_bindings", check_parquet_strings_stays_leaf),
     ("parquet_argsort stays Arrow-free", check_parquet_argsort_stays_arrow_free),

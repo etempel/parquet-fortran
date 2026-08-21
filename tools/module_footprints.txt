@@ -102,12 +102,14 @@ parquet_columns_structural.f90
 parquet_columns_util.f90
 parquet_columns_validity.f90
 parquet_core.f90
+parquet_expkey.f90
 parquet_io.f90
 parquet_maml_base.f90
 parquet_metadata.f90
 parquet_metadata_base.f90
 parquet_metadata_get.f90
 parquet_metadata_maml.f90
+parquet_random.f90
 parquet_read.f90
 parquet_read_filter.f90
 parquet_read_numeric.f90
@@ -131,6 +133,7 @@ parquet_write.f90
 parquet_write_numeric.f90
 parquet_write_string.f90
 parquet_write_temporal.f90
+parquet_ziggurat.f90
 
 [parquet]
 parquet.f90

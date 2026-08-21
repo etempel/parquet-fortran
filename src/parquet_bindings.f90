@@ -75,7 +75,6 @@ module parquet_bindings
     public :: parquet_sort_is_sorted_int64, parquet_sort_is_sorted_double, parquet_sort_is_sorted_string
     public :: parquet_reader_set_sample
     public :: c_reader_adopt_transform
-    public :: parquet_draw_sample_seed
     public :: parquet_reader_set_qc
     public :: parquet_read_int32_column, parquet_read_int64_column
     public :: parquet_read_float32_column, parquet_read_float64_column
@@ -1125,38 +1124,33 @@ module parquet_bindings
             integer(c_long_long) :: has_any
         end function
 
-        !> Applies Bernoulli(sample_fraction) row sampling to `reader` (see parquet_reader_set_sample
-        !> in parquet_wrapper.cpp); returns non-zero and writes a message to `err_out` on failure.
-        !> actual_seed_out is always filled with the seed actually used (caller-supplied via seed/
-        !> has_seed, or, when has_seed is 0 or seed <= 0, freshly drawn from entropy). filter_will_follow
-        !> (non-zero when the caller's own filter= will also be applied right after this): defers
-        !> installing the draw as the reader's active mask (stashed in pending_sample_mask instead)
-        !> so the filter's own clause evaluation still sees raw, unmasked column data -- see
-        !> parquet_reader_set_sample's own comment in parquet_wrapper.cpp.
-        function parquet_reader_set_sample(reader, sample_fraction, seed, has_seed, filter_will_follow, &
-                actual_seed_out, err_out, err_cap) &
+        !> Installs a caller-built Bernoulli row mask on `reader` (see parquet_reader_set_sample in
+        !> parquet_wrapper.cpp); returns non-zero and writes a message to `err_out` on failure.
+        !>
+        !> **No randomness crosses this boundary.** `keep` already holds one byte per PHYSICAL row
+        !> of the file, nonzero meaning keep, drawn by parquet_apply_sample (parquet_read.f90) from
+        !> this library's own generator -- see parquet_sample_algorithm (parquet_core.f90) for the
+        !> frozen mapping. sample_fraction and seed_used are carried only so
+        !> parquet_reader_print_stat can report them. keep_len must equal the file's total row
+        !> count; the C++ side rejects any other value rather than reading out of bounds.
+        !>
+        !> filter_will_follow (non-zero when the caller's own filter= will also be applied right
+        !> after this): stashes the mask instead of installing it, so the filter's own clause
+        !> evaluation still sees raw, unmasked column data. Which rows are selected is identical
+        !> either way -- the deferral is about ordering alone.
+        function parquet_reader_set_sample(reader, sample_fraction, seed_used, keep, keep_len, &
+                filter_will_follow, err_out, err_cap) &
                 bind(C, name="parquet_reader_set_sample") result(status)
             import
             type(c_ptr), value :: reader
             real(c_double), value :: sample_fraction
-            integer(c_int32_t), value :: seed
-            integer(c_int8_t), value :: has_seed
+            integer(c_int64_t), value :: seed_used
+            integer(c_int8_t) :: keep(*)
+            integer(c_int64_t), value :: keep_len
             integer(c_int8_t), value :: filter_will_follow
-            integer(c_int32_t) :: actual_seed_out
             character(kind=c_char) :: err_out(*)
             integer(c_long_long), value :: err_cap
             integer(c_long_long) :: status
-        end function
-
-        !> Draws one fresh sample seed from entropy, with no reader involved -- the same draw
-        !> parquet_reader_set_sample makes for itself when given no seed, exposed for a caller that
-        !> needs the seed settled BEFORE any reader is opened (parquet_open_table, so that every
-        !> reader the table ever opens samples the identical rows). Always in [1, huge(int32)], so
-        !> it reads back as a real seed rather than as "draw a fresh one".
-        function parquet_draw_sample_seed() &
-                bind(C, name="parquet_draw_sample_seed") result(seed)
-            import
-            integer(c_int32_t) :: seed !! a fresh, positive, entropy-drawn sample seed.
         end function
 
         !> Installs packed per-column qc: min/max/miss rules on `reader`.

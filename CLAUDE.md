@@ -3082,9 +3082,12 @@ applied to the harness instead of the source.
   gets overflow guards wrong in BOTH directions.** With `INT64_MIN = ibset(0_int64, 63)` as a
   parameter, `v < INT64_MIN - delta` answers `.true.` for `v = 19920, delta = -4`, and
   `INT64_MIN/scale` comes back with the **wrong sign** (`+9223372036` for `scale = 1e9`); `mod()`
-  divides the same way. **Copying the constant into a local variable first makes every form
-  correct**, and equality (`n == INT64_MIN`), a bare constant comparison, plain assignment and a
-  fully folded all-constant expression were measured correct without it. **Printing the expression
+  divides the same way. **Form the bound from `huge` instead; a local copy is NOT a fix** — the
+  optimiser propagates the constant back, so the copy is correct at `-O0` and wrong at `-O2`+ once
+  the guard sits in a module procedure, which is how a "fixed" guard still aborted on `date + 4`
+  under `--profile release` while a plain `fpm test` stayed green. Measured correct at every level:
+  equality (`n == INT64_MIN`), a bare constant comparison, plain assignment, a copy compared bare,
+  and a fully folded all-constant expression. **Printing the expression
   shows the right value** — only a comparison or a stored result reveals it, so a debugging session
   goes looking in the wrong place. Both failure directions had shipped in `src/parquet_temporal.f90`:
   a guard that stopped firing (`%to_unix` wrapping silently past int64 instead of aborting) and one

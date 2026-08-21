@@ -5461,7 +5461,9 @@ Measured against gfortran on the same machine, with `v = 19920` and `delta = -4`
 | `v < INT64_MIN - delta` | `.true.` | `.false.` |
 | `INT64_MIN/scale` (`scale = 1e9`) | `+9223372036` | `-9223372036` |
 | `ieor(a, K) < ieor(b, K)` with `K = 2**63`, operands straddling `2**63` | `.false.` | `.true.` |
-| `v < lo_limit - delta` (constant copied to a variable first) | `.false.` | `.false.` |
+| `v < lo_limit - delta` (constant copied to a variable first), **in a module procedure at -O2+** | `.true.` | `.false.` |
+| the same copy at `-O0` only | `.false.` | `.false.` |
+| `x < -(huge + (delta + 1))` (formed from `huge` alone) | `.false.` | `.false.` |
 | `v == INT64_MIN`, a bare constant comparison, a fully folded constant expression | correct | correct |
 
 `mod()` divides with the same wrong sign. **Printing the expression shows the right value** — only a
@@ -5500,9 +5502,20 @@ rather than a correctness necessity.
 
 **What this forbids.**
 
-- **Copy `INT64_MIN` into a local variable before combining it with anything computed at run time.**
-  Three sites do (`date_offset_days_impl`, `ts_offset_ns_impl`, `ts_to_unix`); the rule and its
-  measurements live at the constant's own declaration, which is where a fourth site will look.
+- **Never combine `INT64_MIN` with a runtime value at all, and do not reach for a local copy.**
+  The copy was tried first and is NOT a fix: the optimiser propagates the constant back, so it is
+  correct at `-O0` and wrong at `-O2` and above once the guard sits in a module procedure. That
+  shipped for a day — `fpm test` green, `fpm test --profile release` aborting on `date + 4`. The
+  three sites now form their bound from `huge` alone: `offset_floor` for the subtraction shape
+  (`date_offset_days_impl`, `ts_offset_ns_impl`) and an inline `huge/scale` correction for the
+  division (`ts_to_unix`). The rule and its measurements live at the constant's own declaration.
+- **A workaround verified in a SIMPLIFIED reproducer is not verified.** The copy passed in a probe
+  that assigned it in a program body, and failed in the shape the library actually has — a module
+  procedure, optimised. Reproduce a compiler workaround in the real shape, at the real flags, or
+  it is evidence about the probe. The same lesson is already recorded for nagfor's `-C=dangling`
+  in CLAUDE.md, arrived at independently.
+- **Run the suite under `--profile release` as well as the default profile on nagfor.** This class
+  is invisible at `-O0`, and the default profile passes no `-O` at all.
 - **Do not generalise the exemptions past what was measured.** Equality, a bare constant comparison,
   plain assignment and an all-constant folded expression are correct; anything else is unmeasured.
 - **Do not restore `ieor(a, K) < ieor(b, K)` in `ult`, and do not reach for that identity anywhere

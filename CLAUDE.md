@@ -4595,6 +4595,19 @@ Three things about doing it *here* specifically:
   `!less(b, a)` are the same predicate and there are no ties for the merge to break. The realistic
   defect was a different edit (substituting the tiebreaker-free comparator), and that one was
   caught. A mutation that is not a behaviour change is not evidence about the tests at all.
+- **A change that makes something cheaper by NOT doing work can be entirely correct and still
+  reduce a documented feature to a no-op — and a suite that asserts answers cannot see it.** When
+  removing work, enumerate who was relying on that work having been done, and do it by grepping the
+  tests and the guide for the feature's name rather than by reasoning about the code. Confirmed
+  instance: releasing a read-time sort's key columns instead of re-ordering them is correct on every
+  path, and the whole suite passed — while silently turning `parquet_open_reader(..., prefetch=.true.,
+  sort_by=)` into a request that decoded those columns twice, because the prefetch that follows had to
+  rebuild what the install had just dropped. It was found by reading a test's *name*
+  (`test_prefetch_is_sorted`), and the fix was to let the caller's own argument decide
+  (`keep_cache`), not to add a knob. **The corollary for the test that then guards it: a counter
+  reading 0 cannot distinguish "the code ran and did nothing" from "the code never ran".** Pair it
+  with a counter for the other branch and assert both, which is the same negative-control rule this
+  file applies to settings and to guards.
 - **If a mutation cannot be caught by any fixture this repository can build, the branch is
   defensive** — say so in a comment and `GCOVR_EXCL` it rather than deleting it or inventing an
   unbuildable fixture. `list_uniform_width`'s `IsNull` check is the worked example: Arrow's own

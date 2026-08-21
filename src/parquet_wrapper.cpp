@@ -519,7 +519,11 @@ extern "C"
 	// actually requested (see get_single_chunk_array). column_cache holds
 	// each column already read this way, keyed by its schema field index, so
 	// asking for the same column twice (e.g. parquet_get_col_size followed
-	// by parquet_read_column) doesn't re-read it from disk.
+	// by parquet_read_column) doesn't re-read it from disk. Entries are always
+	// post-transform (see sort_perm), and two paths drop them:
+	// parquet_reader_release_column at the caller's request, and
+	// parquet_reader_sort_install, which releases the key columns its own
+	// bind decoded rather than re-ordering data nobody has asked to read.
 	struct ParquetReaderHandle
 	{
 		std::unique_ptr<parquet::arrow::FileReader> reader;
@@ -562,8 +566,11 @@ extern "C"
 		// Int64Array permutation of length nrows (i.e. of the POST-filter row set -- the sort runs
 		// after the mask, so it orders the surviving rows). Null when no sort is active, which is
 		// the predicate reader_has_sort_permutation reports. apply_row_transform applies it with
-		// arrow::compute::Take right after the mask, so every column ever handed back to Fortran --
-		// and every column_cache entry -- is in sorted order, transparently, once this is set.
+		// arrow::compute::Take right after the mask, so every column ever handed back to Fortran is
+		// in sorted order, transparently, once this is set -- and that ONE path is what makes it
+		// true, which is why parquet_reader_sort_install can simply release whatever was decoded
+		// before the permutation existed rather than re-ordering it in place. A cached entry is
+		// therefore always post-transform: it was cached after this was set, or it is not there.
 		//
 		// A permutation, unlike a mask, destroys row-group locality: sorted row 5 may come from row
 		// group 47 and row 6 from row group 3. Everything row-group-scoped is therefore refused
@@ -3816,13 +3823,17 @@ extern "C"
 	//            O(rows) materialisation -- for a string key, a vector<string> of one string a row.
 	//   copy  -- the memcpy/offset walk handing that reduction to Fortran-owned buffers.
 	//   perm  -- building the arrow::Int64Array from the permutation Fortran computed.
-	//   take  -- arrow::compute::Take over every column already in column_cache. This is the phase
-	//            P13 is about: it was ~30% of a string-keyed sort before R1 and, since R1 cut the
-	//            permutation build by roughly an order of magnitude without touching it, a much
-	//            larger share afterwards.
+	//   take  -- what parquet_reader_sort_install does with column_cache once the permutation
+	//            exists. This is the phase P13 was about, and it is now a RELEASE on every path
+	//            except an open that also prefetches: the entries are the sort's own key columns,
+	//            and dropping them leaves a later read to decode them again through
+	//            apply_row_transform. The counter is kept, and reading ~0 is the point -- it is
+	//            what shows the Take is gone, and what would show it coming back.
 	//
-	// take_columns counts the Take calls, because "how long" is not interpretable without "how many"
-	// -- the loop's cost is per CACHED column, which is the key columns plus anything prefetched.
+	// take_columns counts Take calls, released_columns the entries dropped instead, and they are
+	// mutually exclusive per install. Both are reported because only the pair distinguishes "the
+	// install ran and released the key" from "the install never ran at all" -- a lone
+	// take_columns == 0 passes just as happily against a reader that was never sorted.
 	//
 	// Not part of the library's behaviour: nothing reads these but a benchmark, and they are plain
 	// non-atomic int64 because a sort installs once per reader open, on one thread.
@@ -3832,6 +3843,7 @@ extern "C"
 	static int64_t g_debug_sort_perm_nanos = 0;
 	static int64_t g_debug_sort_take_nanos = 0;
 	static int64_t g_debug_sort_take_columns = 0;
+	static int64_t g_debug_sort_released_columns = 0;
 
 	void parquet_debug_reset_sort_phase_nanos(void)
 	{
@@ -3841,6 +3853,7 @@ extern "C"
 		g_debug_sort_perm_nanos = 0;
 		g_debug_sort_take_nanos = 0;
 		g_debug_sort_take_columns = 0;
+		g_debug_sort_released_columns = 0;
 	}
 
 	int64_t parquet_debug_get_sort_info_nanos(void) { return g_debug_sort_info_nanos; }
@@ -3849,6 +3862,7 @@ extern "C"
 	int64_t parquet_debug_get_sort_perm_nanos(void) { return g_debug_sort_perm_nanos; }
 	int64_t parquet_debug_get_sort_take_nanos(void) { return g_debug_sort_take_nanos; }
 	int64_t parquet_debug_get_sort_take_columns(void) { return g_debug_sort_take_columns; }
+	int64_t parquet_debug_get_sort_released_columns(void) { return g_debug_sort_released_columns; }
 
 	// Same idea, for the fixed-width space-padded string read (parquet_read_string_column). Two
 	// phases, because the only question anyone asks about that path is whether its per-element work
@@ -7321,15 +7335,15 @@ extern "C"
 		return 0;
 	}
 
-	// Installs a permutation built by the Fortran engine, and applies it to everything already
-	// decoded. Everything after the engine call in parquet_reader_set_sort below, and it must stay
-	// that way: the permutation has to reach sort_perm as an arrow::Int64Array because
-	// apply_row_transform and the column_cache re-Take both consume it as one.
+	// Installs a permutation built by the Fortran engine, and releases everything already decoded
+	// so that it is re-read through the permutation instead. Everything after the engine call in
+	// parquet_reader_set_sort below, and it must stay that way: the permutation has to reach
+	// sort_perm as an arrow::Int64Array because apply_row_transform consumes it as one.
 	//
 	// `perm` arrives 0-based, which is what Arrow's Take wants and what the Fortran side converts
 	// to on its way out -- pf_argsort produces 1-based indices.
 	int64_t parquet_reader_sort_install(void *handle, const int64_t *perm, int64_t n,
-		const char *key_text, char *err_out, int64_t err_cap)
+		const char *key_text, int64_t keep_cache, char *err_out, int64_t err_cap)
 	{
 		auto reader_handle = as_reader_handle(handle);
 		// Every key has been fetched by the time a permutation comes back, so the slot is spent;
@@ -7356,21 +7370,63 @@ extern "C"
 		if (key_text != nullptr) reader_handle->sort_key_text = key_text;
 		auto t_take = charge_phase(t_perm, g_debug_sort_perm_nanos);
 
-		// Every key column was decoded above, before sort_perm existed, and any column the caller
-		// prefetched earlier is in the same position -- re-Take the whole cache so nothing can be
-		// handed back in physical order later.
+		// **What happens to everything already decoded, and why there are two answers.**
+		// column_cache at this moment holds exactly the columns this sort decoded to bind its own
+		// keys: the guards on parquet_reader_set_sort (parquet_read.f90) refuse a reader that has
+		// read anything, and parquet_open_reader(sort_by=) installs before its own prefetch. Those
+		// entries predate sort_perm, so they are in physical order and cannot simply be left.
+		//
+		// **The ordering invariant is enforced by the READ path, which is what makes RELEASING an
+		// option at all.** A column decoded after sort_perm exists is permuted by
+		// apply_row_transform before it is cached, and a cache hit is returned untransformed
+		// precisely because the transform already happened. Dropping an entry therefore means the
+		// next read decodes it again and takes that ordinary path -- no second cache state, and no
+		// per-entry flag to consult. The eager Take below exists only to fix up entries that
+		// predate the permutation; it is not what upholds the invariant.
+		//
+		// **Default: RELEASE, because the key columns are ones the caller never asked for.**
+		// Sorting by a column does not mean reading it, and reordering data nobody looks at is the
+		// whole of feature_sort.md's P13. Measured on machine C at n = 2e7 with a string key: the
+		// Take is 3115 ms, 49% of a sort-then-read workflow that never touches the key. A caller
+		// that DOES read the key pays one extra decode instead -- under 564 ms, and only that,
+		// since the Take has to happen either way once the column is read.
+		//
+		// **keep_cache != 0: re-Take instead, because the caller has said it wants everything
+		// resident.** The one caller that sets it is parquet_open_reader(..., sort_by=,
+		// prefetch=.true.), where releasing would be a pure loss: the prefetch that follows would
+		// decode the key columns a second time to put them straight back. Nothing else may set it,
+		// and in particular it must never be set on a path that does not immediately re-read what
+		// it kept -- keeping an entry is only safe because the Take below reorders it here.
+		//
+		// Releasing is correct for any entry, key or not, which is why it is a clear() rather than
+		// a selective erase: the array is rebuilt from the file on demand, so the worst case is a
+		// re-decode and never a wrong answer. was_released is marked for the same reason
+		// parquet_reader_release_column marks it -- parquet_reader_print_stat must not look a
+		// dropped column up in a cache it has left.
 		ensure_compute_initialized();
-		for (auto &entry : reader_handle->column_cache)
+		if (keep_cache != 0)
 		{
-			auto taken = arrow::compute::Take(arrow::Datum(entry.second), arrow::Datum(perm_array));
-			if (!taken.ok())
-			{ // GCOVR_EXCL_START -- Take-kernel Status backstop on an already-validated permutation
-				std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply sort: %s", taken.status().ToString().c_str());
-				return 1;
+			for (auto &entry : reader_handle->column_cache)
+			{
+				auto taken = arrow::compute::Take(arrow::Datum(entry.second), arrow::Datum(perm_array));
+				if (!taken.ok())
+				{ // GCOVR_EXCL_START -- Take-kernel Status backstop on an already-validated permutation
+					std::snprintf(err_out, static_cast<size_t>(err_cap), "failed to apply sort: %s", taken.status().ToString().c_str());
+					return 1;
+				}
+				// GCOVR_EXCL_STOP
+				entry.second = taken.ValueOrDie().make_array();
+				++g_debug_sort_take_columns;
 			}
-			// GCOVR_EXCL_STOP
-			entry.second = taken.ValueOrDie().make_array();
-			++g_debug_sort_take_columns;
+		}
+		else
+		{
+			for (const auto &entry : reader_handle->column_cache)
+			{
+				reader_handle->was_released.insert(entry.first);
+				++g_debug_sort_released_columns;
+			}
+			reader_handle->column_cache.clear();
 		}
 		charge_phase(t_take, g_debug_sort_take_nanos);
 		return 0;

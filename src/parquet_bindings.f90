@@ -703,16 +703,27 @@ module parquet_bindings
             integer(c_long_long) :: status !! 0 on success, 1 on failure.
         end function
 
-        !> Installs a permutation built by the Fortran engine and applies it to every column already
-        !> decoded on this reader. `perm` is 0-based, which is what Arrow's Take consumes --
-        !> `pf_argsort` produces 1-based indices, so the caller converts on the way out.
-        function parquet_reader_sort_install(reader, perm, n, key_text, err_out, err_cap) &
+        !> Installs a permutation built by the Fortran engine and settles what happens to every
+        !> column already decoded on this reader -- which is only ever the sort's own key columns,
+        !> since a sort is refused once anything else has been read. `perm` is 0-based, which is
+        !> what Arrow's Take consumes -- `pf_argsort` produces 1-based indices, so the caller
+        !> converts on the way out.
+        !>
+        !> `keep_cache` chooses between the two, and 0 is the ordinary answer: RELEASE the decoded
+        !> key columns, so that a later read decodes them again and is permuted on the normal read
+        !> path. Sorting by a column does not mean reading it, and reordering data nobody looks at
+        !> was measured at up to 49% of a sort-then-read workflow. Pass 1 only when the caller has
+        !> asked for everything to be resident anyway -- `parquet_open_reader(..., prefetch=.true.)`
+        !> is the sole case -- where releasing would merely force the prefetch that follows to
+        !> decode the same columns a second time.
+        function parquet_reader_sort_install(reader, perm, n, key_text, keep_cache, err_out, err_cap) &
                 bind(C, name="parquet_reader_sort_install") result(status)
             import
             type(c_ptr), value :: reader !! open reader handle.
             integer(c_int64_t) :: perm(*) !! 0-based row permutation of length `n`.
             integer(c_long_long), value :: n !! number of rows the permutation covers.
             character(kind=c_char) :: key_text(*) !! whole key list, for print_stat only.
+            integer(c_long_long), value :: keep_cache !! 1 re-Takes the decoded columns, 0 releases them.
             character(kind=c_char) :: err_out(*) !! receives the failure message, if any.
             integer(c_long_long), value :: err_cap !! capacity of err_out, in characters.
             integer(c_long_long) :: status !! 0 on success, 1 on failure.

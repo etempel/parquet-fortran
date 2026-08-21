@@ -256,7 +256,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_table%sort_by`, because all of them are **one engine** rather than several that match:
   they cannot disagree about null placement, NaN placement or tie order, since there is only one
   answer to disagree about. Consolidating on that engine also made read-time sorting substantially
-  faster, most of all on large files and on string keys. Every sort is stable,
+  faster, most of all on large files and on string keys. A read-time sort also no longer keeps its
+  key columns in memory: they are released once the permutation exists, so sorting by a column you
+  do not go on to read costs neither the memory nor the reordering — measured at up to 1.97x on the
+  whole open-and-read of a 20-million-row file with a string key. Reading a key back after sorting
+  by it decodes it a second time, which is the one shape that costs slightly more;
+  `prefetch=.true.` keeps the keys resident as before, since there every column is wanted anyway. Every sort is stable,
   `descending=` reverses the values without moving the null/NaN tiers, and the six types with no
   null state of their own take an optional `is_valid=` mask. `pf_permute` validates that its
   permutation really is one before writing anything, since an invalid one silently duplicates some

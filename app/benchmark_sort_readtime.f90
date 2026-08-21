@@ -79,6 +79,11 @@ program benchmark_sort_readtime
             import :: c_long_long
             integer(c_long_long) :: n
         end function parquet_debug_get_sort_take_columns
+        function parquet_debug_get_sort_released_columns() result(n) &
+                bind(C, name="parquet_debug_get_sort_released_columns")
+            import :: c_long_long
+            integer(c_long_long) :: n
+        end function parquet_debug_get_sort_released_columns
     end interface
 
     integer(int64) :: n
@@ -116,13 +121,13 @@ contains
         type(parquet_reader) :: reader
         type(parquet_sortkey) :: srt
         real(real64) :: t0, t1, best
-        integer(c_long_long) :: info, bind_, copy, perm, take, cols
-        integer(c_long_long) :: b_info, b_bind, b_copy, b_perm, b_take, b_cols
+        integer(c_long_long) :: info, bind_, copy, perm, take, cols, rel
+        integer(c_long_long) :: b_info, b_bind, b_copy, b_perm, b_take, b_cols, b_rel
         real(real64) :: derived
         integer :: r
         !
         best = huge(1.0_real64)
-        b_info = 0; b_bind = 0; b_copy = 0; b_perm = 0; b_take = 0; b_cols = 0
+        b_info = 0; b_bind = 0; b_copy = 0; b_perm = 0; b_take = 0; b_cols = 0; b_rel = 0
         ! Built once: `parquet_sortkey` has `%add` and no `%clear`, and the key does not change
         ! between repetitions anyway.
         call srt%add(key // " asc")
@@ -140,10 +145,12 @@ contains
             perm = parquet_debug_get_sort_perm_nanos()
             take = parquet_debug_get_sort_take_nanos()
             cols = parquet_debug_get_sort_take_columns()
+            rel = parquet_debug_get_sort_released_columns()
             call parquet_close_reader(reader)
             if (t1 - t0 < best) then
                 best = t1 - t0
-                b_info = info; b_bind = bind_; b_copy = copy; b_perm = perm; b_take = take; b_cols = cols
+                b_info = info; b_bind = bind_; b_copy = copy; b_perm = perm; b_take = take
+                b_cols = cols; b_rel = rel
             end if
         end do
         !
@@ -152,7 +159,12 @@ contains
         ! a sort-engine figure -- `tools/benchmark_sort_engine.sh` is what measures that.
         derived = best * 1.0e9_real64 - real(b_info + b_bind + b_copy + b_perm + b_take, real64)
         write (output_unit, '(a)') ""
-        write (output_unit, '(a,a,a,i0,a)') "## sort_by=""", key, " asc""   (", b_cols, " column(s) taken)"
+        ! Both counts, because they are the two arms of what the install does with the cache and
+        ! only the pair says which one ran: `taken` is the prefetch case, `released` the ordinary
+        ! one, and a lone `taken 0` would read the same whether the key was dropped or the install
+        ! never happened at all. See feature_sort.md's P13.
+        write (output_unit, '(a,a,a,i0,a,i0,a)') "## sort_by=""", key, " asc""   (", b_cols, &
+            " column(s) taken, ", b_rel, " released)"
         write (output_unit, '(a)') ""
         write (output_unit, '(a)') "  phase          ms      ns/row   share    what it is"
         call row("info", real(b_info, real64), best, n, "sort_key_info: bind the key to size it")
@@ -160,7 +172,7 @@ contains
         call row("copy", real(b_copy, real64), best, n, "hand the reduction to Fortran buffers")
         call row("engine+open", derived, best, n, "DERIVED: pf_argsort + the open itself")
         call row("perm", real(b_perm, real64), best, n, "build the arrow::Int64Array")
-        call row("take", real(b_take, real64), best, n, "arrow::compute::Take over the cache")
+        call row("take", real(b_take, real64), best, n, "what the install does with the cache")
         write (output_unit, '(a)') "  -----------------------------------------------------------------------"
         call row("TOTAL", best * 1.0e9_real64, best, n, "wall clock for the whole open")
     end subroutine measure

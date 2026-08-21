@@ -336,9 +336,16 @@ another for the cost of two atomic refcount increments — see
 
 A sort key column is always read **whole**: a global order needs every row, so there is no
 row-group-scoped equivalent the way there is for filtering. That is the one place sorting costs
-memory that filtering does not. Sorting itself never skips I/O — the benefit is that your own code
-receives the rows already ordered. (Composed with `filter=`, the key column is read over the
-surviving row groups only, since the filter's pruning applies to every column read after it.)
+memory that filtering does not — but only while the permutation is being built. Once it exists the
+key column is **released**, so sorting by a column you never read leaves nothing of it resident and
+costs nothing to reorder. Reading the key back afterwards is therefore an ordinary read: it decodes
+the column again and hands it back in sorted order like any other. Sorting itself never skips I/O —
+the benefit is that your own code receives the rows already ordered. (Composed with `filter=`, the
+key column is read over the surviving row groups only, since the filter's pruning applies to every
+column read after it.)
+
+`prefetch=.true.` is the one case that keeps the key resident, because there you have asked for
+every column to be in memory anyway and releasing it would only make the prefetch decode it twice.
 
 ### Sorting composes with filtering and sampling
 

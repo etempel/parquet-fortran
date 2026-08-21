@@ -72,7 +72,10 @@ contains
             new_unittest("the read-time sort runs on the Fortran engine", test_read_time_sort_uses_fortran_engine), &
             new_unittest("two keys of DIFFERENT families do not share a staged reduction", &
                 test_two_keys_different_families), &
-            new_unittest("the same column as two keys binds twice, correctly", test_same_column_twice) &
+            new_unittest("the same column as two keys binds twice, correctly", test_same_column_twice), &
+            new_unittest("a released key column re-reads in sorted order", test_sort_key_read_back), &
+            new_unittest("the install releases its key columns, and keeps them under prefetch", &
+                test_sort_releases_key_columns) &
             ]
     end subroutine collect_tests_sort
     !
@@ -449,7 +452,9 @@ contains
     end subroutine test_struct_leaf_key
     !
     !> The key column need not be one the caller ever reads -- it is decoded to build the
-    !> permutation and then simply stays cached, sorted like everything else.
+    !> permutation and then RELEASED, so nothing pays to reorder it. See
+    !> `test_sort_releases_key_columns` for the half of that which is about the cache rather than
+    !> the ordering, and `test_sort_key_read_back` for what happens when the caller does read it.
     subroutine test_key_column_not_read(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int32), allocatable :: ids(:)
@@ -459,6 +464,140 @@ contains
         call sorted_ids(file, "txt desc", ids)
         call check(error, all(ids == [3, 6, 1, 5, 2, 4]), "sorting by a column never read must still order the rows")
     end subroutine test_key_column_not_read
+    !
+    !> **Reading the sort key back after sorting by it.** The key column is decoded to build the
+    !> permutation and then released (`parquet_reader_sort_install`), so this read decodes it a
+    !> second time and is permuted by `apply_row_transform` on the ordinary read path rather than
+    !> by anything the install did. That is the branch the release trades against, and the values
+    !> coming back in order is what says the ordinary path really does apply the permutation.
+    !>
+    !> `id` is read alongside and cross-checked, so a permutation applied to one column but not
+    !> the other cannot pass: the pairing (v, id) is fixed by the fixture.
+    subroutine test_sort_key_read_back(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer(int32) :: vs(6), ids(6)
+        !> `v` indexed by `id`, i.e. the fixture's own pairing, used as the cross-check below.
+        integer(int32), parameter :: v_by_id(6) = [30, 10, 50, 20, 60, 40]
+        character(len=*), parameter :: file = "test_run/sort_key_read_back.parquet"
+
+        call write_basic_fixture(file)
+        call srt%add("v asc")
+        call parquet_open_reader(reader, file, sort_by=srt)
+        call parquet_read_column(reader, "v", vs)
+        call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+        call check(error, all(vs == [10, 20, 30, 40, 50, 60]), &
+            "reading the sort key back must give it in sorted order, not physical order")
+        if (allocated(error)) return
+        call check(error, all(ids == [2, 4, 1, 6, 3, 5]), &
+            "the row identities must agree with the key order")
+        if (allocated(error)) return
+        ! The pairing is the fixture's own, so this fails if one column was permuted and the
+        ! other was not -- which is the shape a half-applied transform would take.
+        call check(error, all(vs == v_by_id(ids)), &
+            "the key values must still belong to the rows the identities name")
+    end subroutine test_sort_key_read_back
+    !
+    !> **The install releases the key columns it decoded, and keeps them only under `prefetch=`.**
+    !>
+    !> Four arms, and the first and last are what stop the assertion being vacuous. A bare
+    !> `released == 1` proves nothing on its own: the counter is process-global, so it has to be
+    !> shown reading 0 for an open that installs no sort at all, and the `prefetch=.true.` arm has
+    !> to be shown taking the other branch, or `keep_cache` could be deleted outright with only a
+    !> benchmark to notice. `taken` and `released` are mutually exclusive per install by
+    !> construction, so each arm asserts both.
+    !>
+    !> Both counters are maintainer-only C++ hooks, reached through a local `bind(C)` interface
+    !> rather than `src/parquet_bindings.f90` -- this project's convention for anything that exists
+    !> only for a test. The `sort` suite is excluded from test-drive's per-test parallelism
+    !> (`test/run_tester.f90`), which is what makes a process-global counter safe to assert here.
+    subroutine test_sort_releases_key_columns(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt1, srt2, srt3
+        integer(int32) :: ids(6)
+        character(len=*), parameter :: file = "test_run/sort_release_keys.parquet"
+
+        call write_basic_fixture(file)
+        !
+        ! (1) Negative control: no sort, so nothing is installed and neither counter moves.
+        call reset_sort_phases()
+        call parquet_open_reader(reader, file)
+        call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+        call check(error, sort_released_columns() == 0, "an unsorted open must release nothing")
+        if (allocated(error)) return
+        call check(error, sort_taken_columns() == 0, "an unsorted open must Take nothing")
+        if (allocated(error)) return
+        !
+        ! (2) One key: the one column the bind decoded is released, and nothing is Taken.
+        call reset_sort_phases()
+        call srt1%add("v asc")
+        call parquet_open_reader(reader, file, sort_by=srt1)
+        call parquet_close_reader(reader)
+        call check(error, sort_released_columns() == 1, "a one-key sort must release its one key column")
+        if (allocated(error)) return
+        call check(error, sort_taken_columns() == 0, "a one-key sort must not Take the key column")
+        if (allocated(error)) return
+        !
+        ! (3) Two keys over two columns: both are released, which is what says the counter tracks
+        ! the columns the bind actually decoded rather than being a constant.
+        call reset_sort_phases()
+        call srt2%add("v asc")
+        call srt2%add("txt asc")
+        call parquet_open_reader(reader, file, sort_by=srt2)
+        call parquet_close_reader(reader)
+        call check(error, sort_released_columns() == 2, "a two-key sort must release both key columns")
+        if (allocated(error)) return
+        !
+        ! (4) prefetch=.true. takes the keep_cache branch instead: releasing there would only make
+        ! the prefetch decode the same column again.
+        call reset_sort_phases()
+        call srt3%add("v asc")
+        call parquet_open_reader(reader, file, sort_by=srt3, prefetch=.true.)
+        call parquet_read_column(reader, "id", ids)
+        call parquet_close_reader(reader)
+        call check(error, sort_taken_columns() == 1, "a prefetching open must sort the cached key column in place")
+        if (allocated(error)) return
+        call check(error, sort_released_columns() == 0, "a prefetching open must not release anything")
+        if (allocated(error)) return
+        call check(error, all(ids == [2, 4, 1, 6, 3, 5]), "the prefetching open must still order the rows")
+    end subroutine test_sort_releases_key_columns
+    !
+    !> Zeroes the read-time sort's phase counters, including the two column counts.
+    subroutine reset_sort_phases()
+        interface
+            subroutine reset_phases() bind(C, name="parquet_debug_reset_sort_phase_nanos")
+            end subroutine reset_phases
+        end interface
+        call reset_phases()
+    end subroutine reset_sort_phases
+    !
+    !> Columns `parquet_reader_sort_install` re-Took in place since the last reset.
+    function sort_taken_columns() result(k)
+        integer(int64) :: k !! number of columns Taken.
+        interface
+            function got_taken() bind(C, name="parquet_debug_get_sort_take_columns") result(n)
+                use iso_c_binding, only : c_long_long
+                integer(c_long_long) :: n
+            end function got_taken
+        end interface
+        k = int(got_taken(), int64)
+    end function sort_taken_columns
+    !
+    !> Columns `parquet_reader_sort_install` dropped from the cache since the last reset.
+    function sort_released_columns() result(k)
+        integer(int64) :: k !! number of columns released.
+        interface
+            function got_released() bind(C, name="parquet_debug_get_sort_released_columns") result(n)
+                use iso_c_binding, only : c_long_long
+                integer(c_long_long) :: n
+            end function got_released
+        end interface
+        k = int(got_released(), int64)
+    end function sort_released_columns
     !
     !> Arms and zeroes the sort's comparison counter.
     !>

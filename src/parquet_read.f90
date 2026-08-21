@@ -571,10 +571,11 @@ contains
     !> Runs AFTER any filter/sample mask is installed, which is what makes "filter first, then
     !> sort within the survivors" true: each key column is read through the normal path, so it
     !> arrives already filtered, and the permutation covers the surviving rows only.
-    subroutine parquet_apply_sort(reader, sort_by, context)
+    subroutine parquet_apply_sort(reader, sort_by, context, keep_cache)
         type(parquet_reader), intent(inout) :: reader !! open reader the sort is applied to.
         type(parquet_sortkey), intent(in) :: sort_by !! keys to parse, validate and apply.
         character(len=*), intent(in) :: context !! calling procedure's name, used in every error-stop message.
+        logical, intent(in), optional :: keep_cache !! .true. keeps the decoded key columns, sorted in place.
         character(len=sort_key_name_len), allocatable :: key_name(:)
         integer(int8), allocatable :: descending(:), nulls_first(:)
         character(len=:), allocatable :: name, errmsg, key_text, name_suffix
@@ -585,8 +586,16 @@ contains
         type(pf_sort_keys) :: skeys
         integer(int64), allocatable :: perm(:)
         integer(int64) :: nrows
+        integer(c_long_long) :: keep
 
         if (sort_by%n == 0) return
+        ! Default 0: the key columns this sort is about to decode are RELEASED once the permutation
+        ! exists, so nothing pays to reorder a column the caller may never read. Only an open that
+        ! also prefetches asks for them to be kept -- see parquet_reader_sort_install's own note.
+        keep = 0_c_long_long
+        if (present(keep_cache)) then
+            if (keep_cache) keep = 1_c_long_long
+        end if
         allocate(key_name(sort_by%n), descending(sort_by%n), nulls_first(sort_by%n))
         do i = 1, sort_by%n
             call parquet_parse_sort_key(sort_by%keys(i), name, desc, ok, errmsg)
@@ -619,7 +628,7 @@ contains
 
         c_err = ""
         status = parquet_reader_sort_install(reader%handle, perm, int(nrows, kind=c_long_long), &
-            key_text//char(0), c_err, int(len(c_err), kind=c_long_long))
+            key_text//char(0), keep, c_err, int(len(c_err), kind=c_long_long))
         if (status /= 0) error stop trim(context) // ": " // trim(c_err) // name_suffix
     end subroutine parquet_apply_sort
     !> Pulls one read-time sort key across the bind(C) boundary and appends it to `skeys`.
@@ -908,6 +917,7 @@ contains
     end subroutine populate_reader_metadata
     module procedure parquet_open_reader_base
         logical :: use_threads_value, qc_effective, qc_soft_value, filter_will_apply
+        logical :: keep_sorted_cache !! whether the sort's key columns stay resident (prefetch only).
         character(len=:), allocatable :: name_suffix !! scratch (reader_filename_suffix).
 
         ! Refresh the C++ side's copy of every mirrored setting before any C++ state exists.
@@ -969,7 +979,14 @@ contains
         ! Strictly after the filter: the sort orders the SURVIVING rows, so every key column has
         ! to arrive already masked (see parquet_apply_sort). Before the prefetch below, so a
         ! prefetched column is cached in sorted order rather than needing a second pass.
-        if (present(sort_by)) call parquet_apply_sort(reader, sort_by, "parquet_open_reader")
+        ! keep_cache is the prefetch flag: with a prefetch coming, releasing the key columns would
+        ! only make that prefetch decode them again. Nested rather than `.and.`-ed, because Fortran
+        ! does not short-circuit and `prefetch` may be absent.
+        if (present(sort_by)) then
+            keep_sorted_cache = .false.
+            if (present(prefetch)) keep_sorted_cache = prefetch
+            call parquet_apply_sort(reader, sort_by, "parquet_open_reader", keep_cache=keep_sorted_cache)
+        end if
 
         ! Must run AFTER parquet_apply_filter: a column cached before the
         ! filter mask exists would stay raw/unfiltered forever, since
@@ -1058,10 +1075,12 @@ contains
         ! BEFORE the decoded-columns guard below, deliberately. Ordering, not merely state:
         ! apply_row_transform (parquet_wrapper.cpp) masks first and permutes second, so a sort
         ! permutation's length is the POST-filter row count, and installing a filter under an
-        ! existing sort would leave the two describing different row sets. The decoded-columns
-        ! guard already refuses this in practice -- applying a sort decodes its key columns into
-        ! the cache -- but only as a side effect, and it names the wrong mistake. Moving this
-        ! check ahead of it is what makes the caller's actual error the one reported.
+        ! existing sort would leave the two describing different row sets. **This check is now the
+        ! ONLY one that refuses sort-then-filter**: it used to be backed up by the decoded-columns
+        ! guard below, because applying a sort left its key columns in the cache, and
+        ! parquet_reader_sort_install now releases them instead. That made a redundant guard into
+        ! a load-bearing one -- do not reorder these two, and do not delete this one on the
+        ! grounds that the next one would catch it.
         if (parquet_reader_has_sort(reader%handle) /= 0) then
             call reader_filename_suffix(reader, name_suffix)
             error stop "parquet_reader_set_filter: this reader already has an active sort; apply the " // &

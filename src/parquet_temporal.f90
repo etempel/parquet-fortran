@@ -107,6 +107,22 @@ module parquet_temporal
     !
     !> The minimum int64 value, built with ibset to avoid the out-of-symmetric-range literal
     !! `-huge-1` (same idiom as the int8 case in CLAUDE.md's "Build and compiler notes").
+    !!
+    !! **Copy it into a local variable before combining it with a runtime value.** nagfor 7.2
+    !! mis-evaluates an expression that mixes this constant with a non-constant operand, and does
+    !! so silently: `v < INT64_MIN - delta` answers `.true.` for `v = 19920, delta = -4` (it must
+    !! be `.false.`), and `INT64_MIN/scale` comes back with the WRONG SIGN, +9223372036 instead of
+    !! -9223372036 for `scale = 1e9`. mod() divides the same way. Assigning the constant to a
+    !! variable first makes every one of them correct, and costs nothing on any compiler; printing
+    !! the same expression shows the right value, so only a comparison or a stored result reveals
+    !! it. Both failure directions have shipped here: a guard that fired on ordinary date
+    !! arithmetic (`a + 4` aborting), and a guard that never fired, letting an out-of-range
+    !! to_unix wrap silently instead of aborting.
+    !!
+    !! Safe without the copy, measured on the same compiler: equality (`n == INT64_MIN`), a bare
+    !! constant comparison, plain assignment, and an expression whose every operand is constant
+    !! and therefore folded (`INT64_MIN + TS_DIFF_NS_BOUND_SECONDS` in ts_diff_ns). gfortran, ifx
+    !! and flang are unaffected throughout, so only a nagfor run reports a regression here.
     integer(int64), parameter :: INT64_MIN = ibset(0_int64, 63)
     !
     !> `parquet_date%days` bounds (the int32 range), as int64 for overflow-safe checks.
@@ -860,7 +876,7 @@ contains
         class(parquet_date), intent(in) :: self !! the element to shift.
         integer(int64), intent(in) :: delta     !! signed day offset (+ forward, - backward).
         type(parquet_date) :: res               !! self shifted by delta days.
-        integer(int64) :: new_days
+        integer(int64) :: new_days, lo_limit
         if (.not. self%valid) then
             error stop EP//"null parquet_date element accessed in operator(+)/operator(-) (guard with is_null)"
         end if
@@ -869,7 +885,8 @@ contains
                 error stop EP//"date out of range in parquet_date operator(+)/operator(-) (beyond +-5.8 million years)"
             end if
         else
-            if (int(self%days, int64) < INT64_MIN - delta) then
+            lo_limit = INT64_MIN ! must stay a variable here -- see INT64_MIN's own declaration
+            if (int(self%days, int64) < lo_limit - delta) then
                 error stop EP//"date out of range in parquet_date operator(+)/operator(-) (beyond +-5.8 million years)"
             end if
         end if
@@ -1393,7 +1410,7 @@ contains
         class(parquet_timestamp), intent(in) :: self !! the element (unchanged).
         integer, intent(in) :: unit                  !! one of the parquet_unit_* constants.
         logical, intent(in), optional :: exact       !! default .true.; .false. => floor instead of abort.
-        integer(int64) :: scale, ns_per_unit, q
+        integer(int64) :: scale, ns_per_unit, q, lo_limit
         logical :: need_exact
         if (.not. self%valid) then
             error stop EP//"null parquet_timestamp element accessed in to_unix (guard with is_null)"
@@ -1413,7 +1430,10 @@ contains
                     error stop EP//"overflow in parquet_timestamp%to_unix (value does not fit int64 in this unit)"
                 end if
             else
-                if (self%seconds < INT64_MIN/scale) then
+                ! must stay a variable here -- see INT64_MIN's own declaration. Inlining it as
+                ! INT64_MIN/scale disabled this guard on nagfor, so the multiply below wrapped.
+                lo_limit = INT64_MIN
+                if (self%seconds < lo_limit/scale) then
                     error stop EP//"overflow in parquet_timestamp%to_unix (value does not fit int64 in this unit)"
                 end if
             end if
@@ -1694,7 +1714,7 @@ contains
         class(parquet_timestamp), intent(in) :: self !! the instant to shift.
         integer(int64), intent(in) :: n              !! signed ns offset (+ forward, - backward).
         type(parquet_timestamp) :: res                !! self shifted by n ns.
-        integer(int64) :: ns_self, total_ns, carry_sec
+        integer(int64) :: ns_self, total_ns, carry_sec, lo_limit
         if (.not. self%valid) then
             error stop EP//"null parquet_timestamp element accessed in operator(+)/operator(-) (guard with is_null)"
         end if
@@ -1711,7 +1731,8 @@ contains
                 error stop EP//"parquet_timestamp offset arithmetic overflows int64 seconds"
             end if
         else
-            if (self%seconds < INT64_MIN - carry_sec) then
+            lo_limit = INT64_MIN ! must stay a variable here -- see INT64_MIN's own declaration
+            if (self%seconds < lo_limit - carry_sec) then
                 error stop EP//"parquet_timestamp offset arithmetic overflows int64 seconds"
             end if
         end if

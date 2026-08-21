@@ -1196,6 +1196,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`parquet_close_reader(print_stat=.true.)` no longer kills a process whose IEEE traps are
+  unmasked.** The per-column report's min/max comes from Arrow's `min_max` kernel, which raises the
+  IEEE invalid-operation flag internally on any non-empty `float32`/`float64` array — harmlessly on
+  a compiler that masks the traps, fatally on one that does not. Under nagfor, whose default
+  `-ieee=stop` unmasks them for the whole process, printing statistics for a reader that had touched
+  a float column aborted with *"Arithmetic exception: Floating invalid operation"* on ordinary data.
+  The flag is now masked across that one call and the caller's floating-point environment restored
+  exactly as it was. `Filter`, `Take`, `Cast` and this library's own float comparisons were measured
+  clear, including on NaN and Inf, so nothing else changed.
+
+- **Writing a NaN to an int-declared column reports the column again instead of crashing** on such a
+  build. The "is this value exactly integral?" test evaluated `anint(value)`, which traps on a NaN,
+  so the intended `parquet_write_column: non-integral float value written to int column <name>`
+  never reached the caller. NaN is now tested for first, and remains non-integral. A NaN reaching a
+  qc-violation warning is formatted rather than trapping, as it already was elsewhere.
+
+- **`parquet_date`/`parquet_timestamp` offset arithmetic and `%to_unix` no longer misjudge their own
+  overflow guards under nagfor.** That compiler mis-evaluates an expression mixing the most-negative
+  int64 constant with a runtime value, silently and in both directions: `date + 4` aborted as "out of
+  range" for an ordinary 2024 date, while `%to_unix` on a value genuinely beyond int64 wrapped and
+  returned a plausible wrong number instead of aborting. Every affected guard now holds the constant
+  in a variable, which is correct on every compiler.
+
 - **A MAML key is now case-insensitive everywhere, including the block headers.** Section names and
   field sub-keys were already matched case-insensitively by `parquet_validate_maml`, but the code
   that *locates* a block compared against a lowercase literal — so a MAML spelling its section

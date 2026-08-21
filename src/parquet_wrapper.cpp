@@ -42,6 +42,7 @@
 #include <cctype>
 #include <chrono>
 #include <cerrno>
+#include <cfenv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -8400,6 +8401,43 @@ extern "C"
 		}
 	}
 
+	// Masks every IEEE trap for its lifetime, then restores the caller's floating-point
+	// environment exactly as it was. Needed for exactly ONE call -- arrow::compute::MinMax in
+	// compute_stat_min_max below -- and deliberately not applied file-wide or at the bind(C)
+	// boundary: a wider guard would also swallow a genuine FP fault in this library's own code,
+	// which is the very thing a caller who turned trapping on is trying to see.
+	//
+	// Why it is needed at all: nagfor's DEFAULT (-ieee=stop) unmasks the IEEE traps for the whole
+	// process, this file included, so a raised flag becomes SIGFPE wherever it is raised. Arrow's
+	// min_max kernel raises FE_INVALID internally on every non-empty floating-point array --
+	// benignly (the min/max it returns is correct) and independently of the data: a one-element
+	// array raises it, and so does an array whose every element is Null, where no value is ever
+	// compared. A length-0 array does not, and an integer array does not. Until this guard existed,
+	// a NAG-built program calling parquet_close_reader(print_stat=.true.) on a reader that had
+	// touched a float32/float64 column died inside Arrow with "Arithmetic exception: Floating
+	// invalid operation", on data containing nothing exceptional at all.
+	//
+	// Scoped this narrowly on evidence, not on hope (Arrow 25, macOS): Filter, Take, Cast and Sum
+	// all stay clear even on input holding NaN, +Inf and -0.0, and so do this file's own float
+	// comparisons (eval_filter_clause, screen_row_groups), because the compiler emits the quiet
+	// ucomisd for them. Re-measure with fetestexcept before adding a second guard elsewhere.
+	//
+	// The destructor CLEARS what Arrow raised and then restores with fesetenv -- never feupdateenv,
+	// which re-raises the currently-flagged exceptions and would therefore trap on the way out,
+	// under the caller's own unmasked environment, defeating the entire guard.
+	struct ScopedMaskedFpTraps
+	{
+		std::fenv_t saved_env;
+		ScopedMaskedFpTraps() { (void)std::feholdexcept(&saved_env); } // saves, clears, masks
+		~ScopedMaskedFpTraps()
+		{
+			(void)std::feclearexcept(FE_ALL_EXCEPT);
+			(void)std::fesetenv(&saved_env);
+		}
+		ScopedMaskedFpTraps(const ScopedMaskedFpTraps &) = delete;
+		ScopedMaskedFpTraps &operator=(const ScopedMaskedFpTraps &) = delete;
+	};
+
 	// Computes this column's min/max (via Arrow's own "min_max" compute
 	// function, on the flattened element array for a vector column) for
 	// every supported scalar type except boolean, which is reported as
@@ -8412,6 +8450,9 @@ extern "C"
 	{
 		ensure_compute_initialized();
 
+		// Arrow's min_max raises FE_INVALID on any non-empty float array, which is fatal under a
+		// caller whose IEEE traps are unmasked (nagfor's default). See ScopedMaskedFpTraps above.
+		ScopedMaskedFpTraps fp_traps_masked;
 		auto result = arrow::compute::MinMax(array);
 		if (!result.ok()) return false;
 		auto struct_scalar = std::static_pointer_cast<arrow::StructScalar>(result.ValueOrDie().scalar());

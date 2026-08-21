@@ -8,6 +8,7 @@
 !> qc: enforcement, qc: numeric-bound satisfaction, qc: real-value text
 !> formatting) they depend on.
 submodule (parquet_core:parquet_write) parquet_write_numeric
+    use ieee_arithmetic, only: ieee_is_nan
     implicit none
 
     !> Checks every valid element of a numeric column against its schema-declared qc: min:/max:
@@ -55,6 +56,25 @@ contains
             dst(i) = int(src(i), kind=int32)
         end do
     end function parquet_narrow_int64_to_int32
+    !> .true. when `value` is exactly integral. The ONLY way this file may ask that question
+    !> about caller-supplied data -- never `value == anint(value)` written out at the call site.
+    !>
+    !> `anint(NaN)` RAISES the IEEE invalid-operation flag, which is fatal under a compiler whose
+    !> traps are unmasked: nagfor halts the process with "Arithmetic exception: Floating invalid
+    !> operation", turning what should be a clean `error stop` naming the offending column into a
+    !> crash naming nothing. `int(NaN)` traps the same way; comparisons (`/=`, `<`), `abs()` and
+    !> `ieee_is_nan` do not, which is why the NaN test can be made safely and must come first.
+    !>
+    !> It must also be its own statement, not an operand: Fortran does not short-circuit `.and.`
+    !> or `.or.`, so `ieee_is_nan(v) .or. v /= anint(v)` still evaluates the anint and still traps.
+    !> gfortran/ifx/flang mask the traps by default and are unaffected either way, so nothing but a
+    !> nagfor run will report a regression here.
+    elemental logical function parquet_float_is_integral(value) result(integral)
+        real(real64), intent(in) :: value !! value to test; may be NaN, Inf, or anything else.
+        integral = .false.
+        if (ieee_is_nan(value)) return
+        integral = (value == anint(value))
+    end function parquet_float_is_integral
     !> Converts float64 `src` to int32, error stopping if any value is
     !> non-integral or outside int32's representable range. Used when a
     !> schema declares a column int32 but the caller's parquet_write_column
@@ -72,7 +92,7 @@ contains
         if (present(context)) ctx = context
         allocate(dst(size(src, kind=int64)))
         do i = 1_int64, size(src, kind=int64)
-            if (src(i) /= anint(src(i))) then
+            if (.not. parquet_float_is_integral(src(i))) then
                 error stop ctx // ": non-integral float value written to int column " // trim(name)
             end if
             if (src(i) < -real(huge(0_int32), real64) - 1.0_real64 .or. src(i) > real(huge(0_int32), real64)) then
@@ -98,7 +118,7 @@ contains
         if (present(context)) ctx = context
         allocate(dst(size(src, kind=int64)))
         do i = 1_int64, size(src, kind=int64)
-            if (src(i) /= anint(src(i))) then
+            if (.not. parquet_float_is_integral(src(i))) then
                 error stop ctx // ": non-integral float value written to int column " // trim(name)
             end if
             if (src(i) < -real(huge(0_int64), real64) .or. src(i) >= real(huge(0_int64), real64)) then
@@ -433,7 +453,7 @@ contains
         character(len=:), allocatable, intent(out) :: text !! formatted, trimmed text.
         character(len=64) :: buf
 
-        if (value == anint(value) .and. abs(value) < 1.0e15_real64) then
+        if (parquet_float_is_integral(value) .and. abs(value) < 1.0e15_real64) then
             write(buf, '(i0)') nint(value, kind=int64)
         else
             write(buf, '(g0.7)') value

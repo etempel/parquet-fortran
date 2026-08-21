@@ -183,6 +183,8 @@ something a reader is expected to have.
 | [Risk-116](#risk-116--the-parity-correction-is-one-branch-and-removing-it-loses-half-of-s_m-with-nothing-failing) | The parity correction is one branch, and removing it loses HALF of `S_m` with nothing failing | 4 — covered |
 | [Risk-117](#risk-117--a-permutation-test-sited-at-an-even-square-or-using-only-marginal-statistics-proves-nothing) | A permutation test sited at an even square, or using only marginal statistics, proves nothing | 4 — covered |
 | [Risk-118](#risk-118--a-chi-square-threshold-chosen-at-one-ensemble-size-is-not-a-threshold) | A chi-square threshold chosen at ONE ensemble size is not a threshold | 4 — covered |
+| [Risk-124](#risk-124--this-library-may-not-raise-an-ieee-flag-in-a-caller-whose-traps-are-unmasked) | This library may not RAISE an IEEE flag in a caller whose traps are unmasked | 4 — covered |
+| [Risk-125](#risk-125--the-most-negative-int64-constant-in-a-runtime-expression-is-wrong-under-nagfor) | The most-negative int64 CONSTANT in a runtime expression is wrong under nagfor | 4 — covered |
 
 ---
 
@@ -190,7 +192,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-116**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-126**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -5403,3 +5405,79 @@ The inlining half is **not testable** and is guarded two other ways: statically 
 so a fourth out-of-line procedure is covered the day it is added, and by `objdump` — the one command
 is on `int_reduce_retry`'s doc-comment. **Grep it for `call`, not `\bcall\b`**: the latter does not
 match `callq`, which is how a 16-instruction thunk was once read as "fully inlined".
+
+### Risk-124 — This library may not RAISE an IEEE flag in a caller whose traps are unmasked
+
+**Covered** by `print_stat_all_types` and `write_float_nan_to_int32` (`test/error_scenarios.f90`) —
+but **only when the suite is run under nagfor**, which is the whole reason this entry exists.
+
+A caller may unmask the IEEE traps for the entire process, and one compiler in this project's own
+fleet does it by DEFAULT: nagfor's `-ieee=stop`. From that moment any operation anywhere in the
+process — Arrow's C++ included — that raises `FE_INVALID` kills it with *"Arithmetic exception:
+Floating invalid operation"*. Two shipped instances, both on data containing nothing exceptional:
+
+- `arrow::compute::MinMax` raises `FE_INVALID` on every non-empty floating-point array, benignly and
+  independently of the values (a one-element array raises it; so does an array whose every element
+  is Null). `compute_stat_min_max` (`src/parquet_wrapper.cpp`) is the only caller, so
+  `parquet_close_reader(print_stat=.true.)` on a reader that had touched a float column aborted.
+  Guarded by `ScopedMaskedFpTraps`, which masks the traps, clears what Arrow raised, and restores
+  the caller's environment with `fesetenv` — never `feupdateenv`, which re-raises on the way out.
+- `anint(NaN)` and `int(NaN)` trap in Fortran the same way, so the "is this float integral?" test in
+  `parquet_float64_to_int32`/`_to_int64` turned a clean `error stop` naming the column into a crash
+  naming nothing. Routed through `parquet_float_is_integral` (`src/parquet_write_numeric.f90`).
+
+**Why the failure is quiet.** gfortran, ifx and flang all mask the traps, so every such site passes
+on three compilers out of four and CI never runs the fourth. The symptom, when it does appear, names
+neither the column nor the call: the process dies inside Arrow or inside an intrinsic, with no
+backtrace into this library at all.
+
+**What this forbids.**
+
+- **Never introduce a NaN into an ordered intrinsic.** `anint`, `nint` and `int` trap on a NaN;
+  comparisons (`<`, `/=`), `abs()` and `ieee_is_nan` do not. Test with `ieee_is_nan` FIRST — and as
+  its own statement, because Fortran does not short-circuit `.and.`/`.or.`, so
+  `ieee_is_nan(v) .or. v /= anint(v)` still evaluates the `anint` and still traps.
+- **Scope any fenv guard to the one call that needs it.** A guard at the `bind(C)` boundary, or
+  around every compute call, would also swallow a genuine FP fault in this library's own code —
+  exactly what a caller who turned trapping on is trying to see. The scope here rests on
+  measurement, not caution: `Filter`, `Take`, `Cast` and `Sum` stay clear even on input holding NaN,
+  `+Inf` and `-0.0`, and this file's own float comparisons stay clear because the compiler emits the
+  quiet `ucomisd`. Re-measure with `fetestexcept` before adding a second guard.
+- **A new `arrow::compute::` call is a new candidate.** There are seven today; only `MinMax` raises.
+
+### Risk-125 — The most-negative int64 CONSTANT in a runtime expression is wrong under nagfor
+
+**Covered** by the temporal suite's `date difference and day-offset arithmetic` test and by
+`temporal_ts_to_unix_overflow_negative` (`test/error_scenarios.f90`), again **only under nagfor**.
+
+nagfor 7.2 mis-evaluates an expression mixing the most-negative `int64` — here the `INT64_MIN`
+parameter in `src/parquet_temporal.f90` — with a non-constant operand, and it does so silently.
+Measured against gfortran on the same machine, with `v = 19920` and `delta = -4`:
+
+| expression | nagfor | correct |
+|---|---|---|
+| `v < INT64_MIN - delta` | `.true.` | `.false.` |
+| `INT64_MIN/scale` (`scale = 1e9`) | `+9223372036` | `-9223372036` |
+| `v < lo_limit - delta` (constant copied to a variable first) | `.false.` | `.false.` |
+| `v == INT64_MIN`, a bare constant comparison, a fully folded constant expression | correct | correct |
+
+`mod()` divides with the same wrong sign. **Printing the expression shows the right value** — only a
+comparison or a stored result reveals it, which is why a debugging session goes looking in the wrong
+place.
+
+**Why the failure is quiet, and why it is worse than a crash.** It breaks overflow guards in BOTH
+directions, and both had shipped. `ts_to_unix`'s guard stopped firing, so an out-of-range value
+wrapped and returned a plausible wrong number instead of aborting. `date_offset_days_impl`'s guard
+started firing on ordinary arithmetic, so `a + 4` aborted on a 2024 date. No other compiler in the
+fleet is affected, so the default toolchain is green either way.
+
+**What this forbids.**
+
+- **Copy `INT64_MIN` into a local variable before combining it with anything computed at run time.**
+  Three sites do (`date_offset_days_impl`, `ts_offset_ns_impl`, `ts_to_unix`); the rule and its
+  measurements live at the constant's own declaration, which is where a fourth site will look.
+- **Do not generalise the exemptions past what was measured.** Equality, a bare constant comparison,
+  plain assignment and an all-constant folded expression are correct; anything else is unmeasured.
+- **Other most-negative constants are safe only because of how they are USED.** `SIGN_BIT`
+  (`parquet_random`) and `SORT_SIGN_BIT` (`parquet_sorting_engine`) appear solely inside `ieor`.
+  A future arithmetic or comparison use of either inherits this entry.

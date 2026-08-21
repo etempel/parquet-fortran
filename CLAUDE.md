@@ -3034,6 +3034,44 @@ applied to the harness instead of the source.
   at the boundary the suite deliberately tests. Every value was correct; only UBSan could see it.
   See `feature_risks.md` Risk-112, and note that a `-ftrapv` build had never flagged any of them.
 
+- **nagfor UNMASKS the IEEE traps by default (`-ieee=stop`), for the WHOLE process — so anything
+  this library links may not RAISE a flag, however harmlessly.** Two confirmed instances, both fatal
+  on data containing nothing exceptional. **`arrow::compute::MinMax` raises `FE_INVALID` on every
+  non-empty floating-point array**, benignly and independently of the values (a one-element array
+  raises it, and so does an array whose every element is Null; a length-0 array and an integer array
+  do not) — so `parquet_close_reader(print_stat=.true.)` on a reader that had touched a
+  float32/float64 column died in Arrow with *"Arithmetic exception: Floating invalid operation"*.
+  And **`anint(NaN)` and `int(NaN)` trap in Fortran**, which turned the write path's "is this value
+  integral?" test into a crash naming nothing, in place of an `error stop` naming the column.
+  Comparisons (`<`, `/=`), `abs()` and `ieee_is_nan` are all quiet on a NaN, on both sides of the
+  language — clang emits the quiet `ucomisd`, so this file's own float comparisons
+  (`eval_filter_clause`, `screen_row_groups`) are safe. So: **test with `ieee_is_nan` FIRST, as its
+  own statement** (Fortran does not short-circuit, so `ieee_is_nan(v) .or. v /= anint(v)` still
+  evaluates the `anint` and still traps), and mask the traps around a foreign call that is *known*
+  to raise, with `feholdexcept` + `feclearexcept` + **`fesetenv`** — never `feupdateenv`, which
+  re-raises on the way out and traps in the caller you were protecting. Scope such a guard to the
+  one call: a file-wide or `bind(C)`-wide guard would swallow a genuine FP fault in this library's
+  own code, which is what a caller who unmasked the traps is trying to see. `-ieee=full` makes a NAG
+  build survive, but it disables the check for the user's code too and still prints
+  `Warning: Floating invalid operation occurred` at exit, so it is a diagnosis, not the fix.
+  gfortran, ifx and flang mask the traps, so **only a nagfor run can see any of this**. See
+  `feature_risks.md` Risk-124.
+
+- **nagfor 7.2 mis-evaluates the most-negative int64 CONSTANT combined with a runtime value, and
+  gets overflow guards wrong in BOTH directions.** With `INT64_MIN = ibset(0_int64, 63)` as a
+  parameter, `v < INT64_MIN - delta` answers `.true.` for `v = 19920, delta = -4`, and
+  `INT64_MIN/scale` comes back with the **wrong sign** (`+9223372036` for `scale = 1e9`); `mod()`
+  divides the same way. **Copying the constant into a local variable first makes every form
+  correct**, and equality (`n == INT64_MIN`), a bare constant comparison, plain assignment and a
+  fully folded all-constant expression were measured correct without it. **Printing the expression
+  shows the right value** — only a comparison or a stored result reveals it, so a debugging session
+  goes looking in the wrong place. Both failure directions had shipped in `src/parquet_temporal.f90`:
+  a guard that stopped firing (`%to_unix` wrapping silently past int64 instead of aborting) and one
+  that started firing on ordinary input (`date + 4` aborting as "out of range" for a 2024 date). The
+  int32 equivalent is unaffected, and so are gfortran, ifx and flang. A most-negative constant used
+  only inside `ieor` — `SIGN_BIT`, `SORT_SIGN_BIT` — is safe for that reason alone, not by nature.
+  See `feature_risks.md` Risk-125.
+
 ### NAG's "explicitly imported but not used" warnings: most are FALSE POSITIVES
 
 NAG is the only compiler in the fleet that reports unused imports and unused variables by default,

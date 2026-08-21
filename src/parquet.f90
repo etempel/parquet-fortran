@@ -93,6 +93,17 @@ module parquet
     private :: parquet_column_data_ptr, parquet_column_string_column
     private :: parquet_column_is_null, parquet_column_set_null, parquet_column_clear_null
     !
+    ! ---- The sorting tiers' internals need NO `private ::` here, and that is worth stating ----
+    !
+    ! `parquet_argsort` exports its engine, `sort_key_buf`, the six intrinsic extractors and the
+    ! oracle plumbing so that `parquet_sorting` and `parquet_sorting_oracle` can share one copy of
+    ! each rather than keeping second copies that could disagree. None of it reaches this facade:
+    ! `parquet_sorting` imports the tier with a bare `use` under its own default `private`
+    ! accessibility and names only the `pf_` surface, the settings and the debug hooks in its
+    ! `public ::` lines, so everything else stops there. `parquet_sorting_oracle` is not imported
+    ! here at all -- `parquet_debug_use_fortran_sort_engine` is reachable only by a program that
+    ! names that module itself, which is what keeps the C++ engine out of every other build.
+    !
     character(len=*),parameter:: cversion = "v1.5.0 (2026-08-08)" !! version info
 #ifndef RELEASE_VERSION
 #  define RELEASE_VERSION 0.1

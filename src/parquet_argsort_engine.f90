@@ -2,9 +2,9 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-! NOT a generated file -- unlike every other src/parquet_sorting*.f90, which
-! tools/generate_parquet_sorting.py emits. Edit THIS file directly.
-! Its four procedures' INTERFACES do live in the generated src/parquet_sorting.f90;
+! NOT a generated file -- unlike every other src/parquet_argsort*.f90 and
+! src/parquet_sorting*.f90, which tools/generate_parquet_sorting.py emits. Edit THIS file directly.
+! Its procedures' INTERFACES do live in the generated src/parquet_argsort.f90;
 ! change those in the generator's emit_engine_interfaces(), never in the generated output.
 !
 !> The serial core of the pure-Fortran sort engine: the ordering, and the introsort over it.
@@ -72,7 +72,7 @@
 !! against an unmeasured gain, so it stays a measurement to take later rather than a design decision
 !! taken now — and if it is ever taken, the hoisted comparator must be generated from the same source
 !! as this one, not written twice.
-submodule (parquet_sorting) parquet_sorting_engine
+submodule (parquet_argsort) parquet_argsort_engine
 #ifdef _OPENMP
     ! Stage 4. Guarded because a build without OpenMP must still COMPILE, not merely run serially:
     ! machine A's flang ships no `omp_lib.mod` at all, so an unguarded `use` here fails the build
@@ -474,7 +474,7 @@ contains
     !! parallelisable. The introsort is the out-of-memory fallback and is reached only when the radix
     !! could not allocate, which is not a path worth threading.
     subroutine sort_build_permutation_impl(keys, n, perm, nt)
-        use parquet_settings, only : parquet_get_sort_counting_path
+        use parquet_settings_base, only : parquet_get_sort_counting_path
         type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
         integer(int64), intent(in) :: n           !! rows to order.
         integer(int64), intent(inout) :: perm(:)  !! receives `n` 1-based row indices.
@@ -619,7 +619,7 @@ contains
     end subroutine sort_build_permutation_impl
 
     module procedure sort_counting_candidate
-        use parquet_settings, only : parquet_get_sort_counting_bucket_limit
+        use parquet_settings_base, only : parquet_get_sort_counting_bucket_limit
         integer(int64) :: i     !! row index.
         integer(int64) :: v     !! one key value.
         integer(int64) :: limit !! largest admissible value RANGE, from the setting.
@@ -835,7 +835,7 @@ contains
     !! histogram's fixed cost. A multi-key sort is deliberately excluded: LSD does compose across
     !! keys, but that is a larger change and is not implemented here.
     function sort_radix_candidate(keys, n) result(ok)
-        use parquet_settings, only : parquet_get_sort_radix_path
+        use parquet_settings_base, only : parquet_get_sort_radix_path
         type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
         integer(int64), intent(in) :: n           !! rows to order.
         logical :: ok                             !! .true. when the radix path applies.
@@ -3637,17 +3637,7 @@ contains
     ! parquet_sorting is confined to ONE file" still holds with these in place. Keep it that way: a
     ! crossing added here would have to be unpicked again at Stage 6.
 
-    module procedure parquet_debug_sort_row_less
-        less = .false.
-        if (.not. allocated(keys%keys)) return
-        less = sort_row_less(keys%keys, a, b)
-    end procedure parquet_debug_sort_row_less
 
-    module procedure parquet_debug_sort_keys_compare
-        c = 0
-        if (.not. allocated(keys%keys)) return
-        c = sort_keys_compare(keys%keys, a, b, nkeys)
-    end procedure parquet_debug_sort_keys_compare
 
     ! The two sweeps below must stay loop-for-loop identical to their C++ twins
     ! (`parquet_debug_sort_sweep_less_cpp` / `_compare_cpp`, src/parquet_wrapper.cpp). They exist so
@@ -3662,30 +3652,11 @@ contains
     !   * The wrapping step is `j = i + stride` with one conditional subtraction, which is why
     !     `stride` is kept in `[1, nrows-1]`: a larger stride would need a loop, not a subtraction.
 
-    module procedure parquet_debug_sort_sweep_less
-        integer(int64) :: rep, i, j, stride
-        !
-        count = -1_int64
-        if (.not. allocated(keys%keys)) return
-        if (nrows < 2_int64) return
-        count = 0_int64
-        do rep = 0_int64, nreps - 1_int64
-            stride = 1_int64 + mod(rep, nrows - 1_int64)
-            do i = 1_int64, nrows
-                j = i + stride
-                if (j > nrows) j = j - nrows
-                if (sort_row_less(keys%keys, i, j)) count = count + 1_int64
-            end do
-        end do
-    end procedure parquet_debug_sort_sweep_less
 
     ! The three below are Stage 2 scaffolding over the module state declared in
     ! src/parquet_sorting.f90 -- see `dbg_fortran_engine` there for why an engine selector is a debug
     ! hook and not a `parquet_settings` knob. All three go away at the Stage 6 cutover.
 
-    module procedure parquet_debug_use_fortran_sort_engine
-        dbg_fortran_engine = on
-    end procedure parquet_debug_use_fortran_sort_engine
 
     module procedure parquet_debug_using_fortran_sort_engine
         on = dbg_fortran_engine
@@ -3761,21 +3732,5 @@ contains
         n = dbg_sort_design
     end procedure parquet_debug_sort_design
 
-    module procedure parquet_debug_sort_sweep_compare
-        integer(int64) :: rep, i, j, stride
-        !
-        total = -1_int64
-        if (.not. allocated(keys%keys)) return
-        if (nrows < 2_int64) return
-        total = 0_int64
-        do rep = 0_int64, nreps - 1_int64
-            stride = 1_int64 + mod(rep, nrows - 1_int64)
-            do i = 1_int64, nrows
-                j = i + stride
-                if (j > nrows) j = j - nrows
-                total = total + int(sort_keys_compare(keys%keys, i, j, nkeys), int64)
-            end do
-        end do
-    end procedure parquet_debug_sort_sweep_compare
 
-end submodule parquet_sorting_engine ! GCOVR_EXCL_LINE
+end submodule parquet_argsort_engine ! GCOVR_EXCL_LINE

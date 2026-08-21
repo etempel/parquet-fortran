@@ -31,7 +31,7 @@ module parquet_strings
     ! link without the whole Arrow/Parquet C++ stack -- which is exactly the independence this
     ! module exists to offer. The base module is a leaf. Enforced by
     ! check_parquet_strings_stays_leaf (tools/check_source_conventions.py).
-    use parquet_settings_base, only : parquet_output_is_suppressed, parquet_get_string_threads
+    use parquet_settings_base
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads, omp_in_parallel
 #endif
@@ -43,6 +43,18 @@ module parquet_strings
     public :: parquet_string_column
     public :: parquet_string
     public :: parquet_string_threads
+    !
+    ! ---- Re-exported from parquet_settings_base ----
+    !
+    ! **A module re-exports, get and set, every knob its own code reads.** A program that imports
+    ! this module for its capability must be able to configure that capability from the same import;
+    ! otherwise the only route is `use parquet_settings`, which reaches `parquet_bindings` and drags
+    ! the whole Arrow stack back into a build this module exists to keep clear of it. The output
+    ! pair comes too wherever the module can emit or suppress output.
+    public :: parquet_set_string_threads, parquet_get_string_threads
+    public :: parquet_set_verbosity, parquet_get_verbosity
+    public :: parquet_set_message_stream, parquet_get_message_stream
+    !
     public :: parquet_debug_set_string_min_bytes
     public :: parquet_debug_set_string_max_auto_threads
     public :: parquet_debug_string_row_ranges

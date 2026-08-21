@@ -57,20 +57,36 @@ module parquet_sampling
     ! The generator, through its public surface only -- see the file header for why.
     use parquet_random, only: pf_random_at, pf_random_key, pf_random_int_at, pf_random_fill_draws
     ! The sort behind `pf_weighted_permutation`, and the only reason this module is not a leaf.
-    use parquet_sorting, only: pf_argsort
+    ! **The ARGSORT TIER, not `parquet_sorting`, and that is the whole point of the tier.**
+    ! `pf_weighted_permutation` sorts its exponential race keys, and one `pf_argsort(real64 array,
+    ! int64 perm)` is the entire dependency. Taking it from `parquet_sorting` dragged in
+    ! `parquet_columns`, `parquet_strings`, `parquet_temporal` and -- before the C++ engine moved
+    ! behind a procedure pointer -- `parquet_bindings` and with it Arrow, none of which a weighted
+    ! draw has any use for. See feature_modules.md section 4.
+    use parquet_argsort, only: pf_argsort
     ! The frozen `-log(u)` transform, in its own leaf module so the standalone fingerprint check
     ! can compile it without dragging this one in.
     use parquet_expkey, only: exp_key, exp_key_contract_ok
     ! parquet_settings_base, NOT parquet_settings: that one imports parquet_bindings to mirror the
     ! C++-side knobs, and nothing here needs a mirrored knob.
-    use parquet_settings_base, only: parquet_get_random_threads, &
-                                     parquet_get_random_parallel_min_elements, &
-                                     parquet_auto_thread_count, parquet_nested_team_unsafe
+    use parquet_settings_base
 
     implicit none
     private
 
     public :: parquet_debug_random_bulk_threads
+    !
+    ! ---- Re-exported from parquet_settings_base ----
+    !
+    ! **A module re-exports, get and set, every knob its own code reads.** A program that imports
+    ! this module for its capability must be able to configure that capability from the same import;
+    ! otherwise the only route is `use parquet_settings`, which reaches `parquet_bindings` and drags
+    ! the whole Arrow stack back into a build this module exists to keep clear of it. The output
+    ! pair comes too wherever the module can emit or suppress output.
+    public :: parquet_set_random_threads, parquet_get_random_threads
+    public :: parquet_set_random_parallel_min_elements
+    public :: parquet_get_random_parallel_min_elements
+    !
     public :: parquet_debug_set_perm_rounds
     public :: parquet_debug_set_perm_parity
     public :: parquet_debug_set_perm_force_feistel

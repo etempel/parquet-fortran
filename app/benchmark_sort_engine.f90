@@ -58,6 +58,11 @@
 !! Maintainer tool, never run by `fpm test`. Drive it with tools/benchmark_sort_engine.sh.
 program benchmark_sort_engine
     use parquet
+    ! The C++ sort engine is TEST-ONLY and is not re-exported by the `parquet` facade: reaching it
+    ! needs this import, which is what keeps it out of every other program's dependency graph.
+    ! Importing it is also what BINDS it -- `parquet_debug_use_fortran_sort_engine` lives here and
+    ! registers the engine's entry points as a side effect of being called.
+    use parquet_sorting_oracle, only : parquet_debug_use_fortran_sort_engine
     use iso_fortran_env, only : int32, int64, real32, real64, error_unit, output_unit
 #ifdef _OPENMP
     use omp_lib, only : omp_get_wtime, omp_get_max_threads

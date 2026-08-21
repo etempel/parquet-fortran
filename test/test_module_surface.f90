@@ -19,7 +19,178 @@
 !!
 !! Extended at each stage of the restructuring: `parquet_settings_base` today; `parquet_argsort`,
 !! `parquet_sorting`, `parquet_strings` and `parquet_sampling` as their re-exports land.
+
+!> `parquet_argsort` alone: the four sorting knobs plus the output pair, get and set.
+!!
+!! **One library import, and it must stay that way.** Everything this file exists to assert is a
+!! property of what a single `use` exports; a second import here silently restores the names and the
+!! suite goes on passing while testing nothing.
+module test_module_surface_argsort
+    use parquet_argsort                ! THE ONLY library import.
+    use iso_fortran_env, only : int64
+    implicit none
+    private
+    public :: check_argsort_surface
+
+contains
+
+    !> Round-trips every knob `parquet_argsort`'s own code reads.
+    subroutine check_argsort_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
+        character(len=:), allocatable :: tok
+        integer :: n_sort
+        logical :: radix, counting
+        integer(int64) :: n64
+
+        what = ""
+        n_sort = parquet_get_sort_threads()
+        radix = parquet_get_sort_radix_path()
+        counting = parquet_get_sort_counting_path()
+
+        call parquet_set_sort_threads(3)
+        if (parquet_get_sort_threads() /= 3) what = "sort_threads"
+        call parquet_set_sort_radix_path(.not. radix)
+        if (what == "" .and. parquet_get_sort_radix_path() .eqv. radix) what = "sort_radix_path"
+        call parquet_set_sort_counting_path(.not. counting)
+        if (what == "" .and. parquet_get_sort_counting_path() .eqv. counting) what = "sort_counting_path"
+        call parquet_set_sort_counting_bucket_limit(64_int64)
+        n64 = parquet_get_sort_counting_bucket_limit()
+        if (what == "" .and. n64 /= 64_int64) what = "sort_counting_bucket_limit"
+        ! The output pair: `warn_thread_clamp` emits from this tier, so a user of it alone must be
+        ! able to silence what it prints.
+        call parquet_set_verbosity("silent")
+        call parquet_get_verbosity(tok)
+        if (what == "" .and. tok /= "silent") what = "verbosity"
+        call parquet_set_verbosity("normal")
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(tok)
+        if (what == "" .and. tok /= "stderr") what = "message_stream"
+        call parquet_set_message_stream("stdout")
+
+        call parquet_set_sort_threads(n_sort)
+        call parquet_set_sort_radix_path(radix)
+        call parquet_set_sort_counting_path(counting)
+        call parquet_set_sort_counting_bucket_limit(0_int64)
+    end subroutine check_argsort_surface
+
+end module test_module_surface_argsort
+
+!> `parquet_sorting` alone: the same four sorting knobs, reached through the facade tier.
+module test_module_surface_sorting
+    use parquet_sorting                ! THE ONLY library import.
+    use iso_fortran_env, only : int64
+    implicit none
+    private
+    public :: check_sorting_surface
+
+contains
+
+    !> Round-trips the sorting knobs through `use parquet_sorting` alone.
+    subroutine check_sorting_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
+        character(len=:), allocatable :: tok
+        integer :: n_sort
+        logical :: radix, counting
+        integer(int64) :: n64
+
+        what = ""
+        n_sort = parquet_get_sort_threads()
+        radix = parquet_get_sort_radix_path()
+        counting = parquet_get_sort_counting_path()
+
+        call parquet_set_sort_threads(5)
+        if (parquet_get_sort_threads() /= 5) what = "sort_threads"
+        call parquet_set_sort_radix_path(.not. radix)
+        if (what == "" .and. parquet_get_sort_radix_path() .eqv. radix) what = "sort_radix_path"
+        call parquet_set_sort_counting_path(.not. counting)
+        if (what == "" .and. parquet_get_sort_counting_path() .eqv. counting) what = "sort_counting_path"
+        call parquet_set_sort_counting_bucket_limit(128_int64)
+        n64 = parquet_get_sort_counting_bucket_limit()
+        if (what == "" .and. n64 /= 128_int64) what = "sort_counting_bucket_limit"
+        call parquet_set_verbosity("silent")
+        call parquet_get_verbosity(tok)
+        if (what == "" .and. tok /= "silent") what = "verbosity"
+        call parquet_set_verbosity("normal")
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(tok)
+        if (what == "" .and. tok /= "stderr") what = "message_stream"
+        call parquet_set_message_stream("stdout")
+
+        call parquet_set_sort_threads(n_sort)
+        call parquet_set_sort_radix_path(radix)
+        call parquet_set_sort_counting_path(counting)
+        call parquet_set_sort_counting_bucket_limit(0_int64)
+    end subroutine check_sorting_surface
+
+end module test_module_surface_sorting
+
+!> `parquet_strings` alone: its thread cap and the output pair it consults.
+module test_module_surface_strings
+    use parquet_strings                ! THE ONLY library import.
+    implicit none
+    private
+    public :: check_strings_surface
+
+contains
+
+    !> Round-trips the knobs `parquet_strings` reads.
+    subroutine check_strings_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
+        character(len=:), allocatable :: tok
+        integer :: n
+
+        what = ""
+        n = parquet_get_string_threads()
+        call parquet_set_string_threads(2)
+        if (parquet_get_string_threads() /= 2) what = "string_threads"
+        call parquet_set_verbosity("silent")
+        call parquet_get_verbosity(tok)
+        if (what == "" .and. tok /= "silent") what = "verbosity"
+        call parquet_set_verbosity("normal")
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(tok)
+        if (what == "" .and. tok /= "stderr") what = "message_stream"
+        call parquet_set_message_stream("stdout")
+        call parquet_set_string_threads(n)
+    end subroutine check_strings_surface
+
+end module test_module_surface_strings
+
+!> `parquet_sampling` alone: its two threading knobs.
+module test_module_surface_sampling
+    use parquet_sampling               ! THE ONLY library import.
+    use iso_fortran_env, only : int64
+    implicit none
+    private
+    public :: check_sampling_surface
+
+contains
+
+    !> Round-trips the knobs `parquet_sampling` reads.
+    subroutine check_sampling_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
+        integer :: n
+        integer(int64) :: floor_was, n64
+
+        what = ""
+        n = parquet_get_random_threads()
+        floor_was = parquet_get_random_parallel_min_elements()
+        call parquet_set_random_threads(2)
+        if (parquet_get_random_threads() /= 2) what = "random_threads"
+        call parquet_set_random_parallel_min_elements(77_int64)
+        n64 = parquet_get_random_parallel_min_elements()
+        if (what == "" .and. n64 /= 77_int64) what = "random_parallel_min_elements"
+        call parquet_set_random_threads(n)
+        call parquet_set_random_parallel_min_elements(floor_was)
+    end subroutine check_sampling_surface
+
+end module test_module_surface_sampling
+
 module test_module_surface
+    use test_module_surface_argsort, only : check_argsort_surface
+    use test_module_surface_sorting, only : check_sorting_surface
+    use test_module_surface_strings, only : check_strings_surface
+    use test_module_surface_sampling, only : check_sampling_surface
     use parquet_settings_base          ! THE ONLY library import -- see the note above.
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use iso_fortran_env, only : int64
@@ -108,8 +279,52 @@ contains
 
         testsuite = [ &
             new_unittest("parquet_settings_base alone exposes get AND set for every knob it holds", &
-                test_settings_base_surface) ]
+                test_settings_base_surface), &
+            new_unittest("parquet_argsort alone exposes every sorting knob it reads", &
+                test_argsort_surface), &
+            new_unittest("parquet_sorting alone exposes every sorting knob it reads", &
+                test_sorting_surface), &
+            new_unittest("parquet_strings alone exposes every knob it reads", &
+                test_strings_surface), &
+            new_unittest("parquet_sampling alone exposes every knob it reads", &
+                test_sampling_surface) ]
     end subroutine collect_tests_module_surface
+
+    !> The test-drive wrapper over check_argsort_surface.
+    subroutine test_argsort_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_argsort_surface(what)
+        call check(error, what == "", "a knob was not round-trippable through `use parquet_argsort` alone: " // what)
+    end subroutine test_argsort_surface
+
+    !> The test-drive wrapper over check_sorting_surface.
+    subroutine test_sorting_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_sorting_surface(what)
+        call check(error, what == "", "a knob was not round-trippable through `use parquet_sorting` alone: " // what)
+    end subroutine test_sorting_surface
+
+    !> The test-drive wrapper over check_strings_surface.
+    subroutine test_strings_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_strings_surface(what)
+        call check(error, what == "", "a knob was not round-trippable through `use parquet_strings` alone: " // what)
+    end subroutine test_strings_surface
+
+    !> The test-drive wrapper over check_sampling_surface.
+    subroutine test_sampling_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_sampling_surface(what)
+        call check(error, what == "", "a knob was not round-trippable through `use parquet_sampling` alone: " // what)
+    end subroutine test_sampling_surface
 
     !> The test-drive wrapper over check_settings_base_surface.
     subroutine test_settings_base_surface(error)

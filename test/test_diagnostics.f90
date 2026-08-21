@@ -28,6 +28,11 @@
 !> Every test writes its own fixture under test_run/, with its own filename, per CLAUDE.md.
 module test_diagnostics
     use parquet
+    ! The C++ sort engine is TEST-ONLY and is not re-exported by the `parquet` facade: reaching it
+    ! needs this import, which is what keeps it out of every other program's dependency graph.
+    ! Importing it is also what BINDS it -- `parquet_debug_use_fortran_sort_engine` lives here and
+    ! registers the engine's entry points as a side effect of being called.
+    use parquet_sorting_oracle, only : parquet_debug_use_fortran_sort_engine
     use iso_fortran_env, only : int32, int64, real64
     use iso_c_binding, only : c_int, c_long_long, c_int64_t
     use testdrive, only : new_unittest, unittest_type, error_type, check

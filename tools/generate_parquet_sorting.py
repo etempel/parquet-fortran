@@ -35,6 +35,7 @@ Usage:  tools/generate_parquet_sorting.py [--check] [--self-test]
 """
 
 import argparse
+import re
 import importlib.util
 import pathlib
 import sys
@@ -91,6 +92,123 @@ TYPES = [
     ("col",    "type(parquet_column)",       "type-erased column", "col",  "own",  False, "reindex"),
 ]
 
+#: The tags that live in the ARGSORT TIER (`parquet_argsort`), which must stay Arrow-free.
+#:
+#: These are the six INTRINSIC element types -- everything `pf_argsort` can order without knowing
+#: about a parquet column, a packed string store or a temporal element. The other five
+#: (`date`, `time`, `ts`, `strcol`, `col`) stay in `parquet_sorting`, which sits above
+#: `parquet_columns`, `parquet_strings` and `parquet_temporal` and extends `pf_argsort` with their
+#: specifics -- see feature_modules.md section 4.
+#:
+#: **The split is a DEPENDENCY boundary, not a filing decision.** A consumer whose only import is
+#: `use parquet_sampling` needs exactly `pf_argsort(real64 array, int64 perm)`; making it compile
+#: the temporal and column machinery -- and, before the oracle was extracted, `parquet_bindings`
+#: and with it Arrow -- is what this tier exists to avoid. Moving a tag across this line is
+#: therefore a design decision, and `check_parquet_argsort_stays_arrow_free`
+#: (tools/check_source_conventions.py) is what stops it happening by accident.
+ARGSORT_TAGS = ("i32", "i64", "f32", "f64", "bool", "chr")
+
+#: The comparator hooks `parquet_argsort` owns and `parquet_sorting` re-exports.
+#:
+#: `parquet_debug_use_fortran_sort_engine` is deliberately absent: the SETTER lives in
+#: `parquet_sorting_oracle`, so selecting the C++ engine and binding it are one act.
+#: The four comparator hooks that take a `pf_sort_keys`, and therefore CANNOT live in the argsort
+#: tier: that type belongs to `parquet_sorting`, and these reach its private `keys` component. Their
+#: bodies sit in `parquet_sorting_keys` and call `sort_row_less`/`sort_keys_compare`, which
+#: `parquet_argsort` exports for exactly this purpose.
+SORTING_HOOK_BODIES = '''    module procedure parquet_debug_sort_row_less
+        less = .false.
+        if (.not. allocated(keys%keys)) return
+        less = sort_row_less(keys%keys, a, b)
+    end procedure parquet_debug_sort_row_less
+    !
+    module procedure parquet_debug_sort_keys_compare
+        c = 0
+        if (.not. allocated(keys%keys)) return
+        c = sort_keys_compare(keys%keys, a, b, nkeys)
+    end procedure parquet_debug_sort_keys_compare
+    !
+    module procedure parquet_debug_sort_sweep_less
+        integer(int64) :: rep, i, j, stride
+        !
+        count = -1_int64
+        if (.not. allocated(keys%keys)) return
+        if (nrows < 2_int64) return
+        count = 0_int64
+        do rep = 0_int64, nreps - 1_int64
+            stride = 1_int64 + mod(rep, nrows - 1_int64)
+            do i = 1_int64, nrows
+                j = i + stride
+                if (j > nrows) j = j - nrows
+                if (sort_row_less(keys%keys, i, j)) count = count + 1_int64
+            end do
+        end do
+    end procedure parquet_debug_sort_sweep_less
+    !
+    module procedure parquet_debug_sort_sweep_compare
+        integer(int64) :: rep, i, j, stride
+        !
+        total = -1_int64
+        if (.not. allocated(keys%keys)) return
+        if (nrows < 2_int64) return
+        total = 0_int64
+        do rep = 0_int64, nreps - 1_int64
+            stride = 1_int64 + mod(rep, nrows - 1_int64)
+            do i = 1_int64, nrows
+                j = i + stride
+                if (j > nrows) j = j - nrows
+                total = total + int(sort_keys_compare(keys%keys, i, j, nkeys), int64)
+            end do
+        end do
+    end procedure parquet_debug_sort_sweep_compare'''
+
+SORTING_HOOKS = [
+    "parquet_debug_sort_row_less", "parquet_debug_sort_keys_compare",
+    "parquet_debug_sort_sweep_less", "parquet_debug_sort_sweep_compare",
+]
+
+DEBUG_HOOKS = [
+    "parquet_debug_using_fortran_sort_engine", "parquet_debug_set_sort_depth_limit",
+    "parquet_debug_sort_heapsort_calls", "parquet_debug_set_sort_track_shift",
+    "parquet_debug_sort_max_insertion_shift", "parquet_debug_set_sort_radix_min_rows",
+    "parquet_debug_set_sort_task_floor", "parquet_debug_set_sort_tail_min_rows",
+    "parquet_debug_set_sort_engine_min_rows", "parquet_debug_set_sort_counting_max_threads",
+    "parquet_debug_sort_refine_runs", "parquet_debug_set_sort_split_min_card",
+    "parquet_debug_set_sort_radix_fail_alloc", "parquet_debug_reset_sort_radix_passes",
+    "parquet_debug_sort_radix_passes", "parquet_debug_sort_threads_used",
+    "parquet_debug_sort_split_buckets", "parquet_debug_sort_design",
+]
+
+
+def in_argsort(t):
+    """Whether one row of TYPES belongs to the argsort tier."""
+    return t[0] in ARGSORT_TAGS
+
+
+class Split:
+    """A writer that routes each emitted line to one of two files.
+
+    `gen_specs` and `gen_keys_split` emit ONE sequence of declarations that has to end up in two
+    modules, and the alternative -- two near-identical emitters -- is how the two drift. Setting
+    `to_a` chooses the destination for everything written until it is set again, so the split is
+    visible at the few places it actually happens rather than spread over several hundred `w(...)`
+    calls. Leave `to_a` False except inside a block that is deliberately argsort-tier.
+    """
+
+    def __init__(self):
+        self.a = []      #: lines destined for the parquet_argsort side
+        self.s = []      #: lines destined for the parquet_sorting side
+        self.to_a = False
+
+    def __call__(self, line):
+        (self.a if self.to_a else self.s).append(line)
+
+    def both(self, line):
+        """Emits one line into BOTH files -- for a declaration each module needs its own copy of."""
+        self.a.append(line)
+        self.s.append(line)
+
+
 #: Families whose values are handed to the engine without a copy, rather than through the builder.
 BORROWED = ("int64", "real64")
 
@@ -109,6 +227,94 @@ BANNER = """!===========================================
 !"""
 
 IDX_KINDS = [("i32", "integer(int32)", "int32"), ("i64", "integer(int64)", "int64")]
+
+#: The module opening for `parquet_argsort` -- the Arrow-free argsort tier.
+ARGSORT_SPEC_HEADER = '''!> `pf_argsort` over plain Fortran arrays, and the sort engine underneath it.
+!!
+!! **This module is a TIER, not a convenience facade, and what it does NOT import is the point.**
+!! Its Fortran `use` graph reaches `parquet_settings_base` and the intrinsic modules and nothing
+!! else -- no `parquet_bindings`, and so no Arrow anywhere in the graph. A project that wants an
+!! argsort, or that wants `parquet_sampling`'s weighted draws, compiles this tier and stops there
+!! instead of compiling the whole reader/writer stack. `parquet_sorting` sits on top and extends
+!! `pf_argsort` with the five element types that need a parquet column, a packed string store or a
+!! temporal element.
+!!
+!! **The C++ engine is reached through a procedure POINTER, and that indirection is what keeps this
+!! module Arrow-free.** The second, independent engine in `src/parquet_wrapper.cpp` exists so the
+!! tests can check this one against it. Binding it is `parquet_sorting_oracle`'s job; a program that
+!! never imports that module never compiles it, and fpm prunes it away. See
+!! `parquet_argsort_bind_oracle` below.
+!!
+!! **Naming.** Everything public carries the `pf_` prefix (parquet-fortran) rather than `parquet_`,
+!! because the subject is not a parquet file -- see CLAUDE.md's "Naming conventions". The module is
+!! `parquet_argsort` rather than `pf_argsort` because a module cannot share its name with a
+!! procedure it declares.
+!!
+!! User guide: `doc/pages/utilities/sorting.md`.
+module parquet_argsort
+    use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
+    use iso_c_binding, only : c_ptr, c_loc, c_null_ptr, c_int8_t, c_char
+    use, intrinsic :: ieee_arithmetic, only : ieee_is_nan
+    ! Every sorting knob this tier reads, plus the output pair, because `warn_thread_clamp` emits.
+    ! Taking them from the leaf rather than from `parquet_settings` is what keeps the graph clear of
+    ! `parquet_bindings`; see that module's header for the rule.
+    use parquet_settings_base
+    !
+    implicit none
+    private
+    !
+    public :: pf_argsort
+    public :: pf_sort_threads
+    !
+    ! ---- Internal to the sorting tiers; `src/parquet.f90` privatises all of it ----
+    !
+    ! `parquet_sorting` needs the key type because `pf_sort_keys` holds an array of it, and
+    ! `parquet_sorting_oracle` needs to read its components to fill the C++ builder. Its components
+    ! are therefore accessible rather than `private` -- the type itself never reaches a user, since
+    ! `parquet_sorting` does not re-export it and `pf_sort_keys` holds it privately.
+    public :: sort_key_buf, SK_INT, SK_REAL, SK_STR
+    ! The two comparators, so parquet_sorting can implement the four debug hooks that take a
+    ! `pf_sort_keys` -- a type this tier cannot see. No library code outside those hooks calls them.
+    public :: sort_row_less, sort_keys_compare
+    !
+    ! The extraction, dispatch and narrowing this tier owns, because `parquet_sorting`'s own
+    ! submodules reach all of it: its five down-tier extractors produce the same `sort_key_buf`,
+    ! its `pf_sort`/`pf_partial_sort`/`pf_unique`/`pf_minmax` families run through the same
+    ! dispatchers, and every int32 form narrows with the same helpers. Sharing one copy is the whole
+    ! point -- two extraction paths would be two chances to disagree about what a null is.
+    public :: extract_i32, extract_i64, extract_f32, extract_f64, extract_bool, extract_chr
+    public :: valid_from_mask, fill_identity, tail_team, resolve_thread_count
+    public :: drive_engine, drive_engine_grouped, engine_build_runs, runs_to_offsets
+    public :: narrow_perm, narrow_offsets
+    !
+    ! The engine-selection flag, and the pointers the selectors dispatch through. `parquet_sorting`
+    ! keeps five of the seven selectors (the ones its own operations use), so it reads the same flag
+    ! and the same pointers rather than keeping a second copy that could disagree.
+    public :: dbg_fortran_engine, check_oracle
+    public :: p_partial, p_nth, p_is_sorted, p_search, p_merge
+    !
+    ! The Fortran engine itself. `parquet_sorting`'s five selectors call the same entry points this
+    ! tier's two do -- one engine for all eleven element types is the property the whole sorting
+    ! design rests on, so there is exactly one copy and both tiers reach it here.
+    public :: sort_build_permutation, sort_build_permutation_threaded
+    public :: sort_comparison_permutation, sort_partial_permutation, sort_nth_index
+    public :: sort_is_sorted, sort_build_runs_permutation, sort_search_position
+    public :: sort_merge_permutation, sort_counting_candidate, sort_counting_permutation
+    public :: sort_tier_of, sort_compare_key
+    public :: parquet_argsort_bind_oracle, parquet_argsort_select_engine
+    !
+    ! ---- Re-exported from parquet_settings_base ----
+    !
+    ! A module re-exports, get and set, every knob its own code reads -- so a program importing this
+    ! tier alone can configure the sort it is about to run without importing parquet_settings.
+    public :: parquet_set_sort_threads, parquet_get_sort_threads
+    public :: parquet_set_sort_radix_path, parquet_get_sort_radix_path
+    public :: parquet_set_sort_counting_path, parquet_get_sort_counting_path
+    public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
+    public :: parquet_set_verbosity, parquet_get_verbosity
+    public :: parquet_set_message_stream, parquet_get_message_stream
+    !'''
+
 
 
 def wrap_list(names, indent, width=110):
@@ -252,10 +458,17 @@ COMMON_OPTS = [
 # --------------------------------------------------------------------------------------
 # src/parquet_sorting.f90 -- the module spec
 # --------------------------------------------------------------------------------------
-def gen_spec():
-    o = []
-    w = o.append
-    w(BANNER)
+def gen_specs():
+    """Emits BOTH module specs: `parquet_argsort` (the tier) and `parquet_sorting` (the facade).
+
+    One emitter rather than two, because the two modules share most of their declarations and two
+    near-identical emitters is how they drift. `W.to_a` selects the destination; see `Split`.
+    """
+    W = Split()
+    w = W
+    W.a.append(BANNER)
+    W.a.append(ARGSORT_SPEC_HEADER)
+    W.s.append(BANNER)
     w('''!> Sorting for plain Fortran arrays and for this library's own column types.
 !!
 !! This module is the public face of the radix engine that orders **everything** this library
@@ -297,16 +510,17 @@ def gen_spec():
 module parquet_sorting
     use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
     use iso_c_binding, only : c_ptr, c_loc, c_null_ptr, c_int8_t, c_char
-    use parquet_bindings, only : parquet_sort_builder_new, parquet_sort_builder_add_key_int64, &
-        parquet_sort_builder_add_key_double, parquet_sort_builder_add_key_string, &
-        parquet_sort_builder_build, parquet_sort_builder_is_sorted, parquet_sort_builder_free, &
-        parquet_sort_argsort_int64, parquet_sort_argsort_double, parquet_sort_argsort_string, &
-        parquet_sort_is_sorted_int64, parquet_sort_is_sorted_double, parquet_sort_is_sorted_string, &
-        parquet_sort_builder_build_partial, parquet_sort_builder_nth_element, &
-        parquet_sort_partial_argsort_int64, parquet_sort_partial_argsort_double, &
-        parquet_sort_partial_argsort_string, parquet_sort_nth_index_int64, &
-        parquet_sort_nth_index_double, parquet_sort_nth_index_string, &
-        parquet_sort_builder_build_runs, parquet_sort_builder_search, parquet_sort_builder_merge
+    ! **The argsort tier, imported WHOLE and re-exported selectively.** `parquet_argsort` owns the
+    ! engine, `sort_key_buf`, the six intrinsic `pf_argsort` specifics and every sorting setting;
+    ! this module extends `pf_argsort` with the five specifics that need a column, a packed string
+    ! store or a temporal element, and adds everything else the sorting API offers. A bare `use`
+    ! with this module's default `private` accessibility is what lets the extension work without
+    ! maintaining a name list: nothing leaks unless a `public ::` below names it.
+    !
+    ! `sort_key_buf` is deliberately NOT re-exported -- `pf_sort_keys` holds it as a PRIVATE
+    ! component, so the type never has to appear in this module's namespace and a `use parquet`
+    ! program never sees it.
+    use parquet_argsort
     use, intrinsic :: ieee_arithmetic, only : ieee_is_nan
     use parquet_strings, only : parquet_string_column
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
@@ -334,19 +548,48 @@ module parquet_sorting
     public :: pf_minmax
     public :: pf_argminmax
     public :: pf_merge
+    !
+    ! ---- Re-exported from parquet_argsort, so `use parquet_sorting` is unchanged ----
+    !
+    ! `pf_argsort` is EXTENDED rather than merely re-exported: the generic below adds this module's
+    ! own specifics to the ones the tier declares, and a program with a single `use parquet_sorting`
+    ! resolves both sets. That mechanism is what the two-tier design rests on; feature_modules.md
+    ! section 10.2 carries the standalone reproducer, verified on gfortran, flang and nagfor.
+    public :: pf_argsort
     public :: pf_sort_threads
     !
-    ! Test-only, and PUBLIC because there is no other route: they expose the comparator core, whose
+    ! Every sorting setting, getter AND setter, so a program that imports this module for its
+    ! sorting can configure that sorting without also importing parquet_settings -- which would
+    ! reach parquet_bindings and, with it, the Arrow stack this tier exists to stay clear of.
+    ! The output pair comes too, because this module emits (the affinity-clamp warning).
+    public :: parquet_set_sort_threads, parquet_get_sort_threads
+    public :: parquet_set_sort_radix_path, parquet_get_sort_radix_path
+    public :: parquet_set_sort_counting_path, parquet_get_sort_counting_path
+    public :: parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
+    public :: parquet_set_verbosity, parquet_get_verbosity
+    public :: parquet_set_message_stream, parquet_get_message_stream
+    !''')
+    w("    ! The tier's test-only comparator hooks, re-exported so that `use parquet` still reaches")
+    w("    ! them -- every A/B conformance test imports the facade, not this module directly.")
+    for _h in DEBUG_HOOKS:
+        w(f"    public :: {_h}")
+    w("    ! These four take a `pf_sort_keys`, so they are declared and implemented HERE rather than")
+    w("    ! one tier down: the argsort tier cannot see that type.")
+    for _h in SORTING_HOOKS:
+        w(f"    public :: {_h}")
+    w("    !")
+    W.to_a = True
+    w('''    ! Test-only, and PUBLIC because there is no other route: they expose the comparator core, whose
     ! state (`sort_key_buf`) is private to this module. CLAUDE.md's "A Fortran-side debug hook has
     ! to be PUBLIC, so prefer a C++ one" states the rule and the accepted precedents; the C++ route
     ! is unavailable here precisely because Stage 1 exists to move this decision OUT of C++.
     ! No library code calls either, neither appears in README.md's API overview, and neither is
     ! mentioned in any doc/pages/ guide -- see feature_sort.md section 7.4.
-    public :: parquet_debug_sort_row_less
-    public :: parquet_debug_sort_keys_compare
-    public :: parquet_debug_sort_sweep_less
-    public :: parquet_debug_sort_sweep_compare
-    public :: parquet_debug_use_fortran_sort_engine
+    ! NOTE `parquet_debug_use_fortran_sort_engine` -- the SETTER -- is NOT here: it lives in
+    ! parquet_sorting_oracle, which is the only module that can honour it, and registering the
+    ! oracle's entry points is a side effect of calling it. That is what makes registration
+    ! impossible to forget: selecting the C++ engine IS binding it. The getter stays beside the
+    ! flag it reads.
     public :: parquet_debug_using_fortran_sort_engine
     public :: parquet_debug_set_sort_depth_limit
     public :: parquet_debug_sort_heapsort_calls
@@ -366,10 +609,17 @@ module parquet_sorting
     public :: parquet_debug_sort_split_buckets
     public :: parquet_debug_sort_design
     !
-    !> Error-message prefix for every `error stop` raised by this module.
-    character(len=*), parameter :: EP = "parquet_sorting: "
-    !
-    ! ---- Engine selection: the Fortran engine is the DEFAULT; the selector is TEST-ONLY ---------
+    !''')
+    for _f in (W.a, W.s):
+        _f.append("    !> Error-message prefix for every `error stop` raised by this module.")
+        _f.append("    !!")
+        _f.append("    !! **The string says `parquet_sorting` in BOTH tiers, deliberately.** `pf_argsort` is")
+        _f.append("    !! documented as part of the sorting API however it is imported, so a caller must not see")
+        _f.append("    !! a different prefix according to which internal module happened to raise the error --")
+        _f.append("    !! and every existing error-scenario test asserts the message it has always produced.")
+        _f.append('    character(len=*), parameter :: EP = "parquet_sorting: "')
+        _f.append("    !")
+    w('''    ! ---- Engine selection: the Fortran engine is the DEFAULT; the selector is TEST-ONLY ---------
     !
     ! Stage 6 flipped this to `.true.`, so `pf_sort`/`pf_argsort` and every operation reached
     ! through `drive_engine` run the Fortran engine. The selector itself STAYS: the conformance
@@ -563,8 +813,9 @@ module parquet_sorting
     integer, parameter :: SK_INT = 1  !! key values live in `ints`.
     integer, parameter :: SK_REAL = 2 !! key values live in `reals`.
     integer, parameter :: SK_STR = 3  !! key values live in `offsets`/`data`.
-    !
-    ! ---- Fractional-position rounding for pf_nth_quantile ----
+    !''')
+    W.to_a = False
+    w('''    ! ---- Fractional-position rounding for pf_nth_quantile ----
     integer, parameter :: RND_NEAREST = 1 !! round a fractional rank to the nearest whole one.
     integer, parameter :: RND_DOWN = 2    !! round a fractional rank down.
     integer, parameter :: RND_UP = 3      !! round a fractional rank up.
@@ -578,14 +829,18 @@ module parquet_sorting
     integer, parameter :: SRCH_LOWER = 1 !! the first position not ordered before the target.
     integer, parameter :: SRCH_UPPER = 2 !! the first position the target is ordered before.
     integer, parameter :: SRCH_BOTH = 3  !! both, from one extraction.
-    !
-    !> One extracted sort key, in the canonical form the C++ engine takes.
+    !''')
+    W.to_a = True
+    w('''    !> One extracted sort key, in the canonical form the C++ engine takes.
     !!
     !! Exactly one of `ints`/`reals`/(`offsets`,`data`) is allocated, matching `family`. `valid`
     !! is left UNALLOCATED when the key has no nulls at all, which is the engine's own fast path
     !! -- the same convention `parquet_column%row_validity` already uses.
     type :: sort_key_buf
-        private
+        ! Components are deliberately NOT `private`: `parquet_sorting_oracle` is a separate module
+        ! and has to read every one of them to fill the C++ builder. The type is still invisible to
+        ! a user -- `parquet_sorting` does not re-export it, `pf_sort_keys` holds it as a private
+        ! component, and `src/parquet.f90` privatises what little is left.
         integer :: family = SK_INT                          !! SK_INT / SK_REAL / SK_STR.
         logical :: descending = .false.                     !! .true. sorts high to low.
         logical :: nulls_first = .false.                    !! .true. places nulls before values.
@@ -594,8 +849,9 @@ module parquet_sorting
         integer(int64), allocatable :: offsets(:)           !! SK_STR: n+1 byte offsets, 0-based.
         character(kind=c_char), allocatable :: data(:)      !! SK_STR: the packed bytes.
         integer(c_int8_t), allocatable :: valid(:)          !! 1 = valid; UNALLOCATED means no nulls.
-    end type sort_key_buf
-    !
+    end type sort_key_buf''')
+    W.to_a = False
+    w('''    !
     !> A list of sort keys, applied in the order added -- the first key added is the primary one.
     !!
     !! This is how a multi-key sort is expressed, because Fortran cannot offer "an optional
@@ -637,6 +893,7 @@ module parquet_sorting
     w("    !")
 
     # ---- generic interfaces ----
+    W.to_a = True
     w("    !> The permutation that would sort `values`: `perm(k)` is the index of the element that")
     w("    !> belongs at position k. `values` is never modified.")
     w("    !>")
@@ -644,11 +901,24 @@ module parquet_sorting
     w("    !> `integer(int32)` form aborts when the array is longer than `huge(1_int32)` rather than")
     w("    !> truncating; declare `perm` as `integer(int64)` for arrays that large.")
     w("    !>")
-    w("    !> Also takes a `pf_sort_keys` object in place of `values`, for a multi-key sort.")
+    w("    !> This tier covers the six intrinsic element types.")
+    w("    !>")
+    w("    !> `parquet_sorting` imports this generic and adds its own specifics to it, so a program")
+    w("    !> with a single `use parquet_sorting` sees one `pf_argsort` covering all eleven types.")
     w("    interface pf_argsort")
     for t in TYPES:
-        for ik, _, _ in IDX_KINDS:
-            w(f"        module procedure argsort_{t[0]}_{ik}")
+        if in_argsort(t):
+            for ik, _, _ in IDX_KINDS:
+                w(f"        module procedure argsort_{t[0]}_{ik}")
+    w("    end interface pf_argsort")
+    W.to_a = False
+    w("    !> Extends `parquet_argsort`'s `pf_argsort` with the element types that need a parquet")
+    w("    !> column, a packed string store or a temporal element, and with the multi-key form.")
+    w("    interface pf_argsort")
+    for t in TYPES:
+        if not in_argsort(t):
+            for ik, _, _ in IDX_KINDS:
+                w(f"        module procedure argsort_{t[0]}_{ik}")
     for ik, _, _ in IDX_KINDS:
         w(f"        module procedure argsort_keys_{ik}")
     w("    end interface pf_argsort")
@@ -922,9 +1192,10 @@ module parquet_sorting
         w("    !")
 
     # ---- interface bodies ----
-    w("    ! ---- Key extraction and pf_sort_keys%add (parquet_sorting_keys) ----")
-    w("    interface")
+    W.both("    ! ---- Key extraction, engine dispatch and the shared helpers ----")
+    W.both("    interface")
     for t in TYPES:
+        W.to_a = in_argsort(t)
         tag, decl, what, family, nulls, _, _ = t
         w(f"        !> Extracts a {what} key into the canonical form the engine takes.")
         w(f"        module subroutine extract_{tag}(values, buf, descending, nulls_first, proc{', is_valid' if nulls == 'arg' else ''}, threads)")
@@ -937,6 +1208,7 @@ module parquet_sorting
             w("            logical, intent(in), optional :: is_valid(:) !! per element: .false. marks a null.")
         w("            integer, intent(in), optional :: threads !! thread request; absent = the automatic policy.")
         w(f"        end subroutine extract_{tag}")
+    W.to_a = False
     for t in TYPES:
         tag, decl, what, family, nulls, _, _ = t
         w(f"        !> Appends a {what} sort key.")
@@ -979,6 +1251,7 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc          !! calling procedure, for messages.")
     w("            integer, intent(out) :: group_ekeys           !! the engine-key prefix length.")
     w("        end subroutine resolve_group_nkeys")
+    W.to_a = True
     w("        !> Runs the C++ engine over `keys`, returning a 1-based permutation.")
     w("        module subroutine drive_engine(keys, nrows, proc, perm, threads)")
     w("            type(sort_key_buf), intent(in), target :: keys(:)   !! the keys, primary first.")
@@ -1054,6 +1327,7 @@ module parquet_sorting
     w("            integer(int64), intent(in) :: n         !! elements to fill.")
     w("            integer(int64), intent(in) :: nthreads  !! the sort's resolved thread count.")
     w("        end subroutine fill_identity")
+    W.to_a = False
     w("        !> Runs the engine over `keys` but orders only the first `count` entries -- `perm`")
     w("        !! comes back with exactly `count` elements.")
     w("        module subroutine drive_engine_partial(keys, nrows, count, proc, perm)")
@@ -1112,6 +1386,7 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc                !! calling procedure, for messages.")
     w("            logical, intent(out) :: answer                      !! .true. when already in order.")
     w("        end subroutine engine_is_sorted")
+    W.to_a = True
     w("        !> Builds the engine's int8 validity array from a logical mask, leaving `valid`")
     w("        !! UNALLOCATED when the mask marks nothing null (the engine's no-nulls fast path).")
     w("        module subroutine valid_from_mask(mask, n, proc, valid)")
@@ -1120,6 +1395,7 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc                    !! calling procedure, for messages.")
     w("            integer(c_int8_t), allocatable, intent(out) :: valid(:) !! 1 per valid element.")
     w("        end subroutine valid_from_mask")
+    W.to_a = False
     w("        !> Aborts unless `perm` is a true permutation of 1..n. Uses a bit-packed seen-set, so")
     w("        !! the scratch is n/8 bytes rather than the 4n a default LOGICAL array would cost.")
     w("        !!")
@@ -1133,6 +1409,7 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc  !! calling procedure, for messages.")
     w("            logical, intent(in), optional :: scan !! .false. checks the length only; default .true.")
     w("        end subroutine check_permutation")
+    W.to_a = True
     w("        !> Sorts, and reports where the runs of EQUAL rows are: `tie(k)` is 1 when output")
     w("        !! position k holds a row comparing equal to the one before it. One call, because")
     w("        !! `pf_unique`/`pf_rank` need both and would otherwise build the permutation twice.")
@@ -1149,6 +1426,7 @@ module parquet_sorting
     w("            !! The sort itself always uses every key; only the tie test is narrowed.")
     w("            integer, intent(in), optional :: group_ekeys")
     w("        end subroutine engine_build_runs")
+    W.to_a = False
     w("        !> Binary-searches `keys`, whose LAST row is the target the caller appended.")
     w("        module subroutine engine_search(keys, nrows, n_search, upper, proc, pos)")
     w("            type(sort_key_buf), intent(in), target :: keys(:) !! the keys, primary first.")
@@ -1224,6 +1502,7 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: noun !! what the numbers are, for the message.")
     w("            integer(int32), allocatable, intent(out) :: dst(:) !! the narrowed copy.")
     w("        end subroutine narrow_i64_array")
+    W.to_a = True
     w("        !> Narrows a 1-based int64 permutation to int32, aborting rather than truncating.")
     w("        module subroutine narrow_perm(perm64, proc, perm32, threads)")
     w("            integer(int64), intent(in) :: perm64(:)                !! the permutation.")
@@ -1244,11 +1523,13 @@ module parquet_sorting
     w("            character(len=*), intent(in) :: proc                      !! calling procedure.")
     w("            integer(int32), allocatable, intent(out) :: offsets32(:)  !! the narrowed copy.")
     w("        end subroutine narrow_offsets")
-    w("    end interface")
-    w("    !")
-    w("    ! ---- pf_argsort and pf_sort (parquet_sorting_argsort) ----")
-    w("    interface")
+    W.to_a = False
+    W.both("    end interface")
+    W.both("    !")
+    W.both("    ! ---- pf_argsort and pf_sort ----")
+    W.both("    interface")
     for t in TYPES:
+        W.to_a = in_argsort(t)
         tag, decl, what, family, nulls, has_sort, _ = t
         for ik, idecl, iname in IDX_KINDS:
             w(f"        !> pf_argsort over a {what} array, returning an {iname} permutation.")
@@ -1265,6 +1546,7 @@ module parquet_sorting
             for line in group_offsets_doc(idecl):
                 w(line)
             w(f"        end subroutine argsort_{tag}_{ik}")
+    W.to_a = False
     for ik, idecl, iname in IDX_KINDS:
         w(f"        !> pf_argsort over a multi-key `pf_sort_keys`, returning an {iname} permutation.")
         w(f"        module subroutine argsort_keys_{ik}(keys, perm, threads, group_offsets, group_nkeys)")
@@ -1298,7 +1580,7 @@ module parquet_sorting
         for line in THREADS_DOC:
             w(line)
         w(f"        end subroutine sort_{tag}")
-    w("    end interface")
+    W.both("    end interface")
     w("    !")
     w("    ! ---- pf_partial_sort and pf_partial_argsort (parquet_sorting_select) ----")
     w("    interface")
@@ -1430,8 +1712,10 @@ module parquet_sorting
     w("    end interface")
     w("    !")
     emit_m3_interfaces(w)
-    w("end module parquet_sorting ! GCOVR_EXCL_LINE")
-    return "\n".join(o) + "\n"
+    emit_oracle_plumbing(W)
+    W.a.append("end module parquet_argsort ! GCOVR_EXCL_LINE")
+    W.s.append("end module parquet_sorting ! GCOVR_EXCL_LINE")
+    return "\n".join(W.a) + "\n", "\n".join(W.s) + "\n"
 
 
 DESC_DOC = "            logical, intent(in), optional :: descending !! .true. for high-to-low order."
@@ -1462,6 +1746,155 @@ def distinct_decl(t):
     if family == "strcol":
         return "            type(parquet_string_column), intent(out) :: distinct !! the distinct values."
     return f"            {decl}, allocatable, intent(out) :: distinct(:) !! the distinct values, in order."
+
+
+def emit_oracle_plumbing(W):
+    """The argsort tier's binding to the TEST-ONLY C++ engine, reached through procedure pointers.
+
+    **This indirection is what keeps `parquet_argsort` and `parquet_sorting` Arrow-free.** The C++
+    engine is a second, independent implementation kept only so the conformance tests can check the
+    Fortran one against it; naming its `bind(C)` entry points from either tier would put
+    `parquet_bindings` -- and with it the whole Arrow stack -- back into the `use` graph of every
+    program that sorts anything. A pointer costs nothing at run time on the shipped path, which
+    never dereferences it, and lets fpm prune `parquet_sorting_oracle` out of any build that does
+    not import it.
+    """
+    W.to_a = True
+    w = W
+    w("    !")
+    w("    ! ---- The test-only C++ engine, bound at run time by parquet_sorting_oracle ----")
+    w("    !")
+    w("    abstract interface")
+    w("        !> One C++-engine entry point. `keys` and the pre-allocated outputs are exactly what")
+    w("        !! the corresponding selector has already prepared, so the oracle does the builder")
+    w("        !! work and nothing else.")
+    w("        subroutine oracle_argsort_i(keys, nrows, nthreads, proc, perm)")
+    w("            import :: sort_key_buf, int64")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("            integer(int64), intent(in) :: nthreads             !! resolved thread count.")
+    w("            character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("            integer(int64), intent(inout) :: perm(:)           !! identity-filled by the caller.")
+    w("        end subroutine oracle_argsort_i")
+    w("        !> The C++ engine's partial sort; `perm` is allocated and identity-filled already.")
+    w("        subroutine oracle_partial_i(keys, nrows, count, proc, perm)")
+    w("            import :: sort_key_buf, int64")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("            integer(int64), intent(in) :: count                !! leading entries to order.")
+    w("            character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("            integer(int64), intent(inout) :: perm(:)           !! the first `count` indices.")
+    w("        end subroutine oracle_partial_i")
+    w("        !> The C++ engine's nth-element selection.")
+    w("        subroutine oracle_nth_i(keys, nrows, nth, proc, idx)")
+    w("            import :: sort_key_buf, int64")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("            integer(int64), intent(in) :: nth                  !! 1-based rank wanted.")
+    w("            character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("            integer(int64), intent(out) :: idx                 !! 1-based row index at that rank.")
+    w("        end subroutine oracle_nth_i")
+    w("        !> The C++ engine's already-sorted test.")
+    w("        subroutine oracle_is_sorted_i(keys, nrows, proc, answer)")
+    w("            import :: sort_key_buf, int64")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("            character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("            logical, intent(out) :: answer                     !! .true. when already in order.")
+    w("        end subroutine oracle_is_sorted_i")
+    w("        !> The C++ engine's grouped sort: a permutation plus the tie flags runs are built from.")
+    w("        subroutine oracle_runs_i(keys, nrows, nthreads, gek, proc, perm, tie)")
+    w("            import :: sort_key_buf, int64, c_int8_t")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("            integer(int64), intent(in) :: nthreads             !! resolved thread count.")
+    w("            integer(int64), intent(in) :: gek                  !! engine keys defining a group.")
+    w("            character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("            integer(int64), intent(inout) :: perm(:)           !! identity-filled by the caller.")
+    w("            integer(c_int8_t), intent(inout) :: tie(:)         !! 1 where a row ties the previous.")
+    w("        end subroutine oracle_runs_i")
+    w("        !> The C++ engine's binary search over a sorted key.")
+    w("        subroutine oracle_search_i(keys, nrows, n_search, upper, proc, pos)")
+    w("            import :: sort_key_buf, int64")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                !! rows each key has, target included.")
+    w("            integer(int64), intent(in) :: n_search             !! rows to search, target excluded.")
+    w("            logical, intent(in) :: upper                       !! .true. for upper_bound.")
+    w("            character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("            integer(int64), intent(out) :: pos                 !! 1-based insertion point.")
+    w("        end subroutine oracle_search_i")
+    w("        !> The C++ engine's merge of two sorted runs.")
+    w("        subroutine oracle_merge_i(keys, nrows, na, proc, perm)")
+    w("            import :: sort_key_buf, int64")
+    w("            type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("            integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("            integer(int64), intent(in) :: na                   !! rows belonging to the first input.")
+    w("            character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("            integer(int64), intent(inout) :: perm(:)           !! identity-filled by the caller.")
+    w("        end subroutine oracle_merge_i")
+    w("    end interface")
+    w("    !")
+    w("    !> The bound C++ entry points. All null until parquet_sorting_oracle binds them, which it")
+    w("    !! does as a side effect of `parquet_debug_use_fortran_sort_engine`, so they cannot be")
+    w("    !! unbound while `dbg_fortran_engine` is `.false.`. `check_oracle` says what happens if")
+    w("    !! some future caller finds a way.")
+    w("    procedure(oracle_argsort_i), pointer, save :: p_argsort => null()")
+    w("    procedure(oracle_partial_i), pointer, save :: p_partial => null()")
+    w("    procedure(oracle_nth_i), pointer, save :: p_nth => null()")
+    w("    procedure(oracle_is_sorted_i), pointer, save :: p_is_sorted => null()")
+    w("    procedure(oracle_runs_i), pointer, save :: p_runs => null()")
+    w("    procedure(oracle_search_i), pointer, save :: p_search => null()")
+    w("    procedure(oracle_merge_i), pointer, save :: p_merge => null()")
+    w("    !")
+    w("contains")
+    w("    !")
+    w("    !> Binds the seven C++-engine entry points. Called by parquet_sorting_oracle, and by")
+    w("    !! nothing else; idempotent, so calling it on every engine selection costs nothing.")
+    w("    subroutine parquet_argsort_bind_oracle(argsort_p, partial_p, nth_p, is_sorted_p, runs_p, &")
+    w("            search_p, merge_p)")
+    w("        procedure(oracle_argsort_i) :: argsort_p       !! the whole-permutation entry point.")
+    w("        procedure(oracle_partial_i) :: partial_p       !! the partial sort.")
+    w("        procedure(oracle_nth_i) :: nth_p               !! nth-element selection.")
+    w("        procedure(oracle_is_sorted_i) :: is_sorted_p   !! the already-sorted test.")
+    w("        procedure(oracle_runs_i) :: runs_p             !! the grouped sort.")
+    w("        procedure(oracle_search_i) :: search_p         !! the binary search.")
+    w("        procedure(oracle_merge_i) :: merge_p           !! the merge.")
+    w("        !")
+    w("        p_argsort => argsort_p")
+    w("        p_partial => partial_p")
+    w("        p_nth => nth_p")
+    w("        p_is_sorted => is_sorted_p")
+    w("        p_runs => runs_p")
+    w("        p_search => search_p")
+    w("        p_merge => merge_p")
+    w("    end subroutine parquet_argsort_bind_oracle")
+    w("    !")
+    w("    !> Selects which engine the dispatchers run. TEST-ONLY, and reached only through")
+    w("    !! parquet_sorting_oracle's `parquet_debug_use_fortran_sort_engine`.")
+    w("    subroutine parquet_argsort_select_engine(use_fortran)")
+    w("        logical, intent(in) :: use_fortran !! .true. selects the Fortran engine.")
+    w("        !")
+    w("        dbg_fortran_engine = use_fortran")
+    w("    end subroutine parquet_argsort_select_engine")
+    w("    !")
+    w("    !> Aborts if the C++ engine was selected without being bound.")
+    w("    !!")
+    w("    !! **Unreachable by construction, and kept anyway.** The only way to clear")
+    w("    !! `dbg_fortran_engine` is `parquet_debug_use_fortran_sort_engine`, which binds the")
+    w("    !! pointers before it clears the flag -- so a build that can select the C++ engine has")
+    w("    !! already imported the oracle. It must NEVER be softened into a silent fall back to the")
+    w("    !! Fortran engine: the A/B conformance tests would then compare that engine against")
+    w("    !! itself and pass, which is exactly the vacuous agreement they exist to rule out.")
+    w("    subroutine check_oracle(bound, proc)")
+    w("        logical, intent(in) :: bound          !! whether the entry point is associated.")
+    w("        character(len=*), intent(in) :: proc  !! calling procedure, for the message.")
+    w("        !")
+    w("        if (.not. bound) then ! GCOVR_EXCL_START -- unreachable; see the note above.")
+    w("            error stop EP // proc // \": the C++ sort engine was selected but is not bound; \" // &")
+    w("                \"add `use parquet_sorting_oracle` to the program that selects it\"")
+    w("        end if ! GCOVR_EXCL_STOP")
+    w("    end subroutine check_oracle")
+    W.to_a = False
 
 
 def emit_m3_interfaces(w):
@@ -1594,7 +2027,9 @@ def emit_m3_interfaces(w):
         w(f"        end subroutine merge_{tag}")
     w("    end interface")
     w("    !")
+    w.to_a = True
     emit_engine_interfaces(w)
+    w.to_a = False
 
 
 def emit_engine_interfaces(w):
@@ -1798,6 +2233,9 @@ def emit_engine_interfaces(w):
     w("    !")
     w("    ! ---- Test-only access to the comparator core (parquet_sorting_engine) ----")
     w("    interface")
+    w.to_a = False
+    w("    ! ---- Test-only comparator hooks that take a pf_sort_keys (parquet_sorting_keys) ----")
+    w("    interface")
     w("        !> Test-only view of what the Fortran SORT comparator says about one pair of rows.")
     w("        !!")
     w("        !! Public only because it has to be: `sort_key_buf` is private to this module, so a")
@@ -1844,14 +2282,9 @@ def emit_engine_interfaces(w):
     w("            integer, intent(in) :: nkeys            !! leading engine keys taking part.")
     w("            integer(int64) :: total                 !! sum of the answers; -1 if unusable.")
     w("        end function parquet_debug_sort_sweep_compare")
-    w("        !> Test-only switch routing `pf_argsort` and friends to the Fortran engine, or back to C++.")
-    w("        !!")
-    w("        !! Stage 2 scaffolding, deleted at the Stage 6 cutover. Both engines answer identically")
-    w("        !! -- that is what the conformance tests assert -- so this changes timing and nothing")
-    w("        !! else, which is exactly why it is a debug hook rather than a setting.")
-    w("        module subroutine parquet_debug_use_fortran_sort_engine(on)")
-    w("            logical, intent(in) :: on !! .true. selects the Fortran engine.")
-    w("        end subroutine parquet_debug_use_fortran_sort_engine")
+    w("    end interface")
+    w("    !")
+    w.to_a = True
     w("        !> Test-only reader for which engine `drive_engine` would use right now.")
     w("        module function parquet_debug_using_fortran_sort_engine() result(on)")
     w("            logical :: on !! .true. when the Fortran engine is selected.")
@@ -2283,6 +2716,136 @@ def emit_extract(w, t):
     w("    !")
 
 
+#: The procedures of the emitted keys submodule that belong to the ARGSORT TIER.
+#:
+#: Derived from what the six intrinsic `pf_argsort` specifics actually reach: an extractor per
+#: intrinsic type (and its serial/parallel halves), the two dispatchers those specifics call
+#: (`drive_engine` and `drive_engine_grouped`, plus `engine_build_runs`/`runs_to_offsets`, which the
+#: grouped form routes through when boundaries are asked for), the thread-count rule and the two
+#: narrowing helpers. Everything else stays in `parquet_sorting`, which owns `pf_sort_keys` and the
+#: five element types that need a column, a packed string store or a temporal element.
+#: The `pf_argsort`/`pf_sort` specifics that belong to the argsort tier: the six intrinsic element
+#: types, in both permutation kinds. `pf_sort` stays in `parquet_sorting` for every type -- it is
+#: `pf_argsort` followed by a gather, so which file a specific is emitted into is the only question,
+#: not which tier owns the logic.
+ARGSORT_SPECIFICS = {f"argsort_{tag}_{ik}" for tag in ARGSORT_TAGS for ik in ("i32", "i64")}
+
+ARGSORT_HEAD = BANNER + '''
+!> `pf_argsort` and `pf_sort` for the element types that need a parquet column, a packed string
+!! store or a temporal element, plus `pf_sort` for every type and the multi-key `pf_sort_keys` form.
+!!
+!! The six intrinsic types' `pf_argsort` specifics are one tier down, in
+!! `src/parquet_argsort_kernel.f90`.
+!!
+!! Both are thin: they extract the values into the engine's canonical key form, run the engine, and
+!! -- for `pf_sort` -- gather the result. No ordering decision is made here.
+!!
+!! **The int32 permutation forms exist because a caller with a default-kind `INTEGER` should not be
+!! forced to widen one** (CLAUDE.md's "Public numeric arguments"). They compute in int64 and narrow
+!! at the end, aborting rather than truncating when the array is longer than `huge(1_int32)`.
+submodule (parquet_sorting) parquet_sorting_argsort
+    implicit none
+    !
+contains
+    !
+'''
+
+KERNEL_HEAD = BANNER + '''
+!> The six intrinsic `pf_argsort` specifics, their key extraction, and the engine dispatch.
+!!
+!! **This is the argsort tier's implementation, and what it does NOT reach is the point.** Nothing
+!! here names `parquet_bindings`: the C++ engine is reached through the procedure pointers
+!! `parquet_argsort` holds, which `parquet_sorting_oracle` binds and which a program that never
+!! imports that module never has bound. See `parquet_argsort`'s own header.
+!!
+!! **This file decides nothing about order.** It extracts values, says which rows are null, and
+!! passes the caller's `descending`/`nulls_first` flags through -- every ordering decision is made
+!! in `sort_compare_key` (src/parquet_argsort_engine.f90), which is what stops a raw-array sort, a
+!! table sort and a read-time `sort_by=` from ever disagreeing.
+submodule (parquet_argsort) parquet_argsort_kernel
+    implicit none
+    !
+contains
+    !
+'''
+
+KEYS_HEAD = BANNER + '''
+!> Turns the element types that need a column, a packed string store or a temporal element into the
+!! canonical key form the engine takes, and implements `pf_sort_keys`.
+!!
+!! The six intrinsic types are handled one tier down, in `src/parquet_argsort_kernel.f90`; this file
+!! is what `parquet_sorting` adds on top of them. See feature_modules.md section 4.
+!!
+!! **This file decides nothing about order.** It extracts values, says which rows are null, and
+!! passes the caller's `descending`/`nulls_first` flags through -- every ordering decision is made
+!! in one place (`sort_compare_key`, src/parquet_argsort_engine.f90), which is what stops a
+!! raw-array sort, a table sort and a read-time `sort_by=` from ever disagreeing.
+!!
+!! The canonical form is deliberately narrow: an integer key, a real key, or a packed
+!! (offsets, data) string key, each with an optional per-row validity array. Everything else
+!! reduces to one of those three -- a `logical` and every temporal kind order exactly as their
+!! stored integers do, and a `parquet_timestamp` becomes two integer keys rather than one.
+submodule (parquet_sorting) parquet_sorting_keys
+    implicit none
+    !
+contains
+    !
+'''
+
+KERNEL_PROCS = {
+    "extract_i32", "extract_i64", "extract_f32", "extract_f64", "extract_bool", "extract_chr",
+    "extract_i32_par", "extract_i64_par", "extract_f32_par", "extract_f64_par", "extract_bool_par",
+    "extract_i32_ser", "extract_i64_ser", "extract_f32_ser", "extract_f64_ser", "extract_bool_ser",
+    "valid_from_mask",
+    "drive_engine", "drive_engine_grouped", "engine_build_runs", "runs_to_offsets",
+    "pf_sort_threads", "resolve_thread_count", "warn_thread_clamp", "tail_team", "fill_identity",
+    "narrow_perm", "narrow_offsets",
+}
+
+
+def partition_submodule(text, wanted):
+    """Splits one emitted submodule body into two files by top-level procedure name.
+
+    Both halves are plain sequences of complete procedures, so the split is exact and checkable:
+    every top-level block is assigned to one side or the other, and an unrecognised block is an
+    error rather than something quietly dropped. `wanted` names the blocks that go to the first
+    (argsort) file.
+    """
+    lines = text.split("\n")
+    c = next(i for i, l in enumerate(lines) if l.strip() == "contains")
+    body = lines[c + 1:]
+    # Drop the trailing `end submodule ...` line and anything after it.
+    e = next(i for i, l in enumerate(body) if l.startswith("end submodule"))
+    tail_marker = body[e]
+    body = body[:e]
+
+    open_re = re.compile(r"^    (?:module procedure|subroutine|function|"
+                         r"\w+(?:\([^)]*\))? function)\s+(\w+)")
+    blocks, cur, name = [], [], None
+    for l in body:
+        m = open_re.match(l)
+        if m and name is None:
+            name = m.group(1)
+        if name is None and l.strip() in ("", "!"):
+            continue          # separator between procedures; each block re-emits its own
+        cur.append(l)
+        if name is not None and re.match(r"^    end (?:procedure|subroutine|function)\s+%s\b"
+                                         % re.escape(name), l):
+            blocks.append((name, cur))
+            cur, name = [], None
+    leftover = [l for l in cur if l.strip()]
+    if leftover:
+        raise SystemExit("partition_submodule: %d line(s) outside any procedure:\n  %s"
+                         % (len(leftover), "\n  ".join(leftover[:5])))
+    a, sside = [], []
+    for n, blk in blocks:
+        (a if n in wanted else sside).extend(blk + ["    !"])
+    missing = wanted - {n for n, _ in blocks}
+    if missing:
+        raise SystemExit("partition_submodule: named but not emitted: %s" % sorted(missing))
+    return a, sside, tail_marker
+
+
 def gen_keys():
     o = []
     w = o.append
@@ -2304,6 +2867,12 @@ submodule (parquet_sorting) parquet_sorting_keys
     !
 contains
     !''')
+    w("""    !> Test-only comparator hooks that take a `pf_sort_keys`.
+    !!
+    !! They live HERE rather than in src/parquet_argsort_engine.f90 with the comparators they call,
+    !! because `pf_sort_keys` belongs to `parquet_sorting` and they reach its private `keys`
+    !! component. `parquet_argsort` exports `sort_row_less`/`sort_keys_compare` for exactly this.""")
+    w(SORTING_HOOK_BODIES)
     for t in TYPES:
         emit_extract(w, t)
     # The threaded arms, one per numeric tag. Separate procedures on purpose -- see
@@ -2751,7 +3320,6 @@ contains
         ! fresh allocation reads back as zeros -- the trap CLAUDE.md records under 'An intermittent
         ! test failure has THREE causes'. Verified against that by running the whole suite under an
         ! LD_PRELOAD malloc filling every block with 0xFF.
-        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             ! Stage 2 scaffolding -- see `dbg_fortran_engine`'s declaration. **Stage 4 made this
             ! branch honour `threads`**, and the resolution above is deliberately SHARED with the
@@ -2765,27 +3333,15 @@ contains
             call sort_build_permutation_threaded(keys, nrows, nthreads, perm)
             return
         end if
-        ! The C++ engine's contract for `perm` cannot be checked from this side, so it keeps the
-        ! fill it has always had.
-        call fill_identity(perm, nrows, nthreads)
-        if (size(keys) == 1) then
-            ! One key needs no builder at all: the one-shot entry points BORROW the buffer that
-            ! was just extracted, so this saves a handle allocation and a second copy of every
-            ! value. Multi-key has to go through the builder, which owns its keys.
-            call engine_one_shot(keys(1), nrows, nthreads, perm)
-            return
-        end if
-        builder = parquet_sort_builder_new(nrows)
-        do ik = 1, size(keys)
-            call engine_add_key(builder, keys(ik), nrows)
-        end do
-        status = parquet_sort_builder_build(builder, nthreads, perm)
-        call parquet_sort_builder_free(builder)
-        if (status /= 0_int64) then
-            ! Only reachable with an empty key list, which the guard above already rejects -- kept
-            ! because silently ignoring a nonzero status is how a real failure goes unnoticed.
-            error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
-        end if
+        ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
+        ! Naming its bind(C) entry points here would put parquet_bindings -- and with it the
+        ! whole Arrow stack -- into the use graph of every program that sorts anything, which
+        ! is exactly what this tier exists to avoid. The oracle is TEST-ONLY: the shipped path
+        ! is the Fortran branch above, and a build that never imports the oracle never
+        ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
+        ! make the A/B conformance tests compare the Fortran engine against itself and pass.
+        call check_oracle(associated(p_argsort), proc)
+        call p_argsort(keys, nrows, nthreads, proc, perm)
     end procedure drive_engine
     !
     module procedure drive_engine_partial
@@ -2802,25 +3358,19 @@ contains
             perm(ik) = ik
         end do
         if (count < 1_int64 .or. nrows < 2_int64) return
-        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             call sort_partial_permutation(keys, nrows, count, perm)
             return
         end if
-        if (size(keys) == 1) then
-            call engine_one_shot_partial(keys(1), nrows, count, perm)
-            return
-        end if
-        builder = parquet_sort_builder_new(nrows)
-        do jk = 1, size(keys)
-            call engine_add_key(builder, keys(jk), nrows)
-        end do
-        status = parquet_sort_builder_build_partial(builder, count, perm)
-        call parquet_sort_builder_free(builder)
-        if (status /= 0_int64) then
-            ! Only reachable with an empty key list, which the guard above already rejects.
-            error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
-        end if
+        ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
+        ! Naming its bind(C) entry points here would put parquet_bindings -- and with it the
+        ! whole Arrow stack -- into the use graph of every program that sorts anything, which
+        ! is exactly what this tier exists to avoid. The oracle is TEST-ONLY: the shipped path
+        ! is the Fortran branch above, and a build that never imports the oracle never
+        ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
+        ! make the A/B conformance tests compare the Fortran engine against itself and pass.
+        call check_oracle(associated(p_partial), proc)
+        call p_partial(keys, nrows, count, proc, perm)
     end procedure drive_engine_partial
     !
     module procedure engine_nth_index
@@ -2831,26 +3381,19 @@ contains
             ! Unreachable: every public entry point rejects an empty key list before reaching here.
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
-        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             call sort_nth_index(keys, nrows, nth, idx)
             return
         end if
-        if (size(keys) == 1) then
-            call engine_one_shot_nth(keys(1), nrows, nth, idx)
-            return
-        end if
-        builder = parquet_sort_builder_new(nrows)
-        do ik = 1, size(keys)
-            call engine_add_key(builder, keys(ik), nrows)
-        end do
-        idx = parquet_sort_builder_nth_element(builder, nth)
-        call parquet_sort_builder_free(builder)
-        if (idx < 1_int64) then
-            ! The C side answers 0 for an empty key list or an out-of-range rank; both are already
-            ! rejected above and by the caller's own bounds check.
-            error stop EP // proc // ": the sort engine could not resolve that rank" ! GCOVR_EXCL_LINE
-        end if
+        ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
+        ! Naming its bind(C) entry points here would put parquet_bindings -- and with it the
+        ! whole Arrow stack -- into the use graph of every program that sorts anything, which
+        ! is exactly what this tier exists to avoid. The oracle is TEST-ONLY: the shipped path
+        ! is the Fortran branch above, and a build that never imports the oracle never
+        ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
+        ! make the A/B conformance tests compare the Fortran engine against itself and pass.
+        call check_oracle(associated(p_nth), proc)
+        call p_nth(keys, nrows, nth, proc, idx)
     end procedure engine_nth_index
     !
     module procedure resolve_count
@@ -2866,46 +3409,6 @@ contains
         count = min(int(n, int64), nrows)
     end procedure resolve_count
     !
-    !> Partially argsorts one already-extracted key through the matching one-shot entry point.
-    subroutine engine_one_shot_partial(key, nrows, count, perm)
-        type(sort_key_buf), intent(in), target :: key !! the key.
-        integer(int64), intent(in) :: nrows           !! its row count.
-        integer(int64), intent(in) :: count           !! leading entries to order.
-        integer(int64), intent(inout) :: perm(:)      !! receives `count` 1-based indices.
-        type(c_ptr) :: vp
-        integer(c_int8_t) :: df, nf
-        !
-        call key_flags(key, vp, df, nf)
-        select case (key%family)
-        case (SK_REAL)
-            call parquet_sort_partial_argsort_double(nrows, key%reals, vp, df, nf, count, perm)
-        case (SK_STR)
-            call parquet_sort_partial_argsort_string(nrows, key%offsets, key%data, vp, df, nf, count, perm)
-        case default
-            call parquet_sort_partial_argsort_int64(nrows, key%ints, vp, df, nf, count, perm)
-        end select
-    end subroutine engine_one_shot_partial
-    !
-    !> Resolves one already-extracted key's nth index through the matching one-shot entry point.
-    subroutine engine_one_shot_nth(key, nrows, nth, idx)
-        type(sort_key_buf), intent(in), target :: key !! the key.
-        integer(int64), intent(in) :: nrows           !! its row count.
-        integer(int64), intent(in) :: nth             !! 1-based rank wanted.
-        integer(int64), intent(out) :: idx            !! 1-based row index at that rank.
-        type(c_ptr) :: vp
-        integer(c_int8_t) :: df, nf
-        !
-        call key_flags(key, vp, df, nf)
-        select case (key%family)
-        case (SK_REAL)
-            idx = parquet_sort_nth_index_double(nrows, key%reals, vp, df, nf, nth)
-        case (SK_STR)
-            idx = parquet_sort_nth_index_string(nrows, key%offsets, key%data, vp, df, nf, nth)
-        case default
-            idx = parquet_sort_nth_index_int64(nrows, key%ints, vp, df, nf, nth)
-        end select
-    end subroutine engine_one_shot_nth
-    !
     module procedure engine_is_sorted
         type(c_ptr) :: builder
         integer(int64) :: res
@@ -2917,100 +3420,20 @@ contains
         end if
         answer = .true.
         if (nrows < 2_int64) return
-        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             answer = sort_is_sorted(keys, nrows)
             return
         end if
-        if (size(keys) == 1) then
-            call engine_one_shot_is_sorted(keys(1), nrows, answer)
-            return
-        end if
-        builder = parquet_sort_builder_new(nrows)
-        do ik = 1, size(keys)
-            call engine_add_key(builder, keys(ik), nrows)
-        end do
-        res = parquet_sort_builder_is_sorted(builder)
-        call parquet_sort_builder_free(builder)
-        if (res < 0_int64) then
-            error stop EP // proc // ": the sort engine had no key to test" ! GCOVR_EXCL_LINE
-        end if
-        answer = res == 1_int64
+        ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
+        ! Naming its bind(C) entry points here would put parquet_bindings -- and with it the
+        ! whole Arrow stack -- into the use graph of every program that sorts anything, which
+        ! is exactly what this tier exists to avoid. The oracle is TEST-ONLY: the shipped path
+        ! is the Fortran branch above, and a build that never imports the oracle never
+        ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
+        ! make the A/B conformance tests compare the Fortran engine against itself and pass.
+        call check_oracle(associated(p_is_sorted), proc)
+        call p_is_sorted(keys, nrows, proc, answer)
     end procedure engine_is_sorted
-    !
-    !> Argsorts one already-extracted key through the matching one-shot entry point.
-    subroutine engine_one_shot(key, nrows, nthreads, perm)
-        type(sort_key_buf), intent(in), target :: key !! the key.
-        integer(int64), intent(in) :: nrows           !! its row count.
-        integer(int64), intent(in) :: nthreads        !! resolved thread count; 1 sorts serially.
-        integer(int64), intent(inout) :: perm(:)      !! receives the 1-based permutation.
-        type(c_ptr) :: vp
-        integer(c_int8_t) :: df, nf
-        !
-        call key_flags(key, vp, df, nf)
-        select case (key%family)
-        case (SK_REAL)
-            call parquet_sort_argsort_double(nrows, key%reals, vp, df, nf, nthreads, perm)
-        case (SK_STR)
-            call parquet_sort_argsort_string(nrows, key%offsets, key%data, vp, df, nf, nthreads, perm)
-        case default
-            call parquet_sort_argsort_int64(nrows, key%ints, vp, df, nf, nthreads, perm)
-        end select
-    end subroutine engine_one_shot
-    !
-    !> Tests one already-extracted key through the matching one-shot entry point.
-    subroutine engine_one_shot_is_sorted(key, nrows, answer)
-        type(sort_key_buf), intent(in), target :: key !! the key.
-        integer(int64), intent(in) :: nrows           !! its row count.
-        logical, intent(out) :: answer                !! .true. when already in order.
-        type(c_ptr) :: vp
-        integer(c_int8_t) :: df, nf
-        integer(int64) :: res
-        !
-        call key_flags(key, vp, df, nf)
-        select case (key%family)
-        case (SK_REAL)
-            res = parquet_sort_is_sorted_double(nrows, key%reals, vp, df, nf)
-        case (SK_STR)
-            res = parquet_sort_is_sorted_string(nrows, key%offsets, key%data, vp, df, nf)
-        case default
-            res = parquet_sort_is_sorted_int64(nrows, key%ints, vp, df, nf)
-        end select
-        answer = res == 1_int64
-    end subroutine engine_one_shot_is_sorted
-    !
-    !> Adds one already-extracted key to a C++ builder.
-    subroutine engine_add_key(builder, key, nrows)
-        type(c_ptr), intent(in) :: builder            !! the builder handle.
-        type(sort_key_buf), intent(in), target :: key !! the key.
-        integer(int64), intent(in) :: nrows           !! its row count.
-        type(c_ptr) :: vp
-        integer(c_int8_t) :: df, nf
-        !
-        call key_flags(key, vp, df, nf)
-        select case (key%family)
-        case (SK_REAL)
-            call parquet_sort_builder_add_key_double(builder, key%reals, vp, df, nf)
-        case (SK_STR)
-            call parquet_sort_builder_add_key_string(builder, key%offsets, key%data, vp, df, nf)
-        case default
-            call parquet_sort_builder_add_key_int64(builder, key%ints, vp, df, nf)
-        end select
-    end subroutine engine_add_key
-    !
-    !> The three scalars every engine call needs: a pointer to the validity array (or a null
-    !! pointer when the key has no nulls) and the two order flags as int8.
-    subroutine key_flags(key, valid_ptr, desc_flag, nulls_flag)
-        type(sort_key_buf), intent(in), target :: key   !! the key.
-        type(c_ptr), intent(out) :: valid_ptr           !! its validity array, or C_NULL_PTR.
-        integer(c_int8_t), intent(out) :: desc_flag     !! nonzero for descending.
-        integer(c_int8_t), intent(out) :: nulls_flag    !! nonzero to place nulls first.
-        !
-        valid_ptr = c_null_ptr
-        if (allocated(key%valid)) valid_ptr = c_loc(key%valid)
-        desc_flag = merge(1_c_int8_t, 0_c_int8_t, key%descending)
-        nulls_flag = merge(1_c_int8_t, 0_c_int8_t, key%nulls_first)
-    end subroutine key_flags
     !
     module procedure check_rank
         character(len=32) :: a_str, b_str
@@ -3141,7 +3564,7 @@ contains
     end procedure check_permutation
     !
     module procedure pf_sort_threads
-        use parquet_settings, only : parquet_get_sort_threads
+        use parquet_settings_base, only : parquet_get_sort_threads
         use parquet_settings_base, only : parquet_auto_thread_count
         !
         ! **The rule itself lives in parquet_auto_thread_count (src/parquet_settings_base.f90)** --
@@ -3237,7 +3660,7 @@ contains
     !! lock-free fetch-and-add rather than a lock, and it sits behind the fast-path read below, so
     !! it is reached only by the one call that is about to print.
     subroutine warn_thread_clamp(count)
-        use parquet_settings, only : parquet_emit_warning, parquet_output_is_suppressed
+        use parquet_settings_base, only : parquet_emit_warning, parquet_output_is_suppressed
 #ifdef _OPENMP
         use omp_lib, only : omp_get_max_threads
 #endif
@@ -3568,21 +3991,19 @@ contains
         ! sentinel, so the C++ side obeys rather than interprets what a prefix of zero would mean.
         gek = int(size(keys), int64)
         if (present(group_ekeys)) gek = int(group_ekeys, int64)
-        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             call sort_build_runs_permutation(keys, nrows, gek, perm, tie)
             return
         end if
-        builder = parquet_sort_builder_new(nrows)
-        do ik = 1, size(keys)
-            call engine_add_key(builder, keys(ik), nrows)
-        end do
-        status = parquet_sort_builder_build_runs(builder, nthreads, gek, perm, tie)
-        call parquet_sort_builder_free(builder)
-        if (status /= 0_int64) then
-            ! Only reachable with an empty key list, which the guard above already rejects.
-            error stop EP // proc // ": the sort engine could not build a permutation" ! GCOVR_EXCL_LINE
-        end if
+        ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
+        ! Naming its bind(C) entry points here would put parquet_bindings -- and with it the
+        ! whole Arrow stack -- into the use graph of every program that sorts anything, which
+        ! is exactly what this tier exists to avoid. The oracle is TEST-ONLY: the shipped path
+        ! is the Fortran branch above, and a build that never imports the oracle never
+        ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
+        ! make the A/B conformance tests compare the Fortran engine against itself and pass.
+        call check_oracle(associated(p_runs), proc)
+        call p_runs(keys, nrows, nthreads, gek, proc, perm, tie)
     end procedure engine_build_runs
     !
     module procedure drive_engine_grouped
@@ -3631,22 +4052,19 @@ contains
         if (size(keys) < 1) then
             error stop EP // proc // ": no sort key was given" ! GCOVR_EXCL_LINE
         end if
-        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             pos = sort_search_position(keys, n_search, upper)
             return
         end if
-        wflag = merge(1_c_int8_t, 0_c_int8_t, upper)
-        builder = parquet_sort_builder_new(nrows)
-        do ik = 1, size(keys)
-            call engine_add_key(builder, keys(ik), nrows)
-        end do
-        pos = parquet_sort_builder_search(builder, n_search, wflag)
-        call parquet_sort_builder_free(builder)
-        if (pos < 1_int64) then
-            ! The C side answers -1 only for an empty key list, rejected above.
-            error stop EP // proc // ": the sort engine had no key to search" ! GCOVR_EXCL_LINE
-        end if
+        ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
+        ! Naming its bind(C) entry points here would put parquet_bindings -- and with it the
+        ! whole Arrow stack -- into the use graph of every program that sorts anything, which
+        ! is exactly what this tier exists to avoid. The oracle is TEST-ONLY: the shipped path
+        ! is the Fortran branch above, and a build that never imports the oracle never
+        ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
+        ! make the A/B conformance tests compare the Fortran engine against itself and pass.
+        call check_oracle(associated(p_search), proc)
+        call p_search(keys, nrows, n_search, upper, proc, pos)
     end procedure engine_search
     !
     module procedure engine_merge
@@ -3662,40 +4080,20 @@ contains
             perm(k) = k
         end do
         if (nrows < 2_int64) return
-        if (.not. dbg_fortran_engine) call push_engine_mirror()
         if (dbg_fortran_engine) then
             call sort_merge_permutation(keys, nrows, na, perm)
             return
         end if
-        builder = parquet_sort_builder_new(nrows)
-        do ik = 1, size(keys)
-            call engine_add_key(builder, keys(ik), nrows)
-        end do
-        status = parquet_sort_builder_merge(builder, na, perm)
-        call parquet_sort_builder_free(builder)
-        if (status /= 0_int64) then
-            ! Only reachable with an empty key list, which the guard above already rejects.
-            error stop EP // proc // ": the sort engine could not merge" ! GCOVR_EXCL_LINE
-        end if
+        ! **The C++ engine, reached through the pointer parquet_sorting_oracle bound.**
+        ! Naming its bind(C) entry points here would put parquet_bindings -- and with it the
+        ! whole Arrow stack -- into the use graph of every program that sorts anything, which
+        ! is exactly what this tier exists to avoid. The oracle is TEST-ONLY: the shipped path
+        ! is the Fortran branch above, and a build that never imports the oracle never
+        ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
+        ! make the A/B conformance tests compare the Fortran engine against itself and pass.
+        call check_oracle(associated(p_merge), proc)
+        call p_merge(keys, nrows, na, proc, perm)
     end procedure engine_merge
-    !
-    !> Refreshes the C++ side's copy of every mirrored setting, before the C++ sort engine reads it.
-    !!
-    !! **The C++ engine is the one mirrored-knob consumer that is not downstream of a reader or
-    !! writer open.** No setter mirrors to C++ any more -- that is what let each sorting knob's
-    !! setter live beside its state in `parquet_settings_base`, where `parquet_sorting` can
-    !! re-export it -- so a `pf_argsort` call with no reader anywhere would otherwise drive the
-    !! engine against stale `g_sort_counting_path` / `g_sort_counting_bucket_limit` values. The A/B
-    !! conformance comparison would then compare the Fortran engine against a C++ engine running a
-    !! DIFFERENT configuration, which still passes whenever the two happen to agree.
-    !!
-    !! Called only on the C++ branch, so the shipped Fortran path pays nothing. **This moves into
-    !! `parquet_sorting_oracle` with the C++ branches it guards** (feature_modules.md S2).
-    subroutine push_engine_mirror()
-        use parquet_settings, only : parquet_push_settings_to_cpp
-
-        call parquet_push_settings_to_cpp()
-    end subroutine push_engine_mirror
     !
 end submodule parquet_sorting_keys ! GCOVR_EXCL_LINE''')
     return "\n".join(o) + "\n"
@@ -4731,10 +5129,23 @@ def main():
               % (len(scalar), len(TYPES)))
         return 0
 
+    argsort_spec, sorting_spec = gen_specs()
+    # The argsort tier's implementation is ONE submodule assembled from two emitters: the key
+    # extraction and dispatch that gen_keys produces, and the six intrinsic pf_argsort specifics
+    # that gen_argsort does. Keeping them in one file was a deliberate choice -- pruning
+    # granularity is the module, so a second submodule would buy nothing and cost a file.
+    k_a, k_s, k_tail = partition_submodule(gen_keys(), KERNEL_PROCS)
+    a_a, a_s, a_tail = partition_submodule(gen_argsort(), ARGSORT_SPECIFICS)
+    kernel_body = KERNEL_HEAD + "\n".join(k_a + a_a) + "\n" \
+        + k_tail.replace("parquet_sorting_keys", "parquet_argsort_kernel") + "\n"
+    keys_body = KEYS_HEAD + "\n".join(k_s) + "\n" + k_tail + "\n"
+    argsort_body = ARGSORT_HEAD + "\n".join(a_s) + "\n" + a_tail + "\n"
     outputs = {
-        REPO_ROOT / "src" / "parquet_sorting.f90": gen_spec(),
-        REPO_ROOT / "src" / "parquet_sorting_keys.f90": gen_keys(),
-        REPO_ROOT / "src" / "parquet_sorting_argsort.f90": gen_argsort(),
+        REPO_ROOT / "src" / "parquet_argsort.f90": argsort_spec,
+        REPO_ROOT / "src" / "parquet_argsort_kernel.f90": kernel_body,
+        REPO_ROOT / "src" / "parquet_sorting.f90": sorting_spec,
+        REPO_ROOT / "src" / "parquet_sorting_keys.f90": keys_body,
+        REPO_ROOT / "src" / "parquet_sorting_argsort.f90": argsort_body,
         REPO_ROOT / "src" / "parquet_sorting_permute.f90": gen_permute(),
         REPO_ROOT / "src" / "parquet_sorting_select.f90": gen_select(),
         REPO_ROOT / "src" / "parquet_sorting_search.f90": gen_search(),

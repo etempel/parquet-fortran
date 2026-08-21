@@ -972,6 +972,133 @@ def check_parquet_strings_stays_leaf():
     ]
 
 
+#: Cached map of module name -> every file fpm compiles as part of it: its own file plus every
+#: submodule descended from it, at any depth.
+_MODULE_FILES = None
+
+
+def _module_file_map():
+    """Which source files belong to each module, submodules included.
+
+    **A module's SUBMODULES are separate files, and fpm compiles every one of them whenever the
+    module is used** -- pruning granularity is the module, never the submodule. So a `use` written
+    inside a submodule is every bit as much a dependency of the parent module as one in its own
+    file, and a walk that opens only `<module>.f90` is blind to it. That blindness is not
+    hypothetical: the argsort tier's engine kept a `use parquet_settings` for three settings
+    getters, which put parquet_bindings back into every consumer's build while a module-file-only
+    walk reported the tier Arrow-free.
+    """
+    global _MODULE_FILES
+    if _MODULE_FILES is not None:
+        return _MODULE_FILES
+    sub_re = re.compile(r"^\s*submodule\s*\(\s*([A-Za-z_]\w*)\s*(?::\s*[A-Za-z_]\w*\s*)?\)"
+                        r"\s*([A-Za-z_]\w*)", re.M | re.I)
+    parent, files = {}, {}
+    for path in sorted(SRC.glob("*.f90")):
+        m = sub_re.search(path.read_text())
+        if m:
+            parent[path.stem.lower()] = m.group(1).lower()
+        files.setdefault(path.stem.lower(), []).append(path)
+    # Resolve each submodule to its ROOT module, following the chain up.
+    out = {}
+    for unit, paths in files.items():
+        root, guard = unit, 0
+        while root in parent and guard < 50:
+            root = parent[root]
+            guard += 1
+        out.setdefault(root, []).extend(paths)
+    _MODULE_FILES = out
+    return out
+
+
+def _module_use_closure(root):
+    """Every module reachable from `root` by `use`, plus the edges, for a shortest-path message."""
+    use_re = re.compile(r"^\s*use\s*(?:,\s*intrinsic\s*)?(?:::)?\s*([A-Za-z_]\w*)", re.M)
+    fmap = _module_file_map()
+    seen, queue, edges = set(), [root], {}
+    while queue:
+        mod = queue.pop()
+        if mod in seen:
+            continue
+        seen.add(mod)
+        for path in fmap.get(mod, ()):        # the module's own file AND every submodule of it
+            for used in use_re.findall(path.read_text()):
+                used = used.lower()
+                if used == mod:
+                    continue                   # a submodule naming its own parent
+                edges.setdefault(mod, set()).add(used)
+                queue.append(used)
+    return seen, edges
+
+
+def _shortest_use_chain(root, target, edges):
+    """One shortest `use` chain from root to target, as `a -> b -> c`."""
+    trail, frontier = {root: [root]}, [root]
+    while frontier:
+        mod = frontier.pop(0)
+        for used in sorted(edges.get(mod, ())):
+            if used not in trail:
+                trail[used] = trail[mod] + [used]
+                frontier.append(used)
+    return " -> ".join(trail.get(target, [root, target]))
+
+
+def _check_stays_arrow_free(module, why):
+    """Shared body of the three tier checks below: `module` must not reach parquet_bindings."""
+    seen, edges = _module_use_closure(module)
+    if "parquet_bindings" not in seen:
+        return []
+    chain = _shortest_use_chain(module, "parquet_bindings", edges)
+    return [
+        "src/%s.f90: reaches parquet_bindings through %s. %s The C++ sort engine is TEST-ONLY and "
+        "must stay behind the procedure pointers parquet_sorting_oracle binds -- naming a bind(C) "
+        "entry point from any of these modules is what this check exists to catch, and adding the "
+        "offending module to some allow-list would destroy the property rather than fix it."
+        % (module, chain, why)
+    ]
+
+
+def check_parquet_argsort_stays_arrow_free():
+    """`use parquet_argsort` must not drag the Arrow/Parquet C++ stack into a consumer's build.
+
+    The argsort tier exists so that a project wanting a sort -- or wanting parquet_sampling's
+    weighted draws -- compiles this tier and stops, instead of the whole reader/writer stack. That
+    is a property of the `use` graph and nothing in `fpm test` can see it: the library obviously has
+    Arrow, so a stray import compiles and tests perfectly well here and fails in the consumer's
+    build, or silently inflates it. See feature_modules.md section 4.
+    """
+    return _check_stays_arrow_free(
+        "parquet_argsort",
+        "That is the tier's whole purpose: an Arrow-free Fortran graph for a consumer that wants "
+        "nothing but a sort.")
+
+
+def check_parquet_sorting_stays_arrow_free():
+    """`use parquet_sorting` must not reach parquet_bindings either.
+
+    The full tier adds the five element types that need a column, a packed string store or a
+    temporal element -- none of which needs C++. Its Arrow-freedom is what makes the whole sorting
+    API importable on its own.
+    """
+    return _check_stays_arrow_free(
+        "parquet_sorting",
+        "The full sorting tier is Arrow-free by design; only parquet_sorting_oracle may name the "
+        "C++ engine.")
+
+
+def check_parquet_sampling_stays_arrow_free():
+    """`use parquet_sampling` must not reach parquet_bindings.
+
+    Sampling needs exactly one thing from the sort -- `pf_argsort(real64 array, int64 perm)` for
+    `pf_weighted_permutation` -- and it takes it from `parquet_argsort` rather than
+    `parquet_sorting` for that reason. Importing the facade instead compiles and passes every test
+    while quietly restoring the dependency this split removed.
+    """
+    return _check_stays_arrow_free(
+        "parquet_sampling",
+        "A weighted draw needs one argsort, which parquet_argsort provides.")
+
+
 def check_parquet_random_stays_leaf():
     """`parquet_random` may import a project module only if that module is itself standalone-
     compilable, and only if both standalone scripts already list it.
@@ -2162,6 +2289,9 @@ CHECKS = (
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
     ("every setting has an environment variable", check_env_covers_every_setting),
     ("parquet_strings does not reach parquet_bindings", check_parquet_strings_stays_leaf),
+    ("parquet_argsort stays Arrow-free", check_parquet_argsort_stays_arrow_free),
+    ("parquet_sorting stays Arrow-free", check_parquet_sorting_stays_arrow_free),
+    ("parquet_sampling stays Arrow-free", check_parquet_sampling_stays_arrow_free),
     ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),

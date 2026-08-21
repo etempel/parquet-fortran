@@ -13,7 +13,7 @@
 ! **The sort is why this module carries the Arrow link edge and `parquet_random` does not.**
 ! `pf_weighted_permutation` orders `n` exponential keys, the project's one sort is `parquet_sorting`,
 ! and that module imports `parquet_bindings`. No C++ actually RUNS for `pf_argsort` -- the engine has
-! been the Fortran one in `parquet_sorting_engine.f90` since the cutover -- so the cost is a link
+! been the Fortran one in `parquet_argsort_engine.f90` since the cutover -- so the cost is a link
 ! edge, not a call. The alternative was a second copy of a sorting algorithm, which is a far worse
 ! thing to own. Splitting the two modules is what confines that edge to the callers who need it.
 !

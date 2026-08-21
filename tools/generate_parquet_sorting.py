@@ -532,7 +532,6 @@ module parquet_sorting
     !
     public :: pf_sort_keys
     public :: pf_sort
-    public :: pf_argsort
     public :: pf_permute
     public :: pf_is_sorted
     public :: pf_partial_sort
@@ -2035,16 +2034,16 @@ def emit_m3_interfaces(w):
 def emit_engine_interfaces(w):
     """The comparator core's interfaces (feature_sort.md Stage 1).
 
-    These four are implemented in src/parquet_sorting_engine.f90, which -- ALONE among the
+    These four are implemented in src/parquet_argsort_engine.f90, which -- ALONE among the
     src/parquet_sorting*.f90 files -- is HAND-WRITTEN and not emitted by this script. Only the
     interfaces live here, and they have to: a `module procedure` body must be declared by the
     module it is a submodule of, and sibling submodules cannot reach each other's contained
     procedures (a plain contained procedure would compile and then fail at LINK time the moment
     parquet_sorting_keys called it, which is exactly what Stage 2 and Stage 6 need it to do).
 
-    So: change a SIGNATURE here, change the BODY in src/parquet_sorting_engine.f90.
+    So: change a SIGNATURE here, change the BODY in src/parquet_argsort_engine.f90.
     """
-    w("    ! ---- The comparator core (parquet_sorting_engine -- HAND-WRITTEN, not generated) ----")
+    w("    ! ---- The comparator core (parquet_argsort_engine -- HAND-WRITTEN, not generated) ----")
     w("    interface")
     w("        !> RAW output tier of row `i` under one key: values(0), NaNs(1), nulls(2).")
     w("        !!")
@@ -2231,7 +2230,7 @@ def emit_engine_interfaces(w):
     w("        end subroutine sort_merge_permutation")
     w("    end interface")
     w("    !")
-    w("    ! ---- Test-only access to the comparator core (parquet_sorting_engine) ----")
+    w("    ! ---- Test-only access to the comparator core (parquet_argsort_engine) ----")
     w("    interface")
     w.to_a = False
     w("    ! ---- Test-only comparator hooks that take a pf_sort_keys (parquet_sorting_keys) ----")

@@ -335,7 +335,13 @@ done
 
 if [ "$SHIPPED_ONLY" = "1" ]; then
     echo "--- forced-kernel half skipped (--shipped-only) ---"
+    # BOTH forcing mechanisms have to be cleared here, not just the -U one. The vacuity guard below
+    # fires when a forcing mechanism is configured and produced no kernel name -- which is exactly
+    # the state --shipped-only creates deliberately. Clearing UNDEF alone left nagfor, whose forcing
+    # mechanism is the pre-expanded source rather than -U, exiting 2 with "the forced half produced
+    # no kernel name -- the check proves nothing" after every shipped configuration had passed.
     UNDEF=""
+    NAG_FORCED_SRC=""
 elif [ -n "$UNDEF" ]; then
     echo "--- allowlist defeated ($UNDEF): the kernel this compiler does NOT ship ---"
     for cfg in "${CONFIGS[@]}"; do

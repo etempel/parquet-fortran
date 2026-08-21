@@ -49,13 +49,16 @@ which module each name lives in, for when you want that.
 |---|---|
 | `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `RES_EMPTY`/`RES_FULL` | `parquet_tables` |
 | the `PK_*` kind constants, `parquet_kind_name` | `parquet_columns` |
-| `parquet_schema`, `parquet_parse_maml`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc` | `parquet_core` (internal — reach these through `use parquet`) |
+| `parquet_schema`, `parquet_parse_maml`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc` | `parquet_io` (a facade over the internal `parquet_core`) |
 | `parquet_string_column` | `parquet_strings` |
 | `parquet_date`, `parquet_time`, `parquet_timestamp` | `parquet_temporal` |
 
-`parquet_core` is the one entry there you should not name directly: it is an internal
-implementation module that may be renamed or restructured in any release, and `use parquet` is
-what the library's [API stability](../../index.html#important-behavior) promise covers.
+`parquet_core` — which `parquet_io` re-exports and which older material may name directly — is the
+one module you should never import: it is an internal implementation module that may be renamed or
+restructured in any release. Every module in the table above, `use parquet` included, is covered by
+the library's [API stability](../../index.html#important-behavior) promise; see
+[Choosing a module](../operating/choosing-a-module.html) for what each one costs to compile
+against.
 
 ## Two ways to reach a column
 

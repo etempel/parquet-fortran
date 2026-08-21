@@ -118,7 +118,7 @@ fpm run benchmark_sort_comparator --profile release -- \
 # printed as evidence only where it can mean something, and labelled where it cannot.
 echo
 echo "---- descriptor-block check (feature_sort.md Stage 1e) ----"
-ENGINE_OBJ="$(find "$FPM_BUILD_DIR" -name "src_parquet_sorting_engine.f90.o" | head -n 1 || true)"
+ENGINE_OBJ="$(find "$FPM_BUILD_DIR" -name "src_parquet_argsort_engine.f90.o" | head -n 1 || true)"
 if [[ -z "$ENGINE_OBJ" ]]; then
     echo "  engine object not found under $FPM_BUILD_DIR -- cannot check."
 elif [[ "$(uname -m)" != "x86_64" ]]; then

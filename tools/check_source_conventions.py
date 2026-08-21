@@ -1099,6 +1099,79 @@ def check_parquet_sampling_stays_arrow_free():
         "A weighted draw needs one argsort, which parquet_argsort provides.")
 
 
+def check_facades_hide_the_same_names():
+    """`use parquet_io` must not expose a name `use parquet` deliberately hides.
+
+    There are two facades over `parquet_core`: `src/parquet.f90` (the whole library) and
+    `src/parquet_io.f90` (the read/write surface alone). Both use the same mechanism -- a bare
+    `use` under default-PUBLIC accessibility, which re-exports everything, plus `private ::`
+    statements naming the cross-module plumbing that `parquet_core` and `parquet_settings` are
+    forced to make public for want of package scope.
+
+    That mechanism has one failure mode, and nothing else can see it: a name added to
+    `src/parquet.f90`'s private list and not to `src/parquet_io.f90`'s stays public from
+    `parquet_io`, so the narrower import exposes MORE than the wider one. It compiles, it passes
+    every test, and it silently makes a piece of internal plumbing part of the versioned surface --
+    which is the expensive direction, since removing it again is then a breaking change.
+
+    The check is deliberately one-directional. `parquet_io` may privatise a name `parquet.f90` does
+    not, and in fact must: `parquet_split_name_list` and `parquet_parse_sort_key` are hidden here
+    and CANNOT be repeated in the facade, because `parquet_io` has already made them inaccessible
+    there and a `private ::` naming an inaccessible symbol is an error (nagfor reports it as an
+    implicitly-typed local; gfortran as an unknown symbol). Only names that both facades can see are
+    compared.
+    """
+    problems = []
+    facade_path = SRC / "parquet.f90"
+    io_path = SRC / "parquet_io.f90"
+    for path in (facade_path, io_path, SRC / "parquet_core.f90", SRC / "parquet_settings.f90"):
+        if not path.exists():
+            return ["%s not found -- this check cannot have run" % path]
+
+    # Both source sets are required to be non-empty, not merely their union: parquet_settings
+    # alone would keep the union populated while parquet_core contributed nothing, and the check
+    # would then silently compare against half the surface it is supposed to cover.
+    core_public = _access_names((SRC / "parquet_core.f90").read_text(), "public")
+    settings_public = _access_names((SRC / "parquet_settings.f90").read_text(), "public")
+    for name, names in (("parquet_core", core_public), ("parquet_settings", settings_public)):
+        if not names:
+            return ["src/%s.f90 declares no public names -- this check cannot have run" % name]
+    reachable = core_public | settings_public
+
+    facade_private = _access_names(facade_path.read_text(), "private")
+    io_private = _access_names(io_path.read_text(), "private")
+    if not facade_private or not io_private:
+        return ["a facade declares no `private ::` names -- this check cannot have run"]
+
+    # A name the facade hides that came from parquet_core/parquet_settings must be hidden by
+    # parquet_io too -- unless parquet_io does not import it at all, which cannot happen, since it
+    # imports both modules whole.
+    for name in sorted(facade_private & reachable):
+        if name not in io_private:
+            problems.append(
+                "src/parquet_io.f90: `%s` is private in src/parquet.f90 but public here, so "
+                "`use parquet_io` exposes a name `use parquet` deliberately hides. Add a "
+                "`private :: %s` with the reason, next to its siblings." % (name, name))
+    return problems
+
+
+def _access_names(text, keyword):
+    names = set()
+    for raw in text.splitlines():
+        line = raw.split("!", 1)[0].strip()
+        if not line.lower().startswith(keyword + " ::"):
+            continue
+        body = line[len(keyword) + 3:]
+        # A generic-binding or renaming form is not a plain accessibility statement.
+        if "=>" in body:
+            continue
+        for name in body.split(","):
+            name = name.strip()
+            if name and name.isidentifier():
+                names.add(name.lower())
+    return names
+
+
 def check_parquet_random_stays_leaf():
     """`parquet_random` may import a project module only if that module is itself standalone-
     compilable, and only if both standalone scripts already list it.
@@ -2293,6 +2366,7 @@ CHECKS = (
     ("parquet_sorting stays Arrow-free", check_parquet_sorting_stays_arrow_free),
     ("parquet_sampling stays Arrow-free", check_parquet_sampling_stays_arrow_free),
     ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
+    ("the two facades hide the same names", check_facades_hide_the_same_names),
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),

@@ -69,7 +69,6 @@ module parquet_sorting
     !
     public :: pf_sort_keys
     public :: pf_sort
-    public :: pf_argsort
     public :: pf_permute
     public :: pf_is_sorted
     public :: pf_partial_sort

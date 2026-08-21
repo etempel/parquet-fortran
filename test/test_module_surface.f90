@@ -186,7 +186,116 @@ contains
 
 end module test_module_surface_sampling
 
+!> `parquet_io` alone: the whole read/write surface, plus the settings that govern it.
+!!
+!! **One library import, and it must stay that way.** This module is the acceptance test for the
+!! `parquet_io` facade (src/parquet_io.f90) in exactly the way `test_facade_covers_every_layer`
+!! (test/test_examples.f90) is for `parquet` -- naming an entity from each layer `parquet_io` must
+!! re-export proves that a program needing only file I/O really does need this one `use` statement.
+!! A dropped re-export stops this file COMPILING rather than failing an assertion, which is the
+!! point: it is a build-time break for every downstream user.
+!!
+!! Layers touched, one name each: the writer and reader lifecycles, `parquet_schema` built both in
+!! code and from MAML, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc`, the metadata types
+!! and queries, and the element types the calls take and return -- `parquet_string_column`,
+!! `parquet_string`, `parquet_timestamp` with a `parquet_unit_*` selector, and `parquet_maml_file`.
+!! Plus the settings: a `use parquet_io` program must be able to choose its writer's compression
+!! and silence what the library prints without also naming `parquet_settings`.
+module test_module_surface_io
+    use parquet_io                     ! THE ONLY library import.
+    use iso_fortran_env, only : int32, int64
+    implicit none
+    private
+    public :: check_io_surface
+
+contains
+
+    !> Round-trips a file through `parquet_io` alone and touches every layer it re-exports.
+    subroutine check_io_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        character(len=*), parameter :: out_file = "test_run/module_surface_io.parquet"
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_schema) :: schema, from_maml
+        type(parquet_filter) :: filt
+        type(parquet_sortkey) :: skey
+        type(parquet_read_qc) :: rqc
+        type(parquet_column_info) :: cinfo
+        type(parquet_table_metadata) :: tmeta
+        type(parquet_string_column) :: sc
+        type(parquet_string) :: sview
+        type(parquet_timestamp) :: ts
+        type(parquet_maml_file) :: mf
+        integer(int32) :: id(3)
+        integer(int32), allocatable :: got(:)
+        integer(int64) :: nrows
+        character(len=:), allocatable :: comp_was, verb_was
+        character(len=:), allocatable :: names(:)
+        logical :: exists
+
+        what = ""
+        id = [1_int32, 2_int32, 3_int32]
+
+        ! The settings this module re-exports, exercised BEFORE the writer opens -- which is when
+        ! the C++ mirror is taken, so it is also the only time a compression choice can apply.
+        call parquet_get_default_compression(comp_was)
+        call parquet_get_verbosity(verb_was)
+        call parquet_set_default_compression("snappy")
+        call parquet_set_verbosity(verb_was)
+        if (parquet_max_filter_depth <= 0) what = "parquet_max_filter_depth"
+
+        ! Writer lifecycle, with a schema built in code.
+        call schema%init("surface", "module surface probe")
+        call schema%add_field("id", "int32", info="probe column")
+        call parquet_parse_maml(schema)
+        call parquet_open_writer(writer, out_file, schema)
+        call parquet_write_column(writer, "id", id)
+        call parquet_close_writer(writer)
+
+        ! Reader lifecycle, plus the metadata and column queries.
+        call parquet_open_reader(reader, out_file)
+        call parquet_get_nrows(reader, nrows)
+        allocate(got(nrows))
+        call parquet_read_column(reader, "id", got)
+        exists = parquet_column_exists(reader, "id")
+        call parquet_get_column_names(reader, names)
+        call parquet_close_reader(reader)
+
+        if (what == "" .and. nrows /= 3_int64) what = "parquet_get_nrows"
+        if (what == "" .and. .not. all(got == id)) what = "parquet_read_column"
+        if (what == "" .and. .not. exists) what = "parquet_column_exists"
+        if (what == "" .and. size(names) /= 1) what = "parquet_get_column_names"
+
+        ! The remaining re-exported types, named so a dropped re-export breaks the BUILD. Each is
+        ! used, not merely declared: an unused declaration would still compile if the type were
+        ! reachable by some other route, and there is no other route from a single `use parquet_io`.
+        call filt%add("id > 0")
+        if (what == "" .and. filt%n /= 1) what = "parquet_filter"
+        call skey%add("id")
+        if (what == "" .and. skey%n /= 1) what = "parquet_sortkey"
+        call rqc%add("id, 0, 10")
+        if (what == "" .and. rqc%n /= 1) what = "parquet_read_qc"
+        call sc%clear()
+        call sc%append_string("probe")
+        sview = sc%view(1_int64)
+        if (what == "" .and. sview%length() /= 5) what = "parquet_string_column"
+        call ts%set_unix(0_int64, parquet_unit_micros)
+        if (what == "" .and. ts%is_null()) what = "parquet_timestamp"
+        mf = parquet_load_maml_file("schemas/maml_example.maml")
+        if (what == "" .and. .not. allocated(mf%lines)) what = "parquet_maml_file"
+        call parquet_parse_maml("schemas/maml_example.maml", from_maml)
+        cinfo = from_maml%cinfo
+        tmeta = from_maml%metadata
+        if (what == "" .and. cinfo%get_num_fields() <= 0) what = "parquet_column_info"
+        if (what == "" .and. .not. allocated(tmeta%items)) what = "parquet_table_metadata"
+
+        call parquet_set_default_compression(comp_was)
+    end subroutine check_io_surface
+
+end module test_module_surface_io
+
 module test_module_surface
+    use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
     use test_module_surface_sorting, only : check_sorting_surface
     use test_module_surface_strings, only : check_strings_surface
@@ -287,8 +396,19 @@ contains
             new_unittest("parquet_strings alone exposes every knob it reads", &
                 test_strings_surface), &
             new_unittest("parquet_sampling alone exposes every knob it reads", &
-                test_sampling_surface) ]
+                test_sampling_surface), &
+            new_unittest("parquet_io alone reaches every layer of the read/write API", &
+                test_io_surface) ]
     end subroutine collect_tests_module_surface
+
+    !> The test-drive wrapper over check_io_surface.
+    subroutine test_io_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_io_surface(what)
+        call check(error, what == "", "a layer was not reachable through `use parquet_io` alone: " // what)
+    end subroutine test_io_surface
 
     !> The test-drive wrapper over check_argsort_surface.
     subroutine test_argsort_surface(error)

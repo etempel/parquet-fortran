@@ -3935,7 +3935,7 @@ extern "C"
 	// **Nothing in the shipped library sorts with this engine any more, and that is not a reason to
 	// delete it.** Every ordering a user can reach -- `parquet_open_reader(..., sort_by=)`,
 	// `parquet_reader_set_sort`, `parquet_table%sort_by`, and every `pf_sort`/`pf_argsort` call --
-	// is produced by the Fortran radix engine in `src/parquet_sorting_engine.f90`. What this code
+	// is produced by the Fortran radix engine in `src/parquet_argsort_engine.f90`. What this code
 	// is now is the **independent oracle that engine is tested against**: `pf_sort_keys`' seven
 	// operations (argsort, partial argsort, nth element, is_sorted, build_runs, search, merge) each
 	// keep a branch selecting it, reached only through the test-only

@@ -187,6 +187,16 @@ test:
     # below the project's floor rather than reporting its miscompilations as findings.
     - tools/check_random_kernels.sh --shipped-only
     - tools/check_exp_key.sh
+    # Same class again, one tier up: builds the argsort tier (parquet_settings_base +
+    # parquet_argsort and its two submodules) with a bare compiler -- no fpm, no dependency
+    # resolver, no Arrow -- and runs it. That tier's whole value is that its Fortran graph reaches
+    # nothing but the settings leaf, and the failure mode is one added `use` line silently pulling
+    # parquet_bindings into every consumer's build, which `fpm test` cannot see because the library
+    # obviously has Arrow. Three bare compiles, so it is as cheap as the two steps above.
+    # tools/check_module_footprints.sh answers the adjacent question -- how big each entry module's
+    # graph got -- and is deliberately NOT here: it cold-builds a probe project per module,
+    # including the C++ wrapper each time, which is minutes rather than seconds.
+    - tools/check_argsort_standalone.sh
     # --exclude-lines-by-pattern auto-excludes every standalone report_fatal_error(...) call
     # site in src/parquet_wrapper.cpp (present and future -- no per-call-site source comment
     # needed) without needing GCOVR_EXCL_LINE comments at each one: std::abort() there discards

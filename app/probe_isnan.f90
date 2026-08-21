@@ -200,7 +200,7 @@ end module probe_keys
 !!
 !! **The four arms**, each a full pass over the same in-cache array:
 !!
-!!   * `ieee_is_nan`  — what `src/parquet_sorting_engine.f90` uses today.
+!!   * `ieee_is_nan`  — what `src/parquet_argsort_engine.f90` uses today.
 !!   * `x /= x`       — the classic idiom. Correct (a NaN is the only value unequal to itself) but it
 !!                      trips gfortran's `-Wcompare-reals`, which is why CLAUDE.md's convention
 !!                      prefers `ieee_is_nan`. If it is dramatically cheaper on x86-64, that

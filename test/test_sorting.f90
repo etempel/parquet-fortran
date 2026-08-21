@@ -43,7 +43,7 @@ module test_sorting
     ! about teams has nothing to prove on a build or a machine that can never open one.
     ! `omp_get_num_procs` rather than `omp_get_max_threads` for the engine tests below, because that
     ! is the quantity the engine clamps an explicit `threads=` against (see
-    ! `sort_build_permutation_threaded`, src/parquet_sorting_engine.f90): on a one-processor machine
+    ! `sort_build_permutation_threaded`, src/parquet_argsort_engine.f90): on a one-processor machine
     ! `threads=4` resolves to 1 and no threaded design is entered.
     use omp_lib, only : omp_get_max_threads, omp_in_parallel, omp_get_num_procs
 #endif
@@ -316,7 +316,7 @@ contains
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
             "preprocessed out entirely -- the Design A/B dispatch in " // &
-            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "src/parquet_argsort_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
             "ever opened and every assertion below would be vacuous")
         return
 #else
@@ -460,7 +460,7 @@ contains
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
             "preprocessed out entirely -- the Design A/B dispatch in " // &
-            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "src/parquet_argsort_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
             "ever opened and every assertion below would be vacuous")
         return
 #else
@@ -540,7 +540,7 @@ contains
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
             "preprocessed out entirely -- the Design A/B dispatch in " // &
-            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "src/parquet_argsort_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
             "ever opened and every assertion below would be vacuous")
         return
 #else
@@ -607,7 +607,7 @@ contains
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
             "preprocessed out entirely -- the Design A/B dispatch in " // &
-            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "src/parquet_argsort_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
             "ever opened and every assertion below would be vacuous")
         return
 #else
@@ -6514,7 +6514,7 @@ contains
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: without it the threaded sort designs are " // &
             "preprocessed out entirely -- the Design A/B dispatch in " // &
-            "src/parquet_sorting_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
+            "src/parquet_argsort_engine.f90 sits inside #ifdef _OPENMP -- so no team is " // &
             "ever opened and every assertion below would be vacuous")
         return
 #else

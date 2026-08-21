@@ -1,5 +1,6 @@
 ---
 title: Operating the library
+ordered_subpage: choosing-a-module.md
 ordered_subpage: error-handling.md
 ordered_subpage: troubleshooting.md
 ordered_subpage: thread-safety.md
@@ -7,10 +8,12 @@ ordered_subpage: performance.md
 ordered_subpage: settings.md
 ---
 
-The cross-cutting concerns, in roughly the order a reader meets them: what an error means, why a
-build or read fails, what may run concurrently, what memory and speed to expect, and the knobs
-that change how loudly, how large and how fast the library runs.
+The cross-cutting concerns, in roughly the order a reader meets them: which module to import, what
+an error means, why a build or read fails, what may run concurrently, what memory and speed to
+expect, and the knobs that change how loudly, how large and how fast the library runs.
 
+- [Choosing a module](choosing-a-module.html) — what each entry module gives you and what it costs
+  to compile against, plus the one caveat: no import makes the *package* Arrow-free.
 - [Error handling](error-handling.html) — the two failure classes (`error stop` and the
   concurrency guard's abort) and what to catch where.
 - [Troubleshooting](troubleshooting.html) — build and link problems and their fixes.

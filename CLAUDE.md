@@ -655,13 +655,15 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and stands at
-**38** as of 2026-08-18 (14 `public ::` re-exports in `parquet_core.f90`, 20 `private ::`
-names in the `parquet` facade, and 4 `public ::` re-exports in `parquet_settings`). **It is stable
-only in the sense that it moves for a reason** — it rises by one for each name any module re-exports
-or hides with an accessibility statement naming a **use-associated** name, which is the expected cost
-of keeping a sibling module's plumbing out of `use parquet`'s namespace, and a rise of exactly that
-size is not a regression. It was recorded here as 23 until the typed accessor tier added nine such
-names at once; re-derive it rather than trusting the figure above:
+**115** as of 2026-08-21, across **eight** modules. **It is stable only in the sense that it moves
+for a reason** — it rises by one for each name any module re-exports or hides with an accessibility
+statement naming a **use-associated** name, which is the expected cost of keeping a sibling module's
+plumbing out of a user's namespace, and a rise of exactly that size is not a regression. It was 23
+before the typed accessor tier added nine such names at once, 38 before the module restructuring,
+and 115 after it — because the rule that every entry module re-exports the settings it reads means
+every one of those re-exports is a use-associated `public ::`. **Do not read a jump of that size as
+a regression without breaking it down per module first**; re-derive rather than trusting the figure
+above:
 
 ```bash
 ford --warn docs.md 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/Warning: Unknown entity/\n&/g' \
@@ -765,9 +767,29 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **38** of
-  them as of 2026-08-18 and the one FORD number worth tracking across a change. Three independent
-  groups:
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **115** of
+  them as of 2026-08-21 and the one FORD number worth tracking across a change. Eight modules
+  contribute, and the per-module census is what to compare across a change rather than the total:
+
+  | module | attribute | names |
+  |---|---|---|
+  | `parquet_sorting` | public | 31 |
+  | `parquet_settings` | public | 22 |
+  | `parquet` | private | 18 |
+  | `parquet_core` | public | 14 |
+  | `parquet_argsort` | public | 12 |
+  | `parquet_io` | private | 8 |
+  | `parquet_strings` | public | 6 |
+  | `parquet_sampling` | public | 4 |
+
+  **Five of those eight groups exist because of one rule** — a module re-exports, getter and setter
+  both, every settings knob its own code reads (see "Nested submodule tree"). Every such re-export
+  is a `public ::` naming a use-associated name, so it warns; there is no spelling that does not,
+  and the alternative is a narrow import that cannot configure itself. The `parquet_io` group is the
+  second facade's `private ::` list, the same case as `parquet`'s and for the same reason.
+
+  The three original groups, whose detail is still worth having because it shows exactly what the
+  warning keys on:
   **14 `public ::`** re-exports in `parquet_core.f90` (`parquet_date`/`parquet_time`/
   `parquet_timestamp` and the eight `parquet_unit_*`/`parquet_ns_*` constants from
   `parquet_temporal`; `parquet_string`/`parquet_string_column` from `parquet_strings`;
@@ -796,8 +818,9 @@ Keep new code to the same standard:
   the expected cost of keeping a sibling module's internal plumbing out of the public namespace —
   a rise of exactly that size is not a regression, and is exactly what took this figure from the
   23 recorded here before the typed accessor tier added its nine names at once, from 32 to 34
-  when the read-ordering guards added their two, and from 36 to 38 when `parquet_random`'s two
-  settings getters were re-exported. That last step is also the sharpest available illustration of
+  when the read-ordering guards added their two, from 36 to 38 when `parquet_random`'s two
+  settings getters were re-exported, and from 38 to 115 when the module restructuring gave every
+  entry module its own settings re-exports and added the `parquet_io` facade. That last step is also the sharpest available illustration of
   what the warning keys on: their matching **setters** (`parquet_set_random_threads`,
   `parquet_set_random_parallel_min_elements`) sit on the *same* `public ::` statements and warn
   about nothing, because they are defined in `parquet_settings` itself while only the getters live
@@ -872,8 +895,9 @@ declared), and `src/parquet_tables.f90`, `src/parquet_tables_access.f90`,
 `tools/generate_parquet_tables.py`, which imports that same kind table), and `src/parquet_sorting.f90`,
 `src/parquet_sorting_keys.f90`, `src/parquet_sorting_argsort.f90`, `src/parquet_sorting_permute.f90`,
 `src/parquet_sorting_select.f90`, `src/parquet_sorting_search.f90`, `src/parquet_sorting_unique.f90`,
-`src/parquet_sorting_reduce.f90`
-(from `tools/generate_parquet_sorting.py`, which imports the nine SCALAR rows of that same kind table
+`src/parquet_sorting_reduce.f90`, `src/parquet_argsort.f90` and `src/parquet_argsort_kernel.f90`
+(all from `tools/generate_parquet_sorting.py`, which emits TEN files across the two sorting tiers and
+imports the nine SCALAR rows of that same kind table
 and adds the three types that are not `parquet_column` storage kinds at all), and
 `src/parquet_ziggurat.f90` (from `tools/generate_parquet_ziggurat.py`, whose 771 constants are the
 unique solution of one equation rather than a table anyone chose — see its `--self-test`). `src/parquet_table_example.f90` is emitted by
@@ -885,13 +909,20 @@ type-bound binding and every interface body lives there, so adding a `parquet_ta
 editing the generator's literal template text, not the file it emits. Treat this list as a snapshot —
 trust the banner, not the list, and add new generated files here when they appear.
 
-**`src/parquet_sorting_engine.f90` is the ONE `src/parquet_sorting*.f90` that is hand-written**, and
-the split matters in both directions: its four procedures' **interfaces** live in the generated
-`src/parquet_sorting.f90`, so changing a signature means editing the generator's
+**`src/parquet_argsort_engine.f90` is the ONE sorting file that is hand-written**, and the split
+matters in both directions: its four procedures' **interfaces** live in the generated
+`src/parquet_argsort.f90`, so changing a signature means editing the generator's
 `emit_engine_interfaces()` while changing the body means editing the engine file directly. Everything
-else in the sort area — including `sort_key_buf`, every module-level `save` variable and every
-`parquet_debug_*` declaration — is generated, so a new debug hook is a generator change even though
-its implementation is not.
+else across BOTH sorting tiers — including `sort_key_buf`, every module-level `save` variable and
+every `parquet_debug_*` declaration — is generated, so a new debug hook is a generator change even
+though its implementation is not. (It was `src/parquet_sorting_engine.f90` until the argsort tier was
+split out; a source comment or planning document naming the old path means this file.)
+
+**`src/parquet_sorting_oracle.f90` is hand-written too, and is NOT part of that rule.** It is the
+C++ sort engine behind procedure pointers, a separate module rather than a submodule of either
+tier, and the generator does not know about it. It is also the only file in the sorting area that
+imports `parquet_bindings` — which is the whole point, since that import is what the two tiers must
+never acquire.
 
 **Grep for the banner carefully: the engine's own header begins "NOT a generated file".** A
 case-insensitive search for "generated file" therefore reports it as generated, which is the exact
@@ -943,6 +974,8 @@ and by format for metadata:
 
 ```
 parquet                         (module — the FACADE; see below. Holds only parquet_get_version)
+parquet_io                      (module — the I/O FACADE: re-exports parquet_core + parquet_settings
+                                 and nothing else. No code at all.)
 parquet_core                    (module — core API + cross-subtree private-helper interfaces)
 ├─ parquet_read                 (submodule — reader lifecycle, queries, shared read helpers)
 │   ├─ parquet_read_numeric     (int32/int64/float32/float64/logical, all access modes)
@@ -958,23 +991,70 @@ parquet_core                    (module — core API + cross-subtree private-hel
     └─ parquet_metadata_maml    (MAML-specific: section schema + all validation)
 
 parquet_bindings                (module — independent C++ interop)
-parquet_strings                 (module — independent element domain)
+parquet_settings_base           (module — LEAF: every knob's state, getters, setters and the three
+                                 emit channels. Imports iso_fortran_env + omp_lib only.)
+parquet_settings                (module — settings_base + parquet_bindings: print, reset, env, and
+                                 the ONE C++ push, parquet_push_settings_to_cpp)
+parquet_strings                 (module — independent element domain; + settings_base)
 parquet_temporal                (module — independent element domain)
 parquet_random                  (module — the generator AND the four distributions; reaches only
                                  parquet_expkey and parquet_ziggurat, both leaves — enforced)
 parquet_expkey                  (module — LEAF: the frozen -log(u) transform)
 parquet_ziggurat                (module — LEAF, GENERATED, data only: the normal's layer tables)
+parquet_argsort                 (module — the ARGSORT TIER: pf_argsort over the six intrinsic
+                                 types, pf_sort_threads, sort_key_buf, the sorting knobs and the
+                                 oracle's procedure pointers. Reaches settings_base ONLY.)
+├─ parquet_argsort_engine       (submodule — HAND-WRITTEN: comparators + radix/merge/counting)
+└─ parquet_argsort_kernel       (submodule — GENERATED: extractors, engine drivers, the twelve
+                                 intrinsic pf_argsort specifics, the thread rule)
+parquet_sorting                 (module — the FULL tier: extends pf_argsort with the five
+                                 down-tier element types and adds every other pf_ operation)
+parquet_sorting_oracle          (module — TEST-ONLY: the C++ sort engine behind procedure
+                                 pointers. Never re-exported by any facade.)
 parquet_sampling                (module — permutations/subsets/resampling/weighted draws;
-                                 uses parquet_random + parquet_sorting + parquet_expkey)
+                                 uses parquet_random + parquet_argsort + parquet_expkey)
 parquet_maml_base               (module — generated)
 └─ parquet_maml_base_add_col_qc (submodule)
 parquet_wrapper.cpp             (C++ TU)
 ```
 
-**`parquet` is a facade module and holds almost no code.** `src/parquet.f90` re-exports
-`parquet_core`, `parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal` and
-three types from `parquet_maml_base`, so a user writes exactly one `use parquet`. Four rules
-follow, and all four are easy to violate by reflex:
+**Every module in that list except `parquet_core`, `parquet_bindings`, `parquet_settings_base`,
+`parquet_expkey`, `parquet_ziggurat`, `parquet_sorting_oracle` and the submodules is an ADVERTISED
+ENTRY MODULE**, documented in `doc/pages/operating/choosing-a-module.md` and covered by the
+semantic-versioning promise **in its own right**. That is wider than it sounds: a change to
+`parquet_column`'s bindings is a breaking change even when nothing reachable through `use parquet`
+moves. Two properties follow, and both are enforced rather than intended:
+
+- **Seven tiers keep their FORTRAN graph clear of `parquet_bindings`** — `parquet_temporal`,
+  `parquet_strings`, `parquet_random`, `parquet_argsort`, `parquet_sampling`, `parquet_columns`
+  and `parquet_sorting`. `check_parquet_argsort_stays_arrow_free` and its two siblings
+  (`tools/check_source_conventions.py`) walk the closure, **including submodules**, and fail if one
+  ever reaches it; `tools/check_argsort_standalone.sh` proves it by compiling the argsort tier with
+  a bare compiler and no Arrow at all. **This never made the PACKAGE Arrow-free** — `link` is a
+  package-level key in `fpm.toml`, so `parquet_wrapper.cpp` is compiled and `-larrow` linked
+  whichever module a consumer names. Say which of the two you mean.
+- **A `use` line added anywhere can multiply what a consumer compiles**, because fpm prunes at
+  module granularity and never prunes a submodule separately. `tools/check_module_footprints.sh`
+  builds a throwaway consumer per entry module and diffs the compiled set against the committed
+  `tools/module_footprints.txt`. When it fails, **updating the expectation is almost never the
+  fix** — move whatever needed the import up a tier instead.
+
+**Where a new procedure goes is therefore a TIER decision, not a filing one.** Anything reaching a
+reader, a writer or `parquet_bindings` belongs at or above `parquet_core`. Anything a
+`use parquet_sampling` program needs belongs in `parquet_argsort` or lower. And **a module
+re-exports, getter and setter both, every settings knob its own code reads** — including
+`verbosity`/`message_stream` when it can emit — which is what lets a narrow import be configured
+without naming `parquet_settings` and putting the C++ boundary back. `test/test_module_surface.f90`
+holds one single-import module per tier and is where that rule is asserted; **do not add a second
+library `use` to any module in that file**, or it silently stops testing anything.
+
+**`parquet` is a facade module and holds almost no code, and `parquet_io` is a second facade that
+holds NONE.** `src/parquet.f90` re-exports `parquet_io`, `parquet_tables`, `parquet_columns`,
+`parquet_strings`, `parquet_temporal`, `parquet_sorting`, `parquet_random`, `parquet_sampling`,
+`parquet_settings` and three types from `parquet_maml_base`, so a user writes exactly one
+`use parquet`. `src/parquet_io.f90` re-exports `parquet_core` and `parquet_settings` and is the
+supported face of the reader/writer surface for a program that never builds a `parquet_table`.
+Five rules follow, and all five are easy to violate by reflex:
 
 - **The core API's spec file is `src/parquet_core.f90`, not `src/parquet.f90`.** Every
   `public ::` line, every interface body, every shared `parameter` reached by host association
@@ -993,13 +1073,22 @@ follow, and all four are easy to violate by reflex:
   `parquet_maml_base` is imported with an `only:` list rather than in full, because its other
   public names are this library's own embedded MAML fixtures, not user API.
 - **`parquet_core` is internal and documented as such** (README's API-stability bullet,
-  `doc/pages/tables/table.md`, and the module's own doc-comment). Only `use parquet` carries the
-  semantic-versioning promise. Sibling modules must `use parquet_core`, never `use parquet` —
+  `doc/pages/tables/table.md`, and the module's own doc-comment). `use parquet` and `use parquet_io`
+  are the two supported spellings of that surface and both carry the semantic-versioning promise;
+  `parquet_core` carries none. Sibling modules must `use parquet_core`, never `use parquet` —
   the facade uses *them*, so the reverse is a circular dependency and will not compile.
+- **The two facades must hide the SAME names.** `parquet_io`'s `private ::` list covers the
+  cross-module plumbing `parquet_core` and `parquet_settings` are forced to make public for want of
+  package scope — `parquet_split_name_list`, `parquet_parse_sort_key`, the compression resolver and
+  the emit channels. `src/parquet.f90` must NOT repeat the first two: `parquet_io` has already
+  hidden them, so a `private ::` there names a symbol that is not accessible at all, which nagfor
+  reports as an implicitly-typed local rather than as anything to do with accessibility.
 
-`test/test_examples.f90`'s `test_facade_covers_every_layer` is the regression test: that whole test
-module's only library import is a bare `use parquet`, so a dropped re-export breaks the *build*
-rather than an assertion.
+Two regression tests, and each catches what the other cannot. `test/test_examples.f90`'s
+`test_facade_covers_every_layer` imports nothing but a bare `use parquet`;
+`test/test_module_surface.f90`'s `test_module_surface_io` imports nothing but `use parquet_io` and
+round-trips a file through it. Both break the *build* rather than an assertion when a re-export is
+dropped, which is how they earn their keep.
 
 Reserved for future element-domain work (not yet implemented): `parquet_map`/`parquet_list`/
 `parquet_struct` (independent modules, like `parquet_temporal`) plus their own
@@ -1122,8 +1211,11 @@ Follow these when adding new public API, types, or internal helpers:
   one.** `parquet_` is for the parquet-file-facing modules (the reader/writer/schema/table/element
   domains: everything listed under "Nested submodule tree"). **`pf_`** — for parquet-fortran, the
   library as a whole — is for *library-wide utility* modules whose subject is not a parquet file at
-  all. There are three: `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays),
+  all. There are four: `parquet_sorting` (a general-purpose sorting API over plain Fortran arrays),
   whose procedures are `pf_sort`, `pf_argsort`, `pf_permute`, … and whose type is `pf_sort_keys`;
+  `parquet_argsort` (the tier below it: `pf_argsort` over the six intrinsic element types, plus
+  `pf_sort_threads`), which shares that vocabulary because it shares the generic — see the tier note
+  under "Nested submodule tree";
   `parquet_random` (counter-based random numbers over nothing but a seed and an index), whose
   procedures are `pf_random_at`, `pf_random_int_at`, `pf_random_fill_draws`, … with the frozen contract
   identifier `pf_random_algorithm`; and `parquet_sampling` (drawing from a population rather than
@@ -1226,6 +1318,9 @@ with it — hence `parquet_bindings`, hence the whole of `parquet_wrapper.cpp` a
 configuration in the kernel check then died on a missing `parquet_sorting.mod` and the script
 exited saying it proved nothing, while `fpm build` and `fpm test` stayed perfectly green throughout
 (the library obviously has Arrow). Nothing else noticed, and nothing else could have.
+(The draw now lives in `parquet_sampling` and takes its sort from the Arrow-free `parquet_argsort`
+tier, so the edge is gone — but the failure mode is unchanged and is exactly what
+`tools/check_argsort_standalone.sh` was written to catch one tier up.)
 
 So:
 
@@ -1257,10 +1352,14 @@ So:
   makes the check pass while destroying the property it measures. Move whatever needed the import
   into `src/parquet_sampling.f90` instead. (If the *second* clause fires, adding to both `SRC` lists
   is exactly the right fix — that is what it is asking for.)
-- **`parquet_sampling` carries the Arrow link edge, deliberately, and confines it.**
-  `pf_weighted_permutation` sorts its keys and the project's one sort is `parquet_sorting`. No C++
-  actually *runs* for `pf_argsort` — the engine has been Fortran since the cutover — so the cost is
-  a link edge, not a call, and the alternative was a second copy of a sorting algorithm.
+- **`parquet_sampling` no longer carries an Arrow link edge, and the way it lost one is the
+  pattern to copy.** `pf_weighted_permutation` sorts its keys, and taking that sort from
+  `parquet_sorting` used to bring `parquet_bindings` — and with it the whole C++ wrapper — into
+  every consumer's build, for one specific over a `real64` array. The fix was not to duplicate a
+  sorting algorithm but to split the tier: `parquet_argsort` holds `pf_argsort` over the six
+  intrinsic types and reaches nothing but `parquet_settings_base`, so `use parquet_sampling` went
+  from 24 compiled files to 8. **When a leaf needs one procedure from a heavyweight module, move
+  the procedure down a tier rather than copying it or accepting the edge.**
 - **The split is a dependency boundary, so it decides placement**: anything drawing a *number* goes
   in `parquet_random`, anything drawing from a *population* goes in `parquet_sampling`. A new
   procedure that needs a thread-count rule, a sort or a settings knob belongs in the latter by
@@ -1686,7 +1785,7 @@ directions at once.
 
 Two places decide on their own how many threads to use — `parallel_prefetch_ok`
 (`parquet_tables_read.f90`, for the table's internally-parallel read) and `pf_sort_threads`
-(`parquet_sorting_keys.f90`, for every sort). **Both resolve to serial inside an OpenMP parallel
+(`parquet_argsort_kernel.f90`, for every sort). **Both resolve to serial inside an OpenMP parallel
 region**, and both do it with the same two lines:
 
 ```fortran
@@ -2556,7 +2655,7 @@ applied to the harness instead of the source.
   drift and no equivalent NaN-style idiom, so their warning is left as an accepted false
   positive rather than "fixed" into something worse (e.g. an epsilon comparison).
 
-  **`src/parquet_sorting_engine.f90` is a deliberate, measured EXCEPTION and uses `x /= x`
+  **`src/parquet_argsort_engine.f90` is a deliberate, measured EXCEPTION and uses `x /= x`
   throughout — do not "correct" it.** Its header states the case at length: `ieee_is_nan` cost ifx
   ~2.5 ns per test on the sort's hot comparison path, where the test sits inside a dependency chain
   rather than in isolation. Two things a future reader should take from it rather than re-deriving
@@ -3242,7 +3341,8 @@ the message names, not the file:
   the `parquet_debug_*` overrides and counters (~40, which
   [have to be globals](#a-fortran-side-debug-hook-has-to-be-public-so-prefer-a-c-one)), and exactly
   **two genuine runtime counters**: `seed_call_counter` in `parquet_random` and
-  `warned_thread_clamp` in `parquet_sorting_keys`.
+  `thread_clamp_claims` in `parquet_argsort` (written by `warn_thread_clamp`, one tier below where
+  it used to live).
 
 **No amount of guarding silences it** — the check is static and has no notion of an atomic, a
 critical region or a lock, so it fires on a correctly-synchronised global exactly as loudly as on an
@@ -3639,7 +3739,7 @@ Three consequences worth carrying to any future hot-path work:
 **The one-command check for whether a call was inlined**, which belongs beside any claim that it was:
 
 ```bash
-objdump -dr --no-show-raw-insn <obj>/src_parquet_sorting_engine.f90.o \
+objdump -dr --no-show-raw-insn <obj>/src_parquet_argsort_engine.f90.o \
     | sed -n '/<.*mp_sort_partition_>:/,/^$/p' | grep R_X86_64
 ```
 

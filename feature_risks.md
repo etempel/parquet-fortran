@@ -284,7 +284,7 @@ test can arrange — and writing a test for them would freeze the wrong thing as
 
 ### Risk-90 — The narrow-integer bias is safe in exactly ONE direction, and its guard cannot be tested
 
-`sort_radix_permutation` (`src/parquet_sorting_engine.f90`) images an integer key as `v - vmin`
+`sort_radix_permutation` (`src/parquet_argsort_engine.f90`) images an integer key as `v - vmin`
 instead of `ieor(v, SORT_SIGN_BIT)` when `sort_span_under_2p32` says the value range spans under
 2^32, which leaves the top four bytes constant and skips four of the eight passes. It is worth 45% on
 an int32 column.
@@ -322,7 +322,7 @@ must avoid `-2^63`; `test_radix_path_narrow_integer` explains both.
 
 ### Risk-91 — `sort_radix_refine_strings` reads one array while permuting another, and nothing diagnoses passing the same one
 
-`sort_radix_refine_strings` (`src/parquet_sorting_engine.f90`) takes the sorted row array `ra` as
+`sort_radix_refine_strings` (`src/parquet_argsort_engine.f90`) takes the sorted row array `ra` as
 `intent(in)` and the permutation `perm` as `intent(inout)`, walks runs of equal image in the first
 and reorders the second. **They must be different arrays.** Associating one actual with a dummy that
 is defined and an `intent(in)` dummy at the same time is forbidden by F2018 15.5.2.13, and neither
@@ -1247,7 +1247,7 @@ for the whole array.
 
 ### Risk-92 — The last radix pass leaves the row array STALE, and only the string exclusion makes that safe
 
-`sort_radix_permutation` (`src/parquet_sorting_engine.f90`) determines before its pass loop which
+`sort_radix_permutation` (`src/parquet_argsort_engine.f90`) determines before its pass loop which
 byte position is the last one that will execute, and has that pass scatter row indices **straight
 into `perm`** rather than into `rb` — removing that pass's key write and the whole final copy, 24
 bytes per element. The pass does not carry the images or the rows forward, so **after it, `ka` and
@@ -2650,7 +2650,7 @@ reads an ICV, not the current team size — inside an 8-thread region it returns
 without the check, eight OpenMP threads would each spawn eight `std::thread`s. Sixty-four threads is
 slower than not threading at all, and nothing about the result would look wrong.
 
-`pf_sort_threads()` (`src/parquet_sorting_keys.f90`) is the single implementation, and it is public
+`pf_sort_threads()` (`src/parquet_argsort_kernel.f90`) is the single implementation, and it is public
 precisely so the read-time `parquet_open_reader(..., sort_by=)` can ask the same question from
 `parquet_read.f90` rather than keeping a second copy that could drift.
 
@@ -2679,7 +2679,7 @@ and do not give the read-time sort its own copy of the rule.
 ### Risk-41 — A setting that is never read passes every test written for it
 
 A `parquet_settings` knob is a module variable that some **other** file has to consult:
-`cfg_sort_threads` is read in `pf_sort_threads` (`src/parquet_sorting_keys.f90`),
+`cfg_sort_threads` is read in `pf_sort_threads` (`src/parquet_argsort_kernel.f90`),
 `cfg_prefetch_threads` in `src/parquet_tables_read.f90`, and the compression pair and
 `cfg_default_use_threads` on the writer/reader open paths. If nothing reads one — the read site was
 never added, or was dropped in a later refactor, or the refactor left it reading a different
@@ -4127,7 +4127,7 @@ everything.
 
 ### Risk-86 — A defective quicksort still returns a correctly sorted answer
 
-`sort_comparison_permutation` (`src/parquet_sorting_engine.f90`, `feature_sort.md` Stage 2) ends with
+`sort_comparison_permutation` (`src/parquet_argsort_engine.f90`, `feature_sort.md` Stage 2) ends with
 a **final insertion pass over the whole range**, exactly as `std::sort` does. Insertion sort is a
 complete sorting algorithm, so whatever `sort_introsort_loop` leaves behind — however wrong — comes
 out correctly ordered. **Every defect above that pass is therefore a performance defect and not a
@@ -4167,7 +4167,7 @@ assertion on a permutation can tell them apart.
 
 ### Risk-87 — The counting sort's range check cannot be written the way C++ writes it
 
-`sort_counting_candidate` (`src/parquet_sorting_engine.f90`) decides whether a key's value range is
+`sort_counting_candidate` (`src/parquet_argsort_engine.f90`) decides whether a key's value range is
 small enough to counting-sort. The C++ engine it was ported from bounds that range with
 `(uint64_t)hi - (uint64_t)lo` (`sort_counting_candidate`, `src/parquet_wrapper.cpp`), which cannot
 overflow whatever the two values are. **Fortran has no portable unsigned integer, and signed
@@ -4204,7 +4204,7 @@ happily against a counting path that accepted the key and answered correctly by 
 
 ### Risk-88 — The sort comparator silently loses a third of its speed if it outgrows an inlining budget
 
-`sort_compare_key` and `sort_tier_of` (`src/parquet_sorting_engine.f90`) are called once per
+`sort_compare_key` and `sort_tier_of` (`src/parquet_argsort_engine.f90`) are called once per
 comparison from the introsort's inner loops. GCC inlines them **only while they fit its default
 budget**; past that it splits `sort_compare_key` into a `sort_compare_key.part.0` clone, inlines a
 cheap prologue and leaves the body out of line — so the hot path, a single non-null key reaching the
@@ -4238,7 +4238,7 @@ branch "for clarity" are all changes that can cross the threshold. They will loo
 does not put timing assertions in the suite. The check is one command against a release build:
 
 ```bash
-nm <build>/.../src_parquet_sorting_engine.f90.o | grep -c 'sort_compare_key\.part'
+nm <build>/.../src_parquet_argsort_engine.f90.o | grep -c 'sort_compare_key\.part'
 ```
 
 It must read **0**. A nonzero count means the comparator no longer fits and the sort has lost
@@ -4249,7 +4249,7 @@ rather than left to whoever next reads a disappointing benchmark.
 
 ### Risk-89 — The radix path is a third expression of the ordering, and a wrong answer there is silent
 
-`sort_radix_image` and `sort_radix_permutation` (`src/parquet_sorting_engine.f90`,
+`sort_radix_image` and `sort_radix_permutation` (`src/parquet_argsort_engine.f90`,
 `feature_sort_radix.md`) reproduce `sort_compare_key`'s ordering without performing a single
 comparison. That makes them a **third** independent statement of what "sorted" means, beside
 `sort_row_less` and `sort_keys_compare` — which is `feature_risks.md` **Risk-34** with one more
@@ -5532,11 +5532,11 @@ rather than a correctness necessity.
   contract. The same reasoning already put `sub64`/`add64`/`width_of` in that file.
 - **A compile-time fork needs a check that runs under every compiler that selects an arm.** An arm
   verified only by another compiler simulating it is verified against the wrong codegen — which is
-  this entry's whole story. `SORT_SIGN_BIT` (`parquet_sorting_engine.f90`) uses the same sign-bit XOR
+  this entry's whole story. `SORT_SIGN_BIT` (`parquet_argsort_engine.f90`) uses the same sign-bit XOR
   but *stores* the result into a radix key rather than comparing two of them, so nothing can cancel;
   that is why the sort is unaffected, and it is a property to preserve rather than a coincidence.
 - **Other most-negative constants are safe only because of how they are USED.** `SIGN_BIT`
-  (`parquet_random`) and `SORT_SIGN_BIT` (`parquet_sorting_engine`) appear solely inside `ieor`.
+  (`parquet_random`) and `SORT_SIGN_BIT` (`parquet_argsort_engine`) appear solely inside `ieor`.
   A future arithmetic or comparison use of either inherits this entry.
 
 ### Risk-126 — A SQUEEZE that accepts outside the acceptance region biases the draw invisibly

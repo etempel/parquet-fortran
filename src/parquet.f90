@@ -7,8 +7,9 @@
 !> This module is a facade. It re-exports, unchanged, every public entity of the
 !> modules that actually implement the library:
 !>
-!>   * `parquet_core`    -- readers, writers, schemas, MAML parsing/validation,
+!>   * `parquet_io`      -- readers, writers, schemas, MAML parsing/validation,
 !>                          filters, sort keys, read-time qc, file metadata.
+!>                          Itself a facade over the internal `parquet_core`.
 !>   * `parquet_tables`  -- the `parquet_table` container: lazy columnar reads,
 !>                          slices, row handles, mutation, table write-out.
 !>   * `parquet_columns` -- the `parquet_column` foundation and the `PK_*` kind
@@ -35,7 +36,7 @@
 !> the facade owns the one piece of the API that is about the library itself.
 module parquet
     use iso_c_binding, only: c_int
-    use parquet_core
+    use parquet_io
     use parquet_tables
     use parquet_columns
     use parquet_strings
@@ -64,14 +65,12 @@ module parquet
     private :: c_int
     private :: parquet_get_arrow_version, parquet_get_parquet_version
     private :: cversion
-    ! parquet_core has to make this public so the sibling parquet_tables module can split a
-    ! comma/semicolon name list the same way parquet_prefetch_columns does -- Fortran has no
-    ! package scope. It is plumbing, not API: one tokenizer shared by two layers so the two
-    ! spellings of a name list cannot disagree about punctuation.
-    private :: parquet_split_name_list
-    ! Same reason: parquet_tables parses the sort-key direction grammar ("ra,-dec") with
-    ! parquet_core's own parser rather than a second copy of it.
-    private :: parquet_parse_sort_key
+    ! `parquet_split_name_list` and `parquet_parse_sort_key` need NO statement here: parquet_core
+    ! makes both public so the sibling parquet_tables module can share the library's one name-list
+    ! tokenizer and its one sort-key direction grammar rather than keeping second copies, and
+    ! `parquet_io` -- the facade this one now re-exports in place of parquet_core -- already hides
+    ! them. Adding a `private ::` for either here is an ERROR, not a redundancy: the name is not
+    ! accessible in this scope at all, and nagfor reports it as an implicitly-typed local.
     ! parquet_settings has to make these two public so the write path (a submodule of parquet_core,
     ! a different module) can reach them -- Fortran has no package scope. They are plumbing, not
     ! API, so the facade keeps them out of the namespace `use parquet` hands a user, exactly as it

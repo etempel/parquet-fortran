@@ -3,7 +3,7 @@
 !!
 !! Not part of the library, and it deliberately does NOT call the library: it reimplements the
 !! engine's inner loop over synthetic data so that the scaling question can be asked without first
-!! threading `src/parquet_sorting_engine.f90`. Every arm sorts the same input and every parallel arm
+!! threading `src/parquet_argsort_engine.f90`. Every arm sorts the same input and every parallel arm
 !! is checked against the serial one for an exact match, so a figure is only printed for an arm that
 !! computed the right answer.
 !!
@@ -589,7 +589,7 @@ contains
         b = iand(ishft(v, -8 * p), 255_int64)
     end function dig
     !
-    ! ---- Serial reference: the shape src/parquet_sorting_engine.f90 uses today ------------------
+    ! ---- Serial reference: the shape src/parquet_argsort_engine.f90 uses today ------------------
     !
     !> **This routine PING-PONGS BY PARITY and must never go back to swapping the buffers.**
     !!

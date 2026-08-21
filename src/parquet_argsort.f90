@@ -915,7 +915,7 @@ module parquet_argsort
             integer(int64), allocatable, intent(out), optional :: group_offsets(:)
         end subroutine argsort_chr_i64
     end interface
-    ! ---- The comparator core (parquet_sorting_engine -- HAND-WRITTEN, not generated) ----
+    ! ---- The comparator core (parquet_argsort_engine -- HAND-WRITTEN, not generated) ----
     interface
         !> RAW output tier of row `i` under one key: values(0), NaNs(1), nulls(2).
         !!
@@ -1102,7 +1102,7 @@ module parquet_argsort
         end subroutine sort_merge_permutation
     end interface
     !
-    ! ---- Test-only access to the comparator core (parquet_sorting_engine) ----
+    ! ---- Test-only access to the comparator core (parquet_argsort_engine) ----
     interface
         !> Test-only reader for which engine `drive_engine` would use right now.
         module function parquet_debug_using_fortran_sort_engine() result(on)

@@ -9,7 +9,9 @@ engine behind every other ordering the library performs: a read-time
 cannot disagree about where nulls go, where NaNs go, or how ties are broken — not because three
 implementations are kept in step, but because there is only one, and it is this one.
 
-Everything here is reachable from `use parquet`.
+Everything here is reachable from `use parquet`, and from `use parquet_sorting` on its own. A
+smaller import covering only `pf_argsort` over the intrinsic types is described in
+[The lighter import: `parquet_argsort`](#the-lighter-import-parquet_argsort) below.
 
 ## Naming: `pf_`, not `parquet_`
 
@@ -122,6 +124,38 @@ which says what it does at the call site.
 `character(len=*)` is compared over its **full declared length, trailing blanks included** — which
 is exactly how Fortran's own `<` compares two equal-length strings, so `pf_is_sorted` agrees with a
 hand-written `a(k) <= a(k+1)` loop rather than quietly trimming behind it.
+
+## The lighter import: `parquet_argsort`
+
+`pf_argsort` over the six **intrinsic** element types — `integer(int32/int64)`,
+`real(real32/real64)`, `logical` and `character(len=*)` — together with `pf_sort_threads` and the
+sort engine itself, lives one tier down, in a module of its own:
+
+```fortran
+use parquet_argsort
+```
+
+That import compiles **4** of this library's Fortran files, against 21 for `use parquet_sorting`,
+and its Fortran graph never reaches the Parquet C++ bindings. `use parquet_sorting` and
+`use parquet` are unaffected: they re-export the tier and *extend* `pf_argsort` with the five
+element types that need a column, a packed string store or a temporal element, so a single
+`use parquet_sorting` resolves all eleven exactly as it always has. You would never know the split
+existed unless you went looking for the smaller import.
+
+**What the smaller import does not include**: `pf_sort`, `pf_permute`, `pf_is_sorted`, the
+selection, search, uniqueness, rank, extreme and merge operations, `pf_sort_keys`, and every
+element type beyond the six intrinsic ones. Those all stay in `parquet_sorting`. If you need any of
+them, import that instead — the answers are identical either way, because there is one engine.
+
+**Why it exists**: fpm prunes at module granularity, so a library that wanted one `pf_argsort`
+specific used to compile the whole sorting graph and link the Parquet C++ stack with it. Splitting
+the intrinsic-type argsort out took `use parquet_sampling` from 24 files to 8. See
+[Choosing a module](../operating/choosing-a-module.html) for the full picture, including the caveat
+that no import makes the *package* Arrow-free.
+
+The tier re-exports the four sorting settings — `sort_threads`, `sort_radix_path`,
+`sort_counting_path`, `sort_counting_bucket_limit` — plus `verbosity` and `message_stream`, getter
+and setter both, so a program importing it alone can still tune and quieten its own sorting.
 
 ## Ordering rules
 

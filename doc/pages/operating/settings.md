@@ -9,6 +9,14 @@ argument at every call site — and can ask what they currently are.
 Everything below comes with `use parquet`; naming the module directly (`use parquet_settings`) works
 too if you prefer a narrower import.
 
+**If you are importing one of the narrower modules, you do not need `parquet_settings` at all.**
+Each entry module re-exports, getter and setter both, the knobs its own code reads — `use
+parquet_sorting` gives you the four sorting knobs, `use parquet_strings` gives you `string_threads`,
+and both give you `verbosity` and `message_stream` because both can print. That matters for more
+than convenience: `parquet_settings` owns this library's C++ boundary, so importing it would put the
+Arrow stack back into a build that was deliberately staying clear of it. See
+[Choosing a module](choosing-a-module.html) for which module carries which knob.
+
 ## What is a setting, and what is not
 
 **A setting may change how fast, how large or how loud the library runs. It may never change what

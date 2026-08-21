@@ -16,10 +16,12 @@ under `use parquet`), see the [modules](../lists/modules.html) and
 **One `use parquet` brings in the whole library** — readers and writers, schemas and MAML, the
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, and the date/time/timestamp types. Every page below assumes that single import.
-The individual modules (`parquet_tables`, `parquet_columns`, `parquet_strings`, `parquet_temporal`,
-`parquet_sorting`, `parquet_settings`, `parquet_maml_base`) are still there and can be named directly when you want a narrower import;
-`parquet_core` is the one exception — it is internal, and `use parquet` is what the library's API
-stability promise covers. Because `parquet` re-exports rather than defines, the generated
+The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_strings`,
+`parquet_temporal`, `parquet_sorting`, `parquet_argsort`, `parquet_sampling`, `parquet_random`,
+`parquet_settings`, `parquet_maml_base`) are still there and can be named directly when you want a
+narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one costs
+to compile against. `parquet_core` is the one exception — it is internal, and every module in that
+table, `use parquet` included, is what the library's API stability promise covers. Because `parquet` re-exports rather than defines, the generated
 [procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the reliable
 place to look a name up, rather than the `parquet` module's own page.
 
@@ -43,7 +45,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 22 pages, in reading order. (This list, each group's own page list and the
+All 23 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -82,6 +84,7 @@ All 22 pages, in reading order. (This list, each group's own page list and the
 
 **Operating the library**
 
+- [Choosing a module: what each entry module costs to import](operating/choosing-a-module.html)
 - [Error handling](operating/error-handling.html)
 - [Troubleshooting](operating/troubleshooting.html)
 - [Thread safety](operating/thread-safety.html)

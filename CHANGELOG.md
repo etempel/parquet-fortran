@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Narrower imports: every layer of the library is now an entry module in its own right**, and
+  each one costs a great deal less to compile against than `use parquet`. Two are new —
+  `parquet_io`, the reader/writer/schema surface without the `parquet_table` layer, and
+  `parquet_argsort`, `pf_argsort` and `pf_sort_threads` over the six intrinsic element types — and
+  the existing `parquet_sorting`, `parquet_sampling`, `parquet_columns`, `parquet_strings`,
+  `parquet_temporal` and `parquet_random` are now documented, tested and version-promised as
+  entry points. `use parquet` is unchanged and remains the recommended import: nothing moved out
+  of it, `pf_argsort` still resolves every element type through one generic, and no call changed
+  its meaning. What changed is what a *narrower* import costs: the Fortran graph behind
+  `parquet_sorting`, `parquet_argsort`, `parquet_sampling`, `parquet_columns`, `parquet_strings`,
+  `parquet_temporal` and `parquet_random` no longer reaches the Parquet C++ bindings at all, so
+  `use parquet_sampling` compiles 8 of this library's files where it used to compile 24. Each of
+  those modules also re-exports, getter and setter both, the process-global settings its own code
+  reads, so a narrow import can be configured without naming `parquet_settings` — which would put
+  the C++ boundary back. **One caveat that no import removes**: `link` is a package-level key in
+  `fpm.toml`, so depending on parquet-fortran still compiles `src/parquet_wrapper.cpp` and still
+  links `-larrow -larrow_compute -lparquet` whichever module you name. See
+  [Choosing a module](doc/pages/operating/choosing-a-module.md).
+
 - **Weighted sampling without replacement**, in two forms that share one distribution.
   `pf_weighted_draw` (`%init` / `%next` / `%reset` / `%reseed` / `%remaining`) draws one item at a
   time by successive sampling — the first draw proportional to weight, each later one proportional

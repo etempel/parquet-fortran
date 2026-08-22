@@ -479,7 +479,7 @@ contains
     !> qc off, a schema-less writer, a column that is not in the schema, a column with no qc:
     !> block, or bounds whose text does not parse for the column's declared data_type.
     logical function qc_numeric_bounds(writer, name, have_min, min_bound, min_op, &
-        have_max, max_bound, max_op) result(any_bound)
+        have_max, max_bound, max_op, min_raw, max_raw) result(any_bound)
         type(parquet_writer), intent(in) :: writer !! open writer.
         character(len=*), intent(in) :: name !! numeric column name.
         logical, intent(out) :: have_min !! .true. if a usable qc: min: bound was declared.
@@ -488,6 +488,12 @@ contains
         logical, intent(out) :: have_max !! .true. if a usable qc: max: bound was declared.
         real(real64), intent(out) :: max_bound !! the declared max bound (meaningful only if have_max).
         character(len=:), allocatable, intent(out) :: max_op !! its comparison operator, "<=" or "<".
+        !> The bound TEXT as declared, for a caller that must judge it in something other than
+        !! real64 -- only qc_numeric_i64 does, and only so an int64 bound past 2**53 is compared
+        !! exactly rather than against a rounded copy of itself. Comes back "" when that bound was
+        !! not declared or did not parse.
+        character(len=:), allocatable, intent(out), optional :: min_raw
+        character(len=:), allocatable, intent(out), optional :: max_raw !! as min_raw, for qc: max:.
         integer :: idx
 
         any_bound = .false.
@@ -497,6 +503,8 @@ contains
         max_bound = 0.0_real64
         min_op = ""
         max_op = ""
+        if (present(min_raw)) min_raw = ""
+        if (present(max_raw)) max_raw = ""
 
         if (.not. writer%qc) return
         if (.not. writer%is_schema_enforced) return
@@ -507,12 +515,18 @@ contains
         if (writer%all_columns(idx)%has_qc_min) then
             have_min = parquet_qc_numeric_bound( &
                 writer%all_columns(idx)%qc_min_raw, writer%all_columns(idx)%data_type, min_bound)
-            if (have_min) min_op = trim(writer%all_columns(idx)%qc_min_op)
+            if (have_min) then
+                min_op = trim(writer%all_columns(idx)%qc_min_op)
+                if (present(min_raw)) min_raw = trim(writer%all_columns(idx)%qc_min_raw)
+            end if
         end if
         if (writer%all_columns(idx)%has_qc_max) then
             have_max = parquet_qc_numeric_bound( &
                 writer%all_columns(idx)%qc_max_raw, writer%all_columns(idx)%data_type, max_bound)
-            if (have_max) max_op = trim(writer%all_columns(idx)%qc_max_op)
+            if (have_max) then
+                max_op = trim(writer%all_columns(idx)%qc_max_op)
+                if (present(max_raw)) max_raw = trim(writer%all_columns(idx)%qc_max_raw)
+            end if
         end if
         any_bound = have_min .or. have_max
     end function qc_numeric_bounds
@@ -523,7 +537,7 @@ contains
     !> kind, which is what keeps an int64 column's warning byte-for-byte what it has always been
     !> even though qc_numeric_i64 now compares in int64.
     subroutine qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
-        data_min, data_max, n_violate, n_valid)
+        data_min, data_max, n_violate, n_valid, imin_bound, imax_bound, idata_min, idata_max)
         type(parquet_writer), intent(in) :: writer !! open writer.
         character(len=*), intent(in) :: name !! numeric column name.
         logical, intent(in) :: have_min !! whether a min bound was declared.
@@ -536,21 +550,46 @@ contains
         real(real64), intent(in) :: data_max !! largest valid element seen.
         integer(int64), intent(in) :: n_violate !! how many valid elements violate a bound.
         integer(int64), intent(in) :: n_valid !! how many elements were checked at all.
+        !> Exact int64 renderings, supplied only by qc_numeric_i64. Without them an int64 column's
+        !! message is built entirely from real64 copies, so a bound or an observed value past 2**53
+        !! prints as something like `0.9007199E+16` -- and prints a DIFFERENT number from the one
+        !! the comparison actually used, which is the worst of both. Absent for every other type,
+        !! whose values and bounds are exact in real64 anyway.
+        integer(int64), intent(in), optional :: imin_bound !! exact min bound; only when it is a plain integer.
+        integer(int64), intent(in), optional :: imax_bound !! exact max bound; only when it is a plain integer.
+        integer(int64), intent(in), optional :: idata_min !! smallest valid element, exactly.
+        integer(int64), intent(in), optional :: idata_max !! largest valid element, exactly.
         character(len=:), allocatable :: bounds_desc, fmt_num, fmt_num2, fmt_int, fmt_int2
 
         bounds_desc = ""
         if (have_min) then
-            call parquet_qc_format_real(min_bound, fmt_num)
+            if (present(imin_bound)) then
+                call parquet_qc_format_int(imin_bound, fmt_num)
+            else
+                call parquet_qc_format_real(min_bound, fmt_num)
+            end if
             bounds_desc = "min " // trim(min_op) // " " // fmt_num
         end if
         if (have_max) then
             if (len_trim(bounds_desc) > 0) bounds_desc = bounds_desc // ", "
-            call parquet_qc_format_real(max_bound, fmt_num)
+            if (present(imax_bound)) then
+                call parquet_qc_format_int(imax_bound, fmt_num)
+            else
+                call parquet_qc_format_real(max_bound, fmt_num)
+            end if
             bounds_desc = bounds_desc // "max " // trim(max_op) // " " // fmt_num
         end if
 
-        call parquet_qc_format_real(data_min, fmt_num)
-        call parquet_qc_format_real(data_max, fmt_num2)
+        if (present(idata_min)) then
+            call parquet_qc_format_int(idata_min, fmt_num)
+        else
+            call parquet_qc_format_real(data_min, fmt_num)
+        end if
+        if (present(idata_max)) then
+            call parquet_qc_format_int(idata_max, fmt_num2)
+        else
+            call parquet_qc_format_real(data_max, fmt_num2)
+        end if
         call parquet_qc_format_int(n_violate, fmt_int)
         call parquet_qc_format_int(n_valid, fmt_int2)
         call parquet_emit_warning("qc violation for column '" // trim(name) // "': declared " // bounds_desc // &
@@ -656,17 +695,31 @@ contains
         logical, intent(in), optional :: is_valid_flat(:) !! flattened validity mask; absent = every element counts.
         logical :: have_min, have_max, any_valid, ok, use_mask, exact_min, exact_max
         real(real64) :: min_bound, max_bound, data_min, data_max, v
-        character(len=:), allocatable :: min_op, max_op
-        integer(int64) :: i, n_valid, n_violate, imin, imax, iv
+        character(len=:), allocatable :: min_op, max_op, min_raw, max_raw
+        integer(int64) :: i, n_valid, n_violate, imin, imax, iv, idata_min, idata_max
 
-        if (.not. qc_numeric_bounds(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op)) return
+        if (.not. qc_numeric_bounds(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+            min_raw, max_raw)) return
 
+        ! Take the exact int64 bound from the declared TEXT, not from `min_bound`/`max_bound`: those
+        ! have already been through real64, where a bound past 2**53 has lost the very digits this
+        ! comparison exists to respect. qc_bound_as_int64 remains the fallback and is NOT dead code
+        ! -- it serves the case where the text is not a plain integer at all but the values are
+        ! int64 anyway, which happens whenever a column is DECLARED float64 (so a fractional bound
+        ! validates) and written from an integer(int64) array. scenario_qc_int64_values_fractional_bound
+        ! is exactly that, and it is the regression guard for this fallback.
         exact_min = .false.
         exact_max = .false.
         imin = 0_int64
         imax = 0_int64
-        if (have_min) exact_min = qc_bound_as_int64(min_bound, imin)
-        if (have_max) exact_max = qc_bound_as_int64(max_bound, imax)
+        if (have_min) then
+            exact_min = parquet_qc_bound_as_int64_text(min_raw, imin)
+            if (.not. exact_min) exact_min = qc_bound_as_int64(min_bound, imin)
+        end if
+        if (have_max) then
+            exact_max = parquet_qc_bound_as_int64_text(max_raw, imax)
+            if (.not. exact_max) exact_max = qc_bound_as_int64(max_bound, imax)
+        end if
 
         use_mask = present(is_valid_flat)
         any_valid = .false.
@@ -674,6 +727,8 @@ contains
         n_violate = 0_int64
         data_min = 0.0_real64
         data_max = 0.0_real64
+        idata_min = 0_int64
+        idata_max = 0_int64
         do i = 1_int64, size(values, kind=int64)
             if (use_mask) then
                 if (.not. is_valid_flat(i)) cycle
@@ -684,10 +739,14 @@ contains
             if (.not. any_valid) then
                 data_min = v
                 data_max = v
+                idata_min = iv
+                idata_max = iv
                 any_valid = .true.
             else
                 data_min = min(data_min, v)
                 data_max = max(data_max, v)
+                idata_min = min(idata_min, iv)
+                idata_max = max(idata_max, iv)
             end if
 
             ok = .true.
@@ -708,8 +767,25 @@ contains
             if (.not. ok) n_violate = n_violate + 1
         end do
         if (.not. any_valid .or. n_violate == 0) return
-        call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
-            data_min, data_max, n_violate, n_valid)
+        ! A bound is rendered exactly only when it WAS judged exactly -- a fractional bound on a
+        ! float-declared column still prints as the real it is. The observed range is always exact,
+        ! since the values are int64 whatever the bound turned out to be.
+        if (exact_min .and. exact_max) then
+            call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+                data_min, data_max, n_violate, n_valid, imin_bound=imin, imax_bound=imax, &
+                idata_min=idata_min, idata_max=idata_max)
+        else if (exact_min) then
+            call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+                data_min, data_max, n_violate, n_valid, imin_bound=imin, &
+                idata_min=idata_min, idata_max=idata_max)
+        else if (exact_max) then
+            call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+                data_min, data_max, n_violate, n_valid, imax_bound=imax, &
+                idata_min=idata_min, idata_max=idata_max)
+        else
+            call qc_numeric_report(writer, name, have_min, min_bound, min_op, have_max, max_bound, max_op, &
+                data_min, data_max, n_violate, n_valid, idata_min=idata_min, idata_max=idata_max)
+        end if
     end subroutine qc_numeric_i64
     !> parquet_check_qc_numeric's float32 specific -- see the generic's own doc-comment above.
     subroutine qc_numeric_r32(writer, name, values, is_valid_flat)

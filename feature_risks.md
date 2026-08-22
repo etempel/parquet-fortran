@@ -132,7 +132,7 @@ something a reader is expected to have.
 | [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null) | Two threads pasting adjacent row groups share a validity bitmap block and lose a null | 4 — covered |
 | [Risk-65](#risk-65--a-guard-claimed-after-the-state-it-protects-is-a-guard-that-loses-the-race) | A guard claimed after the state it protects is a guard that loses the race | 4 — covered |
 | [Risk-67](#risk-67--an-unbounded-read-of-a-parquet_column-storage-array-returns-uninitialised-slack) | An unbounded read of a `parquet_column` storage array returns uninitialised slack | 4 — covered |
-| [Risk-68](#risk-68--a-qc-bound-is-parsed-into-float64-so-a-bound-past-253-is-silently-rounded) | A qc bound is parsed into `float64`, so a bound past 2^53 is silently rounded | 4 — covered |
+| [Risk-68](#risk-68--a-qc-bound-and-the-values-it-judges-must-be-compared-in-the-same-arithmetic) | A qc bound and the values it judges must be compared in the SAME arithmetic | 4 — covered |
 | [Risk-69](#risk-69--a-test-that-compares-a-never-written-column-with-itself-passes-on-the-heaps-luck) | A test that compares a never-written column with itself passes on the heap's luck | 2 — proposed |
 | [Risk-70](#risk-70--an-intentinout-temporal-setter-that-skips-a-component-leaves-a-reused-element-stale) | An `intent(inout)` temporal setter that skips a component leaves a REUSED element stale | 4 — covered |
 | [Risk-71](#risk-71--a-stale-handle-reads-the-wrong-column-or-row-and-nothing-says-so) | A stale handle reads the wrong column or row, and nothing says so | 4 — covered |
@@ -3448,54 +3448,54 @@ obviously "the whole array" is meant. Do not use `size(self%<comp>)` as a row co
 the row count and `%capacity()` is the allocation. And do not "simplify" `ensure_bitmap` back to
 `bits_needed(self)`: it looks like the tighter, more careful expression, and it is the bug.
 
-### Risk-68 — A qc bound is parsed into `float64`, so a bound past 2^53 is silently rounded
+### Risk-68 — A qc bound and the values it judges must be compared in the SAME arithmetic
 
-**What breaks.** `parquet_qc_numeric_bound` (`src/parquet_metadata_maml.f90`) reads a `qc: min:`/
-`max:` bound out of the MAML text with `read(raw, *, iostat=ios) value` into a `real(real64)`. Every
-consumer of a numeric bound therefore sees a `float64`, whatever the column's declared type. Past
-2^53 that is lossy: `max: 9007199254740993` becomes `9007199254740992` with no diagnostic, because
-nothing in the text distinguishes "I meant exactly this" from "I meant roughly this".
+**Covered** by `qc: an int64 bound is judged in int64, not after widening to real64`, `qc: an int64
+BOUND past 2**53 constrains exactly what it says` and its control `qc: a value equal to a bound past
+2**53, and a huge(int64) bound, stay silent` (all `test/test_writing.f90`), plus `qc: a fractional
+bound still checks int64 values, in real64` and `qc: a strict min:/max: operator excludes the
+boundary value`.
 
-**Why it is quiet.** A qc violation is a WARNING, so the failure mode is not an abort but a *missing*
-warning — the check reports compliance for data that violates its declaration. Nothing downstream can
-notice: the file is written correctly, the values are correct, and the only evidence is a line that
-was never printed.
+**Both halves are now closed, and the second half is the one this entry was written waiting for.**
+The values were fixed first: `parquet_check_qc_numeric` used to widen every element to `float64`
+before comparing, so an `int64` column holding 2^53 + 1 compared as though it held 2^53 and passed a
+`max: 2^53` bound it violates. The bound followed: it used to be read out of the MAML text into a
+`real(real64)` and rounded past 2^53, so `max: 9007199254740993` silently became `9007199254740992`
+and a value equal to its own declared bound was reported as a violation — while `max:
+9223372036854775807` was rejected outright at validation time, because that value and
+`huge(int64) + 1` are the same `real64`. `parquet_qc_bound_as_int64_text` now parses a plainly-written
+integer bound straight to `int64`, and `qc_numeric_i64` takes the bound from that text rather than
+from a `real64` copy of it. **Verified by mutation, and the two halves separate**: restoring the
+`real64` bound route fails both new tests; disabling only the exact *rendering* fails the message
+assertions while the control still passes.
 
-**The values are no longer affected — only the bound.** `parquet_check_qc_numeric` used to widen
-every element to `float64` before comparing, which rounded the *data* the same way; an `int64` column
-holding 2^53 + 1 compared as though it held 2^53 and passed a `max: 2^53` bound it violates. That is
-fixed: `qc_numeric_i64` converts the bound to `int64` once (`qc_bound_as_int64`) and compares
-natively whenever the bound has an exact `int64` equivalent, falling back to the `float64` comparison
-only for a fractional bound — which can reach an `int64` column only when the *schema's* type is a
-float one, where comparing in `float64` is the correct reading.
+**Why it was quiet.** A qc violation is a WARNING, so the failure mode was not an abort but a
+*missing* one — the check reporting compliance for data that violates its declaration — or, once the
+bound rounded the other way, a warning about data that honours it exactly. Nothing downstream could
+notice: the file is written correctly and the values are correct either way.
 
-**Test.** `qc: an int64 bound is judged in int64, not after widening to real64`
-(`test/test_writing.f90`, over the `qc_int64_beyond_float64_precision` error scenario). The scenario
-carries both halves in one file: an `over` column holding 2^53 + 1 against `max: 2^53`, which must
-warn, and an `at` column holding 2^53 exactly against the same bound, which must not. The negative
-control is what stops a checker that simply warns about every `int64` column from passing. Confirmed
-by mutation: making `qc_bound_as_int64` always answer `.false.` — i.e. restoring the old widening —
-fails the test.
+**What this still forbids.**
 
-**The four operators are now exercised, which is what makes that warning concrete.** Until
-`qc: a strict min:/max: operator excludes the boundary value` (`test/test_writing.f90`, over the
-`qc_int64_strict_operators` scenario), every scenario declared its bounds plainly — which parses to
-the inclusive `>=`/`<=` defaults — so `qc_int64_satisfies`' two strict arms had never run. A strict
-operator quietly behaving as its inclusive twin accepts exactly the boundary value the declaration
-excludes, and warns about nothing. The scenario's `inside` column (one step in from each boundary) is
-the negative control that separates that failure from a checker warning indiscriminately. The
-fractional fallback described above has the same treatment, in
-`qc: a fractional bound still checks int64 values, in real64`.
-
-**What this forbids.** Do not "fix" the remaining half by rounding, clamping or ceiling the bound
-into the value's kind: the operator makes that a different question for each of `>=`, `>`, `<=`, `<`,
-and getting it wrong turns a silently-loose check into a silently-tight one, which is worse. The
-honest options are to leave it (and document it, which
-[quality-control.md](doc/pages/schema/quality-control.md) now does) or to carry the bound's original text
-down to the comparison so an exact integer bound can be parsed as one — which would touch
-`parquet_qc_numeric_bound`'s two schema-validation callers as well, and is a change to make
-deliberately rather than in passing.
-
+- **Do not "simplify" the bound back onto one numeric route.** An integer bound is judged in `int64`
+  and a fractional one in `real64`, and both are needed: the `real64` fallback in `qc_numeric_i64` is
+  not dead code, it serves a column DECLARED `float64` (so a fractional bound validates) that is
+  written from an `integer(int64)` array. `scenario_qc_int64_values_fractional_bound` is exactly that
+  case and is the regression guard for it.
+- **Do not round, clamp or ceiling a bound into the value's kind.** The operator makes that a
+  different question for each of `>=`, `>`, `<=`, `<`, and getting it wrong turns a silently-loose
+  check into a silently-tight one, which is worse. This is why the fix parses the text rather than
+  converting the `real64`.
+- **The message must quote the number the comparison used.** `qc_numeric_report` renders an exact
+  `int64` bound and an `int64` column's observed range through `parquet_qc_format_int`; building the
+  message from `real64` copies prints `0.9007199E+16` for a bound the check applied as
+  `9007199254740993`, i.e. names a different number from the one it enforced. A reader comparing the
+  warning against their own MAML would find neither number in it.
+- **The strict operators stay covered.** Until `qc: a strict min:/max: operator excludes the boundary
+  value` (over the `qc_int64_strict_operators` scenario), every scenario declared its bounds plainly
+  — which parses to the inclusive `>=`/`<=` defaults — so `qc_int64_satisfies`' two strict arms had
+  never run. A strict operator quietly behaving as its inclusive twin accepts exactly the boundary
+  value the declaration excludes, and warns about nothing. That scenario's `inside` column is the
+  negative control separating that failure from a checker warning indiscriminately.
 
 ### Risk-70 — An `intent(inout)` temporal setter that skips a component leaves a REUSED element stale
 

@@ -1416,7 +1416,7 @@ contains
 
         call check_scenario_exit_status_and_stderr(error, "validate_qc_on_temporal_column", expect_abort=.true., &
             failure_message="qc: on a timestamp field was expected to error stop", &
-            required_stderr="declares qc:, which is not supported for a timestamp column")
+            required_stderr="declares qc: min:/max:, which is not supported for a timestamp column (qc: miss: is)")
     end subroutine test_validate_qc_on_temporal_column_aborts
 
     !> Regression test: an explicit seconds unit ("timestamp[s]") must be rejected at add_field

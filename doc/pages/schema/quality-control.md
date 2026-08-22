@@ -236,18 +236,14 @@ range check only fires for columns that actually declare `qc: min:`/`max:`, and 
 fires for a column that declares an empty `qc: miss:` *and* is actually written with a null-carrying
 mask. `qc=.false.` skips both checks entirely.
 
-### One precision limit worth knowing, on `int64` columns
+### Integer bounds are exact, at any magnitude
 
-A declared bound is parsed from the MAML text into a 64-bit float, so **a bound larger than 2^53
-(9007199254740992) is rounded to the nearest representable value**. Declaring `max:
-9007199254740993` gives you `max: 9007199254740992`, silently — there is no warning, because nothing
-about the text says it was meant exactly.
-
-The *values* are not affected: an `int64` column's elements are compared against the bound in
-`int64`, so a value past 2^53 is judged exactly. Only the bound itself has this limit, and only when
-it is written larger than 2^53 — which for a range check on real data is an unusual thing to want.
-If you need one, express it as a `min:`/`max:` a little wider than the true intent rather than
-relying on an exact bound at that magnitude.
+A `min:`/`max:` written as a plain integer is parsed straight to a 64-bit integer and compared in
+64-bit integer arithmetic, on both the write and the read side. Every `int64` value is expressible
+as such a bound, `9223372036854775807` included, and a bound past 2^53 constrains exactly what it
+says rather than the nearest 64-bit float to it. A bound written in any other form — with a decimal
+point, or in exponent notation — is a floating-point bound and is compared as one, which is what
+lets a `float64` column declare `min: 1.5`.
 
 ## Read-side enforcement
 

@@ -1295,6 +1295,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An integer `qc: min:`/`max:` bound is now exact at any magnitude.** A bound written as a plain
+  integer is parsed straight to `int64` instead of through a 64-bit float, on the write side as the
+  read side always did. Two consequences a reader of 1.0.0 can observe: a bound past 2^53 no longer
+  rounds, so `max: 9007199254740993` constrains what it says and a value equal to it is no longer
+  reported as a violation; and `9223372036854775807` (`huge(int64)`) is now a legal bound, where
+  `parquet_validate_maml` used to reject it as invalid — that value and `huge(int64) + 1` are the
+  same 64-bit float, so the range test could not tell them apart. The violation WARNING now also
+  quotes an `int64` bound and range as integers rather than as `0.9007199E+16`, i.e. it names the
+  number the check actually applied. A bound written with a decimal point or in exponent notation is
+  still a floating-point bound and is still compared as one.
+
 - **An unrecognised `qc: miss:` value in a schema MAML is now rejected instead of silently meaning
   the opposite.** `qc: miss:` accepts empty, `Null` or `NA` (the latter two case-insensitively).
   A qc-maml, `schema%add_field`'s `qc_miss=` and `schema%add_col_qc` have always rejected anything

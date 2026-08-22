@@ -945,12 +945,63 @@ contains
         has_flag = .true.
     end procedure parquet_set_qc_bound
 
+    module procedure parquet_qc_bound_as_int64_text
+        integer :: k, first, ios
+        logical :: ok
+        character(len=:), allocatable :: text
+
+        value = 0_int64
+        parquet_qc_bound_as_int64_text = .false.
+        text = trim(adjustl(raw))
+        if (len(text) == 0) return
+
+        ! Shape first, by hand: an optional sign then nothing but digits, to the end. A bare
+        ! list-directed read cannot do this -- it accepts "5 6" as 5, and "1.5" as 1.5 -- so the
+        ! read below only ever runs on text already known to be a plain integer, and its iostat is
+        ! then reporting one thing only: that the value does not fit in int64.
+        first = 1
+        if (text(1:1) == "+" .or. text(1:1) == "-") first = 2
+        ok = len(text) >= first
+        do k = first, len(text)
+            if (text(k:k) < "0" .or. text(k:k) > "9") then
+                ok = .false.
+                exit
+            end if
+        end do
+        if (.not. ok) return
+
+        read(text, *, iostat=ios) value
+        if (ios /= 0) then
+            value = 0_int64
+            return
+        end if
+        parquet_qc_bound_as_int64_text = .true.
+    end procedure parquet_qc_bound_as_int64_text
+
     module procedure parquet_qc_numeric_bound
         integer :: ios
         real(real64) :: rounded
+        integer(int64) :: exact
 
         value = 0.0_real64
         parquet_qc_numeric_bound = .false.
+
+        ! An integer-typed bound is judged as an int64 whenever the text IS a plain integer, so a
+        ! bound past 2**53 -- huge(int64) included -- validates exactly rather than being tested
+        ! against a rounded copy of itself. `value` is still handed back as real64 for the callers
+        ! that compare in real64; the int64 write path re-parses the text for its own comparison
+        ! (see qc_numeric_i64), so no precision is lost where it matters.
+        select case (trim(data_type))
+        case ("int32", "int64")
+            if (parquet_qc_bound_as_int64_text(raw, exact)) then
+                if (trim(data_type) == "int32") then
+                    if (exact < -int(huge(0_int32), int64) - 1_int64 .or. exact > int(huge(0_int32), int64)) return
+                end if
+                value = real(exact, kind=real64)
+                parquet_qc_numeric_bound = .true.
+                return
+            end if
+        end select
 
         read(raw, *, iostat=ios) value
         if (ios /= 0) return

@@ -1325,6 +1325,28 @@ module parquet_core
             character(len=*), intent(in) :: data_type !! field's declared data_type; selects the parsing rule.
             real(real64), intent(out) :: value !! parsed bound value; only meaningful when the function returns .true.
         end function parquet_qc_numeric_bound
+        !> Parses `raw` (a qc: min:/max: bound, operator already stripped) as an
+        !> EXACT int64, without ever going through real64. Whole-string and
+        !> strict: an optional leading +/- then nothing but digits, and the
+        !> value must fit in int64. Returns .false. (value undefined) for
+        !> anything else -- a fractional bound ("1.5"), an exponent form
+        !> ("1e3"), trailing junk, or a magnitude past int64 -- which is what
+        !> lets a caller fall back to parquet_qc_numeric_bound's real64 route
+        !> for the cases that legitimately need it.
+        !>
+        !> Why this exists at all: routing an integer bound through real64
+        !> rounds it above 2**53, so a declared max: of 9007199254740993 became
+        !> 9007199254740992 and a legitimate value equal to its own bound was
+        !> reported as a violation; and the real64 range test rejected
+        !> huge(int64) outright, since that value and huge(int64)+1 are the same
+        !> real64. Both are wrong answers rather than approximations, and the
+        !> read side (parse_int64_strict, parquet_wrapper.cpp) never had them
+        !> because it parses the same text straight to int64. Do NOT use a bare
+        !> list-directed read for this -- it accepts "5 6" as 5 (see CLAUDE.md).
+        module logical function parquet_qc_bound_as_int64_text(raw, value)
+            character(len=*), intent(in) :: raw !! qc: min:/max: text, operator prefix already stripped.
+            integer(int64), intent(out) :: value !! parsed bound; only meaningful when the function returns .true.
+        end function parquet_qc_bound_as_int64_text
         !> File form of parquet_parse_maml: loads `filename` from disk, then
         !> parses/validates it into `schema` (%maml, %cinfo, %metadata). Error
         !> stops if `schema` is already initialized (schema%is_init() ==

@@ -739,6 +739,8 @@ scenarios=(
     "qc_warning_numeric:0"
     "qc_warning_fractional_bound:0"
     "qc_int64_beyond_float64_precision:0"
+    "qc_int64_exact_bound_violation:0"
+    "qc_int64_exact_bound_no_false_violation:0"
     "qc_int64_strict_operators:0"
     "qc_int64_values_fractional_bound:0"
     "qc_warning_float64:0"

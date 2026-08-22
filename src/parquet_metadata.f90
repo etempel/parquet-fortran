@@ -321,8 +321,8 @@ contains
         select case (trim(col%data_type))
         case ("date", "time", "timestamp")
             if (col%has_qc_min .or. col%has_qc_max) then
-                errors = errors // "field '" // cur_name // "' declares qc:, which is not " // &
-                    "supported for a " // trim(col%data_type) // " column; "
+                errors = errors // "field '" // cur_name // "' declares qc: min:/max:, which is not " // &
+                    "supported for a " // trim(col%data_type) // " column (qc: miss: is); "
             end if
         end select
 

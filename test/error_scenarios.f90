@@ -812,6 +812,10 @@ program error_scenarios
         call scenario_qc_warning_fractional_bound()
     case ("qc_int64_beyond_float64_precision")
         call scenario_qc_int64_beyond_float64_precision()
+    case ("qc_int64_exact_bound_violation")
+        call scenario_qc_int64_exact_bound_violation()
+    case ("qc_int64_exact_bound_no_false_violation")
+        call scenario_qc_int64_exact_bound_no_false_violation()
     case ("qc_int64_strict_operators")
         call scenario_qc_int64_strict_operators()
     case ("qc_int64_values_fractional_bound")
@@ -8326,6 +8330,70 @@ contains
         call parquet_write_column(writer, "at", at)
         call parquet_close_writer(writer)
     end subroutine scenario_qc_int64_beyond_float64_precision
+
+    !> A qc bound is judged as an exact int64 whenever the declared text IS a plain integer, so a
+    !> bound PAST 2**53 constrains what it says rather than a rounded copy of itself. This is the
+    !> positive half: 9007199254740994 genuinely exceeds a max of 9007199254740993, so exactly one
+    !> WARNING must appear -- and both numbers must be rendered exactly, since a message built from
+    !> real64 copies would print 0.9007199E+16 for the bound, the value AND the range, i.e. would
+    !> quote a different number from the one the comparison used. Its negative half is
+    !> scenario_qc_int64_exact_bound_no_false_violation. See feature_risks.md Risk-68.
+    subroutine scenario_qc_int64_exact_bound_violation()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: over(1) = [9007199254740994_int64]  !! one past a bound of 2**53 + 1.
+
+        schema%maml%name = "qc_int64_exact_bound.maml"
+        schema%maml%lines = [character(len=48) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: over", &
+            "  data_type: int64", &
+            "  qc:", &
+            "    max: 9007199254740993" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_int64_exact_bound.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "over", over)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_int64_exact_bound_violation
+
+    !> Negative control for the scenario above, and the half that actually catches the defect this
+    !> pair exists for. Two things must produce NO output at all:
+    !>   * a value exactly EQUAL to a max: past 2**53 is compliant -- routing the bound through
+    !>     real64 rounded 9007199254740993 down to ...992, so the value equal to its own declared
+    !>     bound was reported as a violation;
+    !>   * max: 9223372036854775807 (= huge(int64)) is a legal bound -- the real64 range test used
+    !>     to reject it outright at parquet_validate_maml time, since that value and huge+1 are the
+    !>     same real64, so this scenario would have ABORTED rather than merely warned.
+    !> Exits cleanly (exit 0) and prints nothing.
+    subroutine scenario_qc_int64_exact_bound_no_false_violation()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int64) :: at(1) = [9007199254740993_int64]    !! exactly the declared bound: compliant.
+        integer(int64) :: small(1) = [1_int64]                !! well inside a huge(int64) bound.
+
+        schema%maml%name = "qc_int64_exact_bound_ok.maml"
+        schema%maml%lines = [character(len=48) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: at", &
+            "  data_type: int64", &
+            "  qc:", &
+            "    max: 9007199254740993", &
+            "- name: small", &
+            "  data_type: int64", &
+            "  qc:", &
+            "    max: 9223372036854775807" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_int64_exact_bound_ok.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "at", at)
+        call parquet_write_column(writer, "small", small)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_int64_exact_bound_no_false_violation
 
     !> qc_int64_satisfies applies the declared comparison operator to an int64 value and an
     !> exactly-int64 bound. Every existing scenario declares its bounds plainly, which parses to

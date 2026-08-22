@@ -96,6 +96,10 @@ contains
                 test_qc_warning_float64), &
             new_unittest("qc: an int64 bound is judged in int64, not after widening to real64", &
                 test_qc_int64_bound_judged_in_int64), &
+            new_unittest("qc: an int64 BOUND past 2**53 constrains exactly what it says", &
+                test_qc_int64_exact_bound_past_2_53), &
+            new_unittest("qc: a value equal to a bound past 2**53, and a huge(int64) bound, stay silent", &
+                test_qc_int64_exact_bound_no_false_violation), &
             new_unittest("qc=.true. prints a WARNING for an out-of-range string value", &
                 test_qc_warning_printed_for_string_violation), &
             new_unittest("qc: on a boolean field is accepted but never enforced", &
@@ -1291,6 +1295,62 @@ contains
         call check(error, .not. warned_at, &
             "2**53 satisfies max: 2**53, so the 'at' column must not produce a qc warning")
     end subroutine test_qc_int64_bound_judged_in_int64
+
+    !> A qc BOUND past 2**53 must constrain what it says. The bound text is parsed straight to
+    !> int64 rather than through real64, so `max: 9007199254740993` is that number and not the
+    !> 9007199254740992 real64 rounds it to -- and the WARNING quotes the same number the
+    !> comparison used, instead of `0.9007199E+16`.
+    !>
+    !> Two failure modes are covered, and the second is the one that shipped: a value one PAST the
+    !> bound must warn (positive half), and a value exactly EQUAL to the bound must not (negative
+    !> half, scenario_qc_int64_exact_bound_no_false_violation). Under the old real64 route the
+    !> equal value was reported as a violation -- qc contradicting a declaration the data honoured
+    !> exactly -- and `max: 9223372036854775807` was rejected outright at validation time, so that
+    !> scenario would abort rather than merely warn. See feature_risks.md Risk-68.
+    subroutine test_qc_int64_exact_bound_past_2_53(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned, exact_bound, exact_range
+
+        call run_error_scenario("qc_int64_exact_bound_violation", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a qc violation must warn, never error stop")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'over'", warned)
+        call check(error, warned, &
+            "9007199254740994 exceeds max: 9007199254740993, but no qc warning named the 'over' " // &
+            "column -- the bound was rounded down to 2**53 on its way through real64")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "max <= 9007199254740993", exact_bound)
+        call check(error, exact_bound, &
+            "the WARNING must quote the declared bound exactly (9007199254740993), not a real64 " // &
+            "rendering of it such as 0.9007199E+16 -- otherwise it names a different number from " // &
+            "the one the comparison actually applied")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "[9007199254740994, 9007199254740994]", exact_range)
+        call check(error, exact_range, &
+            "the WARNING's observed data range must be rendered in int64 too, exactly")
+    end subroutine test_qc_int64_exact_bound_past_2_53
+
+    !> Negative control for the test above: a value exactly equal to a bound past 2**53 is
+    !> compliant and must stay silent, and huge(int64) must be a legal bound rather than a
+    !> validation error. Without this, the positive test passes just as happily against a checker
+    !> that warns about every int64 column, or against one whose bounds still round.
+    subroutine test_qc_int64_exact_bound_no_false_violation(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_no_output(error, "qc_int64_exact_bound_no_false_violation", &
+            expect_abort=.false., &
+            failure_message="a value equal to its own max: past 2**53, and a max: of huge(int64), " // &
+                "must both be accepted in silence", &
+            forbidden_text="qc violation")
+    end subroutine test_qc_int64_exact_bound_no_false_violation
 
     !> A STRICT qc operator (`min: > 0`, `max: < 100`) must exclude the boundary value that its
     !> inclusive twin would accept -- qc_int64_satisfies' ">" and "<" arms. The scenario carries

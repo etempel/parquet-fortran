@@ -21,9 +21,10 @@ The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parq
 `parquet_settings`, `parquet_maml_base`) are still there and can be named directly when you want a
 narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one costs
 to compile against. `parquet_core` is the one exception — it is internal, and every module in that
-table, `use parquet` included, is what the library's API stability promise covers. Because `parquet` re-exports rather than defines, the generated
-[procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the reliable
-place to look a name up, rather than the `parquet` module's own page.
+table, `use parquet` included, is what the library's API stability promise covers. Because
+`parquet` re-exports rather than defines, the generated
+[procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the
+reliable place to look a name up, rather than the `parquet` module's own page.
 
 The guide is organised into six groups, ordered roughly by what a new user needs first;
 reference/advanced material is last. If you only want a file's columns as arrays with the least
@@ -35,7 +36,7 @@ point in the library.
 - [Data types](types/index.html) — what a column can hold: the supported types, date/time/
   timestamp elements, and compact string columns.
 - [Schemas, metadata and quality control](schema/index.html) — declare a file's contents in MAML
-  or in code, with qc bounds, ending on a worked example combining all of it.
+  or in code, with qc bounds and read-time renaming, ending on two worked examples.
 - [Whole tables in memory](tables/index.html) — the high-level `parquet_table` layer: a whole
   file as one object, columns by name, read only when touched.
 - [Utilities and code generation](utilities/index.html) — sorting for plain arrays, reproducible

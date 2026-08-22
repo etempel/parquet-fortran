@@ -102,8 +102,10 @@ contains
                 test_qc_int64_exact_bound_no_false_violation), &
             new_unittest("qc=.true. prints a WARNING for an out-of-range string value", &
                 test_qc_warning_printed_for_string_violation), &
-            new_unittest("qc: on a boolean field is accepted but never enforced", &
-                test_qc_silently_ignored_for_boolean), &
+            new_unittest("qc: min:/max: on a boolean field are accepted but never enforced", &
+                test_qc_min_max_ignored_for_boolean), &
+            new_unittest("qc: miss: IS enforced on a boolean field, with its control", &
+                test_qc_miss_enforced_for_boolean), &
             new_unittest("qc defaults to active whenever a schema is given (no explicit qc=), " // &
                 "warning on an unexpected Null", test_qc_miss_default_active_numeric_warns), &
             new_unittest("qc: miss: absent means Nulls are allowed -- no WARNING printed", &
@@ -190,6 +192,8 @@ contains
                 test_qc_maml_stray_no_colon_line_ok), &
             new_unittest("qc: unexpected Null prints a WARNING but does not abort", &
                 test_qc_null_violation_warns), &
+            new_unittest("qc: an omitted miss: raises no read-side violation, with its control", &
+                test_qc_miss_omitted_no_read_violation), &
             new_unittest("qc: miss: Null suppresses the Null-presence WARNING", &
                 test_qc_miss_null_no_warning), &
             new_unittest("qc=.false. suppresses a would-be range violation WARNING", &
@@ -1449,22 +1453,57 @@ contains
             "qc=.true. with an out-of-range string value should not error stop (warning only)")
     end subroutine test_qc_warning_printed_for_string_violation
 
-    subroutine test_qc_silently_ignored_for_boolean(error)
+    !> Covers min:/max: ONLY -- a qc: miss: on a boolean IS enforced, and
+    !> test_qc_miss_enforced_for_boolean is what covers that.
+    subroutine test_qc_min_max_ignored_for_boolean(error)
         type(error_type), allocatable, intent(out) :: error
         integer :: exitstat, cmdstat
         character(len=:), allocatable :: out_file, err_file
         logical :: found_warning
 
-        call run_error_scenario("qc_silently_ignored_for_boolean", exitstat, cmdstat, out_file, err_file)
+        call run_error_scenario("qc_min_max_ignored_for_boolean", exitstat, cmdstat, out_file, err_file)
 
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
-        call check(error, exitstat == 0, "qc: on a boolean field should never be enforced (no error expected)")
+        call check(error, exitstat == 0, "qc: min:/max: on a boolean field must not error stop")
         if (allocated(error)) return
 
         call scenario_capture_contains(out_file, err_file, "WARNING", found_warning)
-        call check(error, .not. found_warning, "qc: on a boolean field must never print a WARNING")
-    end subroutine test_qc_silently_ignored_for_boolean
+        call check(error, .not. found_warning, &
+            "a qc: min:/max: bound on a boolean field must never print a WARNING -- it is not enforced")
+    end subroutine test_qc_min_max_ignored_for_boolean
+
+    !> A qc: miss: on a boolean column IS enforced -- the half its sibling test cannot see, because
+    !> that scenario declares no miss: and writes no Null. The scenario carries its own control: two
+    !> boolean columns over identical data, one declaring an empty miss: (must warn) and one
+    !> declaring miss: Null (must not), so a checker that warned indiscriminately fails the second
+    !> assertion while one that had stopped enforcing miss: on booleans fails the first.
+    !>
+    !> This gap is how the user guide came to claim that qc: is "never enforced" on a boolean field:
+    !> the only test in the area asserted no-warning for a scenario that could not have produced one.
+    subroutine test_qc_miss_enforced_for_boolean(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_banned, warned_allowed
+
+        call run_error_scenario("qc_miss_enforced_for_boolean", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a qc: miss: violation must warn, never error stop")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'banned'", warned_banned)
+        call check(error, warned_banned, &
+            "a boolean column declaring an EMPTY qc: miss: and holding a Null must produce the " // &
+            "Null-presence WARNING -- miss: is enforced on boolean exactly as on any other type")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'allowed'", warned_allowed)
+        call check(error, .not. warned_allowed, &
+            "a boolean column declaring qc: miss: Null expects Nulls, so it must stay silent")
+    end subroutine test_qc_miss_enforced_for_boolean
 
     subroutine test_qc_miss_default_active_numeric_warns(error)
         type(error_type), allocatable, intent(out) :: error
@@ -2571,6 +2610,39 @@ contains
             failure_message="a qc: unexpected-Null violation must warn, not abort", &
             required_stderr="WARNING: qc violation for column 'id'")
     end subroutine test_qc_null_violation_warns
+
+    !> Read side, the third qc: miss: state: a qc: block declaring min:/max: but NO miss: says
+    !> nothing about Nulls, so reading a Null in that column raises nothing. The other two states
+    !> already had tests (qc_miss_null_no_warning for miss: Null, qc_null_violation_warns for an
+    !> explicit empty miss:); this was the gap, and it is the state the guide had backwards.
+    !>
+    !> The scenario's own control is the second column, which declares an EMPTY miss: over a Null in
+    !> the same position and must warn -- so this cannot pass against a build where the read-side
+    !> Null check never runs at all.
+    subroutine test_qc_miss_omitted_no_read_violation(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned_omitted, warned_explicit
+
+        call run_error_scenario("qc_miss_omitted_no_read_violation", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "qc_soft=.true. must warn rather than abort")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'omitted'", warned_omitted)
+        call check(error, .not. warned_omitted, &
+            "a qc: block that declares no miss: says nothing about Nulls, so reading a Null in " // &
+            "that column must raise no violation -- only an explicit EMPTY miss: asks for the check")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, "qc violation for column 'explicit'", warned_explicit)
+        call check(error, warned_explicit, &
+            "the control column declares an EMPTY qc: miss: over a Null and must warn -- without " // &
+            "it this test would pass against a reader that never checks Nulls at all")
+    end subroutine test_qc_miss_omitted_no_read_violation
 
     subroutine test_qc_miss_null_no_warning(error)
         type(error_type), allocatable, intent(out) :: error

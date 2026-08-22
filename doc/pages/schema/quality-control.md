@@ -112,25 +112,6 @@ kind of `qc:` block directly on a from-scratch schema-authoring field, with the 
 operator/`miss:` rules — a schema built that way works directly as `parquet_open_reader(...,
 schema=)`, without needing a separate `add_col_qc` call.
 
-- `schema` is optional, `type(parquet_schema)`; `parquet_load_qc_maml_file(filename)` loads one from
-  disk (a separate function from `parquet_parse_maml`, since a qc-maml has different, lighter
-  requirements and is never parsed into `cinfo`/`metadata` — see [The MAML metadata
-  format](maml-format.html#the-fields-section)). `qc` is optional `logical`: if omitted, it defaults
-  to `.true.` whenever `schema` is supplied and `.false.` otherwise; an explicit `qc=` always wins
-  (so `qc=.false.` with a `schema=` present disables checking entirely, and `qc=.true.` with no
-  `schema=` at all is a harmless no-op, nothing to check).
-- `qc_soft` is optional `logical`, default `.false.` (hard: a violation aborts the process). It only
-  ever takes effect when qc is active; with `qc=.false.` (or no `schema=`) it is irrelevant.
-- A qc-maml's only required field attribute is `name` — `data_type` and everything else (including
-  `qc:` itself) are optional, unlike a schema-authoring MAML. `qc: min:`/`max:` bounds are parsed
-  against the column's actual Parquet type at read time, not any `data_type` the maml might declare.
-  A qc-maml may declare fields that don't exist in the parquet file at all (they're silently
-  ignored) or that already have a value in the file's own physical type different from the maml —
-  validation only requires that field names not repeat, that a `qc: miss:` value (if present) is
-  `Null`/`NA` (case-insensitive) or empty, and that any `qc: min:`/`max:` operator points the right
-  way (`min:` a lower bound with `>=`/`>`, `max:` an upper bound with `<=`/`<` — the same rule the
-  write side enforces; a reversed operator aborts `parquet_open_reader`).
-
 ## Deferring qc declarations with `parquet_read_qc`
 
 `schema%add_col_qc` emits its MAML text immediately, which is exactly what you want when the schema
@@ -158,7 +139,18 @@ Two things can then be done with it, in this order:
 - **`call parquet_compose_read_qc([schema], [qc], composed, ncolumns)`** merges a MAML-declared qc
   (`schema`) and a code-declared one (`qc`) — both optional — into the single `composed` schema that
   `parquet_open_reader(..., schema=)` takes. Pass `composed` on only when `ncolumns` is greater than
-  zero — a schema with no rules still switches qc on for no benefit.
+  zero — a schema with no rules still switches qc on for no benefit. `ncolumns` counts the columns
+  `composed` carries a `qc:` block for, which is not quite the same as the columns it constrains: a
+  column claimed by an *empty* `qc:` block counts, even though an empty block constrains nothing (see
+  the merge rule below).
+
+To see *which* columns those are, ask the composed schema:
+
+- **`call parquet_get_qc_columns(schema, names)`** returns the columns a qc schema declares an actual
+  `qc:` block for, as a blank-padded array — so `trim(names(i))` is the name to pass on. A field that
+  merely names a column, with no `qc:` key, declares nothing and is left out, exactly as the merge
+  rule leaves it out. `names` comes back zero-size when nothing is constrained. It works on any qc
+  schema, whether composed here or loaded by `parquet_load_qc_maml_file`.
 
 ### The merge rule: per column, not per bound
 
@@ -222,14 +214,18 @@ With qc active, every `parquet_write_column` call runs two independent checks pe
 | `Null` or `NA` (case-insensitive) | Nulls are an expected part of this column | no |
 | declared with an empty value | Nulls are **not** expected in this column | **yes** |
 
-  `min:`/`max:` always run only over non-null elements, whatever `miss:` says.
+`min:`/`max:` always run only over non-null elements, whatever `miss:` says — which is why the two
+warnings below disagree about the denominator.
 
 Neither check ever stops the write — each prints its own one-line `WARNING` to stdout naming the
 column, e.g.:
 ```
-WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.5, 359.9], 3 of 1000 valid element(s) out of range
 WARNING: qc violation for column 'ra': 2 of 1000 element(s) are Null (qc: miss: is declared empty, so Nulls are not expected here)
+WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [-1.500000, 359.9000], 3 of 998 valid element(s) out of range
 ```
+That is one column of 1000 rows declaring `min: '>= 0'`, `max: '< 360'` and an empty `miss:`, holding
+two Nulls and three values below zero. The Null count is over all 1000 rows; the range count is over
+the 998 that hold a value.
 This only applies when writing against a schema (`parquet_open_writer(..., schema, ...)`) — one
 loaded from a `.maml` file and one built in code with `%init`/`%add_field` behave identically; the
 range check only fires for columns that actually declare `qc: min:`/`max:`, and the miss check only
@@ -257,32 +253,77 @@ proceeds. Either way, the existing strict-by-default Null behavior (`error stop`
 unless `null_value=`/`is_valid=` is passed — see [Null
 values](../types/supported-data-types.html#null-values)) is completely unchanged.
 
+The three optional arguments, in detail:
+
+- `schema` is optional, `type(parquet_schema)`; `parquet_load_qc_maml_file(filename)` loads one from
+  disk (a separate function from `parquet_parse_maml`, since a qc-maml has different, lighter
+  requirements and is never parsed into `cinfo`/`metadata` — see [The MAML metadata
+  format](maml-format.html#the-fields-section)). `qc` is optional `logical`: if omitted, it defaults
+  to `.true.` whenever `schema` is supplied and `.false.` otherwise; an explicit `qc=` always wins
+  (so `qc=.false.` with a `schema=` present disables checking entirely, and `qc=.true.` with no
+  `schema=` at all is a harmless no-op, nothing to check).
+- `qc_soft` is optional `logical`, default `.false.` (hard: a violation aborts the process). It only
+  ever takes effect when qc is active; with `qc=.false.` (or no `schema=`) it is irrelevant.
+- A qc-maml's only required field attribute is `name` — `data_type` and everything else (including
+  `qc:` itself) are optional, unlike a schema-authoring MAML. `qc: min:`/`max:` bounds are parsed
+  against the column's actual Parquet type at read time, not any `data_type` the maml might declare.
+  A qc-maml may declare fields that don't exist in the parquet file at all (they're silently
+  ignored) or that already have a value in the file's own physical type different from the maml —
+  validation only requires that field names not repeat, that a `qc: miss:` value (if present) is
+  `Null`/`NA` (case-insensitive) or empty, and that any `qc: min:`/`max:` operator points the right
+  way (`min:` a lower bound with `>=`/`>`, `max:` an upper bound with `<=`/`<` — the same rule the
+  write side enforces; a reversed operator aborts `parquet_open_reader`).
+
+A complete program — it writes its own file and qc-maml, so it runs as it stands:
+
 ```fortran
-type(parquet_reader) :: reader
-integer(int32), allocatable :: ra_back(:)
+program qc_read_example
+    use parquet
+    use iso_fortran_env, only: real64
+    implicit none
 
-! qc.maml:
-!   fields:
-!   - name: ra
-!     qc:
-!       min: 0
-!       max: 360
-!   - name: id
-!     qc:
-!       miss: Null   ! this column is expected to contain genuine Nulls
+    type(parquet_writer) :: writer
+    type(parquet_reader) :: reader
+    real(real64) :: ra(5), ra_back(5)
+    integer :: u
 
-! Default: a range violation aborts the process.
-call parquet_open_reader(reader, "data.parquet", schema=parquet_load_qc_maml_file("qc.maml"))
-call parquet_read_column(reader, "ra", ra_back)
-! aborts: parquet-fortran: qc hard check: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [...], N of M valid element(s) out of range
-call parquet_close_reader(reader)
+    ! A file holding two values outside the range we are about to declare.
+    ra = [10.0_real64, 400.0_real64, 120.0_real64, -5.0_real64, 359.5_real64]
+    call parquet_open_writer(writer, "data.parquet")
+    call parquet_write_column(writer, "ra", ra)
+    call parquet_close_writer(writer)
 
-! qc_soft=.true.: the same violation only prints a WARNING to stdout, then continues.
-call parquet_open_reader(reader, "data.parquet", schema=parquet_load_qc_maml_file("qc.maml"), qc_soft=.true.)
-call parquet_read_column(reader, "ra", ra_back)
-! prints: WARNING: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [...], N of M valid element(s) out of range
-call parquet_close_reader(reader)
+    ! A qc-maml saying what "ra" is allowed to hold. Only `name` is required.
+    open(newunit=u, file="qc.maml", status="replace", action="write")
+    write(u, '(A)') "fields:"
+    write(u, '(A)') "- name: ra"
+    write(u, '(A)') "  qc:"
+    write(u, '(A)') "    min: 0"
+    write(u, '(A)') "    max: 360"
+    close(u)
+
+    ! qc_soft=.true.: a violation prints a WARNING and the read continues.
+    ! Without it (the default) the same violation aborts the process instead.
+    call parquet_open_reader(reader, "data.parquet", &
+        schema=parquet_load_qc_maml_file("qc.maml"), qc_soft=.true.)
+    call parquet_read_column(reader, "ra", ra_back)
+    call parquet_close_reader(reader)
+
+    print '(A,I0,A)', "read ", size(ra_back), " values; qc reported the out-of-range ones above"
+end program qc_read_example
 ```
+
+which prints:
+
+```
+WARNING: qc violation for column 'ra' (based on incomplete column information): declared min >= 0, max <= 360, data range [-5, 400], 2 of 5 valid element(s) out of range
+read 5 values; qc reported the out-of-range ones above
+```
+
+Drop the `qc_soft=.true.` and the same violation aborts instead, with the same text on stderr behind
+a `parquet-fortran: qc hard check:` prefix — nothing is read and the process stops. A second field
+declaring `qc: miss: Null` would say that *that* column is expected to contain genuine Nulls, so a
+Null in it raises nothing.
 
 - `miss:` has the same three states here as on the write side, with the same meanings (see the
   [three-state table](#write-side-enforcement) above). `qc: miss: Null` (or `NA`) means Nulls are

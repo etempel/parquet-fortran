@@ -662,6 +662,8 @@ program error_scenarios
         call scenario_qc_range_violation_int64_warns()
     case ("qc_maml_stray_no_colon_line")
         call scenario_qc_maml_stray_no_colon_line()
+    case ("qc_miss_omitted_no_read_violation")
+        call scenario_qc_miss_omitted_no_read_violation()
     case ("qc_null_violation_warns")
         call scenario_qc_null_violation_warns()
     case ("qc_range_violation_hard_aborts")
@@ -824,8 +826,10 @@ program error_scenarios
         call scenario_qc_warning_float64()
     case ("qc_warning_string")
         call scenario_qc_warning_string()
-    case ("qc_silently_ignored_for_boolean")
-        call scenario_qc_silently_ignored_for_boolean()
+    case ("qc_min_max_ignored_for_boolean")
+        call scenario_qc_min_max_ignored_for_boolean()
+    case ("qc_miss_enforced_for_boolean")
+        call scenario_qc_miss_enforced_for_boolean()
     case ("qc_miss_default_active_numeric_warns")
         call scenario_qc_miss_default_active_numeric_warns()
     case ("qc_miss_absent_no_warning")
@@ -7236,6 +7240,52 @@ contains
         call parquet_close_reader(reader)
     end subroutine scenario_qc_null_violation_warns
 
+    !> The third read-side qc: miss: state, and the only one that had no test: a qc: block that
+    !> declares min:/max: but NO miss: says nothing about Nulls, so reading a Null in that column is
+    !> not a violation. parquet_qc_rule%null_values_allowed defaults to .true. for exactly this case,
+    !> and its own doc-comment calls that default load-bearing.
+    !>
+    !> The scenario carries its own control, over one file and one read: `omitted` declares no miss:
+    !> and must stay silent, while `explicit` declares an EMPTY miss: over data holding a Null in the
+    !> same position and must warn. Without that second column a checker whose read-side Null check
+    !> never ran at all would pass this scenario. Both columns are read with null_value= so the
+    !> strict-Null read guard does not fire first and mask the question.
+    !>
+    !> Exits cleanly (exit 0): qc_soft=.true. makes a violation a WARNING rather than an abort.
+    !> This is the state the user guide had backwards -- it claimed omitting miss: made a Null a
+    !> violation, which is what an explicit EMPTY miss: does.
+    subroutine scenario_qc_miss_omitted_no_read_violation()
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        integer(int32) :: omitted(4), explicit(4), back(4)
+        logical :: valid(4)
+
+        omitted = [1, 2, 3, 4]
+        explicit = [5, 6, 7, 8]
+        valid = [.true., .false., .true., .true.]   ! element 2 is Null in both columns
+
+        call parquet_open_writer(writer, "test_run/qc_miss_omitted.parquet")
+        call parquet_write_column(writer, "omitted", omitted, is_valid=valid)
+        call parquet_write_column(writer, "explicit", explicit, is_valid=valid)
+        call parquet_close_writer(writer)
+
+        call write_text_file("test_run/qc_miss_omitted.maml", [character(len=32) :: &
+            "fields:", &
+            "- name: omitted", &
+            "  qc:", &
+            "    min: 0", &
+            "- name: explicit", &
+            "  qc:", &
+            "    min: 0", &
+            "    miss:"])
+
+        call parquet_open_reader(reader, "test_run/qc_miss_omitted.parquet", &
+            schema=parquet_load_qc_maml_file("test_run/qc_miss_omitted.maml"), qc_soft=.true.)
+        call parquet_read_column(reader, "omitted", back, null_value=-1_int32)
+        call parquet_read_column(reader, "explicit", back, null_value=-1_int32)
+        call parquet_close_reader(reader)
+    end subroutine scenario_qc_miss_omitted_no_read_violation
+
     !> Default (qc_soft=.false., hard): reading an out-of-range value with
     !> qc active aborts the process, via the report_fatal_error convention
     !> (stderr diagnostic + SIGABRT), the same class of clean read-side
@@ -8533,9 +8583,17 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_qc_warning_string
 
-    !> qc: on a boolean field is accepted by validation but never enforced;
-    !> this must write/close without error and without printing a WARNING.
-    subroutine scenario_qc_silently_ignored_for_boolean()
+    !> qc: min:/max: on a boolean field are accepted by validation -- including a reversed operator,
+    !> since the direction check exempts boolean -- and then never enforced: this must write/close
+    !> without error and without printing a WARNING.
+    !>
+    !> Scope note, and the reason this scenario's name changed: it covers min:/max: ONLY. A qc: miss:
+    !> on a boolean field IS enforced, exactly as on any other type, because write_logical_flat calls
+    !> parquet_check_qc_miss like the four numeric paths do. This scenario declares no miss: and
+    !> writes no Null, so it can never observe that -- scenario_qc_miss_enforced_for_boolean is what
+    !> covers it. An earlier name ("silently_ignored") claimed the whole qc: block was ignored here,
+    !> which was wrong and had been copied into the user guide.
+    subroutine scenario_qc_min_max_ignored_for_boolean()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         logical :: values(3) = [.true., .false., .true.]
@@ -8555,7 +8613,42 @@ contains
         call parquet_open_writer(writer, "test_run/error_scenario_qc_boolean.parquet", schema, qc=.true.)
         call parquet_write_column(writer, "b", values)
         call parquet_close_writer(writer)
-    end subroutine scenario_qc_silently_ignored_for_boolean
+    end subroutine scenario_qc_min_max_ignored_for_boolean
+
+    !> The other half of boolean qc, and the half that was never covered: an explicit, EMPTY
+    !> qc: miss: IS enforced on a boolean column, exactly as on any other type -- write_logical_flat
+    !> calls parquet_check_qc_miss just as the four numeric write paths do.
+    !>
+    !> Both halves are in one file so the assertion pair is a true control: `banned` declares an
+    !> empty miss: and must warn, `allowed` declares miss: Null over the SAME data and must not.
+    !> A checker that warned about every boolean column, or one that had stopped enforcing miss:
+    !> on booleans, fails exactly one of the two. See feature_risks.md.
+    subroutine scenario_qc_miss_enforced_for_boolean()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        logical :: values(4) = [.true., .false., .true., .true.]
+        logical :: valid(4) = [.true., .false., .true., .true.]  !! element 2 is Null.
+
+        schema%maml%name = "qc_boolean_miss.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: banned", &
+            "  data_type: boolean", &
+            "  qc:", &
+            "    miss:", &
+            "- name: allowed", &
+            "  data_type: boolean", &
+            "  qc:", &
+            "    miss: Null" ]
+
+        call parquet_parse_maml(schema)
+
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_boolean_miss.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "banned", values, is_valid=valid)
+        call parquet_write_column(writer, "allowed", values, is_valid=valid)
+        call parquet_close_writer(writer)
+    end subroutine scenario_qc_miss_enforced_for_boolean
 
     !> An EXPLICIT, EMPTY qc: miss: declares that Nulls are NOT expected: writing a Null through
     !! an is_valid= mask must then print a WARNING naming the column -- checked here with NO

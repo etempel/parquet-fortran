@@ -36,6 +36,7 @@ contains
                 test_maml_example2_sidecar_keyarray), &
             new_unittest("doc/pages/types/date-time.md datetime_quickstart example", test_datetime_quickstart_example), &
             new_unittest("doc/pages/operating/performance.md write_parquet_qc_example", test_performance_qc_example), &
+            new_unittest("doc/pages/schema/quality-control.md qc_read_example", test_qc_read_example), &
             new_unittest("doc/pages/types/supported-data-types.md null_values_example", &
                 test_null_values_example), &
             new_unittest("doc/pages/types/string-columns.md strings_quickstart example", &
@@ -473,6 +474,62 @@ contains
     !> round-tripped values/nulls -- the WARNING itself is not asserted on
     !> (test-drive can't capture stdout), only that the write/read still
     !> succeeds and round-trips correctly despite the qc violation.
+    !> Mirrors doc/pages/schema/quality-control.md's `qc_read_example` program, the page's one
+    !> complete runnable example. Same data, same qc-maml, same qc_soft=.true. read; only the file
+    !> paths differ, so that this test owns them (tests in a suite run concurrently, and two sharing
+    !> a fixture path is a documented source of intermittent failure).
+    !>
+    !> What it pins is that read-time qc in SOFT mode does not disturb the read: the page tells a
+    !> reader the violation is reported and the values still arrive, so the assertion is that
+    !> ra_back holds the data verbatim -- out-of-range elements included, since qc reports and
+    !> never filters. The negative control is the in-range column: it must round-trip identically
+    !> while producing no violation at all, which is what separates "qc left the data alone" from
+    !> "qc was never active".
+    subroutine test_qc_read_example(error)
+        use iso_fortran_env, only: real64
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/qc_read_example.parquet"
+        character(len=*), parameter :: maml_file = "test_run/qc_read_example.maml"
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        real(real64) :: ra(5), ra_back(5), ok(5), ok_back(5)
+        integer :: u
+
+        ra = [10.0_real64, 400.0_real64, 120.0_real64, -5.0_real64, 359.5_real64]
+        ok = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64]   ! the control: all in range
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "ra", ra)
+        call parquet_write_column(writer, "ok", ok)
+        call parquet_close_writer(writer)
+
+        open(newunit=u, file=maml_file, status="replace", action="write")
+        write(u, '(A)') "fields:"
+        write(u, '(A)') "- name: ra"
+        write(u, '(A)') "  qc:"
+        write(u, '(A)') "    min: 0"
+        write(u, '(A)') "    max: 360"
+        write(u, '(A)') "- name: ok"
+        write(u, '(A)') "  qc:"
+        write(u, '(A)') "    min: 0"
+        write(u, '(A)') "    max: 360"
+        close(u)
+
+        ! qc_soft=.true. -- a violation warns rather than aborting, so this is testable in process.
+        call parquet_open_reader(reader, out_file, &
+            schema=parquet_load_qc_maml_file(maml_file), qc_soft=.true.)
+        call parquet_read_column(reader, "ra", ra_back)
+        call parquet_read_column(reader, "ok", ok_back)
+        call parquet_close_reader(reader)
+
+        call check(error, all(ra_back == ra), &
+            "quality-control.md's qc_read_example must return every value verbatim -- a soft qc " // &
+            "violation reports the out-of-range elements, it never drops or alters them")
+        if (allocated(error)) return
+        call check(error, all(ok_back == ok), &
+            "the in-range control column must round-trip identically under the same qc schema")
+    end subroutine test_qc_read_example
+
     subroutine test_performance_qc_example(error)
         use iso_fortran_env, only: int32
         type(error_type), allocatable, intent(out) :: error

@@ -158,7 +158,7 @@ module parquet_random
     !! `pf_random_at` and `pf_random_bits_at`. Draw 1 is unchanged; draws from 2 up moved. The
     !! cipher, the key and counter layout, the word order, the rejection rule and the retry key are
     !! all identical between the two.
-    character(len=*), parameter :: pf_random_algorithm = "philox4x32-10/v2"
+    character(len=*), parameter :: pf_random_algorithm = "philox4x32-10/v3"
 
     ! ---- Frozen contract identifiers for the DISTRIBUTIONS ----
     !
@@ -267,6 +267,43 @@ module parquet_random
     !! the cap is on the width `hi - lo + 1`, never on `size(idx)`, which are the same number for a
     !! resample and different for everything else.
     integer(int64), parameter :: NARROW32_CAP = 16777216_int64
+
+    ! ---- Per-generic word spaces (domain tags) ----
+    !
+    ! One `(seed, stream)` pair names FOUR independent sequences of 32-bit words, not one, and each
+    ! generic family reads its own. Two values taken at different `(generic, draw)` coordinates are
+    ! therefore never functions of the same bits -- see `feature_random_domains.md`, and note the
+    ! two DOCUMENTED identities that survive: `pf_random_at` is the top 53 bits of
+    ! `pf_random_bits_at`, and `pf_random_exp_at` is `-log(1-u)` for that same `u`. Both live inside
+    ! `DOM_REAL64` on purpose.
+    !
+    ! **The tag occupies bits 62-63 of the BLOCK INDEX, which no caller can reach.** `draw` is
+    ! `integer(int64)` and every path bounds it at `huge(int64)`, so a stride-2 block index is at
+    ! most `(huge-1)/2 = 0x3FFF...` and a stride-1 one at most `(huge-1)/4`. Both leave bits 62-63
+    ! clear. The stream index and the key are user-controlled and could not carry a tag safely; the
+    ! block index can, and it costs one `ior` on a value already in a register.
+    !
+    ! **The precondition, which is a property of this file rather than of the language:** no call
+    ! site may hand `random_block` a block index above the one its own draw addresses. The two fills
+    ! that read a block ahead (`blk + 1_int64`) do so only inside a `k + 4 <= m` guard, so the block
+    ! ahead is always one the caller asked for. A future fill that prefetched unconditionally would
+    ! set bit 62 and land in another domain, silently. See `feature_risks.md`.
+    !
+    ! `DOM_REAL64` is deliberately 0, so its blocks are byte-identical to those of every build
+    ! before the spaces were split -- which is what keeps every uniform, every bit pattern and all
+    ! four distributions at the values they have always returned.
+    !
+    ! Spelled with `ibset` rather than a shift: `ishft(3_int64, 62)` forms a value at or above
+    ! `2**63` in a constant expression, which is the hazard `CLAUDE.md` records for `-128_int8`.
+
+    !> Word space of `pf_random_at`, `pf_random_bits_at` and everything built on them.
+    integer(int64), parameter :: DOM_REAL64 = 0_int64
+    !> Word space of `pf_random32_at`.
+    integer(int64), parameter :: DOM_REAL32 = ibset(0_int64, 62)
+    !> Word space of `pf_random_int_at` over a range of `NARROW32_CAP` values or fewer.
+    integer(int64), parameter :: DOM_INT_NARROW = ibset(0_int64, 63)
+    !> Word space of `pf_random_int_at` over a wider range.
+    integer(int64), parameter :: DOM_INT_WIDE = ibset(ibset(0_int64, 62), 63)
     !> `2**32`, the modulus of the 32-bit rejection threshold.
     integer(int64), parameter :: TWO32 = 4294967296_int64
     !> First round multiplier.
@@ -864,7 +901,7 @@ contains
         integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
         integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
         real(real64) :: r                           !! a uniform draw in `[0, 1)`
-        r = to_real64(bits_of(seed, int(i, int64), draw_or_1(draw)))
+        r = to_real64(bits_of(seed, int(i, int64), draw_or_1(draw), DOM_REAL64))
     end function pf_random_at_i32
 
     !> `pf_random_at` for an `integer(int64)` stream index.
@@ -873,7 +910,7 @@ contains
         integer(int64), intent(in) :: i             !! stream index; every value is valid, negatives included
         integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
         real(real64) :: r                           !! a uniform draw in `[0, 1)`
-        r = to_real64(bits_of(seed, i, draw_or_1(draw)))
+        r = to_real64(bits_of(seed, i, draw_or_1(draw), DOM_REAL64))
     end function pf_random_at_i64
 
     !> `pf_random32_at` for an `integer(int32)` stream index.
@@ -900,7 +937,7 @@ contains
         integer(int32), intent(in) :: i             !! stream index; sign-extends, so any value is valid
         integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
         integer(int64) :: r                         !! 64 raw bits
-        r = bits_of(seed, int(i, int64), draw_or_1(draw))
+        r = bits_of(seed, int(i, int64), draw_or_1(draw), DOM_REAL64)
     end function pf_random_bits_at_i32
 
     !> `pf_random_bits_at` for an `integer(int64)` stream index.
@@ -909,7 +946,7 @@ contains
         integer(int64), intent(in) :: i             !! stream index; every value is valid
         integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
         integer(int64) :: r                         !! 64 raw bits
-        r = bits_of(seed, i, draw_or_1(draw))
+        r = bits_of(seed, i, draw_or_1(draw), DOM_REAL64)
     end function pf_random_bits_at_i64
 
     !> `pf_random_int_at` for `integer(int32)` stream index and bounds.
@@ -1555,7 +1592,7 @@ contains
         integer(int64), intent(in) :: index         !! 0-based word index within the stream
         integer(int64) :: w                         !! that word, in `[0, 2**32)`
         integer(int64) :: c0, c1, c2, c3
-        call random_block(seed, stream, index / 4_int64, c0, c1, c2, c3)
+        call random_block(seed, stream, ior(DOM_REAL32, index / 4_int64), c0, c1, c2, c3)
         select case (int(modulo(index, 4_int64), int32))
         case (0)
             w = c0
@@ -1595,14 +1632,15 @@ contains
     !! where `/` and `modulo` merely named the wrong pair. Every caller already clamps (`draw_or_1`
     !! at tier 0, `take_pair` at the stream, `draw + (k-1)` in the fills), so this changes no value
     !! any caller can obtain -- it makes the function total on its own rather than by their courtesy.
-    pure function bits_of(seed, stream, draw) result(b)
+    pure function bits_of(seed, stream, draw, dom) result(b)
         integer(int64), intent(in) :: seed          !! the stream family's seed
         integer(int64), intent(in) :: stream        !! stream index
         integer(int64), intent(in) :: draw          !! 1-based value index; `< 1` clamps to 1
+        integer(int64), intent(in) :: dom           !! word space: `DOM_REAL64` or `DOM_INT_WIDE`
         integer(int64) :: b                         !! the 64-bit pattern
         integer(int64) :: w0, w1, w2, w3, e
         e = max(draw, 1_int64) - 1_int64            ! 0-based value index; non-negative by the max
-        call random_block(seed, stream, ishft(e, -1), w0, w1, w2, w3)
+        call random_block(seed, stream, ior(dom, ishft(e, -1)), w0, w1, w2, w3)
         if (iand(e, 1_int64) == 0_int64) then
             b = ior(ishft(w1, 32), w0)
         else
@@ -1662,7 +1700,7 @@ contains
         integer(int64), intent(in) :: stream        !! which stream of that family
         integer(int64), intent(in) :: draw          !! 1-based value index
         real(real64) :: e                           !! an `Exp(1)` draw in `[0, 36.7368]`
-        e = -log(1.0_real64 - to_real64(bits_of(seed, stream, draw)))
+        e = -log(1.0_real64 - to_real64(bits_of(seed, stream, draw, DOM_REAL64)))
     end function exp_of
 
     !> `exp_of` through `parquet_expkey`'s frozen transform, for the `_portable` realisation.
@@ -1675,7 +1713,7 @@ contains
         integer(int64), intent(in) :: stream        !! which stream of that family
         integer(int64), intent(in) :: draw          !! 1-based value index
         real(real64) :: e                           !! an `Exp(1)` draw in `[0, 36.7368]`
-        e = exp_key(1.0_real64 - to_real64(bits_of(seed, stream, draw)))
+        e = exp_key(1.0_real64 - to_real64(bits_of(seed, stream, draw, DOM_REAL64)))
     end function exp_portable_of
 
     !> Fills `v` with consecutive `Exp(1)` draws, by filling uniforms in bulk and transforming.
@@ -1749,7 +1787,7 @@ contains
 
         d = draw0
         do
-            b = bits_of(key, stream, d)
+            b = bits_of(key, stream, d, DOM_REAL64)
             d = d + 1_int64
             i = int(iand(b, int(zig_layers - 1, int64)), int32)
             u = to_real64(b)
@@ -1764,8 +1802,8 @@ contains
                 ! exactly the conditional density of a normal above `zig_r`.
                 path = 3
                 do
-                    ta = -log(1.0_real64 - to_real64(bits_of(key, stream, d))) / zig_r
-                    tb = -log(1.0_real64 - to_real64(bits_of(key, stream, d + 1_int64)))
+                    ta = -log(1.0_real64 - to_real64(bits_of(key, stream, d, DOM_REAL64))) / zig_r
+                    tb = -log(1.0_real64 - to_real64(bits_of(key, stream, d + 1_int64, DOM_REAL64)))
                     d = d + 2_int64
                     if (tb + tb >= ta * ta) exit
                 end do
@@ -1775,7 +1813,7 @@ contains
             xx = u * zig_w(i)
             ! The wedge between the layer's inner and outer edges: accept if a uniform height in
             ! `[f(w(i)), f(w(i-1))]` falls below the curve at `xx`.
-            y = zig_f(i) + to_real64(bits_of(key, stream, d)) * (zig_f(i - 1) - zig_f(i))
+            y = zig_f(i) + to_real64(bits_of(key, stream, d, DOM_REAL64)) * (zig_f(i - 1) - zig_f(i))
             d = d + 1_int64
             if (y < exp(-0.5_real64 * xx * xx)) then
                 path = 2
@@ -1833,8 +1871,8 @@ contains
 
         d = draw0
         do
-            a1 = to_real64(bits_of(key, stream, d))
-            a2 = to_real64(bits_of(key, stream, d + 1_int64))
+            a1 = to_real64(bits_of(key, stream, d, DOM_REAL64))
+            a2 = to_real64(bits_of(key, stream, d + 1_int64, DOM_REAL64))
             d = d + 2_int64
             u1 = (a1 + a1) - 1.0_real64             ! `a + a` is exact, so this rounds once
             u2 = (a2 + a2) - 1.0_real64
@@ -1960,15 +1998,15 @@ contains
         position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
         ! Head: one value when `draw` lands on a block's SECOND pair, after which we are aligned.
         if (iand(position, 1_int64) /= 0_int64) then
-            call random_block(seed, stream, ishft(position, -1), w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_REAL64, ishft(position, -1)), w0, w1, w2, w3)
             k = 1_int64
             v(1) = to_real64(ior(ishft(w3, 32), w2))
             position = position + 1_int64
         end if
         blk = ishft(position, -1)
         do while (k + 4_int64 <= m)                 ! steady state: two blocks, four values
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
-            call random_block(seed, stream, blk + 1_int64, x0, x1, x2, x3)
+            call random_block(seed, stream, ior(DOM_REAL64, blk), w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_REAL64, blk + 1_int64), x0, x1, x2, x3)
             v(k + 1_int64) = to_real64(ior(ishft(w1, 32), w0))
             v(k + 2_int64) = to_real64(ior(ishft(w3, 32), w2))
             v(k + 3_int64) = to_real64(ior(ishft(x1, 32), x0))
@@ -1977,14 +2015,14 @@ contains
             blk = blk + 2_int64
         end do
         do while (k + 2_int64 <= m)                 ! tail: whole blocks
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_REAL64, blk), w0, w1, w2, w3)
             v(k + 1_int64) = to_real64(ior(ishft(w1, 32), w0))
             v(k + 2_int64) = to_real64(ior(ishft(w3, 32), w2))
             k = k + 2_int64
             blk = blk + 1_int64
         end do
         if (k < m) then                             ! tail: a final half-block
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_REAL64, blk), w0, w1, w2, w3)
             v(m) = to_real64(ior(ishft(w1, 32), w0))
         end if
     end subroutine fill_r64
@@ -2028,7 +2066,7 @@ contains
         slot = int(modulo(position, 4_int64), int32)
         ! Head: finish the first block when the start is not block-aligned.
         if (slot /= 0) then
-            call random_block(seed, stream, blk, c0, c1, c2, c3)
+            call random_block(seed, stream, ior(DOM_REAL32, blk), c0, c1, c2, c3)
             if (slot <= 0 .and. k < m) then
                 k = k + 1_int64
                 v(k) = to_real32(c0)
@@ -2048,8 +2086,8 @@ contains
             blk = blk + 1_int64
         end if
         do while (k + 8_int64 <= m)                 ! steady state: two blocks, eight values
-            call random_block(seed, stream, blk, c0, c1, c2, c3)
-            call random_block(seed, stream, blk + 1_int64, d0, d1, d2, d3)
+            call random_block(seed, stream, ior(DOM_REAL32, blk), c0, c1, c2, c3)
+            call random_block(seed, stream, ior(DOM_REAL32, blk + 1_int64), d0, d1, d2, d3)
             v(k + 1_int64) = to_real32(c0)
             v(k + 2_int64) = to_real32(c1)
             v(k + 3_int64) = to_real32(c2)
@@ -2062,7 +2100,7 @@ contains
             blk = blk + 2_int64
         end do
         do while (k + 4_int64 <= m)                 ! tail: whole blocks
-            call random_block(seed, stream, blk, c0, c1, c2, c3)
+            call random_block(seed, stream, ior(DOM_REAL32, blk), c0, c1, c2, c3)
             v(k + 1_int64) = to_real32(c0)
             v(k + 2_int64) = to_real32(c1)
             v(k + 3_int64) = to_real32(c2)
@@ -2071,7 +2109,7 @@ contains
             blk = blk + 1_int64
         end do
         if (k < m) then                             ! tail: a final partial block, at most 3 values
-            call random_block(seed, stream, blk, c0, c1, c2, c3)
+            call random_block(seed, stream, ior(DOM_REAL32, blk), c0, c1, c2, c3)
             if (k < m) then
                 k = k + 1_int64
                 v(k) = to_real32(c0)
@@ -2135,7 +2173,7 @@ contains
         ! Since `k >= 1`, `k - 1` is non-negative and `i0 + (k - 1)` cannot exceed the sum the
         ! precondition already bounds. Found by UBSan; see feature_risks.md Risk-112.
         do k = 1_int64, m
-            call random_block(seed, i0 + (k - 1_int64), blk, w0, w1, w2, w3)
+            call random_block(seed, i0 + (k - 1_int64), ior(DOM_REAL64, blk), w0, w1, w2, w3)
             if (second) then
                 v(k) = to_real64(ior(ishft(w3, 32), w2))
             else
@@ -2164,7 +2202,7 @@ contains
         blk = (draw - 1_int64) / 4_int64
         slot = int(modulo(draw - 1_int64, 4_int64), int32)
         do k = 1_int64, m
-            call random_block(seed, i0 + (k - 1_int64), blk, c0, c1, c2, c3)
+            call random_block(seed, i0 + (k - 1_int64), ior(DOM_REAL32, blk), c0, c1, c2, c3)
             select case (slot)
             case (0)
                 v(k) = to_real32(c0)
@@ -2243,7 +2281,7 @@ contains
         position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
         ! Head: one value when `draw` lands on a block's SECOND pair, after which we are aligned.
         if (iand(position, 1_int64) /= 0_int64) then
-            call random_block(seed, stream, ishft(position, -1), w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_INT_WIDE, ishft(position, -1)), w0, w1, w2, w3)
             k = 1_int64
             v(1) = int_reduce(ior(ishft(w3, 32), w2), a, s, seed, stream, draw)
             position = position + 1_int64
@@ -2253,7 +2291,7 @@ contains
         ! so none can form `huge + 1` even when the fill ends exactly at the representable boundary
         ! -- the hazard `fill_streams_r64` spells out at length. Risk-112.
         do while (k + 2_int64 <= m)                 ! steady state: one block, two values
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_INT_WIDE, blk), w0, w1, w2, w3)
             v(k + 1_int64) = int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, draw + k)
             v(k + 2_int64) = int_reduce(ior(ishft(w3, 32), w2), a, s, seed, stream, &
                                         draw + (k + 1_int64))
@@ -2261,7 +2299,7 @@ contains
             blk = blk + 1_int64
         end do
         if (k < m) then                             ! tail: a final half-block
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_INT_WIDE, blk), w0, w1, w2, w3)
             v(m) = int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, draw + (m - 1_int64))
         end if
     end subroutine fill_draws_i64
@@ -2292,14 +2330,14 @@ contains
         k = 0_int64
         position = draw - 1_int64                   ! 0-based value index; `draw` >= 1, so >= 0
         if (iand(position, 1_int64) /= 0_int64) then            ! head: see `fill_draws_i64`
-            call random_block(seed, stream, ishft(position, -1), w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_INT_WIDE, ishft(position, -1)), w0, w1, w2, w3)
             k = 1_int64
             v(1) = int(int_reduce(ior(ishft(w3, 32), w2), a, s, seed, stream, draw), int32)
             position = position + 1_int64
         end if
         blk = ishft(position, -1)
         do while (k + 2_int64 <= m)                 ! steady state: one block, two values
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_INT_WIDE, blk), w0, w1, w2, w3)
             v(k + 1_int64) = int(int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, &
                                             draw + k), int32)
             v(k + 2_int64) = int(int_reduce(ior(ishft(w3, 32), w2), a, s, seed, stream, &
@@ -2308,7 +2346,7 @@ contains
             blk = blk + 1_int64
         end do
         if (k < m) then                             ! tail: a final half-block
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_INT_WIDE, blk), w0, w1, w2, w3)
             v(m) = int(int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, &
                                   draw + (m - 1_int64)), int32)
         end if
@@ -2366,7 +2404,7 @@ contains
             nj = int(iand(draw - 1_int64, 3_int64), int32)
             do k = 1_int64, m
                 st = i0 + (k - 1_int64)
-                call random_block(seed, st, nblk, x0, x1, x2, x3)
+                call random_block(seed, st, ior(DOM_INT_NARROW, nblk), x0, x1, x2, x3)
                 select case (nj)
                 case (0)
                     xw = x0
@@ -2408,7 +2446,7 @@ contains
             nj = int(iand(draw - 1_int64, 3_int64), int32)
             do k = 1_int64, m
                 st = i0 + (k - 1_int64)
-                call random_block(seed, st, nblk, x0, x1, x2, x3)
+                call random_block(seed, st, ior(DOM_INT_NARROW, nblk), x0, x1, x2, x3)
                 select case (nj)
                 case (0)
                     xw = x0
@@ -2497,7 +2535,7 @@ contains
             r = int_at_narrow32(seed, stream, a, s, draw)
             return
         end if
-        r = int_reduce(bits_of(seed, stream, draw), a, s, seed, stream, draw)
+        r = int_reduce(bits_of(seed, stream, draw, DOM_INT_WIDE), a, s, seed, stream, draw)
     end function int_at_impl
 
     !> Lemire's reduction with the exact rejection loop, over a candidate already in hand.
@@ -2587,7 +2625,7 @@ contains
         threshold = umod_2p64(s)
         do while (ult(low, threshold))
             attempt = attempt + 1_int64
-            x = bits_of(retry_key_of(seed, attempt), stream, draw)
+            x = bits_of(retry_key_of(seed, attempt), stream, draw, DOM_INT_WIDE)
             call mulhilo64(x, s, low, high)
         end do
         r = offset_by(a, high)
@@ -2616,7 +2654,7 @@ contains
         end do
         blk = ishft(position, -2)
         do while (k + 4_int64 <= m)                 ! steady state: one block, four values
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_INT_NARROW, blk), w0, w1, w2, w3)
             v(k + 1_int64) = int_reduce32(w0, a, s, seed, stream, draw + k)
             v(k + 2_int64) = int_reduce32(w1, a, s, seed, stream, draw + (k + 1_int64))
             v(k + 3_int64) = int_reduce32(w2, a, s, seed, stream, draw + (k + 2_int64))
@@ -2649,7 +2687,7 @@ contains
         end do
         blk = ishft(position, -2)
         do while (k + 4_int64 <= m)
-            call random_block(seed, stream, blk, w0, w1, w2, w3)
+            call random_block(seed, stream, ior(DOM_INT_NARROW, blk), w0, w1, w2, w3)
             v(k + 1_int64) = int(int_reduce32(w0, a, s, seed, stream, draw + k), int32)
             v(k + 2_int64) = int(int_reduce32(w1, a, s, seed, stream, &
                                               draw + (k + 1_int64)), int32)
@@ -2700,7 +2738,7 @@ contains
         integer(int64) :: x                         !! the 32-bit candidate, in `[0, 2**32)`
         integer(int64) :: e, w0, w1, w2, w3
         e = max(draw, 1_int64) - 1_int64
-        call random_block(seed, stream, ishft(e, -2), w0, w1, w2, w3)
+        call random_block(seed, stream, ior(DOM_INT_NARROW, ishft(e, -2)), w0, w1, w2, w3)
         select case (int(iand(e, 3_int64), int32))
         case (0)
             x = w0
@@ -3232,9 +3270,10 @@ contains
         class(pf_random_stream), intent(inout) :: self  !! the stream to advance
         real(real64), intent(out) :: x                  !! a uniform draw in `[0, 1)`
         integer(int64) :: w0, w1
+        call align_to_pair(self)
         call advance_by(self, 2_int64)
-        call word_at(self, self%pos - 2_int64, w0)
-        call word_at(self, self%pos - 1_int64, w1)
+        call word_at(self, DOM_REAL64, self%pos - 2_int64, w0)
+        call word_at(self, DOM_REAL64, self%pos - 1_int64, w1)
         x = to_real64(ior(ishft(w1, 32), w0))
     end subroutine stream_uniform
 
@@ -3244,7 +3283,7 @@ contains
         real(real32), intent(out) :: x                  !! a uniform draw in `[0, 1)`
         integer(int64) :: w
         call advance_by(self, 1_int64)
-        call word_at(self, self%pos - 1_int64, w)
+        call word_at(self, DOM_REAL32, self%pos - 1_int64, w)
         x = to_real32(w)
     end subroutine stream_uniform32
 
@@ -3253,9 +3292,10 @@ contains
         class(pf_random_stream), intent(inout) :: self  !! the stream to advance
         integer(int64), intent(out) :: b                !! 64 raw bits
         integer(int64) :: w0, w1
+        call align_to_pair(self)
         call advance_by(self, 2_int64)
-        call word_at(self, self%pos - 2_int64, w0)
-        call word_at(self, self%pos - 1_int64, w1)
+        call word_at(self, DOM_REAL64, self%pos - 2_int64, w0)
+        call word_at(self, DOM_REAL64, self%pos - 1_int64, w1)
         b = ior(ishft(w1, 32), w0)
     end subroutine stream_bits
 
@@ -3683,12 +3723,13 @@ contains
     !!
     !! The only place the cache is read or written. `p` is always a position this call's own
     !! `advance_by` has already checked, so it is in range by construction.
-    pure subroutine word_at(self, p, w)
+    pure subroutine word_at(self, dom, p, w)
         class(pf_random_stream), intent(inout) :: self  !! the stream holding the cache
-        integer(int64), intent(in) :: p                 !! 0-based word position
+        integer(int64), intent(in) :: dom               !! which word space to read; see `DOM_REAL64`
+        integer(int64), intent(in) :: p                 !! 0-based word position within that space
         integer(int64), intent(out) :: w                !! that word, in `[0, 2**32)`
         integer(int64) :: want
-        want = p / 4_int64
+        want = ior(dom, p / 4_int64)
         if (want /= self%blk) then
             call random_block(self%key, self%stream, want, self%c0, self%c1, self%c2, self%c3)
             self%blk = want

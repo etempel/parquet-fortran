@@ -106,6 +106,22 @@ RETRY_TAG = 0x5A17000000000000
 #: for everything else.
 NARROW32_CAP = 1 << 24
 
+# ---------------------------------------------------------------------------------------------
+# Per-generic word spaces.  One (seed, stream) pair names FOUR independent sequences of 32-bit
+# words, and each generic family reads its own, so two values taken at different (generic, draw)
+# coordinates are never functions of the same bits.  The tag occupies bits 62-63 of the BLOCK
+# INDEX, which no caller can reach: `draw` is bounded by huge(int64), so a stride-2 block index is
+# at most (2**63-2)//2 and a stride-1 one at most (2**63-2)//4, both leaving those two bits clear.
+#
+# DOM_REAL64 is 0 on purpose -- its blocks are byte-identical to every build before the split, so
+# every uniform, every bit pattern and all four distributions keep the values they always had.
+# See feature_random_domains.md section 4.
+# ---------------------------------------------------------------------------------------------
+DOM_REAL64 = 0
+DOM_REAL32 = 1 << 62
+DOM_INT_NARROW = 1 << 63
+DOM_INT_WIDE = (1 << 62) | (1 << 63)
+
 
 def u64(x):
     """The unsigned 64-bit pattern of `x`."""
@@ -138,16 +154,26 @@ def key_of(k):
     return k & M32, (k >> 32) & M32
 
 
-def block(seed, stream, index, key=None):
-    """Block `index` (0-based) of `stream` under `seed`, or under an explicit retry `key`."""
+def block(seed, stream, index, key=None, dom=DOM_REAL64):
+    """Block `index` (0-based) of `stream` under `seed`, or under an explicit retry `key`.
+
+    `dom` selects the word space; see the DOM_* constants.  It is OR-ed into the block index, so
+    `dom=DOM_REAL64` (zero) reproduces every value this oracle emitted before the spaces existed.
+    """
     k0, k1 = key_of(seed if key is None else key)
     s = u64(stream)
-    return philox4x32_10(index & M32, (index >> 32) & M32, s & M32, (s >> 32) & M32, k0, k1)
+    idx = dom | index
+    return philox4x32_10(idx & M32, (idx >> 32) & M32, s & M32, (s >> 32) & M32, k0, k1)
+
+
+def word_in(seed, stream, index, dom):
+    """Word `index` (0-based) of one word space: blocks 0,1,2,... each giving c0..c3 in order."""
+    return block(seed, stream, index // 4, dom=dom)[index % 4]
 
 
 def word(seed, stream, index):
-    """Word `index` (0-based) of the stream: blocks 0,1,2,... each giving c0,c1,c2,c3 in order."""
-    return block(seed, stream, index // 4)[index % 4]
+    """Word `index` (0-based) of the REAL32 space: `pf_random32_at`'s own sequence."""
+    return word_in(seed, stream, index, DOM_REAL32)
 
 
 def clamp_draw(draw):
@@ -164,7 +190,8 @@ def real64_word_indices(draw):
 def bits_at(seed, stream, draw=1):
     """`pf_random_bits_at`: the first word is the LOW half of the 64-bit pattern."""
     lo_index, hi_index = real64_word_indices(draw)
-    return (word(seed, stream, hi_index) << 32) | word(seed, stream, lo_index)
+    return ((word_in(seed, stream, hi_index, DOM_REAL64) << 32)
+            | word_in(seed, stream, lo_index, DOM_REAL64))
 
 
 def at(seed, stream, draw=1):
@@ -225,15 +252,23 @@ def int_at(seed, stream, lo, hi, draw=1):
         lo, hi = hi, lo
     a, s = lo, u64(hi - lo + 1)
     d = clamp_draw(draw)
-    if s == 0:                                    # the full int64 range: nothing to reduce
-        return signed64(bits_at(seed, stream, d)), 0
+    if s == 0:
+        # The full int64 range: every pattern is in range, so there is nothing to reduce -- but it
+        # is read from the INTEGER space like every other wide draw, not from DOM_REAL64.  Before
+        # the word spaces were split this case was bit-identical to `pf_random_bits_at` at the same
+        # coordinate, and that identity is deliberately gone: `pf_random_int_at` shares its bits
+        # with no other generic at any width, which is what the guide has always told users to
+        # assume.  See feature_random_domains.md section 11, Q4.
+        blk0, pair0 = DOM_INT_WIDE | ((d - 1) // 2), (d - 1) % 2
+        c = block(seed, stream, blk0, dom=0)
+        return signed64((c[2 * pair0 + 1] << 32) | c[2 * pair0]), 0
     if 1 <= s <= NARROW32_CAP:                    # the 32-bit grid
         threshold = (1 << 32) % s
         blk, slot = (d - 1) // 4, (d - 1) % 4
         attempt = 0
         while True:                               # uncapped: a cap would reintroduce bias
             key = None if attempt == 0 else retry_key(seed, attempt)
-            x = block(seed, stream, blk, key=key)[slot]
+            x = block(seed, stream, blk, key=key, dom=DOM_INT_NARROW)[slot]
             product = x * s
             if (product & M32) >= threshold:
                 return a + (product >> 32), attempt
@@ -243,7 +278,7 @@ def int_at(seed, stream, lo, hi, draw=1):
     attempt = 0
     while True:                                   # uncapped: a cap would reintroduce bias
         key = None if attempt == 0 else retry_key(seed, attempt)
-        c = block(seed, stream, blk, key=key)
+        c = block(seed, stream, blk, key=key, dom=DOM_INT_WIDE)
         x = (c[2 * pair + 1] << 32) | c[2 * pair]
         product = x * s
         if (product & MASK64) >= threshold:
@@ -463,7 +498,7 @@ KAT = [
 ]
 
 MIX64_CHECKSUM = 3577507447353514381          # xor of mix64(n*2654435761), n = 1..200000
-WIDE_WIDTH_ANCHOR = 8560708566805553027       # pf_random_int_at(12345, 1, 0, huge(int64))
+WIDE_WIDTH_ANCHOR = 69735831379136943       # pf_random_int_at(12345, 1, 0, huge(int64))
 
 #: Reference Table 1, restricted to `draw = 1` -- the rows the superseded draw mapping cannot
 #: reach (see the module docstring).  (seed, stream, bits, at).
@@ -487,25 +522,28 @@ ANCHOR_SCALAR = [
 #: therefore weaker than the rest of this list.** Every row whose width is `<= NARROW32_CAP` moved,
 #: because a narrow draw now reads one 32-bit word where it used to read a 64-bit pair. Those rows
 #: no longer match `feature_random_reference.md` §3 Table 2, which documents the superseded rule --
-#: they are marked `narrow` below, and that document's Table 2 should be read as historical for
-#: them. The rows marked `wide` are untouched and remain independent evidence about this oracle,
-#: as do the KATs, `MIX64_CHECKSUM`, `WIDE_WIDTH_ANCHOR` and every scalar/key anchor.
+#: they are marked `narrow` below.  **Every row here has since moved a second time**, when each
+#: generic was given its own word space, and so has `WIDE_WIDTH_ANCHOR`: the `wide` rows are no
+#: longer the untouched independent evidence they once were.  What is still untouched, and is the
+#: evidence this oracle now rests on, is the KATs, `MIX64_CHECKSUM` and every scalar and key
+#: anchor -- none of which moved, because `DOM_REAL64` is tag 0.
 #:
-#: `check_narrow_from_spec()` below is what keeps the re-baselined rows from being circular: it
-#: recomputes them from the written specification rather than by calling `int_at`.
+#: `check_narrow_from_spec()` and `check_wide_from_spec()` below are what keep the re-baselined
+#: rows from being circular: each recomputes its half from the written specification rather than
+#: by calling `int_at`, and `self_test` checks EVERY row through one of them.
 ANCHOR_INT = [
-    (12345, 1, 0, 999999, 485065),                # narrow, re-baselined
-    (12345, 1, 0, 3999999999999, 3712615530458),  # wide
-    (12345, 1, 1, 6, 3),                          # narrow, re-baselined
-    (12345, 1, 999999, 0, 485065),                # narrow, re-baselined
+    (12345, 1, 0, 999999, 807636),                # narrow, re-baselined
+    (12345, 1, 0, 3999999999999, 30243095952),  # wide
+    (12345, 1, 1, 6, 5),                          # narrow, re-baselined
+    (12345, 1, 999999, 0, 807636),                # narrow, re-baselined
     (12345, 1, 7, 7, 7),                          # narrow, degenerate: any rule gives 7
-    (12345, 1, -10, 10, 0),                       # narrow, re-baselined
-    (12345, 1, 0, INT64_MAX, 8560708566805553027),        # wide
-    (12345, 1, -INT64_MAX, INT64_MAX, 7898045096756330246),  # wide
-    (12345, 1, INT64_MIN, INT64_MAX, -1325326940098445562),  # wide, full range
-    (0, 1, 0, 999999, 516679),                    # narrow, re-baselined
-    (-7, 3, -100, 100, -10),                      # narrow, re-baselined
-    (INT64_MAX, 1, 0, 4294967296, 1636308124),    # wide (width 2**32+1 > NARROW32_CAP)
+    (12345, 1, -10, 10, 6),                       # narrow, re-baselined
+    (12345, 1, 0, INT64_MAX, 69735831379136943),        # wide
+    (12345, 1, -INT64_MAX, INT64_MAX, -9083900374096501921),  # wide
+    (12345, 1, INT64_MIN, INT64_MAX, 139471662758273887),  # wide, full range
+    (0, 1, 0, 999999, 740224),                    # narrow, re-baselined
+    (-7, 3, -100, 100, 42),                      # narrow, re-baselined
+    (INT64_MAX, 1, 0, 4294967296, 1826840458),    # wide (width 2**32+1 > NARROW32_CAP)
 ]
 
 
@@ -522,7 +560,8 @@ def check_narrow_from_spec(seed, stream, lo, hi, draw=1):
     assert 1 <= width <= NARROW32_CAP, "not a narrow range"
     d = draw if draw >= 1 else 1
     # The candidate is word `d-1` of the stream -- block `(d-1)//4`, word `(d-1)%4`.
-    c0, c1, c2, c3 = philox4x32_10((d - 1) // 4 & M32, ((d - 1) // 4 >> 32) & M32,
+    nblk = DOM_INT_NARROW | ((d - 1) // 4)
+    c0, c1, c2, c3 = philox4x32_10(nblk & M32, (nblk >> 32) & M32,
                                    u64(stream) & M32, (u64(stream) >> 32) & M32,
                                    u64(seed) & M32, (u64(seed) >> 32) & M32)
     candidate = [c0, c1, c2, c3][(d - 1) % 4]
@@ -533,10 +572,50 @@ def check_narrow_from_spec(seed, stream, lo, hi, draw=1):
             return lo + product // (1 << 32)
         attempt += 1
         k = retry_key(seed, attempt)
-        c0, c1, c2, c3 = philox4x32_10((d - 1) // 4 & M32, ((d - 1) // 4 >> 32) & M32,
+        c0, c1, c2, c3 = philox4x32_10(nblk & M32, (nblk >> 32) & M32,
                                        u64(stream) & M32, (u64(stream) >> 32) & M32,
                                        u64(k) & M32, (u64(k) >> 32) & M32)
         candidate = [c0, c1, c2, c3][(d - 1) % 4]
+
+def check_wide_from_spec(seed, stream, lo, hi, draw=1):
+    """Recompute a WIDE integer draw FROM THE WRITTEN SPECIFICATION, not by calling `int_at`.
+
+    The 64-bit twin of `check_narrow_from_spec`, and it exists for the same reason and under the
+    same rule: deliberately spelled out rather than factored, so that a re-baselined `wide` anchor
+    is checked by a second, independently written path.  If this and `int_at` are ever refactored
+    into calling one another, the check silently becomes worthless.
+
+    **Why it was written.** Until the per-generic word spaces landed, the `wide` rows of
+    `ANCHOR_INT` and `WIDE_WIDTH_ANCHOR` had never moved -- they were independent evidence about
+    this oracle precisely because no decision had touched them.  Giving `pf_random_int_at` its own
+    space moves every one of them, so without this function the whole integer half of the table
+    would be re-baselined against nothing but the implementation.  See feature_random_domains.md
+    section 5.6, which requires this to exist BEFORE the oracle is tagged.
+    """
+    if lo > hi:
+        lo, hi = hi, lo
+    width = u64(hi - lo + 1)
+    assert not (1 <= width <= NARROW32_CAP), "not a wide range"
+    d = draw if draw >= 1 else 1
+    # Draw `d` is words `2d-2` and `2d-1`: block `(d-1)//2`, pair `(d-1)%2`.
+    blk, pair = DOM_INT_WIDE | ((d - 1) // 2), (d - 1) % 2
+    key = seed
+    attempt = 0
+    while True:
+        c0, c1, c2, c3 = philox4x32_10(blk & M32, (blk >> 32) & M32,
+                                       u64(stream) & M32, (u64(stream) >> 32) & M32,
+                                       u64(key) & M32, (u64(key) >> 32) & M32)
+        words = [c0, c1, c2, c3]
+        candidate = (words[2 * pair + 1] << 32) | words[2 * pair]
+        if width == 0:
+            # The whole int64 range: every pattern is in range, so there is nothing to reduce.
+            return signed64(candidate)
+        product = candidate * width
+        if (product & MASK64) >= ((1 << 64) % width):
+            return lo + (product >> 64)
+        attempt += 1
+        key = retry_key(seed, attempt)
+
 
 #: Reference Table 3, entire.  (seed, label, value).
 ANCHOR_KEY = [
@@ -583,10 +662,13 @@ def self_test():
         # For a narrow range, check the SAME value a second time from the written specification.
         # Six of these anchors were re-baselined when the narrow grid was admitted, so without an
         # independently written path they would only be checking the oracle against itself.
-        w = (max(lo, hi) - min(lo, hi)) + 1
+        w = u64(max(lo, hi) - min(lo, hi) + 1)
         if 1 <= w <= NARROW32_CAP:
             eq("int_at(%d,%d,%d,%d) from spec" % (seed, stream, lo, hi),
                check_narrow_from_spec(seed, stream, lo, hi), want)
+        else:
+            eq("int_at(%d,%d,%d,%d) from spec" % (seed, stream, lo, hi),
+               check_wide_from_spec(seed, stream, lo, hi), want)
         if retries:
             bad.append("int_at(%d,%d,%d,%d) retried %d times -- it is not a stable anchor and "
                        "must be removed from ANCHOR_INT" % (seed, stream, lo, hi, retries))
@@ -596,8 +678,13 @@ def self_test():
 
     # Contract identities, asserted here as well as in the suite: a break in any of them would
     # otherwise reach the emitted table as a consistent pair of wrong values.
-    eq("width-0 int_at == bits_at", int_at(12345, 1, INT64_MIN, INT64_MAX)[0],
-       signed64(bits_at(12345, 1)))
+    # The full-range draw is NOT `bits_at` any more -- see int_at.  What is still contract is that
+    # it needs no reduction, so it must equal the wide-space pair read straight, which is exactly
+    # what the independently written `check_wide_from_spec` computes.
+    eq("width-0 int_at from spec", int_at(12345, 1, INT64_MIN, INT64_MAX)[0],
+       check_wide_from_spec(12345, 1, INT64_MIN, INT64_MAX))
+    if int_at(12345, 1, INT64_MIN, INT64_MAX)[0] == signed64(bits_at(12345, 1)):
+        bad.append("width-0 int_at still equals bits_at: the integer space is not separated")
     eq("lo>hi swaps", int_at(12345, 1, 999999, 0)[0], int_at(12345, 1, 0, 999999)[0])
     eq("draw 0 clamps to 1", bits_at(12345, 1, 0), bits_at(12345, 1, 1))
     eq("draw -5 clamps to 1", bits_at(12345, 1, -5), bits_at(12345, 1, 1))
@@ -613,18 +700,27 @@ def self_test():
     eq("draw 1 is pair (c0,c1)", bits_at(12345, 1, 1), (c[1] << 32) | c[0])
     eq("draw 2 is pair (c2,c3)", bits_at(12345, 1, 2), (c[3] << 32) | c[2])
 
-    # `/v2`: the integer generic is on the SAME grid as the 64-bit real one.  Asserted at every
-    # draw, not only draw 1 -- draw 1 agrees under `/v1` too, so a draw-1-only check would pass
-    # unchanged against the mapping this replaced and prove nothing.
+    # `/v3`: the integer generic reads its OWN word space, so it shares bits with nothing.
+    # Asserted at every draw rather than only draw 1, because a draw-1-only check would pass
+    # against a build that had tagged the scalar path and forgotten the fills.
     for d in (1, 2, 3, 4, 5, 8, 9):
-        eq("int_at at draw %d is bits_at at draw %d" % (d, d),
-           int_at(12345, 1, INT64_MIN, INT64_MAX, d)[0], signed64(bits_at(12345, 1, d)))
-    # Negative control: the `/v1` identity `int_at(d) == bits_at(2d-1)` must now FAIL for d >= 2.
-    # Without this, restoring the old mapping would satisfy every check above at draw 1 alone.
-    for d in (2, 3, 5):
-        if int_at(12345, 1, INT64_MIN, INT64_MAX, d)[0] == signed64(bits_at(12345, 1, 2 * d - 1)):
-            bad.append("int_at at draw %d still equals bits_at at draw %d -- this is the /v1 "
-                       "stride-4 mapping, which /v2 replaced" % (d, 2 * d - 1))
+        eq("int_at at draw %d from spec" % d,
+           int_at(12345, 1, INT64_MIN, INT64_MAX, d)[0],
+           check_wide_from_spec(12345, 1, INT64_MIN, INT64_MAX, draw=d))
+    # Negative control, and it is the one that matters: the integer draw must NOT be any of the
+    # 64-bit real draws.  Without it, a build that dropped every domain tag would satisfy the
+    # `from spec` checks above -- both paths would simply be wrong together.
+    for d in (1, 2, 3, 4, 5, 8, 9):
+        got = int_at(12345, 1, INT64_MIN, INT64_MAX, d)[0]
+        for e in (d, 2 * d - 1, 2 * d):
+            if got == signed64(bits_at(12345, 1, e)):
+                bad.append("int_at at draw %d equals bits_at at draw %d -- the integer and real64 "
+                           "word spaces are not separated" % (d, e))
+    # And the same for the narrow grid against real32, which shares its stride.
+    for d in (1, 2, 3, 5):
+        if int_at(12345, 1, 0, 999, d)[0] == 0 + (word(12345, 1, d - 1) * 1000 >> 32):
+            bad.append("narrow int_at at draw %d is a reduction of pf_random32_at's own word -- "
+                       "the integer and real32 word spaces are not separated" % d)
     # Two consecutive integer draws must share one block, which is what the bulk fill amortises.
     eq("int draws 1 and 2 share block 0", ((1 - 1) // 2, (2 - 1) // 2), (0, 0))
 
@@ -1029,7 +1125,7 @@ def gen_module():
     L.append("!!")
     L.append("!! Every value here is permanent: it is what the library promises to return for a")
     L.append("!! given seed, stream and draw, on every machine and compiler, for as long as")
-    L.append("!! `pf_random_algorithm` reads \"philox4x32-10/v2\". The tables are derived from an")
+    L.append("!! `pf_random_algorithm` reads \"philox4x32-10/v3\". The tables are derived from an")
     L.append("!! arbitrary-precision model of the contract in the generator named above, never")
     L.append("!! from a Fortran run -- a table read back out of the implementation could only")
     L.append("!! ever confirm that the implementation agrees with itself.")

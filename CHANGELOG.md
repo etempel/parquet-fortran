@@ -705,7 +705,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order, so a parallel loop returns the same numbers under `schedule(static)`,
   `schedule(dynamic)`, one thread or three hundred — something no stateful generator can offer at
   any speed, and which locking does not fix. The generator is Philox4x32-10; `pf_random_algorithm`
-  names the frozen bit contract (`philox4x32-10/v2`) and changes only if some value the module can
+  names the frozen bit contract (`philox4x32-10/v3`) and changes only if some value the module can
   produce changes. `pf_random_at`/`pf_random32_at` give `real64`/`real32` in `[0, 1)` with 1.0
   unreachable by construction, and the `real32` sequence is deliberately its own rather than a
   narrowing of the `real64` one; `pf_random_bits_at` gives 64 raw bits, of which `pf_random_at` is
@@ -758,7 +758,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parquet_set_random_threads` and floored by `parquet_set_random_parallel_min_elements`, and the
   result is **bit-identical at every thread count** because no element depends on any other — 87x on
   192 cores, and about 4.3x over the scalar form on one. The construction is piecewise, named
-  separately by `pf_random_perm_algorithm` (`feistel-mix2-16p/zaxzb/exact20/v2`) so that a change to
+  separately by `pf_random_perm_algorithm` (`feistel-mix2-16p/zaxzb/exact20/v3`) so that a change to
   it cannot be confused with a change to the draws. For `m <= 20` it is **exactly uniform over all
   `m!` permutations** — an exactly uniform rank in `[0, m!)`, unranked — which is a property of the
   construction rather than a measurement, and 20 is where it stops because `20!` is the last
@@ -785,17 +785,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both there does not compile. It requires `m >= 1`, and `m <= huge(int32)` for an
   `integer(int32)` array, but deliberately **not** `size(idx) <= m`: that bound belongs to drawing
   without replacement, and `size(idx) == m` is the ordinary bootstrap.
-  **One property to know before mixing generics on a single stream**: a `(seed, i)` pair names one
-  sequence of 32-bit words, and the coordinate-addressed generics read it with two strides — one word
-  per `pf_random32_at` value, two per `pf_random_at`, `pf_random_bits_at` and `pf_random_int_at`. So
-  the three 64-bit generics agree on what a `draw` index means, and separating two of them along the
-  draw axis is sufficient; but `pf_random32_at` walks a finer grid, and its draws `2d-1` and `2d` are
-  the two halves of 64-bit draw `d`, so mixing it with the others across draw indices still aliases.
-  Use a separate stream, a separate `pf_random_key` family, or `pf_random_stream`, which tracks its
-  own word cursor and cannot alias. The frozen contract identifier `pf_random_algorithm` reads
-  `philox4x32-10/v2`; `/v1`, which never appeared in a release, gave `pf_random_int_at` stride 4 and
-  so made an integer at draw 2 the same randomness as a real at draw 3. The generator is
-  **not cryptographic** and is documented as such. See
+  **Generics do not share bits.** A `(seed, i)` pair names four independent sequences of 32-bit
+  words, one per generic family — `pf_random_at` with `pf_random_bits_at` and the distributions
+  built on them, `pf_random32_at`, and `pf_random_int_at` in each of its two width regimes — so two
+  values taken at different `(generic, draw)` coordinates are never functions of the same bits,
+  whatever draw indices are used. The two exceptions are contract and deliberate: `pf_random_at` is
+  the top 53 bits of `pf_random_bits_at`, and `pf_random_exp_at` is `-log(1 - u)` for that same `u`.
+  `pf_random_stream` rests on the same separation, and every pair-addressed producer on it aligns
+  before reading, so a stream hands out exactly the values the coordinate-addressed calls give
+  **unconditionally** rather than only while its cursor stays even. The frozen contract identifier
+  `pf_random_algorithm` reads `philox4x32-10/v3`; neither earlier value appeared in a release. The
+  generator is **not cryptographic** and is documented as such. See
   [Random numbers](doc/pages/utilities/random.md).
 
 ### Changed

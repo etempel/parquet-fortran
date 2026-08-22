@@ -439,11 +439,10 @@ every form still agrees value for value. A range wider than 2²⁴ takes the 64-
 switch is a function of `m`, which you pass, so it is deterministic and identical on every machine —
 it is **not** a setting and can never become one.
 
-One consequence worth knowing if you mix generics: a narrow integer draw shares its word with
-`pf_random32_at` at the same coordinate, where a wide one shares its pair with
-`pf_random_at`/`pf_random_bits_at`. See
-[the stride table](#mixing-generics-on-one-stream-the-stride-table), which is where that is set out
-in full — including why walking the draw axis does not separate a narrow integer from a real.
+The two width regimes read **different word sequences**, as every generic here does, so nothing
+about mixing them is a hazard — see
+[Mixing generics on one stream](#mixing-generics-on-one-stream). All the switch decides is how many
+values one enciphering serves.
 
 **There is deliberately no `size(idx) <= m` requirement**, which is the clearest statement of how
 this differs from `pf_random_subset`. Drawing 4000 values from a population of 4000 is the ordinary
@@ -492,7 +491,7 @@ over the alternating group, an all-cells chi-square at the sizes it can be force
 fixed-point counts, cycle structure, position uniformity, subset membership and a structural test
 asking whether sharing an input coordinate makes two outputs share one.
 
-`pf_random_perm_algorithm` names that whole contract — `feistel-mix2-16p/zaxzb/exact20/v2` —
+`pf_random_perm_algorithm` names that whole contract — `feistel-mix2-16p/zaxzb/exact20/v3` —
 **separately from `pf_random_algorithm`**, so a program that recorded the draw contract is not told
 its draws changed when only the permutation did. All four facts are in the string because all four
 fix the answer: the round count, the parity correction (`p`), the width rule, and the threshold
@@ -529,7 +528,7 @@ agree, and that requirement is checked by the same golden vectors under each.
 `pf_random_algorithm` names the frozen contract:
 
 ```fortran
-print *, pf_random_algorithm            ! philox4x32-10/v2
+print *, pf_random_algorithm            ! philox4x32-10/v3
 ```
 
 Its value changes if and only if some value the module can produce changes. Record it alongside a
@@ -551,91 +550,55 @@ narrowing of `pf_random_at`, and does not visit the same values. That is deliber
 probability 2⁻⁵³ for the `real64` form — and 1.0 is unreachable by construction, so a caller may
 divide by `1 - x` but not by `x`.
 
-`pf_random_at(seed, i, draw)` is exactly `pf_random_bits_at(seed, i, draw)`'s top 53 bits scaled
-into `[0, 1)`. That identity is contract and is asserted by the suite.
+**Two identities are contract, and they are the only two.**
 
-**`pf_random_int_at` shares no such identity with anything**, and none should be assumed. Lemire's
-reduction is a different function of the bits it reads, and a rejection moves it to a different key,
-so it is never simply a rescaling of a draw you already have.
+- `pf_random_at(seed, i, draw)` is exactly `pf_random_bits_at(seed, i, draw)`'s top 53 bits scaled
+  into `[0, 1)`.
+- `pf_random_exp_at(seed, i, draw)` is exactly `-log(1 - u)` for that same `u`.
 
-**Which bits it reads depends on the range**, and that is the thing to know before mixing it with
-anything else. A range spanning 2²⁴ values or fewer takes a single 32-bit word — the same word
-`pf_random32_at` takes at that draw — so four such values come out of one enciphering. A wider range
-takes the 64-bit pair `pf_random_at` and `pf_random_bits_at` take, so two values come out of one.
-[The stride table](#mixing-generics-on-one-stream-the-stride-table) below gives both.
+Both are deliberate: asking for a uniform and asking for its raw bits, or for the exponential built
+from it, are three views of one draw. Both are asserted by the test suite.
 
-**So do not expect two values that read the same words to be independent.** "No identity" means the
-two *values* are not equal; it does not mean they are unrelated. Reading the same words makes them
-the same randomness twice, and a rejection is what would separate them — but at any realistic range
-that happens with probability around 2⁻⁴⁰, so in practice it never does.
+### Mixing generics on one stream
 
-Which pairing that catches depends on the range, so it is worth being concrete. A narrow integer at
-draw 2 reads word 1, the high word of `pf_random_at`'s first pair, and is then simply a function of
-it: `pf_random_int_at(seed, i, 1, 6, 2_int64)` equals `1 + floor(6 * pf_random_at(seed, i))` for
-20000 of 20000 streams measured. At the *same* coordinate the two agree only by chance (3325 of
-20000, against 3333 expected for a die), because draw 1 of the narrow integer is word 0 — the low
-half of that pair, which the top-53-bit real barely uses. Neither is a pairing to rely on.
-
-### Mixing generics on one stream: the stride table
-
-The same-coordinate case above is one instance of a general rule, and the rule is worth knowing in
-full, because the four generics do not all walk the same grid.
-
-**One `(seed, i)` pair names one sequence of 32-bit words. The coordinate-addressed generics are
-*views* of that one sequence, and there are two strides:**
-
-| generic | words read for draw `d` (1-based) | stride |
-|---|---|---|
-| `pf_random32_at(seed, i, d)` | `d-1` | 1 |
-| `pf_random_int_at(seed, i, lo, hi, d)`, range of 2²⁴ values or fewer | `d-1` | 1 |
-| `pf_random_at(seed, i, d)`, `pf_random_bits_at(seed, i, d)` | `2d-2`, `2d-1` | 2 |
-| `pf_random_int_at(seed, i, lo, hi, d)`, wider range | `2d-2`, `2d-1` | 2 |
-
-Two rules follow, and between them they are the whole story:
-
-1. **`pf_random_at` and `pf_random_bits_at` agree on what draw `d` means.** At one coordinate they
-   are two presentations of the same 64 bits; at different coordinates they are independent. A wide
-   `pf_random_int_at` reads that same pair.
-2. **`pf_random32_at` has its own finer grid**, one word per value, and is deliberately not a
-   narrowing of `pf_random_at`. Its draws `2d-1` and `2d` are the two halves of 64-bit draw `d`.
-   **A narrow `pf_random_int_at` walks that same one-word grid** — which is every range of 2²⁴
-   values or fewer, so it is the ordinary case rather than the exception. Either one mixed with a
-   64-bit generic on one stream aliases across draw indices:
-
-```
-pf_random32_at(seed, i, 2d-1)  is the low word of  pf_random_bits_at(seed, i, d)
-```
-
-In practice:
+**Everything else is independent, and you do not have to think about it.** Each generic family
+reads its own sequence of words, so two values taken at different `(generic, draw)` coordinates of
+one `(seed, i)` are never functions of the same bits — whatever draw indices you use, and whatever
+order you take them in:
 
 ```fortran
-! SAFE -- different draws of the two 64-bit generics are independent
-x    = pf_random_at(seed, i, 1_int64)               ! words 0,1
-b    = pf_random_bits_at(seed, i, 2_int64)          ! words 2,3
-
-! COLLIDES -- a range of 6 is narrow, so this walks the one-word grid
-x    = pf_random_at(seed, i, 1_int64)               ! words 0,1
-die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! word  1  <-- half of `x`'s randomness
-
-! COLLIDES -- pf_random32_at is on that same finer grid
-y    = pf_random_at(seed, i, 2_int64)               ! words 2,3
-z    = pf_random32_at(seed, i, 3_int64)             ! word  2  <-- half of `y`'s randomness
-
-! SAFE -- word 2 onwards is untouched by `x`
-x    = pf_random_at(seed, i, 1_int64)               ! words 0,1
-die  = pf_random_int_at(seed, i, 1, 6, 3_int64)     ! word  2
+x    = pf_random_at(seed, i, 1_int64)               ! a uniform
+die  = pf_random_int_at(seed, i, 1, 6, 1_int64)     ! an integer at the SAME draw: independent
+z    = pf_random32_at(seed, i, 1_int64)             ! and a real32, also independent
 ```
 
-The failure is silent when it happens. The values are not *equal* — the two generics scale their
-words differently — so every structural check passes and only a distributional test can see it.
-That is why the safest habit remains the one in the next section: give each role its own stream.
+There are four such families: `pf_random_at` with `pf_random_bits_at` (and the distributions built
+on them), `pf_random32_at`, and `pf_random_int_at` in each of its two width regimes. Which one a
+call lands in is decided by the call itself and never by a setting.
 
-**Walking the draw axis is therefore not enough on its own.** It separates the two 64-bit generics,
-and it does not separate a narrow integer from either of them — draw `d` of a narrow integer is
-word `d-1`, which belongs to 64-bit draw `(d+1)/2`. Separate the *streams* or the *seeds* instead,
-as below.
+**This is what `pf_random_stream` rests on too.** A stream tracks its own word cursor, so
+consecutive calls consume consecutive positions, and because each producer reads its own space they
+cannot alias either — whatever mixture of `%uniform`, `%uniform32` and `%int_range` you take, and
+however many of each:
 
-### Three constructions that are safe
+```fortran
+type(pf_random_stream) :: rng
+call rng%seed(seed, i)
+call rng%uniform(x)                 ! consumes 2 words
+call rng%int_range(1, 6, die)       ! consumes the next 2 -- and reads a different space entirely
+```
+
+A stream also hands out **exactly** the values the coordinate-addressed calls give at the same
+positions, unconditionally: `rng%uniform` after `k` words equals `pf_random_at` at the draw it
+consumed, whatever mixture preceded it. `%uniform`, `%bits`, `%int_range` and `%exp` each align to
+a word pair before reading, which costs at most one skipped word after a `%uniform32` and is what
+makes that correspondence hold with no caveat.
+
+### Three constructions that separate two roles
+
+None of these is needed to avoid aliasing any more — the word spaces do that. They are still the
+clearest ways to say *this draw is for that purpose*, which matters when you want to change one
+part of a program without shifting another.
 
 **Use a separate stream.** Two streams never overlap, whatever draw indices you use on each:
 
@@ -655,40 +618,8 @@ seed_pos = pf_random_key(seed, 1_int64)
 seed_die = pf_random_key(seed, 2_int64)
 ```
 
-**Or use `pf_random_stream`, which advances the cursor for you.** A stream keeps its own word
-position, so consecutive calls consume consecutive words and you never have to work out a draw
-index:
-
-```fortran
-type(pf_random_stream) :: rng
-call rng%seed(seed, i)
-call rng%uniform(x)                 ! consumes 2 words
-call rng%int_range(1, 6, die)       ! consumes the next 2
-```
-
-**One caveat, and it is the narrow-integer rule again.** `%int_range` advances the cursor by a word
-pair, but over a range of 2²⁴ values or fewer it *reads* a single word — the first of that pair. So
-after a `%uniform` the die above comes from the second word of the pair `x` was built from, and is a
-function of `x`: measured 20000 of 20000 at a range of 6. A stream separates repeated calls to the
-*same* producer, which is the ordinary case; it does not by itself separate a narrow `%int_range`
-from a `%uniform` beside it. Where that matters, use a separate stream or a separate family, both of
-which are unconditional.
-
-Otherwise this is what a stream is *for*: the coordinate-addressed forms are the right tool when you
-know which value you want, and a stream is the right tool when you are consuming several per step.
-
-### Why the remaining overlap is not simply removed
-
-Folding a per-generic constant into the key would make the overlap impossible by construction. It
-would also break the property `pf_random_stream` exists to provide — that a stream hands out exactly
-the values the coordinate-addressed calls give at the same positions — because that correspondence
-is possible only while every generic reads one word space.
-
-So the overlap is the price of that correspondence, and what remains of it is one thing rather than
-several: **a one-word grid and a two-word grid over the same words.** `pf_random32_at` and a narrow
-`pf_random_int_at` are on the first, `pf_random_at`, `pf_random_bits_at` and a wide
-`pf_random_int_at` on the second. Two values from the same grid at different draws never overlap;
-two from different grids can, and the table above says exactly when.
+**Or use `pf_random_stream`**, which is the right tool when you are consuming several values per
+step and do not want to track a draw index yourself.
 
 ### Not cryptographic
 

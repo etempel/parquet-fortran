@@ -154,6 +154,7 @@ something a reader is expected to have.
 | [Risk-87](#risk-87--the-counting-sorts-range-check-cannot-be-written-the-way-c-writes-it) | The counting sort's range check cannot be written the way C++ writes it | 4 — covered |
 | [Risk-88](#risk-88--the-sort-comparator-silently-loses-a-third-of-its-speed-if-it-outgrows-an-inlining-budget) | The sort comparator silently loses a third of its speed if it outgrows an inlining budget | 3 — not testable |
 | [Risk-89](#risk-89--the-radix-path-is-a-third-expression-of-the-ordering-and-a-wrong-answer-there-is-silent) | The radix path is a third expression of the ordering, and a wrong answer there is silent | 4 — covered |
+| [Risk-133](#risk-133--a-missing-domain-tag-puts-a-generic-back-in-another-generics-word-space-silently) | A missing domain tag puts a generic back in another generic's word space, silently | 2 — proposed |
 | [Risk-90](#risk-90--the-narrow-integer-bias-is-safe-in-exactly-one-direction-and-its-guard-cannot-be-tested) | The narrow-integer bias is safe in exactly ONE direction, and its guard cannot be tested | 3 — not testable |
 | [Risk-91](#risk-91--sort_radix_refine_strings-reads-one-array-while-permuting-another-and-nothing-diagnoses-passing-the-same-one) | `sort_radix_refine_strings` reads one array while permuting another, and nothing diagnoses passing the same one | 3 — not testable |
 | [Risk-92](#risk-92--the-last-radix-pass-leaves-the-row-array-stale-and-only-the-string-exclusion-makes-that-safe) | The last radix pass leaves the row array STALE, and only the string exclusion makes that safe | 4 — covered |
@@ -172,7 +173,7 @@ something a reader is expected to have.
 | [Risk-105](#risk-105--an-allocate-extent-from-a-default-kind-size-overflows-the-array-it-just-allocated) | An allocate extent from a default-kind `size()` overflows the array it just allocated | 4 — covered |
 | [Risk-106](#risk-106--a-stream-consumed-across-loop-iterations-is-irreproducible-and-nothing-fails) | A stream consumed across loop iterations is irreproducible, and nothing fails | 4 — covered |
 | [Risk-107](#risk-107--a-queue-shaped-stream-buffer-would-pull-the-buffer-state-into-the-contract) | A queue-shaped stream buffer would pull the buffer state into the contract | 4 — covered |
-| [Risk-108](#risk-108--an-integer-draw-taken-off-a-pair-boundary-re-reads-a-word-already-handed-out) | An integer draw taken off a pair boundary re-reads a word already handed out | 4 — covered |
+| [Risk-108](#risk-108--a-stream-producer-that-skips-its-pair-alignment-reads-a-word-index-that-is-no-draw) | A stream producer that skips its pair alignment reads a word index that is no draw | 4 — covered |
 | [Risk-109](#risk-109--the-bulk-permutation-and-the-scalar-entry-point-compute-the-same-function-by-different-routes) | The bulk permutation and the scalar entry point compute the same function by different routes | 4 — covered |
 | [Risk-110](#risk-110--the-permutations-round-count-round-function-and-width-rule-are-frozen-and-a-lower-count-looks-free) | The permutation's round count, round function and width rule are frozen, and a lower count looks free | 4 — covered |
 | [Risk-111](#risk-111--a-bulk-fill-that-silently-stopped-threading-would-fail-no-test) | A bulk fill that silently stopped threading would fail no test | 3 — not testable |
@@ -199,10 +200,53 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-133**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-134**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
+
+### Risk-133 — A missing domain tag puts a generic back in another generic's word space, silently
+
+One `(seed, stream)` pair names **four** independent sequences of 32-bit words, one per generic
+family, and which sequence a reader walks is decided by a two-bit tag OR-ed into the block index
+(`DOM_REAL64`, `DOM_REAL32`, `DOM_INT_NARROW`, `DOM_INT_WIDE` in `src/parquet_random.f90`). Drop the
+tag from one reader and that generic silently rejoins another's space: the values stay exactly
+uniform, containment holds, every distribution test passes, and the only observable is that two
+values a caller has every reason to treat as independent become functions of the same bits. That is
+the defect the spaces were introduced to remove — before them,
+`pf_random_int_at(seed, i, 1, 6, 2)` was `1 + floor(6 * pf_random_at(seed, i))` for 20000 of 20000
+streams — and nothing announces its return.
+
+**Two shapes, and the second is the one a future change walks into.** A reader that never got its
+tag is the obvious one; there are 27 `random_block` call sites and every one carries an explicit
+domain for exactly this reason, so a new one is visible by inspection. The other is subtler: the tag
+sits in bits 62–63 of the block index, which are free **only because every call site passes a block
+index its own draw addresses**. `draw` is bounded by `huge(int64)`, so a stride-2 block index cannot
+exceed `0x3FFF…`; but two fills read a block ahead (`blk + 1_int64`), and they are safe only because
+both sit inside a `do while (k + 4 <= m)` guard. **A future fill that prefetched a block
+unconditionally would set bit 62 and land in `DOM_REAL32`'s space**, for the last block of a fill
+whose draw index sits at the top of the axis — a wrong answer in a corner no ordinary test reaches.
+
+**`DOM_REAL64` is tag 0, which cuts both ways.** It is what keeps every uniform, every bit pattern,
+all four distributions and the reader's `sample_fraction=` mapping at the values they have always
+had — and it means a build that *over*-tagged, giving the reals a non-zero tag, would change all of
+those at once while still passing any test that only checked the moved generics.
+
+**Test:** `test_generic_stride_aliasing` (`test/test_random.f90`) asserts each generic reads its own
+space, computing the expected words from tags **written out locally from the specification** rather
+than imported from `parquet_random` — a test that borrowed the library's constants could not tell a
+wrong constant from a wrong reader. Its first loop is the over-tagging control: it requires
+`pf_random_bits_at` to read the **untagged** block. `test_int_shares_block` asserts the collision
+rate between an integer draw and both real generics sits near chance rather than near certainty,
+with a determinism control showing the counter can reach its maximum at all. On the oracle side,
+`check_narrow_from_spec` and `check_wide_from_spec`
+(`tools/generate_random_golden_vectors.py`) recompute every `ANCHOR_INT` row from the written
+specification, so a re-baselined anchor is never checked against the implementation alone.
+
+**What it still forbids:** adding a `random_block` call site without an explicit domain; adding a
+generic without deciding which space it reads; and any fill that reads a block ahead outside a
+guard proving the caller asked for it.
+
 
 A risk belongs here when someone has decided it is testable and said what to assert, but has not
 written the test yet, and only for as long as that is true. Once the test exists the entry moves to
@@ -1216,36 +1260,37 @@ faster it looks. The measured worth of the cache is 1.70x (gfortran) / 1.78x (if
 2.88x / 3.35x on `real32`; a queue would not beat that by enough to buy a contract change, and
 `pf_random_fill_draws` already exists for callers who want the last 1.7x.
 
-### Risk-108 — An integer draw taken off a pair boundary re-reads a word already handed out
+### Risk-108 — A stream producer that skips its pair alignment reads a word index that is no draw
 
-An integer draw names a **word pair at a fixed grid**: since `pf_random_algorithm` `/v2`,
-`int_at_impl` goes through `bits_of` and reads words `2d-2, 2d-1`. A stream's `%int_range` therefore
-aligns to the next pair boundary before taking one. Drop that alignment — it is two lines, and looks
-like padding — and an `%int_range` called at word 1, which only a preceding `%uniform32` can leave
-behind, re-reads word 0, already handed out to the caller.
+**Rewritten twice, because its premise has been wrong twice.** It first said an integer draw names a
+word pair at a fixed grid; the narrow 32-bit rule made that false for any range of 2²⁴ values or
+fewer. It then said the pair grid was shared with `pf_random_at`; giving each generic its own word
+space made *that* false too. What survives both, and is the real invariant, is about **alignment**
+rather than about which words are shared.
 
-**The failure is silent and it is not merely a repeat.** The two draws are different *functions* of
-the same bits (one is a scaled top-53, the other Lemire's reduction), so nothing looks duplicated;
-the integers stay exactly uniform, and no containment or distribution test can see it. What is lost
-is independence between two values a caller has every reason to treat as independent — the same class
-of defect `int_at_impl`'s own doc-comment records for `pf_random_int_at` against `pf_random_at` at
-one coordinate.
+Every pair-addressed producer on a `pf_random_stream` — `%uniform`, `%bits`, `%int_range`, `%exp`,
+`%exp_portable` — aligns the cursor to a word-pair boundary before reading, then derives its draw
+index as `pos/2 + 1`. Drop that alignment (it is two lines, and looks like padding) and the producer
+reads at an **odd** cursor, so its draw index is not an integer position in its own space at all: it
+returns a value that no coordinate-addressed call can name. Only `%uniform32` can leave the cursor
+odd, so the window is one word wide and easy to miss.
 
-**`/v2` made this risk narrower, not smaller.** Under `/v1` the integer rule addressed a whole block
-(`draw-1`, first pair only), so `align_to_block` skipped up to three words and *any* preceding
-producer could leave the cursor unaligned. Now only `%uniform32` can, and the skip is one word — but
-the consequence of dropping it is identical, and the smaller window makes it *less* likely that a
-casual test happens to catch it.
+**The failure is silent, and it is not a repeat.** The value returned is still uniform and still
+correctly distributed; what is lost is the property `pf_random_stream` exists to provide — that a
+stream hands out exactly the values the coordinate-addressed calls give at the same positions. Since
+the alignment was extended to `%uniform` and `%bits`, that correspondence is **unconditional**, so
+its breach is now visible to a single assertion rather than only to a parity-dependent one.
 
 **Test:** `test_stream_position` (`test/test_random.f90`) calls `%uniform32` (leaving position 2)
-then `%int_range`, and asserts both the resulting position (5, i.e. aligned then two words) and that
-the value equals `pf_random_int_at` at draw 2 — the assertion that actually pins the alignment, since
-an unaligned implementation would read words 1 and 2, which is no draw index at all. It also asserts
-the aligned case: from word 4, `%int_range` must be integer draw 3.
+then `%int_range`, and asserts both the resulting position and that the value equals
+`pf_random_int_at` at draw 2. `test_stream_values` does the same for `%uniform`: after a
+`%uniform32` it must read the pair (word 2, word 3), must land at position 5, and must equal
+`pf_random_at` at the draw it consumed — the last of which is the assertion that pins the
+unconditional form rather than the old parity-dependent one.
 
 **What it still forbids:** "simplifying" `align_to_pair` away, and adding any new pair-addressed
 producer that does not call it. The same applies to the integer `%fill` specifics, which align once
-for the whole array.
+for the whole array. See Risk-133 for the separate question of *which space* a producer reads.
 
 ### Risk-92 — The last radix pass leaves the row array STALE, and only the string exclusion makes that safe
 

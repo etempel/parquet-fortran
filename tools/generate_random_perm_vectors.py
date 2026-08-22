@@ -48,7 +48,7 @@ EXACT_MAX = 20           # perm_exact_max: 20! fits an int64 and 21! does not
 PARITY_KEY = ROUNDS + 1  # perm_parity_key: fixed, so it does not move with a forced round count
 FAMILY_LABEL = 6813122891117395759   # perm_family_label
 
-ALGORITHM = "feistel-mix2-16p/zaxzb/exact20/v2"
+ALGORITHM = "feistel-mix2-16p/zaxzb/exact20/v3"
 
 
 def mix2(rk, x):

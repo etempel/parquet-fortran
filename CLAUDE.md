@@ -47,6 +47,7 @@ working rules).
   - [A separate module procedure must be IMPLEMENTED before it is CALLED in the same submodule](#a-separate-module-procedure-must-be-implemented-before-it-is-called-in-the-same-submodule)
   - [Naming conventions](#naming-conventions)
   - [`parquet_random` is a LEAF; `parquet_sampling` is where anything more goes](#parquet_random-is-a-leaf-parquet_sampling-is-where-anything-more-goes)
+  - [Each `parquet_random` generic reads its OWN word space, and a missed tag is silent](#each-parquet_random-generic-reads-its-own-word-space-and-a-missed-tag-is-silent)
   - [Public numeric arguments: provide both int32 and int64 kinds](#public-numeric-arguments-provide-both-int32-and-int64-kinds)
   - [A new process-global parameter goes in `parquet_settings`](#a-new-process-global-parameter-goes-in-parquet_settings-and-a-design-doc-must-say-so)
   - [Role-A MAMLs live in `table_types/`, not `schemas/`](#role-a-mamls-live-in-table_types-not-schemas)
@@ -1398,6 +1399,30 @@ So:
   `pf_random_int_at`/`pf_random_key`/`pf_random_fill_draws` rather than the private
   `int_at_impl`/`key_from`/`fill_draws_i32` those wrap. Each is an exact pass-through; keep it that
   way, or a value changes with only the golden vectors to report it.
+
+### Each `parquet_random` generic reads its OWN word space, and a missed tag is silent
+
+One `(seed, stream)` pair names **four** independent sequences of 32-bit words, not one. Which
+sequence a reader walks is a two-bit domain tag OR-ed into the block index — `DOM_REAL64`,
+`DOM_REAL32`, `DOM_INT_NARROW`, `DOM_INT_WIDE` in `src/parquet_random.f90`. That is what makes two
+values taken at different `(generic, draw)` coordinates independent; before it,
+`pf_random_int_at(seed, i, 1, 6, 2)` was a deterministic function of `pf_random_at(seed, i)`.
+
+**Adding a generic means deciding which space it reads, and adding a `random_block` call site means
+naming a domain.** Every one of the 27 existing call sites carries an explicit tag, including the
+`DOM_REAL64` ones where the tag is zero and could have been omitted — that is deliberate, so an
+untagged site is visible by inspection rather than by measurement. **`DOM_REAL64` must stay zero**:
+it is what keeps every uniform, every distribution and the reader's `sample_fraction=` mapping at
+the values they have always returned.
+
+**Two identities are exempt and must survive**: `pf_random_at` is the top 53 bits of
+`pf_random_bits_at`, and `pf_random_exp_at` is `-log(1 - u)` for that same `u`. Both are contract
+and both are asserted.
+
+The failure mode — a reader left in the wrong space still returns uniform, in-range,
+well-distributed values, and nothing announces it — is `feature_risks.md` **Risk-133**, which also
+records the subtler half: the tag is safe only because no call site passes a block index above the
+one its own draw addresses.
 
 ### Public numeric arguments: provide both int32 and int64 kinds
 

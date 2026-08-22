@@ -126,7 +126,7 @@ module parquet_sampling
     !! disagrees with the current one. **That reasoning expires the moment `/v2` ships**: from the
     !! first release carrying it, any change to what it answers requires a new string, and the
     !! exception recorded here is not a precedent for one taken afterwards.
-    character(len=*), parameter :: pf_random_perm_algorithm = "feistel-mix2-16p/zaxzb/exact20/v2"
+    character(len=*), parameter :: pf_random_perm_algorithm = "feistel-mix2-16p/zaxzb/exact20/v3"
 
     !> Feistel rounds. **Sixteen, and it must stay even.**
     !!

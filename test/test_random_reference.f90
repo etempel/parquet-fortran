@@ -47,6 +47,24 @@ module test_random_reference
     public :: ref_philox_block, ref_bits, ref_at, ref_at32, ref_int_at, ref_key, ref_mix64
     public :: ref_umod_2p64, ref_mulhilo64, ref_width, ref_offset
 
+    ! ---- Per-generic word spaces ----
+    !
+    ! Written out here from the specification in `feature_random_domains.md` section 4 rather than
+    ! imported from `parquet_random`, which is the whole point of this file: a reference that
+    ! borrowed the library's own constants could only ever confirm that the library agrees with
+    ! itself. The tag sits in bits 62-63 of the block index, which no draw index can reach.
+    !
+    ! `REF_DOM_REAL64` is zero, so every value in that space is what it was before the split.
+
+    !> Word space of `pf_random_at` and `pf_random_bits_at`.
+    integer(int64), parameter :: REF_DOM_REAL64 = 0_int64
+    !> Word space of `pf_random32_at`.
+    integer(int64), parameter :: REF_DOM_REAL32 = ibset(0_int64, 62)
+    !> Word space of `pf_random_int_at` at a range of `NARROW32_CAP` values or fewer.
+    integer(int64), parameter :: REF_DOM_INT_NARROW = ibset(0_int64, 63)
+    !> Word space of `pf_random_int_at` at a wider range.
+    integer(int64), parameter :: REF_DOM_INT_WIDE = ibset(ibset(0_int64, 62), 63)
+
     !> Limbs per 128-bit value. Sixteen bits each, so a product of two limbs is below 2**32.
     integer, parameter :: NL = 8
     !> Low 16 bits set.
@@ -271,7 +289,7 @@ contains
         integer(int64), intent(in) :: index         !! the 0-based word index
         integer(int64) :: w                         !! that Philox output word
         integer(int64) :: o(0:3)
-        call ref_block(seed, stream, index / 4_int64, o(0), o(1), o(2), o(3))
+        call ref_block(seed, stream, ior(REF_DOM_REAL32, index / 4_int64), o(0), o(1), o(2), o(3))
         w = o(int(modulo(index, 4_int64), int32))
     end function ref_word
 
@@ -293,7 +311,8 @@ contains
         ! The block and the slot within it each follow from d without multiplying anything: the
         ! block is the word index over 4, which is (d-1)/2, and the slot is the word index modulo
         ! 4, which is 0 when d is odd and 2 when d is even.
-        call ref_block(seed, stream, (d - 1_int64) / 2_int64, o(0), o(1), o(2), o(3))
+        call ref_block(seed, stream, ior(REF_DOM_REAL64, (d - 1_int64) / 2_int64), &
+                       o(0), o(1), o(2), o(3))
         slot = 2_int32 * int(modulo(d - 1_int64, 2_int64), int32)
         b = ior(ishft(o(slot + 1), 32), o(slot))
     end function ref_bits
@@ -463,10 +482,11 @@ contains
         d = max(draw, 1_int64)
         retries = 0_int64
         ! **A narrow range takes the 32-bit grid**: one word rather than a pair, at word index
-        ! `d - 1` -- the grid `pf_random32_at` walks -- so one block serves four draws. Spelled out
-        ! here rather than shared with the wide arm below, so that each rule reads as one piece.
+        ! `d - 1`, so one block serves four draws. It is the same INDEXING `pf_random32_at` uses
+        ! but in a different word SPACE, so the two never share a word. Spelled out here rather
+        ! than shared with the wide arm below, so that each rule reads as one piece.
         if (s >= 1_int64 .and. s <= RNARROW32_CAP) then
-            blk = (d - 1_int64) / 4_int64
+            blk = ior(REF_DOM_INT_NARROW, (d - 1_int64) / 4_int64)
             slot = int(modulo(d - 1_int64, 4_int64), int32)
             threshold = modulo(4294967296_int64, s)     ! `2**32 mod s`; both operands positive
             do
@@ -495,7 +515,7 @@ contains
             value = a + ishft(low, -32)
             return
         end if
-        blk = (d - 1_int64) / 2_int64
+        blk = ior(REF_DOM_INT_WIDE, (d - 1_int64) / 2_int64)
         second = (modulo(d - 1_int64, 2_int64) == 1_int64)
         if (s == 0_int64) then
             call ref_block(seed, stream, blk, o0, o1, o2, o3)

@@ -696,11 +696,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pf_random_normal_portable_at`, `pf_random_fill_normal`, `pf_random_fill_normal_portable`,
   `pf_random_algorithm`, `pf_random_perm_algorithm`, `pf_exp_algorithm`, `pf_normal_algorithm`,
   `pf_gamma_algorithm`, `pf_poisson_algorithm`), re-exported by `use parquet`. It splits in two
-  for anyone importing a module directly: `parquet_random` is the generator and depends on
-  `iso_fortran_env` alone, so it links without the Arrow/Parquet C++ stack, while `parquet_sampling`
+  for anyone importing a module directly: `parquet_random` is the generator and is the library's
+  smallest import at three Fortran files, while `parquet_sampling`
   holds everything that draws from a *population* — `pf_random_perm_at`, `pf_random_permutation`,
-  `pf_random_subset`, `pf_random_resample` and the weighted family below — and carries the sort
-  dependency they need. Every value is a pure function of `(seed, i [, draw])` rather than of call
+  `pf_random_subset`, `pf_random_resample` and the weighted family below — and adds the sort they
+  need, at eight. Neither reaches the C++ bindings, though the package still links Arrow whichever
+  module is named. Every value is a pure function of `(seed, i [, draw])` rather than of call
   order, so a parallel loop returns the same numbers under `schedule(static)`,
   `schedule(dynamic)`, one thread or three hundred — something no stateful generator can offer at
   any speed, and which locking does not fix. The generator is Philox4x32-10; `pf_random_algorithm`

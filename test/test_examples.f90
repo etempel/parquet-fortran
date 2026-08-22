@@ -44,6 +44,8 @@ contains
                 test_strings_quickstart_example), &
             new_unittest("doc/pages/types/string-columns.md token_column example", test_token_column_example), &
             new_unittest("doc/pages/utilities/sorting.md worked examples", test_sorting_page_examples), &
+            new_unittest("doc/pages/utilities/random.md random_quickstart example", &
+                test_random_quickstart_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -972,5 +974,59 @@ contains
         if (allocated(error)) return
         call check(error, found_url2, "keyarray entry 'test_url2' not found (" // context // ")")
     end subroutine check_keyarray_entries
+    !
+    !> `doc/pages/utilities/random.md`'s `program random_quickstart`, mirrored.
+    !!
+    !! **Two assertions, and the second is the one the page exists for.** The three values pin the
+    !! draw contract at three coordinates; the array equality pins that the answer does not depend
+    !! on how the loop was scheduled, which is the property `random_number` cannot offer.
+    !!
+    !! **The negative control matters more than usual here.** A fill that ignored `i` entirely, or
+    !! that returned the same value everywhere, would satisfy a plain "two runs agree" check
+    !! perfectly -- so the control fills from a shifted coordinate and requires the result to
+    !! DIFFER. Without it this test passes against a generator that is not addressed at all.
+    subroutine test_random_quickstart_example(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle
+        integer(int32), parameter :: n = 1000000
+        integer(int64) :: seed
+        real(real64), allocatable :: x(:), y(:)
+        integer(int32) :: i
+
+        allocate(x(n), y(n))
+        seed = 20260816_int64                     ! the seed the page's example uses
+
+        !$omp parallel do schedule(dynamic)
+        do i = 1, n
+            x(i) = pf_random_at(seed, i)
+        end do
+
+        ! The three values the page prints, taken from a verbatim run of its own example.
+        call check(error, x(1) == 8.9584852429081541e-2_real64, &
+            "random.md: quickstart x(1) does not match the value the page prints")
+        if (allocated(error)) return
+        call check(error, x(500000) == 0.98486331512086944_real64, &
+            "random.md: quickstart x(500000) does not match the value the page prints")
+        if (allocated(error)) return
+        call check(error, x(n) == 0.21019864601366756_real64, &
+            "random.md: quickstart x(n) does not match the value the page prints")
+        if (allocated(error)) return
+
+        ! Serial, and in the reverse order, so nothing about the schedule can survive into `y`.
+        do i = n, 1, -1
+            y(i) = pf_random_at(seed, i)
+        end do
+        call check(error, all(x == y), &
+            "random.md: the quickstart's values depend on the loop order, which is the one " // &
+            "thing the page promises they do not")
+        if (allocated(error)) return
+
+        ! Negative control: a shifted coordinate must NOT reproduce the array.
+        do i = 1, n
+            y(i) = pf_random_at(seed, i + 1)
+        end do
+        call check(error, .not. all(x == y), &
+            "random.md: a shifted stream index gave the same array, so the draw is not " // &
+            "addressed by `i` at all and the assertions above prove nothing")
+    end subroutine test_random_quickstart_example
     !
 end module test_examples

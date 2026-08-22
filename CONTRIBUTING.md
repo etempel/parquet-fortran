@@ -538,8 +538,10 @@ other on one compiler** — the 128-bit kernel (`#ifdef PF_INT128`) and the wrap
 same reason, it cannot go through fpm and its driver is not under `app/`: forcing the other kernel
 needs `-U__GFORTRAN__`, which also flips `src/parquet.f90`'s stringify branch, so the package will
 not build that way at all. Only a standalone compile of `parquet_random` works — which it does
-because that module imports nothing but `iso_fortran_env`, a property
-`check_parquet_random_stays_leaf` enforces.
+because that module reaches nothing but `iso_fortran_env` and two leaves of its own
+(`parquet_expkey`, `parquet_ziggurat`). `check_parquet_random_stays_leaf` is what enforces it, and
+the rule it enforces is the transitive one: every project module `parquet_random` reaches must
+itself reach nothing but compiler-supplied modules.
 
 Two gates decide whether it reports anything, and both exist because their failure mode is a
 plausible-looking number rather than an error. The **vacuity guard** requires the two halves to

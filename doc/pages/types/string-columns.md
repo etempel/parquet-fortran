@@ -8,7 +8,9 @@ variable-length strings compactly, in the same Arrow-like layout Parquet uses fo
 multi-gigabyte payloads, with a minimal allocation count and good cache locality.
 
 It is an **independent module** at its core — a program whose only import is `use parquet_strings`
-links without the Arrow/Parquet C++ stack. Beyond `iso_fortran_env` and `iso_c_binding` it reaches
+compiles two Fortran files and never reaches this library's C++ bindings (the *package* still links
+Arrow; see [Choosing a module](../operating/choosing-a-module.html)). Beyond `iso_fortran_env` and
+`iso_c_binding` it reaches
 only `parquet_settings_base` (a leaf holding the two settings it honours: the `verbosity` its print
 procedures obey, and the thread cap described under
 [Threading inside one column](#threading-inside-one-column)) and `omp_lib` under `-fopenmp`. Its

@@ -62,6 +62,7 @@ contains
             new_unittest("18 decades of weight still give n distinct items", test_wide_dynamic_range), &
             new_unittest("%reset repeats the same sequence", test_reset_repeats_the_sequence), &
             new_unittest("%reseed equals a freshly built sampler", test_reseed_equals_fresh), &
+            new_unittest("%init's stream index is optional and defaults to 0", test_init_default_stream), &
             new_unittest("pf_weighted_subset is k calls to %next", test_subset_identities), &
             new_unittest("zero-weight items come last in seed-dependent order", test_zero_weight_tail), &
             new_unittest("the same coordinates give the same sequence", test_reproducibility), &
@@ -496,6 +497,43 @@ contains
         end do
         call check(error, .not. all(a == b), "a different stream must give a different sequence")
     end subroutine test_reseed_equals_fresh
+
+    !> `%init`'s `stream` is optional and defaults to **0**, matching `pf_random_stream%seed`.
+    !!
+    !! `doc/pages/utilities/random.md` shows only the two-argument form, so the third argument is
+    !! easy to miss entirely; this pins that it exists and which sequence omitting it selects.
+    !!
+    !! **Negative control:** stream 1 must give a different sequence. Without it the test passes
+    !! against an `%init` that accepts the argument and discards it.
+    subroutine test_init_default_stream(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle
+        type(pf_weighted_draw) :: a, b, c
+        real(real64), parameter :: w(6) = [5.0_real64, 1.0_real64, 3.0_real64, &
+                                           2.0_real64, 4.0_real64, 1.5_real64]
+        integer(int64), parameter :: s = 20260822_int64
+        integer :: ia, ib, ic, k
+        logical :: oka, okb, okc, differs
+
+        call a%init(w, s)
+        call b%init(w, s, 0_int64)
+        call c%init(w, s, 1_int64)
+
+        differs = .false.
+        do k = 1, size(w)
+            call a%next(ia, oka)
+            call b%next(ib, okb)
+            call c%next(ic, okc)
+            call check(error, ia == ib, "%init(w, s) must be %init(w, s, 0): the default stream is 0")
+            if (allocated(error)) return
+            call check(error, oka .eqv. okb, "%init(w, s) and %init(w, s, 0) must drain alike")
+            if (allocated(error)) return
+            if (ia /= ic) differs = .true.
+        end do
+
+        call check(error, differs, &
+            "%init(w, s, 1) drew the same items as %init(w, s), so the stream argument is " // &
+            "being ignored and the assertions above prove nothing")
+    end subroutine test_init_default_stream
 
     !> `pf_weighted_subset` is k calls to `%next`, and a prefix of a longer subset.
     subroutine test_subset_identities(error)

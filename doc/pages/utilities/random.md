@@ -10,13 +10,18 @@ last, alone, or spread across 384 cores under a dynamic schedule.
 Everything here is reachable from `use parquet`.
 
 **Two modules sit behind that, and the split matters only if you import them directly.**
-`parquet_random` is the generator — draws, bits, integers, streams and derived seeds — and it
-depends on `iso_fortran_env` and nothing else, so a program that wants nothing but reproducible
-random numbers can use it without the Arrow/Parquet C++ stack. `parquet_sampling` is everything
-that draws from a *population*: `pf_random_perm_at`, `pf_random_permutation`, `pf_random_subset`,
-`pf_random_resample`, and the whole weighted family. It needs a sort, and this project's sort
-brings the C++ stack with it, which is precisely why the two are separate — the dependency stays
-with the callers who need it. `use parquet` gives you both and the distinction never arises.
+`parquet_random` is the generator — draws, bits, integers, streams and derived seeds — and it is
+the smallest import in the library: three Fortran files, no settings and no sort.
+`parquet_sampling` is everything that draws from a *population*: `pf_random_perm_at`,
+`pf_random_permutation`, `pf_random_subset`, `pf_random_resample`, and the whole weighted family.
+It needs a sort, and takes it from `parquet_argsort`, so it costs eight files rather than three.
+`use parquet` gives you both and the distinction never arises.
+
+Neither reaches this library's C++ bindings, so neither pulls the Arrow/Parquet headers into your
+Fortran build. That is a statement about the *Fortran* graph and not about linking: `link` is a
+package-level key in `fpm.toml`, so every import of this package still compiles the C++ wrapper and
+still links `-larrow`. See [Choosing a module](../operating/choosing-a-module.html) for the
+per-module file counts and what the guarantee does and does not cover.
 
 ## The problem it solves
 
@@ -40,17 +45,29 @@ the answer then depends on the thread count.
 you get that value, always:
 
 ```fortran
-use parquet
-integer(int64) :: seed
-real(real64) :: x(n)
+program random_quickstart
+    use parquet
+    use iso_fortran_env, only: int32, int64, real64
+    implicit none
 
-seed = 20260816_int64                     ! or pf_random_seed(), recorded for later
+    integer(int32), parameter :: n = 1000000
+    integer(int64) :: seed
+    real(real64) :: x(n)
+    integer(int32) :: i
 
-!$omp parallel do schedule(dynamic)
-do i = 1, n
-    x(i) = pf_random_at(seed, i)          ! same value for this i, on any schedule
-end do
+    seed = 20260816_int64                     ! or pf_random_seed(), recorded for later
+
+    !$omp parallel do schedule(dynamic)
+    do i = 1, n
+        x(i) = pf_random_at(seed, i)          ! same value for this i, on any schedule
+    end do
+
+    print *, x(1), x(500000), x(n)
+end program random_quickstart
 ```
+
+`use parquet` reaches every name on this page, but it does not re-export `iso_fortran_env` — the
+`int64`/`real64` kinds need their own `use`, as above.
 
 Run it again on one thread, on eight, on a different machine: `x` is identical. That property, not
 speed, is the whole point of the module — see [Performance](#performance) below, which is
@@ -154,8 +171,8 @@ a single value — they are faster ways to ask for numbers you could already hav
 values — two `real64`s, or four `real32`s, per enciphering. `pf_random_fill_streams` walks across
 streams, and consecutive streams are *different* streams, so each value needs its own enciphering
 and the remaining words belong to draws this call was not asked for. So the stream-axis fill is a
-worthwhile saving over the scalar loop it replaces (measured about 1.3× on gfortran and 1.5× on
-ifx), while the draw-axis fill is roughly twice as fast again per value. If you need several values
+worthwhile saving over the scalar loop it replaces — roughly 1.5× — while the draw-axis fill is
+about twice as fast again per value. If you need several values
 per stream, ask for them along the draw axis.
 
 Each fill has a precondition on the axis it walks: the last position it addresses must be
@@ -178,9 +195,9 @@ real-valued fills are.
 
 **The integer draw-axis fill amortises just as the `real64` one does.** An integer draw costs one
 word pair, so two consecutive draws are the two pairs of a single enciphering, and the fill reuses
-the block it already has. Measured at **1.61×** against a loop of `pf_random_int_at` (machine B,
-gfortran 15.2.1, 4M values). The stream-*axis* integer fill is the one that cannot amortise, since
-each element belongs to a different stream and so needs its own enciphering.
+the block it already has — worth roughly 1.5× against a loop of `pf_random_int_at`. The
+stream-*axis* integer fill is the one that cannot amortise, since each element belongs to a
+different stream and so needs its own enciphering.
 
 ### Filling several values at once
 
@@ -248,7 +265,7 @@ The producers, with what each costs in words (positions are counted in 32-bit wo
 
 | call | gives | words |
 |---|---|---|
-| `call rng%seed(seed [, stream])` | reseeds to position 1, in O(1) | — |
+| `call rng%seed(seed [, stream])` | reseeds to position 1, in O(1); `stream` defaults to **0** | — |
 | `call rng%uniform(x)` | `real64` in `[0, 1)` | 2 |
 | `call rng%uniform32(x)` | `real32` in `[0, 1)` | 1 |
 | `call rng%bits(b)` | 64 raw bits | 2 |
@@ -257,6 +274,10 @@ The producers, with what each costs in words (positions are counted in 32-bit wo
 | `call rng%fill(v, lo, hi)` | the next `size(v)` integers | 2 each |
 | `call rng%rewind([pos])` | sets the position; no argument means 1 | — |
 | `rng%position()` | the current position | — |
+
+`stream` takes either integer kind and **defaults to 0**, not to 1 — unlike `draw`, which defaults
+to 1. `call rng%seed(s)` is therefore stream 0 of that seed, and is the same sequence
+`pf_random_at(s, 0)` names.
 
 `%position` is the one that is a function, because it is the one that does not advance anything.
 Everything that produces a value is a subroutine — deliberately, since `rng%uniform() - rng%uniform()`
@@ -295,8 +316,8 @@ no reason to share a stream between iterations.
 library-wide rule for any derived type used per-thread, and it applies here.
 
 **For bulk work whose length you know in advance, use `pf_random_fill_draws` instead.** It walks
-blocks rather than values and is about 1.7× faster than even a stream loop, which is itself faster
-than a loop of scalar `pf_random_at` calls. The stream is for the case where the count is not known
+blocks rather than values and is comfortably faster than even a stream loop, which is itself
+faster than a loop of scalar `pf_random_at` calls. The stream is for the case where the count is not known
 in advance, not a general replacement for the fills.
 
 A stream addresses 2⁶³ words and refuses to go past that, or before its first word — asking for a
@@ -344,7 +365,7 @@ call pf_random_subset(idx, m, seed [, threads])      ! the first size(idx) of th
 
 Both fill a rank-1 `integer(int32)` or `integer(int64)` array. They are an **identity, not a second
 algorithm** — the bulk form returns exactly what the scalar form returns at the same coordinates, so
-the two may be mixed freely. They are about 2.4x cheaper per element, because enumerating the domain
+the two may be mixed freely. They are several times cheaper per element, because enumerating the domain
 in order supplies a split the scalar form must divide to recover, and because the width rule and the
 key schedule are derived once per call instead of once per element, which a `pure elemental` function
 has no way to avoid.
@@ -390,7 +411,7 @@ call pf_random_fill_draws(seed, stream, idx, 1_int64, m)   ! the same values, gu
 That identity is part of the contract and is asserted by the test suite. What the name buys is
 speed a caller otherwise leaves on the table: without it the obvious code is a loop of
 `pf_random_int_at`, which re-enciphers a block for every value where the bulk form serves two draws
-from each one — measured at 1.4x–1.6x, depending on the machine, for identical values.
+from each one — worth roughly 1.5× for identical values.
 
 `idx` is a rank-1 `integer(int32)` or `integer(int64)` array and `m` takes either kind. `stream` is
 optional and defaults to 1; it selects **which replicate** this is, so replicate `b` is reproducible
@@ -412,16 +433,17 @@ routes work here — `stream = b` and `seed = pf_random_key(seed, b)` are equall
 the range spans 2²⁴ values or fewer — which covers essentially every resample a table-oriented
 program does — an integer draw takes a single 32-bit word rather than a 64-bit pair, so one
 enciphering serves four values instead of two. It is still *exactly* unbiased: the rejection test is
-the 32-bit analogue of the same rule, not an approximation. Measured 2.2×–2.45× on the bulk fill,
-depending on the compiler, and it applies to `pf_random_int_at` and both integer fills alike, so
-every form still agrees value for value. Above 2²⁴ the 64-bit grid is used exactly as before. The
+the 32-bit analogue of the same rule, not an approximation. It is worth a little over 2× on the
+bulk fill, and it applies to `pf_random_int_at` and both integer fills alike, so
+every form still agrees value for value. A range wider than 2²⁴ takes the 64-bit pair instead. The
 switch is a function of `m`, which you pass, so it is deterministic and identical on every machine —
 it is **not** a setting and can never become one.
 
-One consequence worth knowing if you mix generics on one stream: at a *narrow* range the integer
-draw shares its word with `pf_random32_at` at the same coordinate, where a *wide* one shares its
-pair with `pf_random_at`/`pf_random_bits_at`. The advice is unchanged — take two generics at
-different draws, or on different streams — but which one a narrow integer collides with has moved.
+One consequence worth knowing if you mix generics: a narrow integer draw shares its word with
+`pf_random32_at` at the same coordinate, where a wide one shares its pair with
+`pf_random_at`/`pf_random_bits_at`. See
+[the stride table](#mixing-generics-on-one-stream-the-stride-table), which is where that is set out
+in full — including why walking the draw axis does not separate a narrow integer from a real.
 
 **There is deliberately no `size(idx) <= m` requirement**, which is the clearest statement of how
 this differs from `pf_random_subset`. Drawing 4000 values from a population of 4000 is the ordinary
@@ -483,10 +505,11 @@ only ever produce an *even* permutation, so the parity is decided entirely by th
 correction, and permutations of two such sizes would share it unless `m` were part of what decides
 it. It is.
 
-**What it costs.** A whole permutation is about 30 ns per element on one thread and falls to well
-under 1 ns per element once it is threaded, because element `k` depends on no other element. The
-random-access form is about 130 ns per element, and that gap is the price of statelessness: it
-re-derives the width rule and the whole key schedule on every call, which the bulk form does once.
+**What it costs.** A whole permutation is a few tens of nanoseconds per element on one thread and
+falls to a small fraction of that once it is threaded, because element `k` depends on no other
+element. The random-access form is several times more expensive per element, and that gap is the
+price of statelessness: it re-derives the width rule and the whole key schedule on every call, which
+the bulk form does once.
 Where the coordinate addressing pays for itself is a *subset* — the first `n` elements of a
 permutation of `m` cost `O(n)`, not `O(m)`, so drawing 1000 rows out of a billion does not touch
 the other billion.
@@ -511,10 +534,10 @@ print *, pf_random_algorithm            ! philox4x32-10/v2
 
 Its value changes if and only if some value the module can produce changes. Record it alongside a
 seed if you need to be able to tell, years later, whether a stored result is still reproducible.
-That is exactly what it was for when `/v1` became `/v2`: the integer generic's draw axis moved (see
-[the stride table](#mixing-generics-on-one-stream-the-stride-table)) while the cipher, the key and
-counter layout, the word order, the rejection rule and the retry key all stayed put, so the string
-is the only thing that can tell a stored `pf_random_int_at` result which mapping produced it.
+It covers more than the cipher: which words a generic reads is part of the contract too, so a
+change confined to one generic's draw axis — leaving the cipher, the key and counter layout, the
+word order, the rejection rule and the retry key untouched — still moves the string. That is what
+makes it the one thing able to tell a stored result which mapping produced it.
 
 **Not guaranteed.** `pf_random_seed()` is nondeterministic by design — that is its whole job. And
 sequences are per `(seed, i)`, **per procedure and per result type**: `pf_random32_at` is not a
@@ -531,24 +554,32 @@ divide by `1 - x` but not by `x`.
 `pf_random_at(seed, i, draw)` is exactly `pf_random_bits_at(seed, i, draw)`'s top 53 bits scaled
 into `[0, 1)`. That identity is contract and is asserted by the suite.
 
-**`pf_random_int_at` shares no such identity with anything**, and none should be assumed. It reads
-the same two words as `pf_random_at` at the same coordinate, but Lemire's reduction is a different
-function of those bits, and a rejection moves it to a different key — so the two are the same
-randomness without being the same number. It costs the same two words per value as its `real64`
-sibling, so a bulk integer fill amortises one enciphering over two values exactly as the `real64`
-one does.
+**`pf_random_int_at` shares no such identity with anything**, and none should be assumed. Lemire's
+reduction is a different function of the bits it reads, and a rejection moves it to a different key,
+so it is never simply a rescaling of a draw you already have.
 
-**So do not take a real and an integer at the same coordinate and expect two independent numbers.**
-"No identity" means the two *values* are not equal; it does not mean they are unrelated. Reading
-the same words makes them the same randomness twice, and a rejection is what would separate them —
-but at any realistic range that happens with probability around 2⁻⁴⁰, so in practice it never does.
-At a small range the integer is simply a function of the real: `pf_random_int_at(seed, i, 1, 6)`
-equals `1 + floor(6 * pf_random_at(seed, i))` for 20000 of 20000 streams measured.
+**Which bits it reads depends on the range**, and that is the thing to know before mixing it with
+anything else. A range spanning 2²⁴ values or fewer takes a single 32-bit word — the same word
+`pf_random32_at` takes at that draw — so four such values come out of one enciphering. A wider range
+takes the 64-bit pair `pf_random_at` and `pf_random_bits_at` take, so two values come out of one.
+[The stride table](#mixing-generics-on-one-stream-the-stride-table) below gives both.
+
+**So do not expect two values that read the same words to be independent.** "No identity" means the
+two *values* are not equal; it does not mean they are unrelated. Reading the same words makes them
+the same randomness twice, and a rejection is what would separate them — but at any realistic range
+that happens with probability around 2⁻⁴⁰, so in practice it never does.
+
+Which pairing that catches depends on the range, so it is worth being concrete. A narrow integer at
+draw 2 reads word 1, the high word of `pf_random_at`'s first pair, and is then simply a function of
+it: `pf_random_int_at(seed, i, 1, 6, 2_int64)` equals `1 + floor(6 * pf_random_at(seed, i))` for
+20000 of 20000 streams measured. At the *same* coordinate the two agree only by chance (3325 of
+20000, against 3333 expected for a die), because draw 1 of the narrow integer is word 0 — the low
+half of that pair, which the top-53-bit real barely uses. Neither is a pairing to rely on.
 
 ### Mixing generics on one stream: the stride table
 
 The same-coordinate case above is one instance of a general rule, and the rule is worth knowing in
-full, because one of the four generics walks a finer grid than the others.
+full, because the four generics do not all walk the same grid.
 
 **One `(seed, i)` pair names one sequence of 32-bit words. The coordinate-addressed generics are
 *views* of that one sequence, and there are two strides:**
@@ -556,17 +587,20 @@ full, because one of the four generics walks a finer grid than the others.
 | generic | words read for draw `d` (1-based) | stride |
 |---|---|---|
 | `pf_random32_at(seed, i, d)` | `d-1` | 1 |
+| `pf_random_int_at(seed, i, lo, hi, d)`, range of 2²⁴ values or fewer | `d-1` | 1 |
 | `pf_random_at(seed, i, d)`, `pf_random_bits_at(seed, i, d)` | `2d-2`, `2d-1` | 2 |
-| `pf_random_int_at(seed, i, lo, hi, d)` | `2d-2`, `2d-1` | 2 |
+| `pf_random_int_at(seed, i, lo, hi, d)`, wider range | `2d-2`, `2d-1` | 2 |
 
 Two rules follow, and between them they are the whole story:
 
-1. **The three 64-bit generics agree on what draw `d` means.** At one coordinate they are three
-   presentations of the same 64 bits; at different coordinates they are independent. So walking the
-   draw axis *is* a safe way to separate them.
+1. **`pf_random_at` and `pf_random_bits_at` agree on what draw `d` means.** At one coordinate they
+   are two presentations of the same 64 bits; at different coordinates they are independent. A wide
+   `pf_random_int_at` reads that same pair.
 2. **`pf_random32_at` has its own finer grid**, one word per value, and is deliberately not a
-   narrowing of `pf_random_at`. Its draws `2d-1` and `2d` are the two halves of 64-bit draw `d`, so
-   mixing it with the others on one stream still aliases across draw indices:
+   narrowing of `pf_random_at`. Its draws `2d-1` and `2d` are the two halves of 64-bit draw `d`.
+   **A narrow `pf_random_int_at` walks that same one-word grid** — which is every range of 2²⁴
+   values or fewer, so it is the ordinary case rather than the exception. Either one mixed with a
+   64-bit generic on one stream aliases across draw indices:
 
 ```
 pf_random32_at(seed, i, 2d-1)  is the low word of  pf_random_bits_at(seed, i, d)
@@ -575,29 +609,31 @@ pf_random32_at(seed, i, 2d-1)  is the low word of  pf_random_bits_at(seed, i, d)
 In practice:
 
 ```fortran
-! SAFE -- different draws of two 64-bit generics are independent
+! SAFE -- different draws of the two 64-bit generics are independent
 x    = pf_random_at(seed, i, 1_int64)               ! words 0,1
-die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! words 2,3
+b    = pf_random_bits_at(seed, i, 2_int64)          ! words 2,3
 
-! ALSO SAFE -- and this is the pairing that did NOT use to be
-die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! words 2,3
-y    = pf_random_at(seed, i, 3_int64)               ! words 4,5
+! COLLIDES -- a range of 6 is narrow, so this walks the one-word grid
+x    = pf_random_at(seed, i, 1_int64)               ! words 0,1
+die  = pf_random_int_at(seed, i, 1, 6, 2_int64)     ! word  1  <-- half of `x`'s randomness
 
-! COLLIDES -- pf_random32_at is on the finer grid
+! COLLIDES -- pf_random32_at is on that same finer grid
 y    = pf_random_at(seed, i, 2_int64)               ! words 2,3
 z    = pf_random32_at(seed, i, 3_int64)             ! word  2  <-- half of `y`'s randomness
+
+! SAFE -- word 2 onwards is untouched by `x`
+x    = pf_random_at(seed, i, 1_int64)               ! words 0,1
+die  = pf_random_int_at(seed, i, 1, 6, 3_int64)     ! word  2
 ```
 
 The failure is silent when it happens. The values are not *equal* — the two generics scale their
 words differently — so every structural check passes and only a distributional test can see it.
 That is why the safest habit remains the one in the next section: give each role its own stream.
 
-> **Changed in an unreleased revision.** `pf_random_int_at` used to have stride 4, taking a whole
-> four-word block per value and using half of it. Rule 1 above was then false: `pf_random_int_at(…,
-> d)` was `pf_random_bits_at(…, 2d-1)`, so an integer at draw 2 and a real at draw 3 were the same
-> randomness — measured 1000 of 1000 — and this page said "walk the draw axis" was not a safe rule.
-> It is now. Draw 1 is unchanged; every integer draw from 2 up returns a different value than it did,
-> and `pf_random_algorithm` reads `philox4x32-10/v2` rather than `/v1` to say so.
+**Walking the draw axis is therefore not enough on its own.** It separates the two 64-bit generics,
+and it does not separate a narrow integer from either of them — draw `d` of a narrow integer is
+word `d-1`, which belongs to 64-bit draw `(d+1)/2`. Separate the *streams* or the *seeds* instead,
+as below.
 
 ### Three constructions that are safe
 
@@ -619,28 +655,40 @@ seed_pos = pf_random_key(seed, 1_int64)
 seed_die = pf_random_key(seed, 2_int64)
 ```
 
-**Or use `pf_random_stream`, which is the purpose-built answer.** A stream tracks its own word
-cursor, so consecutive calls consume consecutive words and cannot alias — whatever mixture of
-`%uniform`, `%uniform32` and `%int_range` you take, and however many of each:
+**Or use `pf_random_stream`, which advances the cursor for you.** A stream keeps its own word
+position, so consecutive calls consume consecutive words and you never have to work out a draw
+index:
 
 ```fortran
 type(pf_random_stream) :: rng
 call rng%seed(seed, i)
 call rng%uniform(x)                 ! consumes 2 words
-call rng%int_range(die, 1, 6)       ! consumes the next 2 words -- never the ones `x` used
+call rng%int_range(1, 6, die)       ! consumes the next 2
 ```
 
-This is what a stream is *for*: the coordinate-addressed forms are the right tool when you know
-which value you want, and a stream is the right tool when you are consuming several per step.
+**One caveat, and it is the narrow-integer rule again.** `%int_range` advances the cursor by a word
+pair, but over a range of 2²⁴ values or fewer it *reads* a single word — the first of that pair. So
+after a `%uniform` the die above comes from the second word of the pair `x` was built from, and is a
+function of `x`: measured 20000 of 20000 at a range of 6. A stream separates repeated calls to the
+*same* producer, which is the ordinary case; it does not by itself separate a narrow `%int_range`
+from a `%uniform` beside it. Where that matters, use a separate stream or a separate family, both of
+which are unconditional.
+
+Otherwise this is what a stream is *for*: the coordinate-addressed forms are the right tool when you
+know which value you want, and a stream is the right tool when you are consuming several per step.
 
 ### Why the remaining overlap is not simply removed
 
-Folding a per-generic constant into the key would make even the `pf_random32_at` overlap impossible
-by construction. It would also break the property `pf_random_stream` exists to provide — that a
-stream hands out exactly the values the coordinate-addressed calls give at the same positions —
-because that correspondence is possible only while every generic reads one word space. Aligning the
-three 64-bit generics onto one stride removed the overlap that actually caused mistakes while
-keeping that correspondence; the `real32` grid is what remains, and this section documents it.
+Folding a per-generic constant into the key would make the overlap impossible by construction. It
+would also break the property `pf_random_stream` exists to provide — that a stream hands out exactly
+the values the coordinate-addressed calls give at the same positions — because that correspondence
+is possible only while every generic reads one word space.
+
+So the overlap is the price of that correspondence, and what remains of it is one thing rather than
+several: **a one-word grid and a two-word grid over the same words.** `pf_random32_at` and a narrow
+`pf_random_int_at` are on the first, `pf_random_at`, `pf_random_bits_at` and a wide
+`pf_random_int_at` on the second. Two values from the same grid at different draws never overlap;
+two from different grids can, and the table above says exactly when.
 
 ### Not cryptographic
 
@@ -653,14 +701,20 @@ either: it folds the clock and a call counter, both of which are guessable.
 ## Performance
 
 **This module is not here to be faster than `random_number`, and on some machines it is not.**
-Under the flags fpm actually passes, a scalar `pf_random_at` measures about 1.8× *slower* than a
-scalar `random_number` call on gfortran, and about 1.6× faster on ifx. Which side you land on
-depends on the machine and compiler.
+A scalar `pf_random_at` and a scalar `random_number` call are within a factor of about two of each
+other under the flags fpm actually passes, and **which one is ahead depends on your compiler** —
+this library loses on one of the two mainstream Fortran compilers and wins on the other. Nothing
+about that is stable enough to plan around, which is why no figure is quoted here.
 
 What `random_number` cannot do at any speed is give you the same answer under a different OpenMP
 schedule. That is what you are buying.
 
-Two notes if you measure it yourself. Quote figures from `--profile release` only; and note that
+**If the ratio matters to you, measure it on your own machine rather than trusting anyone's
+number.** `tools/benchmark_random.sh` in this repository drives exactly that comparison — bulk and
+scalar, `real64` and `real32` — against the intrinsic. It is a maintainer tool rather than part of
+the installed package, so run it from a checkout.
+
+Two notes if you do. Quote figures from `--profile release` only; and note that
 "unoptimised" is a different profile per compiler — the default profile is the slow one for
 gfortran and flang, while for ifx it is `--profile debug`, since ifx optimises at `-O2` by default
 and fpm passes it no `-O` in either of the other two.
@@ -743,8 +797,8 @@ own — and its three tiers agree exactly everywhere.
 the first three of `v(1:6)`, at any chunking, on any number of threads. That is the promise the
 module exists for, and it is unaffected.
 
-**`pf_random_exp_portable_at` costs about 3x** — 39.4 ns per value against 11.2 on a bulk fill,
-81.3 against 27.0 scalar (machine B, gfortran 15.2.1, `-O3 -funroll-loops`). The frozen logarithm is
+**`pf_random_exp_portable_at` costs about 3x**, on a bulk fill and scalar alike. The frozen
+logarithm is
 twelve barriered Horner steps, each a store and a reload, so it neither vectorises nor pipelines
 where a libm `log` does both. Reach for it when a stored result must reproduce across machines.
 
@@ -812,7 +866,9 @@ the mean and the variance are both `shape`. Below `shape = 1` the draw goes thro
 there is deliberately **no `%gamma_portable`**: `pow` is not frozen, so such a procedure could not
 keep the promise its name would imply.
 
-**`%poisson`** takes any `lambda >= 0` (0 always draws 0). Below `lambda = 10` it uses Knuth's
+**`%poisson`** takes any `lambda >= 0` (0 always draws 0), up to about 5.8e17 — past that a drawn
+count could overflow `integer(int64)`, so it aborts rather than return one, which is far beyond
+where a Poisson draw means anything. Below `lambda = 10` it uses Knuth's
 product of uniforms, which is exact and terminates unconditionally; at or above it, transformed
 rejection, whose cost does not grow with `lambda`. **The crossover is frozen contract**, published
 through `pf_poisson_algorithm`, because it decides which value comes back — it is not a tuning knob
@@ -876,9 +932,28 @@ do
 end do
 ```
 
-`%remaining()` reports how many are left, `%reset()` restarts the same sequence, and
-`%reseed(seed [, stream])` starts a different one over the same weights. In signatures written out
-in prose here, square brackets mark an optional argument.
+`%init(weights, seed [, stream])` prepares the sampler; `%remaining()` reports how many items are
+left, `%reset()` restarts the same sequence, and `%reseed(seed [, stream])` starts a different one
+over the same weights. In signatures written out in prose here, square brackets mark an optional
+argument. **`stream` is optional on both `%init` and `%reseed`, takes either integer kind, and
+defaults to 0** — it names which sequence of that seed you want, so `%init(w, s, 3_int64)` and
+`%init(w, s)` followed by `%reseed(s, 3_int64)` give the same draws.
+
+**What the sampler refuses.** All of these abort rather than returning something plausible, so a
+program that runs has not silently skipped one:
+
+- **`%init` twice on the same sampler** — use `%reseed` for a new sequence over the same weights,
+  or `%reset` to repeat the current one. This is the one that surprises, because `%reset` and
+  `%reseed` make a second `%init` look like the obvious way to start over.
+- **any other entry point before `%init`** — an uninitialised sampler has no weights to draw from.
+- **a weight that is NaN, infinite, or negative.** A zero weight is fine and is described under
+  [Zero weights](#zero-weights); those three are not.
+- **every weight zero** — there is no distribution to draw from.
+- **a population above `huge(int32)`** when the item is an `integer(int32)`; pass an
+  `integer(int64)` item.
+
+`pf_weighted_subset` and `pf_weighted_permutation` add one each: the first refuses
+`size(idx) > size(weights)`, and the second requires `size(perm) == size(weights)` exactly.
 
 ### This is successive sampling, not proportional-to-size inclusion
 
@@ -891,7 +966,24 @@ algorithm entirely.
 
 ### Two families, one distribution, different realizations
 
-There are two constructions, and which one you want depends on how you consume the result.
+There are two constructions, and which one you want depends on how you consume the result. Each has
+a bulk form:
+
+```fortran
+call pf_weighted_subset(idx, weights, seed [, stream])                ! the first size(idx) drawn
+call pf_weighted_permutation(perm, weights, seed [, stream] [, threads])   ! the whole shuffle
+```
+
+`idx` and `perm` are rank-1 `integer(int32)` or `integer(int64)` arrays; `weights` is
+`real(real64)`, one per item, and it carries the population — note this differs from
+`pf_random_subset`, whose second argument is the population size. `pf_weighted_subset` has no
+`threads=`, because the tree family is serial by nature.
+
+**`pf_weighted_permutation`'s `stream` must be `integer(int64)`** — write `stream=int(j, int64)` in
+a loop. This is the same argument-position wart as
+[`pf_random_resample`'s](#drawing-with-replacement-pf_random_resample): an `int32` `stream` and an
+`int32` `threads` are indistinguishable as a positional fourth argument, so the generic offers only
+the wide kind. `pf_weighted_draw`'s `%init`/`%reseed` and `pf_weighted_subset` take either kind.
 
 - **`pf_weighted_draw` and `pf_weighted_subset`** are backed by a segment tree. `%init` is `O(n)`,
   `%next` is `O(log n)`, and `%reset`/`%reseed` are `O(k log n)` in the draws already taken. Serial

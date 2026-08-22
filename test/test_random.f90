@@ -86,6 +86,7 @@ contains
             new_unittest("the stream-axis fill agrees with the scalar draws on every shape", test_fill_streams), &
             new_unittest("the integer bulk fills agree with pf_random_int_at on both axes", test_fill_int), &
             new_unittest("a stream walks exactly the tier-0 grid, on every producer", test_stream_values), &
+            new_unittest("%seed's stream index is optional and defaults to 0", test_stream_default_index), &
             new_unittest("stream positioning: rewind, position, and the block-aligned draw", &
                          test_stream_position), &
             new_unittest("stream fills equal the scalar bindings, aligned and unaligned", test_stream_fill), &
@@ -909,6 +910,38 @@ contains
         call check(error, x == to_r64_local(ior(ishft(v0, 32), w3)), &
             "a %uniform spanning a block boundary did not read word 3 then word 0 of the next block")
     end subroutine test_stream_values
+
+    !> `%seed`'s `stream` is optional, and the value it defaults to is **0, not 1**.
+    !!
+    !! Worth pinning because the module's other optional coordinate goes the other way: `draw`
+    !! defaults to 1. A reader who has learnt that will guess wrong here, and nothing else in the
+    !! suite asserts which it is -- every other test passes the index explicitly.
+    !!
+    !! **The negative control is the whole test.** `seed(s)` agreeing with `seed(s, 0)` is also what
+    !! you would see from an implementation that ignored the argument entirely, so the second half
+    !! requires `seed(s, 1)` to DIFFER.
+    subroutine test_stream_default_index(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive error handle
+        type(pf_random_stream) :: a, b, c
+        integer(int64), parameter :: s = 20260822_int64
+        real(real64) :: xa, xb, xc
+
+        call a%seed(s)
+        call a%uniform(xa)
+        call b%seed(s, 0_int64)
+        call b%uniform(xb)
+        call c%seed(s, 1_int64)
+        call c%uniform(xc)
+
+        call check(error, xa == xb, "%seed(s) must be %seed(s, 0): the default stream index is 0")
+        if (allocated(error)) return
+        call check(error, xa == pf_random_at(s, 0_int64, 1_int64), &
+            "%seed(s) then %uniform must equal pf_random_at(s, 0, 1)")
+        if (allocated(error)) return
+        call check(error, xa /= xc, &
+            "%seed(s) matched %seed(s, 1) as well as %seed(s, 0), so the stream index is " // &
+            "being ignored and the assertions above prove nothing")
+    end subroutine test_stream_default_index
 
     !> `%rewind`, `%position`, and the block alignment `%int_range` performs.
     subroutine test_stream_position(error)

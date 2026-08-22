@@ -1,7 +1,7 @@
 # This is a MAML file to generate a code for parquet_table_example type.
 #
 # A Role-A MAML: the input to tools/generate_user_table_code.py, which turns it into a named
-# parquet_table extension type. See doc/pages/generated-tables.md.
+# parquet_table extension type. See doc/pages/utilities/generated-tables.md.
 #
 # It is deliberately also a perfectly ordinary MAML -- parquet_parse_maml accepts it as a write
 # schema, which is what lets the tests use one file both to generate the type and to write the

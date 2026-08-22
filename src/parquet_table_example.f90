@@ -5,7 +5,7 @@
 ! GENERATED FILE -- everything outside the marked USER SECTIONs is regenerated.
 ! Regenerate with:  tools/generate_user_table_code.py
 ! source-maml: table_types/maml_example4.maml
-! source-maml-sha256: 4655135a459f309e77c9ff12e4d36b1d0082d73f2a8df13d55b63baa41a3f2e3
+! source-maml-sha256: 367e1186398848d6406188c7bf26f112b7e36b15ae673bf5103af4b954b138f1
 !
 !> Table type generated from the `test` MAML schema: `parquet_table_test`, with one accessor per predefined column.
 !!
@@ -359,7 +359,7 @@ contains
     end subroutine parquet_table_test_clone_extra
     !
     !> Object ID field. (int64) The whole column. Points into the live storage: zero copy, writable, and invalidated by any
-    !! row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_uberid_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), pointer :: p(:) !! alias to the column's storage.
@@ -381,7 +381,7 @@ contains
     end function parquet_table_test_uberid_at_i32
     !
     !> Object ID field. (int64) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and invalidated
-    !! by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_uberid_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -408,7 +408,7 @@ contains
     end function parquet_table_test_uberid_at_i64
     !
     !> Object ID field. (int64) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and invalidated
-    !! by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_uberid_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -422,7 +422,7 @@ contains
     end function parquet_table_test_uberid_rng_i64
     !
     !> A plain int32 scalar column. (int32) The whole column. Points into the live storage: zero copy, writable, and invalidated by
-    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_idx_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), pointer :: p(:) !! alias to the column's storage.
@@ -444,7 +444,8 @@ contains
     end function parquet_table_test_idx_at_i32
     !
     !> A plain int32 scalar column. (int32) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_idx_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -471,7 +472,8 @@ contains
     end function parquet_table_test_idx_at_i64
     !
     !> A plain int32 scalar column. (int32) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_idx_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -485,7 +487,7 @@ contains
     end function parquet_table_test_idx_rng_i64
     !
     !> A boolean scalar column. (boolean) The whole column. Points into the live storage: zero copy, writable, and invalidated by
-    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_flag_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         logical, pointer :: p(:) !! alias to the column's storage.
@@ -507,7 +509,8 @@ contains
     end function parquet_table_test_flag_at_i32
     !
     !> A boolean scalar column. (boolean) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_flag_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -534,7 +537,8 @@ contains
     end function parquet_table_test_flag_at_i64
     !
     !> A boolean scalar column. (boolean) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_flag_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -614,7 +618,7 @@ contains
     end subroutine parquet_table_test_name_chr
     !
     !> Right ascension. Unit: deg. (float64) The whole column. Points into the live storage: zero copy, writable, and invalidated by
-    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_ra_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         real(real64), pointer :: p(:) !! alias to the column's storage.
@@ -636,7 +640,8 @@ contains
     end function parquet_table_test_ra_at_i32
     !
     !> Right ascension. Unit: deg. (float64) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable,
-    !! and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_ra_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -663,7 +668,8 @@ contains
     end function parquet_table_test_ra_at_i64
     !
     !> Right ascension. Unit: deg. (float64) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable,
-    !! and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_ra_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -677,7 +683,7 @@ contains
     end function parquet_table_test_ra_rng_i64
     !
     !> Declination. Unit: deg. (float64) The whole column. Points into the live storage: zero copy, writable, and invalidated by any
-    !! row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_dec_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         real(real64), pointer :: p(:) !! alias to the column's storage.
@@ -699,7 +705,8 @@ contains
     end function parquet_table_test_dec_at_i32
     !
     !> Declination. Unit: deg. (float64) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_dec_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -726,7 +733,8 @@ contains
     end function parquet_table_test_dec_at_i64
     !
     !> Declination. Unit: deg. (float64) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_dec_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -740,7 +748,8 @@ contains
     end function parquet_table_test_dec_rng_i64
     !
     !> Comoving coordinates. Unit: Mpc. (float32, width 3) The whole column. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_crd_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         real(real32), pointer :: p(:,:) !! alias to the column's storage.
@@ -763,7 +772,7 @@ contains
     !
     !> Comoving coordinates. Unit: Mpc. (float32, width 3) Rows `lo` through `hi` inclusive, full width. Points into the live
     !! storage: zero copy, writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows,
-    !! %truncate, %append).
+    !! %truncate, %append, %append_null_rows).
     function parquet_table_test_crd_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -791,7 +800,7 @@ contains
     !
     !> Comoving coordinates. Unit: Mpc. (float32, width 3) Rows `lo` through `hi` inclusive, full width. Points into the live
     !! storage: zero copy, writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows,
-    !! %truncate, %append).
+    !! %truncate, %append, %append_null_rows).
     function parquet_table_test_crd_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -805,7 +814,7 @@ contains
     end function parquet_table_test_crd_rng_i64
     !
     !> An int32 vector column. (int32, width 2) The whole column. Points into the live storage: zero copy, writable, and invalidated
-    !! by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_counts_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), pointer :: p(:,:) !! alias to the column's storage.
@@ -828,7 +837,7 @@ contains
     !
     !> An int32 vector column. (int32, width 2) Rows `lo` through `hi` inclusive, full width. Points into the live storage: zero
     !! copy, writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate,
-    !! %append).
+    !! %append, %append_null_rows).
     function parquet_table_test_counts_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -856,7 +865,7 @@ contains
     !
     !> An int32 vector column. (int32, width 2) Rows `lo` through `hi` inclusive, full width. Points into the live storage: zero
     !! copy, writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate,
-    !! %append).
+    !! %append, %append_null_rows).
     function parquet_table_test_counts_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -870,7 +879,8 @@ contains
     end function parquet_table_test_counts_rng_i64
     !
     !> A boolean vector column. (boolean, width 2) The whole column. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_passed_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         logical, pointer :: p(:,:) !! alias to the column's storage.
@@ -893,7 +903,7 @@ contains
     !
     !> A boolean vector column. (boolean, width 2) Rows `lo` through `hi` inclusive, full width. Points into the live storage: zero
     !! copy, writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate,
-    !! %append).
+    !! %append, %append_null_rows).
     function parquet_table_test_passed_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -921,7 +931,7 @@ contains
     !
     !> A boolean vector column. (boolean, width 2) Rows `lo` through `hi` inclusive, full width. Points into the live storage: zero
     !! copy, writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate,
-    !! %append).
+    !! %append, %append_null_rows).
     function parquet_table_test_passed_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -935,7 +945,7 @@ contains
     end function parquet_table_test_passed_rng_i64
     !
     !> A date column. (date) The whole column. Points into the live storage: zero copy, writable, and invalidated by any
-    !! row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_obsdate_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         type(parquet_date), pointer :: p(:) !! alias to the column's storage.
@@ -957,7 +967,7 @@ contains
     end function parquet_table_test_obsdate_at_i32
     !
     !> A date column. (date) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and invalidated by
-    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_obsdate_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -984,7 +994,7 @@ contains
     end function parquet_table_test_obsdate_at_i64
     !
     !> A date column. (date) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and invalidated by
-    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_obsdate_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -998,7 +1008,7 @@ contains
     end function parquet_table_test_obsdate_rng_i64
     !
     !> A millisecond time column. (time) The whole column. Points into the live storage: zero copy, writable, and invalidated by any
-    !! row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_obstime_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         type(parquet_time), pointer :: p(:) !! alias to the column's storage.
@@ -1020,7 +1030,8 @@ contains
     end function parquet_table_test_obstime_at_i32
     !
     !> A millisecond time column. (time) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_obstime_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -1047,7 +1058,8 @@ contains
     end function parquet_table_test_obstime_at_i64
     !
     !> A millisecond time column. (time) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_obstime_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -1061,7 +1073,8 @@ contains
     end function parquet_table_test_obstime_rng_i64
     !
     !> A UTC microsecond timestamp column. (timestamp) The whole column. Points into the live storage: zero copy, writable, and
-    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_obsstamp_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         type(parquet_timestamp), pointer :: p(:) !! alias to the column's storage.
@@ -1083,7 +1096,8 @@ contains
     end function parquet_table_test_obsstamp_at_i32
     !
     !> A UTC microsecond timestamp column. (timestamp) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy,
-    !! writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_obsstamp_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -1110,7 +1124,8 @@ contains
     end function parquet_table_test_obsstamp_at_i64
     !
     !> A UTC microsecond timestamp column. (timestamp) Rows `lo` through `hi` inclusive. Points into the live storage: zero copy,
-    !! writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! writable, and invalidated by any row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append,
+    !! %append_null_rows).
     function parquet_table_test_obsstamp_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).
@@ -1135,7 +1150,7 @@ contains
     !
     !> Filled in by the program, never read from the file. Unit: Jy. (float64) Computed: no file column is read for it. The whole
     !! column. Points into the live storage: zero copy, writable, and invalidated by any row-structural mutation (%filter_rows,
-    !! %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_flux_all(self) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         real(real64), pointer :: p(:) !! alias to the column's storage.
@@ -1158,7 +1173,7 @@ contains
     !
     !> Filled in by the program, never read from the file. Unit: Jy. (float64) Computed: no file column is read for it. Rows `lo`
     !! through `hi` inclusive. Points into the live storage: zero copy, writable, and invalidated by any row-structural mutation
-    !! (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_flux_rng_i32(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int32), intent(in) :: lo !! first row of the range (1-based).
@@ -1186,7 +1201,7 @@ contains
     !
     !> Filled in by the program, never read from the file. Unit: Jy. (float64) Computed: no file column is read for it. Rows `lo`
     !! through `hi` inclusive. Points into the live storage: zero copy, writable, and invalidated by any row-structural mutation
-    !! (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append).
+    !! (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, %append, %append_null_rows).
     function parquet_table_test_flux_rng_i64(self, lo, hi) result(p)
         class(parquet_table_test), intent(in), target :: self !! the table.
         integer(int64), intent(in) :: lo !! first row of the range (1-based).

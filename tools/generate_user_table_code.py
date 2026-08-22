@@ -992,7 +992,7 @@ def emit_accessors(schema, f):
     summary = field_summary(f)
     ptr_note = ("Points into the live storage: zero copy, writable, and invalidated by any "
                 "row-structural mutation (%filter_rows, %sort_by, %top_n, %delete_rows, %truncate, "
-                "%append).")
+                "%append, %append_null_rows).")
 
     if f.family == "str":
         if not f.is_vector:

@@ -1260,10 +1260,12 @@ contains
             error stop EP//"view_all: size(data_string) does not match self%size()"
         end if
         ! **The components are written directly, not via `%view(i)`, and that is worth 2.5x.**
-        ! `parquet_string` is finalizable, so `data_string(i) = self%view(i)` runs the finalizer
-        ! twice per element -- once on the destination, which intrinsic assignment finalizes before
-        ! overwriting, and once on the function result afterwards -- to set a pointer and an integer.
-        ! `%view`'s bounds check is also redundant here: `i` runs over exactly 1..nrows.
+        ! The 2.5x was measured while `parquet_string` still had a finalizer, which intrinsic
+        ! assignment ran twice per element -- once on the destination, which it finalizes before
+        ! overwriting, and once on the function result afterwards -- to set a pointer and an
+        ! integer. That finalizer is gone (the type body says why, at length, and why it must not
+        ! come back), so what the direct writes still save is one call plus one bounds check per
+        ! element: `%view`'s check cannot fail here, since `i` runs over exactly 1..nrows.
         do i = 1_int64, self%nrows
             data_string(i)%col => self
             data_string(i)%idx = i
@@ -1294,8 +1296,8 @@ contains
         if (size(data_string, kind=int64) /= n) then
             error stop EP//"view_slice: size(data_string) does not match last-first+1"
         end if
-        ! Direct component writes, for the reason `view_all` gives at length: `parquet_string` is
-        ! finalizable, so going through `%view` runs its finalizer twice per element.
+        ! Direct component writes, for the reason `view_all` gives at length: a call and a bounds
+        ! check per element, neither of which this loop needs.
         do i = 1_int64, n
             data_string(i)%col => self
             data_string(i)%idx = first + i - 1_int64

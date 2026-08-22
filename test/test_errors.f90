@@ -1166,6 +1166,12 @@ contains
                 test_codegen_range_out_of_range_aborts), &
             new_unittest("opening a generated table on a file missing a column aborts", &
                 test_codegen_missing_file_column_aborts), &
+            new_unittest("init(exact=.true.) refuses a value the declared kind cannot hold", &
+                test_codegen_init_exact_refuses_aborts), &
+            new_unittest("the same file without exact= warns and opens", &
+                test_codegen_init_exact_control), &
+            new_unittest("a generated table cannot reopen its own output while it holds a computed column", &
+                test_codegen_computed_roundtrip_aborts), &
             new_unittest("reindex_trusted still checks the permutation LENGTH", &
                 test_reindex_trusted_length_aborts), &
             new_unittest("pf_permute checks the length even under assume_valid", &
@@ -2044,6 +2050,44 @@ contains
             failure_message="an out-of-range row range on a generated accessor was expected to abort", &
             required_stderr="row range out of range for column 'ra'")
     end subroutine test_codegen_range_out_of_range_aborts
+
+    !> `%init(exact=.true.)` must refuse a value the declared kind cannot represent.
+    !!
+    !! Nothing else exercises `exact=` through a generated `%init` at all -- the argument is
+    !! forwarded to `%cast`, which is disqualified from its deferred path by `exact=` precisely so
+    !! it has the values in hand to check.
+    subroutine test_codegen_init_exact_refuses_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "codegen_init_exact_refuses", &
+            expect_abort=.true., &
+            failure_message="init(exact=.true.) over a lossy value was expected to abort", &
+            required_stderr="cannot be represented exactly as PK_FLOAT32_VEC")
+    end subroutine test_codegen_init_exact_refuses_aborts
+
+    !> The negative control for the test above: same file, same declaration, no `exact=`. Without
+    !! this, that test would pass against an `%init` that refused the file for any reason at all.
+    subroutine test_codegen_init_exact_control(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "codegen_init_exact_control", &
+            expect_abort=.false., &
+            failure_message="the same file without exact= was expected to warn and open", &
+            required_stderr="values may lose precision or range")
+    end subroutine test_codegen_init_exact_control
+
+    !> A generated table writes its `source: computed` column like any other, so `%init` on the
+    !! file it just produced finds a column the schema says will not be there, and aborts.
+    !! Documented on doc/pages/utilities/generated-tables.md under "Writing one out".
+    !!
+    !! **If that refusal is ever lifted**, this does not simply get deleted: it becomes an
+    !! in-process test asserting the round trip SUCCEEDS and that the computed column's values
+    !! survived, and the page's "Writing one out" section changes with it.
+    subroutine test_codegen_computed_roundtrip_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "codegen_computed_roundtrip", &
+            expect_abort=.true., &
+            failure_message="reopening a generated table's own output was expected to abort", &
+            required_stderr="but the table already has a column of that name")
+    end subroutine test_codegen_computed_roundtrip_aborts
 
     subroutine test_codegen_missing_file_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -619,8 +619,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_argsort), proc)
-        call p_argsort(keys, nrows, nthreads, proc, perm)
+        call oracle_argsort(keys, nrows, nthreads, proc, perm)
     end procedure drive_engine
     !
     module procedure pf_sort_threads
@@ -897,8 +896,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_runs), proc)
-        call p_runs(keys, nrows, nthreads, gek, proc, perm, tie)
+        call oracle_runs(keys, nrows, nthreads, gek, proc, perm, tie)
     end procedure engine_build_runs
     !
     module procedure drive_engine_grouped

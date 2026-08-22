@@ -3178,6 +3178,35 @@ applied to the harness instead of the source.
   a type that embeds a component from another module's private-component type needs the same
   treatment.
 
+- **gfortran 15.2 ICEs under `-flto` when a SUBMODULE calls a module-level PROCEDURE POINTER**, so
+  a call like that must live in the owning module's own `contains` and be reached through a relay.
+  The failure is `internal compiler error: in write_symbol, at lto-streamer-out.cc:3086`, during
+  `IPA pass: modref`, pointing at the `end procedure` line. Twenty lines reproduce it: a module
+  declaring `procedure(i_p), pointer, save :: p => null()` and a submodule whose body is `call p(x)`.
+
+  **Every ingredient was bisected, and most of the plausible ones are irrelevant:** `-flto` is the
+  only flag that matters (it ICEs at `-O0` through `-O3` alike), and `save`, `=> null()` and
+  accessibility all make no difference. Two results shape the fix. **Copying the pointer to a local
+  and calling that does NOT help** — the ICE follows any call derived from the module-level pointer.
+  And **a submodule of a DIFFERENT module that merely use-associates the pointer fails identically**,
+  so it is not about the owning module at all. Calling from the owning module's `contains` is clean.
+
+  **A bare reference is not always safe either**: `associated(p)` alone in a submodule compiles, but
+  passing `associated(p)` as an actual argument reproduces the ICE. So the rule is that no submodule
+  names the pointer at all — which is why `parquet_argsort`'s seven `oracle_*` relays fold the
+  `check_oracle` association test in rather than leaving it at the call site.
+
+  **The relays must be PUBLIC, including the two only their own module's submodule calls.** gfortran
+  does not emit a private module-contained procedure whose only callers are that module's submodules
+  (see the `undefined symbol` bullet elsewhere in this section), so those two link-failed under
+  `--profile release`; and the usual fix for *that* shape — declare the interface and implement it in
+  a submodule — is exactly what reintroduces this ICE.
+
+  **Nothing in CI or in a plain `fpm test` builds with `-flto`**, so a reintroduced call would
+  compile, pass every test and sit in the tree until someone next asked for a release build.
+  `check_no_submodule_oracle_pointer_call` (`tools/check_source_conventions.py`) is what makes it
+  visible; it also fails if the relays themselves disappear, since without them the whole workaround
+  has been undone and every submodule call would be legal again.
 - **A TEMPLATE cannot go in `src/parquet_wrapper.cpp` without its own `extern "C++"` block.** The
   whole file sits inside one enormous `extern "C" { … }`, and a template declared there fails with
   `error: templates must have C++ linkage` — a message that points at the template rather than at

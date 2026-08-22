@@ -64,11 +64,20 @@ module parquet_argsort
     public :: drive_engine, drive_engine_grouped, engine_build_runs, runs_to_offsets
     public :: narrow_perm, narrow_offsets
     !
-    ! The engine-selection flag, and the pointers the selectors dispatch through. `parquet_sorting`
+    ! The engine-selection flag, and the RELAYS the selectors dispatch through. `parquet_sorting`
     ! keeps five of the seven selectors (the ones its own operations use), so it reads the same flag
-    ! and the same pointers rather than keeping a second copy that could disagree.
+    ! and reaches the same pointers rather than keeping a second copy that could disagree.
+    !
+    ! The `p_*` pointers themselves stay PRIVATE, and the relays exist, because gfortran 15.2 ICEs
+    ! under `-flto` when a submodule calls a module-level procedure pointer -- see `oracle_argsort`.
+    ! All seven relays are public, including the two only `parquet_argsort_kernel` calls: gfortran
+    ! does not emit a PRIVATE module-contained procedure whose only callers are that module's own
+    ! submodules, so those two link-failed as undefined symbols under `--profile release`. The usual
+    ! fix for that shape -- declare the interface here and implement it in a submodule -- is exactly
+    ! what reintroduces the ICE these relays exist to avoid, so public is the remaining option.
     public :: dbg_fortran_engine, check_oracle
-    public :: p_partial, p_nth, p_is_sorted, p_search, p_merge
+    public :: oracle_argsort, oracle_runs
+    public :: oracle_partial, oracle_nth, oracle_is_sorted, oracle_search, oracle_merge
     !
     ! The Fortran engine itself. `parquet_sorting`'s five selectors call the same entry points this
     ! tier's two do -- one engine for all eleven element types is the property the whole sorting
@@ -1368,6 +1377,109 @@ contains
         !
         dbg_fortran_engine = use_fortran
     end subroutine parquet_argsort_select_engine
+    !
+    !> **Relays onto the oracle's procedure pointers, and they exist for a COMPILER
+    !! reason rather than a design one -- do not inline them back into the callers.**
+    !!
+    !! gfortran 15.2 ICEs (`in write_symbol, at lto-streamer-out.cc:3086`, during
+    !! `IPA pass: modref`) when a SUBMODULE calls a module-level procedure pointer under
+    !! `-flto`, which is what `--profile release` builds with. Every ingredient was
+    !! bisected: the optimisation level is irrelevant, so are `save`, `=> null()` and
+    !! accessibility, copying the pointer to a local first does NOT help, and a submodule
+    !! of a DIFFERENT module that use-associates the pointer fails identically. Calling
+    !! from the owning module's own `contains` -- which is what these do -- is clean.
+    !!
+    !! So no submodule may name a `p_*` pointer at all: even passing
+    !! `associated(p_argsort)` as an actual argument reproduces it, though the bare test
+    !! alone does not. `check_oracle` is folded in here for that reason, not for brevity.
+    !! `check_source_conventions.py`'s `check_no_submodule_oracle_pointer_call` enforces
+    !! it, because nothing in CI or a plain `fpm test` builds with `-flto` -- a
+    !! reintroduced call would sit in the tree until someone next asked for a release
+    !! build. See CLAUDE.md, "Compiler & language gotchas".
+    subroutine oracle_argsort(keys, nrows, nthreads, proc, perm)
+        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.
+        integer(int64), intent(in) :: nrows                !! rows each key describes.
+        integer(int64), intent(in) :: nthreads             !! resolved thread count.
+        character(len=*), intent(in) :: proc               !! calling procedure, for messages.
+        integer(int64), intent(inout) :: perm(:)           !! the permutation to fill.
+        !
+        call check_oracle(associated(p_argsort), proc)
+        call p_argsort(keys, nrows, nthreads, proc, perm)
+    end subroutine oracle_argsort
+    !
+    !> Relay onto `p_partial`; see `oracle_argsort` for why these exist.
+    subroutine oracle_partial(keys, nrows, count, proc, perm)
+        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.
+        integer(int64), intent(in) :: nrows                !! rows each key describes.
+        integer(int64), intent(in) :: count                !! leading rows to order.
+        character(len=*), intent(in) :: proc               !! calling procedure, for messages.
+        integer(int64), intent(inout) :: perm(:)           !! the permutation to fill.
+        !
+        call check_oracle(associated(p_partial), proc)
+        call p_partial(keys, nrows, count, proc, perm)
+    end subroutine oracle_partial
+    !
+    !> Relay onto `p_nth`; see `oracle_argsort` for why these exist.
+    subroutine oracle_nth(keys, nrows, nth, proc, idx)
+        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.
+        integer(int64), intent(in) :: nrows                !! rows each key describes.
+        integer(int64), intent(in) :: nth                  !! the rank wanted, 1-based.
+        character(len=*), intent(in) :: proc               !! calling procedure, for messages.
+        integer(int64), intent(out) :: idx                 !! the row holding that rank.
+        !
+        call check_oracle(associated(p_nth), proc)
+        call p_nth(keys, nrows, nth, proc, idx)
+    end subroutine oracle_nth
+    !
+    !> Relay onto `p_is_sorted`; see `oracle_argsort` for why these exist.
+    subroutine oracle_is_sorted(keys, nrows, proc, answer)
+        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.
+        integer(int64), intent(in) :: nrows                !! rows each key describes.
+        character(len=*), intent(in) :: proc               !! calling procedure, for messages.
+        logical, intent(out) :: answer                     !! whether the rows are ordered.
+        !
+        call check_oracle(associated(p_is_sorted), proc)
+        call p_is_sorted(keys, nrows, proc, answer)
+    end subroutine oracle_is_sorted
+    !
+    !> Relay onto `p_runs`; see `oracle_argsort` for why these exist.
+    subroutine oracle_runs(keys, nrows, nthreads, gek, proc, perm, tie)
+        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.
+        integer(int64), intent(in) :: nrows                !! rows each key describes.
+        integer(int64), intent(in) :: nthreads             !! resolved thread count.
+        integer(int64), intent(in) :: gek                  !! engine keys defining a group.
+        character(len=*), intent(in) :: proc               !! calling procedure, for messages.
+        integer(int64), intent(inout) :: perm(:)           !! the permutation to fill.
+        integer(c_int8_t), intent(inout) :: tie(:)         !! 1 where a row ties the previous.
+        !
+        call check_oracle(associated(p_runs), proc)
+        call p_runs(keys, nrows, nthreads, gek, proc, perm, tie)
+    end subroutine oracle_runs
+    !
+    !> Relay onto `p_search`; see `oracle_argsort` for why these exist.
+    subroutine oracle_search(keys, nrows, n_search, upper, proc, pos)
+        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.
+        integer(int64), intent(in) :: nrows                !! rows each key describes.
+        integer(int64), intent(in) :: n_search             !! rows belonging to the haystack.
+        logical, intent(in) :: upper                       !! upper rather than lower bound.
+        character(len=*), intent(in) :: proc               !! calling procedure, for messages.
+        integer(int64), intent(out) :: pos                 !! the insertion position found.
+        !
+        call check_oracle(associated(p_search), proc)
+        call p_search(keys, nrows, n_search, upper, proc, pos)
+    end subroutine oracle_search
+    !
+    !> Relay onto `p_merge`; see `oracle_argsort` for why these exist.
+    subroutine oracle_merge(keys, nrows, na, proc, perm)
+        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.
+        integer(int64), intent(in) :: nrows                !! rows each key describes.
+        integer(int64), intent(in) :: na                   !! rows belonging to the first input.
+        character(len=*), intent(in) :: proc               !! calling procedure, for messages.
+        integer(int64), intent(inout) :: perm(:)           !! the permutation to fill.
+        !
+        call check_oracle(associated(p_merge), proc)
+        call p_merge(keys, nrows, na, proc, perm)
+    end subroutine oracle_merge
     !
     !> Aborts if the C++ engine was selected without being bound.
     !!

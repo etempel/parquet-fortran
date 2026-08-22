@@ -3,9 +3,9 @@
 # A Role-A MAML: the input to tools/generate_user_table_code.py, which turns it into a named
 # parquet_table extension type. See doc/pages/utilities/generated-tables.md.
 #
-# It is deliberately also a perfectly ordinary MAML -- parquet_parse_maml accepts it as a write
-# schema, which is what lets the tests use one file both to generate the type and to write the
-# fixture that type is opened on.
+# It is deliberately also a perfectly ordinary MAML: `source:` is an accepted fields: sub-key, so
+# parquet_parse_maml takes this file as a write schema too. The tests do not rely on that -- they
+# write their fixtures schema-less, which is what pins the kinds this MAML declares.
 dataset: parquet_table_example # module name (matches filename without extension)
 table: test # type name: parquet_table_<table>, i.e. type(parquet_table_test)
 author: Elmo Tempel (elmo.tempel@ut.ee)

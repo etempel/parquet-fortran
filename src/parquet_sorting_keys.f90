@@ -875,8 +875,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_partial), proc)
-        call p_partial(keys, nrows, count, proc, perm)
+        call oracle_partial(keys, nrows, count, proc, perm)
     end procedure drive_engine_partial
     !
     module procedure engine_nth_index
@@ -898,8 +897,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_nth), proc)
-        call p_nth(keys, nrows, nth, proc, idx)
+        call oracle_nth(keys, nrows, nth, proc, idx)
     end procedure engine_nth_index
     !
     module procedure resolve_count
@@ -937,8 +935,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_is_sorted), proc)
-        call p_is_sorted(keys, nrows, proc, answer)
+        call oracle_is_sorted(keys, nrows, proc, answer)
     end procedure engine_is_sorted
     !
     module procedure check_rank
@@ -1251,8 +1248,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_search), proc)
-        call p_search(keys, nrows, n_search, upper, proc, pos)
+        call oracle_search(keys, nrows, n_search, upper, proc, pos)
     end procedure engine_search
     !
     module procedure engine_merge
@@ -1279,8 +1275,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_merge), proc)
-        call p_merge(keys, nrows, na, proc, perm)
+        call oracle_merge(keys, nrows, na, proc, perm)
     end procedure engine_merge
     !
 end submodule parquet_sorting_keys ! GCOVR_EXCL_LINE

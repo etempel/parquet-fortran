@@ -853,6 +853,27 @@ INIT_DECLS = [
 ]
 
 
+def _init_decls_without(drop):
+    """INIT_DECLS with the named dummy argument's declaration removed.
+
+    Selects by the DECLARED NAME, not by a substring of the line. The previous form -- `"sort" not
+    in d`, a substring test over the whole line including its `!!` doc text -- worked only because
+    exactly one entry happens to contain those letters: a future declaration whose comment merely
+    mentioned a sort would have been dropped silently, giving %init_slice a constructor missing an
+    argument, with nothing anywhere to report it.
+
+    An entry with no `::` is a continuation of the doc-comment on the entry above it, so it travels
+    with that declaration and is dropped with it.
+    """
+    out, keep = [], True
+    for decl in INIT_DECLS:
+        if "::" in decl:
+            keep = decl.split("::", 1)[1].split("!!", 1)[0].strip() != drop
+        if keep:
+            out.append(decl)
+    return out
+
+
 def emit_init(schema):
     t = schema.type_name
     o = []
@@ -893,7 +914,7 @@ def emit_init_slice(schema):
         o.append("        character(len=*), intent(in) :: filename !! parquet file to open.")
         o.append(f"        {kind}, intent(in) :: row_lo !! first file row to cover (1-based).")
         o.append(f"        {kind}, intent(in) :: row_hi !! last file row to cover (inclusive).")
-        o.extend(d for d in INIT_DECLS if "sort" not in d)
+        o.extend(_init_decls_without("sort"))
         o.append("        !")
         o.append("        call parquet_open_table(self%parquet_table, filename, row_lo, row_hi, "
                  "maml, filter, qc, &")
@@ -1321,6 +1342,22 @@ fields:
 """
 
 
+def _capture_main(argv):
+    """Runs main(argv) with stderr captured. Returns (exit code, stderr text).
+
+    `--check`'s two messages and the duplicate-module refusal are all produced inside main() and
+    printed to stderr, so a self-test that only calls build() cannot see any of them.
+    """
+    import io
+    import contextlib
+    buf = io.StringIO()
+    # stdout too, or a self-test run prints this generator's own "wrote ..." lines into CI's lint
+    # log, where they read as a real generation having happened.
+    with contextlib.redirect_stderr(buf), contextlib.redirect_stdout(io.StringIO()):
+        rc = main(argv)
+    return rc, buf.getvalue()
+
+
 def _tmp_schema(tmp, text=MINIMAL, name="demo.maml"):
     p = tmp / name
     p.write_text(text, encoding="utf-8")
@@ -1468,6 +1505,83 @@ def self_test():
               "an empty fields: should emit no bind_predefined call at all")
         check(text5.count("USER SECTION (") == 2 * len(USER_WINDOWS),
               "an empty fields: should still have every user window")
+
+        # --- the name-length limits, and the tighter one a `string` column carries ------
+        #
+        # The pair is the point: 60 characters is fine on an int64 column and refused on a string
+        # one, because only the string column also gets a `<name>_chr` accessor. Asserting only the
+        # refusal would pass just as happily against a generator that refused every 60-character
+        # name, which is why the accepted half is here as its own check.
+        long60 = "a" * 60
+        expect_error(lambda: parse_maml("dataset: m\ntable: t\nfields:\n- name: %s\n"
+                                        "  data_type: string\n" % long60,
+                                        pathlib.Path("t.maml")),
+                     "would exceed Fortran's 63-character identifier limit",
+                     "a 60-character string field (its _chr accessor would not fit)")
+        ok60 = parse_maml("dataset: m\ntable: t\nfields:\n- name: %s\n  data_type: int64\n"
+                          % long60, pathlib.Path("t.maml"))
+        check(ok60.fields[0].name == long60,
+              "the same 60-character name must be ACCEPTED on a non-string column")
+        expect_error(lambda: parse_maml("dataset: m\ntable: t\nfields:\n- name: %s\n"
+                                        "  data_type: int64\n" % ("a" * 64),
+                                        pathlib.Path("t.maml")),
+                     "exceeds Fortran's 63-character identifier limit",
+                     "a 64-character field name")
+        expect_error(lambda: parse_maml("dataset: m\ntable: %s\nfields:\n- name: a\n"
+                                        "  data_type: int64\n" % ("t" * 60),
+                                        pathlib.Path("t.maml")),
+                     "longer than Fortran's 63-character identifier limit",
+                     "a table: making the type name too long")
+
+        # --- two schemas naming the same module are refused ----------------------------
+        #
+        # That check lives in main(), not in build(), so none of the build()-level cases above can
+        # reach it: it needs a real two-file run.
+        dupdir = tmp / "dup"
+        dupdir.mkdir()
+        (dupdir / "one.maml").write_text("dataset: same_mod\ntable: one\nfields:\n- name: a\n"
+                                         "  data_type: int32\n", encoding="utf-8")
+        (dupdir / "two.maml").write_text("dataset: same_mod\ntable: two\nfields:\n- name: b\n"
+                                         "  data_type: int32\n", encoding="utf-8")
+        dupout = tmp / "dupout"
+        dupout.mkdir()
+        rc, err = _capture_main(["--dir", str(dupdir), "--out-dir", str(dupout)])
+        check(rc == 1 and "both name module" in err,
+              "two schemas sharing a dataset: should be refused; got rc=%r err=%r" % (rc, err))
+        # The negative control: the same two schemas with distinct module names must succeed.
+        (dupdir / "two.maml").write_text("dataset: other_mod\ntable: two\nfields:\n- name: b\n"
+                                         "  data_type: int32\n", encoding="utf-8")
+        rc2, err2 = _capture_main(["--dir", str(dupdir), "--out-dir", str(dupout)])
+        check(rc2 == 0, "distinct dataset: names should be accepted; got rc=%r err=%r" % (rc2, err2))
+
+        # --- --check tells a STALE file apart from a HAND-EDITED one --------------------
+        #
+        # Both are exit 1, so asserting the status proves nothing about the half a user acts on.
+        # Each case therefore asserts the message that must appear AND the one that must not.
+        cdir = tmp / "chk"
+        cdir.mkdir()
+        cout = tmp / "chkout"
+        cout.mkdir()
+        cmaml = cdir / "c.maml"
+        cmaml.write_text(MINIMAL, encoding="utf-8")
+        rc3, _ = _capture_main(["--dir", str(cdir), "--out-dir", str(cout)])
+        check(rc3 == 0, "the fixture schema should generate cleanly")
+        rc4, err4 = _capture_main(["--dir", str(cdir), "--out-dir", str(cout), "--check"])
+        check(rc4 == 0, "a freshly generated file should be up to date; got %r" % (err4,))
+        # (a) a generated region edited by hand: the digest still matches its MAML.
+        gen = cout / "gen_mod.f90"
+        body = gen.read_text(encoding="utf-8")
+        gen.write_text(body.replace("    implicit none", "    implicit none\n    ! hand-edited",
+                                    1), encoding="utf-8")
+        rc5, err5 = _capture_main(["--dir", str(cdir), "--out-dir", str(cout), "--check"])
+        check(rc5 == 1 and "edited outside its USER SECTION" in err5 and "is stale" not in err5,
+              "a hand-edited generated region should report EDITED, not stale; got %r" % (err5,))
+        # (b) the MAML changed under a file that is otherwise exactly as generated.
+        gen.write_text(body, encoding="utf-8")
+        cmaml.write_text(MINIMAL + "- name: extra\n  data_type: int32\n", encoding="utf-8")
+        rc6, err6 = _capture_main(["--dir", str(cdir), "--out-dir", str(cout), "--check"])
+        check(rc6 == 1 and "is stale" in err6 and "edited outside its USER SECTION" not in err6,
+              "a changed MAML should report STALE, not edited; got %r" % (err6,))
 
     # --- the baked-in reserved list must match parquet_table, when the source is here --
     src = pathlib.Path(__file__).resolve().parent.parent / "src" / "parquet_tables.f90"

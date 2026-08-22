@@ -5,7 +5,7 @@
 ! GENERATED FILE -- everything outside the marked USER SECTIONs is regenerated.
 ! Regenerate with:  tools/generate_user_table_code.py
 ! source-maml: table_types/maml_example4.maml
-! source-maml-sha256: 367e1186398848d6406188c7bf26f112b7e36b15ae673bf5103af4b954b138f1
+! source-maml-sha256: 2bdf0035e7fba23fcddc4a788694266cad7ee17f525ffd7a26c16da4b588639e
 !
 !> Table type generated from the `test` MAML schema: `parquet_table_test`, with one accessor per predefined column.
 !!

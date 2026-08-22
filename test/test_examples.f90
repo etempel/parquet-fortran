@@ -14,6 +14,7 @@
 !> be driven by test-drive and checked with a round-trip read-back.
 module test_examples
     use parquet
+    use parquet_table_example, only : parquet_table_test
     use iso_fortran_env, only : int32, int64, real32, real64
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
@@ -46,9 +47,60 @@ contains
             new_unittest("doc/pages/utilities/sorting.md worked examples", test_sorting_page_examples), &
             new_unittest("doc/pages/utilities/random.md random_quickstart example", &
                 test_random_quickstart_example), &
+            new_unittest("doc/pages/utilities/generated-tables.md generated_table_quickstart example", &
+                test_generated_table_quickstart_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
+
+    !> Mirrors doc/pages/utilities/generated-tables.md's opening `generated_table_quickstart`
+    !> example, asserting the three values its trailing comment shows.
+    !>
+    !> The example is deliberately in-memory (`%init_empty`, no file), which is what lets it be
+    !> mirrored here with no fixture at all -- and therefore with no chance of the concurrent-suite
+    !> fixture collision CLAUDE.md warns about.
+    !>
+    !> **The negative control is the second table.** Asserting only `20.291667` would pass against
+    !> a `%set` that wrote nothing and a `sum` over three zeros divided by three -- so a second
+    !> table built with `%init_empty(2)` and two of the same values must give a DIFFERENT mean.
+    !> That is what makes this a test of the data rather than of the arithmetic. The `%is_null`
+    !> assertions are the other half: the page states that `%init_empty`'s rows start null and that
+    !> `%set` clears them, and without those two lines the example would read the same whether or
+    !> not the values were ever marked valid.
+    subroutine test_generated_table_quickstart_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table_test) :: t, control
+        real(real64), pointer :: ra(:), one
+        real(real64) :: mean, control_mean
+        !
+        call t%init_empty(3)
+        call check(error, t%is_null("ra", 1), &
+            "generated-tables.md: %init_empty's rows start null")
+        if (allocated(error)) return
+        call t%set("uberid", [101_int64, 102_int64, 103_int64])
+        call t%set("ra", [10.5_real64, 20.25_real64, 30.125_real64])
+        call check(error, .not. t%is_null("ra", 1), "generated-tables.md: %set clears the null")
+        if (allocated(error)) return
+        !
+        ra => t%ra()
+        one => t%ra(2)
+        call check(error, t%nrows() == 3_int64, "generated-tables.md: nrows is 3")
+        if (allocated(error)) return
+        call check(error, abs(one - 20.25_real64) < 1.0e-12_real64, &
+            "generated-tables.md: %ra(2) is 20.25")
+        if (allocated(error)) return
+        mean = sum(ra) / t%nrows()
+        call check(error, abs(mean - 20.291666666666668_real64) < 1.0e-9_real64, &
+            "generated-tables.md: sum(ra) / t%nrows() is 20.291667")
+        if (allocated(error)) return
+        !
+        ! The control: two of the same values, so a mean that came from the data must differ.
+        call control%init_empty(2)
+        call control%set("ra", [10.5_real64, 20.25_real64])
+        control_mean = sum(control%ra()) / control%nrows()
+        call check(error, abs(control_mean - mean) > 1.0e-6_real64, &
+            "generated-tables.md: a different table must give a different mean")
+    end subroutine test_generated_table_quickstart_example
 
     !> Mirrors every worked example on doc/pages/utilities/sorting.md that prints a concrete
     !> result, asserting the exact values the page shows in its trailing comments.

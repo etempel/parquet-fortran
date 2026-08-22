@@ -1142,6 +1142,56 @@ def check_parquet_sampling_stays_arrow_free():
         "A weighted draw needs one argsort, which parquet_argsort provides.")
 
 
+def check_no_submodule_oracle_pointer_call():
+    """No `src/` SUBMODULE may name one of the sort oracle's `p_*` procedure pointers.
+
+    gfortran 15.2 ICEs -- `internal compiler error: in write_symbol, at lto-streamer-out.cc:3086`,
+    during `IPA pass: modref` -- when a submodule calls a module-level procedure pointer under
+    `-flto`, which is what `--profile release` builds with. Every ingredient was bisected: the
+    optimisation level is irrelevant, so are `save`, `=> null()` and accessibility, copying the
+    pointer to a local first does not help, and a submodule of a DIFFERENT module that
+    use-associates the pointer fails identically. Calling from the owning module's own `contains`
+    is clean, which is what `parquet_argsort`'s seven `oracle_*` relays do.
+
+    Even a bare reference is unsafe: passing `associated(p_argsort)` as an actual argument
+    reproduces it, though the `associated` test alone does not. So the rule is that no submodule
+    mentions a `p_*` name at all, and `check_oracle` is folded into each relay for that reason.
+
+    This needs a static check rather than a test because NOTHING in CI or in a plain `fpm test`
+    builds with `-flto`: a reintroduced call would compile, pass every test and sit in the tree
+    until someone next asked for a release build. See CLAUDE.md's "Compiler & language gotchas".
+    """
+    pointers = ("p_argsort", "p_partial", "p_nth", "p_is_sorted", "p_runs", "p_search", "p_merge")
+    problems = []
+    seen_any = False
+    for path in sorted(SRC.glob("*.f90")):
+        text = path.read_text(encoding="utf-8")
+        if not re.search(r"(?im)^\s*submodule\s*\(", text):
+            continue
+        for lineno, line in enumerate(text.split("\n"), start=1):
+            code = line.split("!", 1)[0]
+            for ptr in pointers:
+                if re.search(r"\b" + ptr + r"\b", code):
+                    seen_any = True
+                    problems.append(
+                        f"{path.name}:{lineno}: a submodule names `{ptr}`; gfortran ICEs under "
+                        f"-flto on this. Call `oracle_{ptr[2:]}` (parquet_argsort's relay) instead")
+    # The relays themselves must exist, or this check is passing against a tree where the whole
+    # mechanism has been removed and every submodule call would be legal again.
+    argsort = SRC / "parquet_argsort.f90"
+    if argsort.is_file():
+        body = argsort.read_text(encoding="utf-8")
+        missing = [p for p in pointers
+                   if f"subroutine oracle_{p[2:]}(" not in body]
+        if missing:
+            problems.append(
+                "parquet_argsort.f90: these oracle relays are gone: "
+                + ", ".join("oracle_" + m[2:] for m in missing)
+                + " -- without them there is nothing for a submodule to call, and the -flto ICE "
+                  "workaround has been undone")
+    return problems
+
+
 def check_facades_hide_the_same_names():
     """`use parquet_io` must not expose a name `use parquet` deliberately hides.
 
@@ -2478,6 +2528,8 @@ CHECKS = (
     ("parquet_sorting stays Arrow-free", check_parquet_sorting_stays_arrow_free),
     ("parquet_sampling stays Arrow-free", check_parquet_sampling_stays_arrow_free),
     ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
+    ("no submodule calls a sort-oracle procedure pointer",
+     check_no_submodule_oracle_pointer_call),
     ("the two facades hide the same names", check_facades_hide_the_same_names),
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),

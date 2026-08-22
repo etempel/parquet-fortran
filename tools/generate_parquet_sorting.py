@@ -287,11 +287,20 @@ module parquet_argsort
     public :: drive_engine, drive_engine_grouped, engine_build_runs, runs_to_offsets
     public :: narrow_perm, narrow_offsets
     !
-    ! The engine-selection flag, and the pointers the selectors dispatch through. `parquet_sorting`
+    ! The engine-selection flag, and the RELAYS the selectors dispatch through. `parquet_sorting`
     ! keeps five of the seven selectors (the ones its own operations use), so it reads the same flag
-    ! and the same pointers rather than keeping a second copy that could disagree.
+    ! and reaches the same pointers rather than keeping a second copy that could disagree.
+    !
+    ! The `p_*` pointers themselves stay PRIVATE, and the relays exist, because gfortran 15.2 ICEs
+    ! under `-flto` when a submodule calls a module-level procedure pointer -- see `oracle_argsort`.
+    ! All seven relays are public, including the two only `parquet_argsort_kernel` calls: gfortran
+    ! does not emit a PRIVATE module-contained procedure whose only callers are that module's own
+    ! submodules, so those two link-failed as undefined symbols under `--profile release`. The usual
+    ! fix for that shape -- declare the interface here and implement it in a submodule -- is exactly
+    ! what reintroduces the ICE these relays exist to avoid, so public is the remaining option.
     public :: dbg_fortran_engine, check_oracle
-    public :: p_partial, p_nth, p_is_sorted, p_search, p_merge
+    public :: oracle_argsort, oracle_runs
+    public :: oracle_partial, oracle_nth, oracle_is_sorted, oracle_search, oracle_merge
     !
     ! The Fortran engine itself. `parquet_sorting`'s five selectors call the same entry points this
     ! tier's two do -- one engine for all eleven element types is the property the whole sorting
@@ -1941,6 +1950,109 @@ def emit_oracle_plumbing(W):
     w("        dbg_fortran_engine = use_fortran")
     w("    end subroutine parquet_argsort_select_engine")
     w("    !")
+    w("    !> **Relays onto the oracle's procedure pointers, and they exist for a COMPILER")
+    w("    !! reason rather than a design one -- do not inline them back into the callers.**")
+    w("    !!")
+    w("    !! gfortran 15.2 ICEs (`in write_symbol, at lto-streamer-out.cc:3086`, during")
+    w("    !! `IPA pass: modref`) when a SUBMODULE calls a module-level procedure pointer under")
+    w("    !! `-flto`, which is what `--profile release` builds with. Every ingredient was")
+    w("    !! bisected: the optimisation level is irrelevant, so are `save`, `=> null()` and")
+    w("    !! accessibility, copying the pointer to a local first does NOT help, and a submodule")
+    w("    !! of a DIFFERENT module that use-associates the pointer fails identically. Calling")
+    w("    !! from the owning module's own `contains` -- which is what these do -- is clean.")
+    w("    !!")
+    w("    !! So no submodule may name a `p_*` pointer at all: even passing")
+    w("    !! `associated(p_argsort)` as an actual argument reproduces it, though the bare test")
+    w("    !! alone does not. `check_oracle` is folded in here for that reason, not for brevity.")
+    w("    !! `check_source_conventions.py`'s `check_no_submodule_oracle_pointer_call` enforces")
+    w("    !! it, because nothing in CI or a plain `fpm test` builds with `-flto` -- a")
+    w("    !! reintroduced call would sit in the tree until someone next asked for a release")
+    w("    !! build. See CLAUDE.md, \"Compiler & language gotchas\".")
+    w("    subroutine oracle_argsort(keys, nrows, nthreads, proc, perm)")
+    w("        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("        integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("        integer(int64), intent(in) :: nthreads             !! resolved thread count.")
+    w("        character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("        integer(int64), intent(inout) :: perm(:)           !! the permutation to fill.")
+    w("        !")
+    w("        call check_oracle(associated(p_argsort), proc)")
+    w("        call p_argsort(keys, nrows, nthreads, proc, perm)")
+    w("    end subroutine oracle_argsort")
+    w("    !")
+    w("    !> Relay onto `p_partial`; see `oracle_argsort` for why these exist.")
+    w("    subroutine oracle_partial(keys, nrows, count, proc, perm)")
+    w("        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("        integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("        integer(int64), intent(in) :: count                !! leading rows to order.")
+    w("        character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("        integer(int64), intent(inout) :: perm(:)           !! the permutation to fill.")
+    w("        !")
+    w("        call check_oracle(associated(p_partial), proc)")
+    w("        call p_partial(keys, nrows, count, proc, perm)")
+    w("    end subroutine oracle_partial")
+    w("    !")
+    w("    !> Relay onto `p_nth`; see `oracle_argsort` for why these exist.")
+    w("    subroutine oracle_nth(keys, nrows, nth, proc, idx)")
+    w("        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("        integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("        integer(int64), intent(in) :: nth                  !! the rank wanted, 1-based.")
+    w("        character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("        integer(int64), intent(out) :: idx                 !! the row holding that rank.")
+    w("        !")
+    w("        call check_oracle(associated(p_nth), proc)")
+    w("        call p_nth(keys, nrows, nth, proc, idx)")
+    w("    end subroutine oracle_nth")
+    w("    !")
+    w("    !> Relay onto `p_is_sorted`; see `oracle_argsort` for why these exist.")
+    w("    subroutine oracle_is_sorted(keys, nrows, proc, answer)")
+    w("        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("        integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("        character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("        logical, intent(out) :: answer                     !! whether the rows are ordered.")
+    w("        !")
+    w("        call check_oracle(associated(p_is_sorted), proc)")
+    w("        call p_is_sorted(keys, nrows, proc, answer)")
+    w("    end subroutine oracle_is_sorted")
+    w("    !")
+    w("    !> Relay onto `p_runs`; see `oracle_argsort` for why these exist.")
+    w("    subroutine oracle_runs(keys, nrows, nthreads, gek, proc, perm, tie)")
+    w("        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("        integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("        integer(int64), intent(in) :: nthreads             !! resolved thread count.")
+    w("        integer(int64), intent(in) :: gek                  !! engine keys defining a group.")
+    w("        character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("        integer(int64), intent(inout) :: perm(:)           !! the permutation to fill.")
+    w("        integer(c_int8_t), intent(inout) :: tie(:)         !! 1 where a row ties the previous.")
+    w("        !")
+    w("        call check_oracle(associated(p_runs), proc)")
+    w("        call p_runs(keys, nrows, nthreads, gek, proc, perm, tie)")
+    w("    end subroutine oracle_runs")
+    w("    !")
+    w("    !> Relay onto `p_search`; see `oracle_argsort` for why these exist.")
+    w("    subroutine oracle_search(keys, nrows, n_search, upper, proc, pos)")
+    w("        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("        integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("        integer(int64), intent(in) :: n_search             !! rows belonging to the haystack.")
+    w("        logical, intent(in) :: upper                       !! upper rather than lower bound.")
+    w("        character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("        integer(int64), intent(out) :: pos                 !! the insertion position found.")
+    w("        !")
+    w("        call check_oracle(associated(p_search), proc)")
+    w("        call p_search(keys, nrows, n_search, upper, proc, pos)")
+    w("    end subroutine oracle_search")
+    w("    !")
+    w("    !> Relay onto `p_merge`; see `oracle_argsort` for why these exist.")
+    w("    subroutine oracle_merge(keys, nrows, na, proc, perm)")
+    w("        type(sort_key_buf), intent(in), target :: keys(:)  !! the keys, primary first.")
+    w("        integer(int64), intent(in) :: nrows                !! rows each key describes.")
+    w("        integer(int64), intent(in) :: na                   !! rows belonging to the first input.")
+    w("        character(len=*), intent(in) :: proc               !! calling procedure, for messages.")
+    w("        integer(int64), intent(inout) :: perm(:)           !! the permutation to fill.")
+    w("        !")
+    w("        call check_oracle(associated(p_merge), proc)")
+    w("        call p_merge(keys, nrows, na, proc, perm)")
+    w("    end subroutine oracle_merge")
+    w("    !")
     w("    !> Aborts if the C++ engine was selected without being bound.")
     w("    !!")
     w("    !! **Unreachable by construction, and kept anyway.** The only way to clear")
@@ -3404,8 +3516,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_argsort), proc)
-        call p_argsort(keys, nrows, nthreads, proc, perm)
+        call oracle_argsort(keys, nrows, nthreads, proc, perm)
     end procedure drive_engine
     !
     module procedure drive_engine_partial
@@ -3433,8 +3544,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_partial), proc)
-        call p_partial(keys, nrows, count, proc, perm)
+        call oracle_partial(keys, nrows, count, proc, perm)
     end procedure drive_engine_partial
     !
     module procedure engine_nth_index
@@ -3456,8 +3566,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_nth), proc)
-        call p_nth(keys, nrows, nth, proc, idx)
+        call oracle_nth(keys, nrows, nth, proc, idx)
     end procedure engine_nth_index
     !
     module procedure resolve_count
@@ -3495,8 +3604,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_is_sorted), proc)
-        call p_is_sorted(keys, nrows, proc, answer)
+        call oracle_is_sorted(keys, nrows, proc, answer)
     end procedure engine_is_sorted
     !
     module procedure check_rank
@@ -4066,8 +4174,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_runs), proc)
-        call p_runs(keys, nrows, nthreads, gek, proc, perm, tie)
+        call oracle_runs(keys, nrows, nthreads, gek, proc, perm, tie)
     end procedure engine_build_runs
     !
     module procedure drive_engine_grouped
@@ -4127,8 +4234,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_search), proc)
-        call p_search(keys, nrows, n_search, upper, proc, pos)
+        call oracle_search(keys, nrows, n_search, upper, proc, pos)
     end procedure engine_search
     !
     module procedure engine_merge
@@ -4155,8 +4261,7 @@ contains
         ! is the Fortran branch above, and a build that never imports the oracle never
         ! compiles it. check_oracle aborts rather than falling back -- a silent fallback would
         ! make the A/B conformance tests compare the Fortran engine against itself and pass.
-        call check_oracle(associated(p_merge), proc)
-        call p_merge(keys, nrows, na, proc, perm)
+        call oracle_merge(keys, nrows, na, proc, perm)
     end procedure engine_merge
     !
 end submodule parquet_sorting_keys ! GCOVR_EXCL_LINE''')

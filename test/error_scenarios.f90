@@ -1748,6 +1748,12 @@ program error_scenarios
         call scenario_codegen_range_out_of_range()
     case ("codegen_missing_file_column")
         call scenario_codegen_missing_file_column()
+    case ("codegen_init_exact_refuses")
+        call scenario_codegen_init_exact_refuses()
+    case ("codegen_init_exact_control")
+        call scenario_codegen_init_exact_control()
+    case ("codegen_computed_roundtrip")
+        call scenario_codegen_computed_roundtrip()
     case ("reindex_trusted_length_mismatch")
         call scenario_reindex_trusted_length_mismatch()
     case ("permute_assume_valid_short_perm")
@@ -13958,8 +13964,12 @@ contains
 
     !> Writes the fixture the generated-table scenarios open, matching table_types/maml_example4.maml's
     !! file columns. Kept minimal: these scenarios are about the guards, not the data.
-    subroutine write_codegen_scenario_fixture(fname)
+    subroutine write_codegen_scenario_fixture(fname, crd_float64)
         character(len=*), intent(in) :: fname !! file to write.
+        !> Present: store `crd` as float64 carrying these values, instead of the float32 the
+        !! schema declares. That is what makes the declared narrowing lossy, for the `exact=`
+        !! scenarios; every other caller omits it and gets a file matching the schema exactly.
+        real(real64), intent(in), optional :: crd_float64(:,:)
         type(parquet_writer) :: w
         integer(int64) :: uberid(3)
         integer(int32) :: idx(3), counts(2, 3)
@@ -13999,7 +14009,11 @@ contains
         call parquet_write_column(w, "name", name)
         call parquet_write_column(w, "ra", ra)
         call parquet_write_column(w, "dec", dec)
-        call parquet_write_column(w, "crd", crd)
+        if (present(crd_float64)) then
+            call parquet_write_column(w, "crd", crd_float64)
+        else
+            call parquet_write_column(w, "crd", crd)
+        end if
         call parquet_write_column(w, "counts", counts)
         call parquet_write_column(w, "passed", passed)
         call parquet_write_column(w, "obsdate", obsdate)
@@ -14056,6 +14070,63 @@ contains
 
     !> A generated type declares its columns up front, so opening it on a file that lacks one is a
     !! mismatch between schema and data -- caught by %init, not by the first accessor call.
+    !> `%init(exact=.true.)` refuses a value that would not survive the declared kind conversion.
+    !!
+    !! `maml_example4.maml` declares `crd` as float32; writing it as float64 with a value no
+    !! float32 can represent makes the narrowing lossy for that value in particular. Without
+    !! `exact=` the same file opens with a warning, which is what
+    !! `codegen_init_exact_control` asserts -- and that control is the whole point: an abort test
+    !! alone would pass just as happily against an `%init` that refused every narrowing, or that
+    !! refused this file for some entirely different reason.
+    subroutine scenario_codegen_init_exact_refuses()
+        type(parquet_table_test) :: t
+        call write_codegen_exact_fixture("test_run/es_codegen_exact.parquet")
+        call t%init("test_run/es_codegen_exact.parquet", exact=.true.)   ! -> aborts
+        print '(a,i0)', "unexpectedly opened with exact=.true. over a lossy value, ncols=", t%ncols()
+    end subroutine scenario_codegen_init_exact_refuses
+
+    !> The negative control for `codegen_init_exact_refuses`: the same file, the same declaration,
+    !! no `exact=`. Must warn and succeed, exit 0.
+    subroutine scenario_codegen_init_exact_control()
+        type(parquet_table_test) :: t
+        real(real32), pointer :: p(:,:)
+        call write_codegen_exact_fixture("test_run/es_codegen_exact_ctl.parquet")
+        call t%init("test_run/es_codegen_exact_ctl.parquet")
+        p => t%crd()
+        print '(a,i0,a,i0)', "opened without exact=: ncols=", t%ncols(), " width=", size(p, 1)
+    end subroutine scenario_codegen_init_exact_control
+
+    !> Writes the fixture both `exact=` scenarios open: `maml_example4.maml`'s columns, but with
+    !! `crd` stored as float64 carrying a value no float32 can hold exactly.
+    subroutine write_codegen_exact_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write.
+        real(real64) :: crd64(3, 3)
+        integer :: i, e
+        do i = 1, 3
+            do e = 1, 3
+                crd64(e, i) = 1.0000000001_real64 * real(e, real64)
+            end do
+        end do
+        call write_codegen_scenario_fixture(fname, crd_float64=crd64)
+    end subroutine write_codegen_exact_fixture
+
+    !> A generated table writes its `source: computed` column out like any other, so the file it
+    !! produces has a column the schema declares as NOT coming from the file -- and `%init` on that
+    !! file aborts. Documented on doc/pages/utilities/generated-tables.md under "Writing one out".
+    !!
+    !! **If this refusal is ever lifted** -- by teaching `%bind_predefined` to adopt an existing
+    !! column whose kind and width match the declaration -- this scenario does not simply get
+    !! deleted: it becomes an in-process test asserting that the round trip SUCCEEDS and that
+    !! `flux`'s values survived it, and the page's "Writing one out" section has to change with it.
+    subroutine scenario_codegen_computed_roundtrip()
+        type(parquet_table_test) :: t
+        call t%init_empty(3)
+        call t%set("uberid", [1_int64, 2_int64, 3_int64])
+        call parquet_write_table(t, "test_run/es_codegen_roundtrip.parquet", overwrite=.true.)
+        call t%init("test_run/es_codegen_roundtrip.parquet")   ! the file now HAS flux -> aborts
+        print '(a,i0)', "unexpectedly reopened a generated table's own output, ncols=", t%ncols()
+    end subroutine scenario_codegen_computed_roundtrip
+
     subroutine scenario_codegen_missing_file_column()
         type(parquet_table_test) :: t
         type(parquet_writer) :: w

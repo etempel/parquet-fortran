@@ -35,7 +35,8 @@ contains
             new_unittest("maml_example2 writer produces a matching sidecar .maml", &
                 test_maml_example2_sidecar_keyarray), &
             new_unittest("doc/pages/types/date-time.md datetime_quickstart example", test_datetime_quickstart_example), &
-            new_unittest("doc/pages/operating/performance.md write_parquet_qc_example", test_performance_qc_example), &
+            new_unittest("doc/pages/schema/combined-example.md write_parquet_qc_example", &
+                test_combined_example_qc_example), &
             new_unittest("doc/pages/schema/quality-control.md qc_read_example", test_qc_read_example), &
             new_unittest("doc/pages/types/supported-data-types.md null_values_example", &
                 test_null_values_example), &
@@ -277,6 +278,7 @@ contains
         integer(int64) :: nrows
         integer(int32), allocatable :: id0_read(:)
         integer(int64), allocatable :: idarr_read(:,:)
+        character(len=:), allocatable :: meta_runtime, meta_from_maml, meta_absent
 
         ! Parse column definitions + table metadata from the MAML file.
         call parquet_parse_maml("schemas/maml_example.maml", schema)
@@ -303,10 +305,26 @@ contains
         allocate(id0_read(nrows), idarr_read(2, nrows))
         call parquet_read_column(reader, "id0", id0_read)
         call parquet_read_column(reader, "idarr", idarr_read)
+        ! The page promises the file carries BOTH the key added at run time and the MAML's
+        ! own table metadata. Read one of each back, plus a key that is in neither, so the
+        ! two positive checks cannot pass against a getter that answers for everything.
+        call parquet_get_metadata(reader, "generated_by", meta_runtime, default="<missing>")
+        call parquet_get_metadata(reader, "test_scalar", meta_from_maml, default="<missing>")
+        call parquet_get_metadata(reader, "no_such_key", meta_absent, default="<absent>", warn=.false.)
         call parquet_close_reader(reader)
 
         call check(error, nrows == 3_int64 .and. all(id0_read == id0) .and. all(idarr_read == idarr), &
             "README combined example did not round-trip the 'id0'/'idarr' columns correctly")
+        if (allocated(error)) return
+        call check(error, meta_runtime == "write_parquet_combined_example", &
+            "the metadata key added at run time with schema%add_metadata did not reach the file")
+        if (allocated(error)) return
+        call check(error, meta_from_maml == "8.1", &
+            "the source MAML's own keyarray: metadata did not reach the file")
+        if (allocated(error)) return
+        call check(error, meta_absent == "<absent>", &
+            "negative control: a key present in neither the MAML nor the runtime additions must " // &
+            "fall back to default=, otherwise the two checks above prove nothing")
     end subroutine test_readme_combined_example
 
     !> Mirrors doc/pages/schema/building-schema-in-code.md's `build_schema` program: a schema built
@@ -467,13 +485,6 @@ contains
             "null_values_example: null_value= read did not round-trip the three non-Null values")
     end subroutine test_null_values_example
     !
-    !> doc/pages/operating/performance.md's "write_parquet_qc_example": builds a qc-maml
-    !> directly via schema%maml%name/schema%maml%lines (rather than a file or
-    !> add_col_qc), writes an out-of-range column with is_valid (one Null) and
-    !> qc=.true./compression="zstd", then reads it back and checks the
-    !> round-tripped values/nulls -- the WARNING itself is not asserted on
-    !> (test-drive can't capture stdout), only that the write/read still
-    !> succeeds and round-trips correctly despite the qc violation.
     !> Mirrors doc/pages/schema/quality-control.md's `qc_read_example` program, the page's one
     !> complete runnable example. Same data, same qc-maml, same qc_soft=.true. read; only the file
     !> paths differ, so that this test owns them (tests in a suite run concurrently, and two sharing
@@ -530,10 +541,22 @@ contains
             "the in-range control column must round-trip identically under the same qc schema")
     end subroutine test_qc_read_example
 
-    subroutine test_performance_qc_example(error)
+    !> doc/pages/schema/combined-example.md's "write_parquet_qc_example" (the page's
+    !> "Nulls, quality control and compression together" section): builds the schema in
+    !> code with schema%init/schema%add_field, declaring the qc bounds through add_field's
+    !> qc_min/qc_max arguments, writes an out-of-range column with is_valid (one Null) and
+    !> qc=.true./compression="zstd", then reads it back and checks the round-tripped
+    !> values/nulls -- the WARNING itself is not asserted on (test-drive can't capture
+    !> stdout), only that the write/read still succeeds and round-trips correctly despite
+    !> the qc violation.
+    !>
+    !> qc=.true. is deliberately redundant here and is kept to mirror the page: qc defaults
+    !> to present(schema), so the checks are already on. Do not "tidy" it away on either
+    !> side without changing the page's prose, which explains exactly that.
+    subroutine test_combined_example_qc_example(error)
         use iso_fortran_env, only: int32
         type(error_type), allocatable, intent(out) :: error
-        character(len=*), parameter :: out_file = "test_run/readme_performance_qc_example.parquet"
+        character(len=*), parameter :: out_file = "test_run/combined_example_qc_example.parquet"
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
@@ -542,17 +565,8 @@ contains
         logical :: is_valid(4) = [.true., .true., .false., .true.]           ! row 3 will be written as Null
         logical :: is_valid_read(4)
 
-        schema%maml%name = "qc_example.maml"
-        schema%maml%lines = [character(len=40) :: &
-            "table: qc_example_table", &
-            "fields:", &
-            "- name: ra", &
-            "  data_type: int32", &
-            "  qc:", &
-            "    min: '>= 0'", &
-            "    max: '< 360'" ]
-
-        call parquet_parse_maml(schema)
+        call schema%init("qc_example_table")
+        call schema%add_field("ra", "int32", qc_min=">= 0", qc_max="< 360")
 
         call parquet_open_writer(writer, out_file, schema, qc=.true., compression="zstd")
         call parquet_write_column(writer, "ra", ra, is_valid=is_valid)
@@ -567,12 +581,12 @@ contains
         ! passed on read, that slot comes back as the safe default (0), not the original
         ! ra(3) -- see doc/pages/types/supported-data-types.md's "Null values" section.
         call check(error, all(is_valid_read .eqv. is_valid), &
-            "performance.md qc example did not round-trip the 'ra' column's is_valid mask correctly")
+            "combined-example.md qc example did not round-trip the 'ra' column's is_valid mask correctly")
         if (allocated(error)) return
         call check(error, ra_read(1) == ra(1) .and. ra_read(2) == ra(2) .and. ra_read(3) == 0_int32 .and. &
             ra_read(4) == ra(4), &
-            "performance.md qc example did not round-trip the 'ra' column values correctly")
-    end subroutine test_performance_qc_example
+            "combined-example.md qc example did not round-trip the 'ra' column values correctly")
+    end subroutine test_combined_example_qc_example
     !
     !> doc/pages/types/string-columns.md's "strings_quickstart" example: appends two
     !> strings, a null, and an empty string to a parquet_string_column, then

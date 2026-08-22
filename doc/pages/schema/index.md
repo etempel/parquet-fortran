@@ -16,5 +16,5 @@ worked example that combines all of it.
   the same schema without a file on disk.
 - [Quality control](quality-control.html) — `qc: min:`/`max:`/`miss:` bounds, write-side
   enforcement, read-side checking, and building a qc-maml in code.
-- [Combined example](combined-example.html) — MAML schema, vector columns, metadata, qc and
-  compression in one complete program.
+- [Combined examples](combined-example.html) — two complete programs: one driving a MAML schema with
+  a vector column, a dropped column and runtime metadata; one combining Nulls, qc and compression.

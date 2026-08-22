@@ -38,10 +38,10 @@ point in the library.
   or in code, with qc bounds, ending on a worked example combining all of it.
 - [Whole tables in memory](tables/index.html) — the high-level `parquet_table` layer: a whole
   file as one object, columns by name, read only when touched.
-- [Utilities and code generation](utilities/index.html) — sorting for plain arrays, generated
-  table types, and embedding your own MAML schemas.
-- [Operating the library](operating/index.html) — errors, troubleshooting, thread safety,
-  performance and settings.
+- [Utilities and code generation](utilities/index.html) — sorting for plain arrays, reproducible
+  random numbers, generated table types, and embedding your own MAML schemas.
+- [Operating the library](operating/index.html) — choosing a module to import, errors,
+  troubleshooting, thread safety, performance and settings.
 
 ### Every page at a glance
 
@@ -66,7 +66,7 @@ All 23 pages, in reading order. (This list, each group's own page list and the
 - [The MAML metadata format](schema/maml-format.html)
 - [Building a schema in code with `schema%init`/`schema%add_field`](schema/building-schema-in-code.html)
 - [Quality control](schema/quality-control.html)
-- [Combined example: MAML schema, vector columns and metadata](schema/combined-example.html)
+- [Combined examples: schemas, vector columns, metadata and quality control](schema/combined-example.html)
 
 **Whole tables in memory**
 

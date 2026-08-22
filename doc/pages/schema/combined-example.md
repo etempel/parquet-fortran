@@ -1,10 +1,36 @@
 ---
-title: Combined example: MAML schema, vector columns and metadata
+title: Combined examples: schemas, vector columns, metadata and quality control
 ---
 
 ## MAML schema, vector columns and metadata
 
-This example ties together MAML-driven column definitions, a vector column, dropping an optional column at runtime, and adding extra table metadata not present in the MAML file.
+This example ties together MAML-driven column definitions, a vector column, dropping an optional
+column at runtime, and adding extra table metadata not present in the MAML file.
+
+Dropping the columns you have no data for is a requirement rather than tidiness:
+`parquet_close_writer` checks that every *enabled* column was actually written, and otherwise fails
+with `parquet_close_writer: missing write for enabled column: <name>`. The rule is set out in full
+under [writing parquet files](../io/writing.html).
+
+The written file carries the MAML's own table metadata as well as the runtime key added here — its
+header keys (`table:`, `author:`, ...) and every `keyarray:` entry are all readable afterwards with
+`parquet_get_metadata`.
+
+The schema file is this repository's own `schemas/maml_example.maml`, which declares thirteen
+fields. Only the two the program writes matter here:
+
+```yaml
+table: input_table
+fields:
+- name: id0
+  data_type: int32
+- name: idarr
+  data_type: int64
+  col_size: 2
+```
+
+`col_size: 2` is what makes `idarr` a vector column two elements wide, and so what makes the
+program's `idarr(2, 3)` mean two elements across three rows.
 
 ```fortran
 program write_parquet_combined_example
@@ -41,7 +67,13 @@ end program write_parquet_combined_example
 
 ## Nulls, quality control and compression together
 
-This ties together `is_valid` (writing a genuine Null), `qc=.true.` (range-check warnings), and a non-default compression codec in one small program:
+This ties together `is_valid` (writing a genuine Null), qc range-check warnings, and a non-default
+compression codec in one small program.
+
+`qc=.true.` is passed explicitly below so the intent is visible at the call site, but it is not what
+switches the checks on: qc is already active whenever `parquet_open_writer` is given a `schema=`.
+Pass `qc=.false.` to turn it off. See [quality control](quality-control.html#write-side-enforcement)
+for what each check does.
 
 ```fortran
 program write_parquet_qc_example
@@ -57,17 +89,8 @@ program write_parquet_qc_example
     logical :: is_valid(4) = [.true., .true., .false., .true.]           ! row 3 will be written as Null
     logical :: is_valid_read(4)
 
-    schema%maml%name = "qc_example.maml"
-    schema%maml%lines = [character(len=40) :: &
-        "table: qc_example_table", &
-        "fields:", &
-        "- name: ra", &
-        "  data_type: int32", &
-        "  qc:", &
-        "    min: '>= 0'", &
-        "    max: '< 360'" ]
-
-    call parquet_parse_maml(schema)   ! %maml was populated directly, so it needs parsing
+    call schema%init("qc_example_table")
+    call schema%add_field("ra", "int32", qc_min=">= 0", qc_max="< 360")
 
     call parquet_open_writer(writer, "data.parquet", schema, qc=.true., compression="zstd")
     call parquet_write_column(writer, "ra", ra, is_valid=is_valid)
@@ -79,3 +102,16 @@ program write_parquet_qc_example
     call parquet_close_reader(reader)
 end program write_parquet_qc_example
 ```
+
+The WARNING the write prints in full:
+
+```
+WARNING: qc violation for column 'ra': declared min >= 0, max < 360, data range [10, 400], 1 of 3 valid element(s) out of range
+```
+
+Note the count: **1 of 3**, not 1 of 4. The Null written at row 3 is not a value, so the range check
+neither passes nor fails it — it is simply not among the elements checked.
+
+`is_valid_read` comes back as the mask that was written, so row 3 is reported Null. The *value* slot
+beside it, `ra_read(3)`, holds `0` — not the original `90` — because no `null_value=` was passed on
+the read; see [Null values](../types/supported-data-types.html#null-values).

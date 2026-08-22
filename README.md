@@ -98,7 +98,7 @@ link = ["arrow", "parquet"]
 
 4. Build/test your project with `fpm test`.
 
-> **On the link list:** your project lists `link = ["arrow", "parquet"]`, whereas `parquet-fortran`'s own `fpm.toml` lists `["arrow", "arrow_compute", "parquet"]`. The two differ intentionally — `arrow_compute` (used for read-side statistics and qc min/max) is propagated to you automatically by fpm, and the C++ runtime (`-lstdc++` on Linux/GCC, `-lc++` on macOS/Clang) comes in through `FPM_LDFLAGS` rather than the `link` list, not through a `"c++"` entry here. See [Environment variables](#environment-variables) and the guide's [Troubleshooting](doc/pages/operating/troubleshooting.md).
+> **On the link list:** your project lists `link = ["arrow", "parquet"]`, whereas `parquet-fortran`'s own `fpm.toml` lists `["arrow", "arrow_compute", "parquet"]`. The two differ intentionally — `arrow_compute` (used for read-side statistics and for the row-filter/sort kernels) is propagated to you automatically by fpm, and the C++ runtime (`-lstdc++` on Linux/GCC, `-lc++` on macOS/Clang) comes in through `FPM_LDFLAGS` rather than the `link` list, not through a `"c++"` entry here. See [Environment variables](#environment-variables) and the guide's [Troubleshooting](doc/pages/operating/troubleshooting.md).
 
 ## Important behavior
 

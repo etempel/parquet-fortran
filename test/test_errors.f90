@@ -736,6 +736,10 @@ contains
                 test_validate_qc_min_wrong_operator_aborts), &
             new_unittest("qc: max value with a reversed (>/>=) operator aborts", &
                 test_validate_qc_max_wrong_operator_aborts), &
+            new_unittest("qc: an unrecognized miss: value aborts, naming the value", &
+                test_validate_qc_miss_bad_value_aborts), &
+            new_unittest("qc: every legal miss: form still validates (control)", &
+                test_validate_qc_miss_valid_values_accepted), &
             new_unittest("qc-maml: min value with a reversed (</<=) operator aborts", &
                 test_qc_maml_min_wrong_operator_aborts), &
             new_unittest("qc-maml: max value with a reversed (>/>=) operator aborts", &
@@ -6076,6 +6080,23 @@ contains
         call check_scenario_exit_status(error, "validate_qc_min_wrong_operator", expect_abort=.true., &
             failure_message="qc: min: with a reversed (</<=) operator was expected to error stop")
     end subroutine test_validate_qc_min_wrong_operator_aborts
+
+    subroutine test_validate_qc_miss_bad_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "validate_qc_miss_bad_value", &
+            expect_abort=.true., &
+            failure_message="an unrecognized qc: miss: value was expected to error stop, naming the value", &
+            required_stderr="invalid qc: miss value 'none' (expected Null/NA or empty)")
+    end subroutine test_validate_qc_miss_bad_value_aborts
+
+    !> Negative control for the test above: rejecting every miss: value would pass it.
+    subroutine test_validate_qc_miss_valid_values_accepted(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status(error, "validate_qc_miss_valid_values", expect_abort=.false., &
+            failure_message="the legal qc: miss: forms (Null/null/NA/na/empty/absent) must all still validate")
+    end subroutine test_validate_qc_miss_valid_values_accepted
 
     subroutine test_validate_qc_max_wrong_operator_aborts(error)
         type(error_type), allocatable, intent(out) :: error

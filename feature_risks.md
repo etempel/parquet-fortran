@@ -191,6 +191,7 @@ something a reader is expected to have.
 | [Risk-129](#risk-129--for-a-given-libm-is-violated-inside-one-program-by-a-vector-variant) | "For a given libm" is violated INSIDE one program, by a vector variant | 4 — covered |
 | [Risk-131](#risk-131--the-row-samples-mask-is-indexed-by-live-row-instead-of-physical-row) | The row sample's mask is indexed by LIVE row instead of PHYSICAL row | 4 — covered |
 | [Risk-130](#risk-130--a-generator-that-derives-through-libm-emits-a-different-table-on-every-machine) | A GENERATOR that derives through libm emits a different table on every machine | 4 — covered |
+| [Risk-132](#risk-132--an-unrecognised-qc-miss-value-resolves-to-a-logical-and-means-the-opposite) | An unrecognised `qc: miss:` value resolves to a logical, and means the OPPOSITE | 4 — covered |
 
 ---
 
@@ -198,7 +199,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-132**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-133**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -5740,3 +5741,46 @@ constant is `...088`.
 - **A consumer of the table must take the ROUNDED form.** `generate_random_golden_vectors.py`'s
   Ziggurat oracle calls `as_floats()`, not `tables()`: the Fortran holds the rounded constants, so
   an oracle built on the `Decimal`s would model a ziggurat the library does not have.
+
+### Risk-132 — An unrecognised `qc: miss:` value resolves to a logical, and means the OPPOSITE
+
+**Covered** by `validate_qc_miss_bad_value` (`test/error_scenarios.f90`, wrapper
+`test_validate_qc_miss_bad_value_aborts` in `test/test_errors.f90`), which asserts the abort *and*
+that stderr names the offending text — with `validate_qc_miss_valid_values` as its negative control,
+because a check that rejected every `miss:` would pass the abort test on its own. **Verified by
+mutation, in both directions**: disabling the check makes the abort test fail while the control still
+passes; making the check reject unconditionally makes the control fail while the abort test still
+passes.
+
+`qc: miss:` has exactly three legal forms — empty, `Null`, `NA` (the latter two case-insensitively) —
+and **four** places accept one: `parquet_read_maml` (a schema-authoring MAML),
+`parquet_parse_qc_maml` (a qc-maml), `parquet_schema%add_field`'s `qc_miss` argument, and
+`parquet_maml_file%add_col_qc`'s fourth field. Three of them validated from the start. The fourth,
+`parquet_read_maml`, resolved the text straight to a logical with
+`qc_allow_null = (lower == "null" .or. lower == "na")` and no `else`.
+
+**Why it is quiet, and why it is worse than an ordinary missing check.** The failure is not "the
+value is ignored" — it is **inverted**. Anything unrecognised landed on `.false.`, which is the one
+state that means *Nulls are NOT expected*, so a near-miss for `Null` — `miss: none`, `miss: nil`,
+`miss: NULLS` — switched Null validation **on** for a column whose author was declaring that Nulls
+are fine. Nothing aborted; the only symptom was a WARNING on a later write, and that WARNING said
+*"qc: miss: is declared empty"*, describing a MAML the user had not written. A user comparing the
+message against their own schema would find no `miss:` declared empty anywhere in it.
+
+**What this still forbids.**
+
+- **Do not resolve a `miss:` to a logical before it has been validated.** The parser now keeps the
+  declared text in `parquet_column_type%qc_miss_raw` for no other purpose than letting
+  `parquet_validate_field_rules` name it; `qc_allow_null` remains what every enforcement path reads.
+  Dropping the raw text to save a component reintroduces the defect, because the validator then has
+  nothing to check and nothing to quote.
+- **A fifth entry point must validate too.** The rule is "all four agree", and it is a rule about the
+  *set*, not about any one parser — which is exactly how one of them stayed wrong while the other
+  three were right.
+- **`qc_allow_null`'s `.true.` default stays load-bearing** (see its own doc-comment): "not declared"
+  and "declared `Null`/`NA`" are deliberately the same state, and only an explicit *empty* value sets
+  `.false.`. The validation added here must never be read as licence to normalise that default.
+- **The check is deliberately NOT restricted by `data_type`**, unlike the `min:`/`max:` rules beside
+  it. A `miss:` is meaningful on every type including `boolean`, whose write path calls
+  `parquet_check_qc_miss` exactly as the numeric ones do — see the boolean half of this page's
+  neighbouring guidance in `doc/pages/schema/quality-control.md`.

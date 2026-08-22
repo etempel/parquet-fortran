@@ -293,6 +293,7 @@ contains
         type(parquet_column_type), intent(in) :: col !! one parsed field.
         character(len=:), allocatable, intent(inout) :: errors !! accumulating "...; "-joined message.
         character(len=:), allocatable :: cur_name
+        character(len=:), allocatable :: qc_miss_lower !! scratch (lower-cased qc: miss: text).
         real(real64) :: qc_bound_value
 
         cur_name = trim(col%name)
@@ -340,6 +341,26 @@ contains
                 errors = errors // "field '" // cur_name // "' has a qc: max value with a '" // &
                     trim(col%qc_max_op) // "' operator; max: accepts only <= or < " // &
                     "(use min: for a lower bound); "
+            end if
+        end if
+
+        ! qc: miss: accepts exactly three forms -- empty, Null, or NA (the latter two
+        ! case-insensitively). Anything else is a typo, and resolving it silently (as the parser
+        ! once did) makes it mean the OPPOSITE of what its author almost certainly intended: an
+        ! unrecognized value used to land on "Nulls are not expected", switching Null validation
+        ! ON for a column whose author was trying to declare that Nulls are fine. Checked here for
+        ! every data_type, boolean included -- unlike the min:/max: rules above, a miss: is
+        ! meaningful on every type (see parquet_check_qc_miss, which the logical write path calls
+        ! exactly like the numeric ones). The read side has always rejected the same text in
+        ! parquet_parse_qc_maml; this is the write side catching up, so that all four entry points
+        ! into a qc: miss: agree. See feature_risks.md.
+        if (allocated(col%qc_miss_raw)) then
+            if (len_trim(col%qc_miss_raw) > 0) then
+                call parquet_to_lower(col%qc_miss_raw, qc_miss_lower)
+                if (.not. (trim(qc_miss_lower) == "null" .or. trim(qc_miss_lower) == "na")) then
+                    errors = errors // "field '" // cur_name // "' has an invalid qc: miss value '" // &
+                        trim(col%qc_miss_raw) // "' (expected Null/NA or empty); "
+                end if
             end if
         end if
 
@@ -1726,6 +1747,11 @@ contains
                 case ("miss")
                     call parquet_unquote(cvalue, tuq44)
                     call parquet_to_lower(tuq44, tlo44)
+                    ! Record the text as declared so parquet_validate_field_rules can reject (and
+                    ! name) anything that is not empty/Null/NA -- resolving straight to a logical
+                    ! here would silently turn a typo such as "miss: none" into an empty miss:,
+                    ! i.e. into Null validation being switched ON. See feature_risks.md.
+                    tmp(n)%qc_miss_raw = trim(adjustl(tuq44))
                     tmp(n)%qc_allow_null = (trim(tlo44) == "null" .or. trim(tlo44) == "na")
                     cycle
                 case default

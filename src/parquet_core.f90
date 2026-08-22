@@ -128,6 +128,11 @@ module parquet_core
         character(len=:), allocatable :: qc_min_raw !! The qc: min: bound text, operator prefix already stripped/
         !! trimmed; numeric for int32/int64/float32/float64, literal for string.
         character(len=:), allocatable :: qc_max_raw !! qc: max: bound text, same convention as qc_min_raw.
+        character(len=:), allocatable :: qc_miss_raw !! The qc: miss: value exactly as declared (unquoted, trimmed),
+        !! kept ONLY so parquet_validate_field_rules can name the offending text when it is not one of the three
+        !! legal forms; qc_allow_null below is what every enforcement path actually reads. Left unallocated when
+        !! the field declares no qc: miss: at all, which is what distinguishes "not declared" from "declared
+        !! empty" here -- qc_allow_null alone cannot, since both leave it .true./.false. by value only.
         logical :: qc_allow_null = .true. !! Whether Nulls are an expected part of this field's output, in which
         !! case parquet_write_column/parquet_open_reader's qc: enforcement never warns/errors about them.
         !! .true. for a declared qc: miss: Null/NA AND -- this is what the default carries -- for a field that
@@ -614,7 +619,7 @@ module parquet_core
     !> Read-time quality control declared in CODE rather than in a MAML file: one column per %add
     !> call, in exactly the compact "col, min, max, miss" string parquet_schema%add_col_qc already
     !> takes, so there is one read-time-QC grammar in this library rather than two. See
-    !> "Declaring qc in code" in doc/pages/schema/quality-control.md for the field syntax -- the
+    !> "Building a qc-maml in code" in doc/pages/schema/quality-control.md for the field syntax -- the
     !> operator prefixes (>, >=, <, <=) and the Null/NA/empty miss: convention are inherited from
     !> %add_col_qc verbatim.
     !>

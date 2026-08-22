@@ -776,6 +776,10 @@ program error_scenarios
         call scenario_validate_qc_min_wrong_operator()
     case ("validate_qc_max_wrong_operator")
         call scenario_validate_qc_max_wrong_operator()
+    case ("validate_qc_miss_bad_value")
+        call scenario_validate_qc_miss_bad_value()
+    case ("validate_qc_miss_valid_values")
+        call scenario_validate_qc_miss_valid_values()
     case ("qc_maml_min_wrong_operator")
         call scenario_qc_maml_min_wrong_operator()
     case ("qc_maml_max_wrong_operator")
@@ -8169,6 +8173,68 @@ contains
 
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_qc_max_wrong_operator
+
+    !> qc: miss: accepts exactly empty, Null or NA (the latter two
+    !> case-insensitively). Anything else is rejected by parquet_validate_maml,
+    !> naming the offending text. This matters more than a syntax check usually
+    !> would: before this was enforced, an unrecognized value resolved silently
+    !> to "Nulls are NOT expected", so a typo such as "miss: none" switched Null
+    !> validation ON for a column whose author was declaring the opposite. Its
+    !> negative control is scenario_validate_qc_miss_valid_values, which must
+    !> keep every legal form working. See feature_risks.md.
+    subroutine scenario_validate_qc_miss_bad_value()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "qc_miss_bad_value.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    miss: none" ]
+
+        call parquet_validate_maml(maml)
+    end subroutine scenario_validate_qc_miss_bad_value
+
+    !> Negative control for scenario_validate_qc_miss_bad_value: every LEGAL
+    !> qc: miss: form must still validate and parse. Without this, that
+    !> scenario passes just as happily against a check that rejects every
+    !> miss: value, including the three the format actually defines.
+    !> Exits cleanly (exit 0) and prints nothing.
+    subroutine scenario_validate_qc_miss_valid_values()
+        type(parquet_schema) :: schema
+
+        schema%maml%name = "qc_miss_valid_values.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    miss: Null", &
+            "- name: b", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    miss: null", &
+            "- name: c", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    miss: NA", &
+            "- name: d", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    miss: na", &
+            "- name: e", &
+            "  data_type: int32", &
+            "  qc:", &
+            "    miss:", &
+            "- name: f", &
+            "  data_type: int32" ]
+
+        call parquet_validate_maml(schema%maml)
+        call parquet_parse_maml(schema)
+    end subroutine scenario_validate_qc_miss_valid_values
 
     !> Not an error scenario: qc=.true. only ever prints a WARNING and lets
     !> the write proceed. This scenario exits cleanly (exit 0); the

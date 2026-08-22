@@ -225,6 +225,8 @@ scenarios=(
     "validate_qc_min_out_of_int32_range:1"
     "validate_qc_min_wrong_operator:1"
     "validate_qc_max_wrong_operator:1"
+    "validate_qc_miss_bad_value:1"
+    "validate_qc_miss_valid_values:0"
     "qc_maml_min_wrong_operator:1"
     "qc_maml_max_wrong_operator:1"
     "add_col_qc_min_reversed_operator:1"

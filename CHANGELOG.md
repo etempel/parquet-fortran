@@ -1295,6 +1295,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unrecognised `qc: miss:` value in a schema MAML is now rejected instead of silently meaning
+  the opposite.** `qc: miss:` accepts empty, `Null` or `NA` (the latter two case-insensitively).
+  A qc-maml, `schema%add_field`'s `qc_miss=` and `schema%add_col_qc` have always rejected anything
+  else, but the schema-authoring MAML parser resolved the text straight to a flag with no
+  validation — so a near-miss such as `miss: none` or `miss: NULLS` landed on *"Nulls are not
+  expected"* and switched Null checking **on** for a column whose author was declaring that Nulls
+  are fine. Nothing announced it; the only symptom was a later write warning
+  *"qc: miss: is declared empty"*, describing a MAML nobody had written. `parquet_validate_maml`
+  now fails such a field and names the offending value. A MAML carrying one is newly rejected —
+  it was already being read as the opposite of what it says.
+
 - **`parquet_close_reader(print_stat=.true.)` no longer kills a process whose IEEE traps are
   unmasked.** The per-column report's min/max comes from Arrow's `min_max` kernel, which raises the
   IEEE invalid-operation flag internally on any non-empty `float32`/`float64` array — harmlessly on

@@ -304,13 +304,16 @@ than obeying a `threads=` it cannot use profitably; a sort that reports one thre
 is behaving correctly.
 
 `parquet_set_sort_counting_path(flag)` and `parquet_set_sort_counting_bucket_limit(n)` control the
-integer counting fast path — a second sort implementation that a single, null-free integer key with
-a narrow value range can use instead of the comparator. It is what stops a low-cardinality integer
-sort costing many times what it should.
+integer counting fast path — a second sort implementation that a single integer key with a narrow
+value range can use instead of the comparator. It is what stops a low-cardinality integer sort
+costing many times what it should.
 
-The full rule, in this order: **the counting path is used when the flag is on, *and* the key's value
-range fits the bucket limit, *and* the key is a single null-free integer key.** Turning the flag off
-overrides the limit; raising the limit does nothing while the flag is off.
+These two knobs are a veto, not the whole rule: **the counting path is used only when the flag is
+on *and* the key's value range fits the bucket limit** — but clearing both is not sufficient, since
+the engine also weighs the range against the row count and against the size of the team it was
+asked for. Turning the flag off overrides the limit; raising the limit does nothing while the flag
+is off. **Nulls are not a disqualifier** — a null row's slot is skipped when the range is measured,
+so a null-bearing key reaches this path like any other.
 
 Two things about the limit specifically:
 
@@ -338,26 +341,31 @@ multi-key sort declines when one of its string keys holds a value longer than 64
 pass that orders a string key finishes long shared prefixes with an insertion sort whose cost is
 quadratic in the size of a tied run. A single-key string sort has no such limit.
 
-**This knob governs the pure-Fortran sort engine, which is not yet the default one** — until it
-becomes so, setting it changes nothing about an ordinary sort. Everything below describes what it
-will control, and is measured rather than projected.
-
 **Unlike the counting path, this one has a real reason to turn off, and it is memory.** The radix
 path needs up to about **32 bytes of scratch per row** — four `int64` buffers for a single-key sort,
 three for a multi-key one — where the comparison sort needs none beyond the permutation itself.
-Measured peak resident set, radix on against radix off:
+Measured on an 8-core arm64 laptop as the difference in peak resident set between the two paths,
+sorting a scattered `real(real64)` array:
 
-| rows | comparison sort | radix path | difference |
-|---|---|---|---|
-| 5 million | 296 MB | 456 MB | 160 MB |
-| 10 million | 536 MB | 856 MB | 320 MB |
-| 20 million | 656 MB | 1295 MB | 638 MB |
+| rows | scratch the radix path adds |
+|---|---|
+| 5 million | 152 MB |
+| 10 million | 305 MB |
+| 20 million | 610 MB |
+| 50 million | 1.6 GB |
 
-At 50 million rows that is roughly 1.6 GB of scratch. A string column whose values share more than
-eight leading bytes can add one further buffer — 8 bytes per row — but only if such a run actually
-needs splitting, so an ordinary string column never allocates it. What you buy for it is several
-times the throughput — at 20 million rows the same sort took 68 ns per element with the radix path and 1092 ns
-without, a factor of 16 — so leave it on unless you are sorting near the edge of available memory.
+That is 32 bytes per row at every size, which is exactly what the four buffers predict — so scale it
+to your own row count rather than reading a figure off the table. Everything else a sort holds is
+the same on both paths: the array itself, plus the extracted key and the permutation at 8 bytes per
+row each.
+
+A string column whose values share more than eight leading bytes can add one further buffer — 8
+bytes per row — but only if such a run actually needs splitting, so an ordinary string column never
+allocates it. What you buy for the scratch is more than an order of magnitude of throughput: on the
+same machine and array, 20 million rows took 51.6 ns per element with the radix path against
+1147.6 ns without, running serially — a factor of 22, and the radix path drops to 20.5 ns on eight
+threads while the comparison sort does not move. So leave it on unless you are sorting near the edge
+of available memory.
 
 If the scratch cannot be allocated the library does **not** fail: the radix path stands down and the
 comparison sort finishes the job, which needs no scratch and gives the identical answer. One caveat

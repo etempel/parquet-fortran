@@ -10,8 +10,11 @@ Things beyond the file being read or written: a general-purpose sorting API over
 arrays, counter-based random numbers that survive a parallel loop, and the two generators meant to
 be copied into your own project.
 
-- [Sorting arrays and columns](sorting.html) — `pf_sort`, `pf_argsort`, multi-key sorts, ranking,
-  searching and set operations over plain arrays and `parquet_column`s.
+- [Sorting arrays and columns](sorting.html) — `pf_sort` and `pf_argsort` over eleven element types,
+  from plain arrays to a `parquet_column`, with multi-key sorts and group boundaries; then selecting
+  without sorting (`pf_partial_sort`, `pf_nth_element`, quantiles), searching a sorted array,
+  distinct values and ranks, extremes, merging, and what threading does and does not change. Also
+  `parquet_argsort`, the smaller import for `pf_argsort` over the intrinsic types alone.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count.

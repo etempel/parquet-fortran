@@ -43,9 +43,114 @@ contains
             new_unittest("doc/pages/types/string-columns.md strings_quickstart example", &
                 test_strings_quickstart_example), &
             new_unittest("doc/pages/types/string-columns.md token_column example", test_token_column_example), &
+            new_unittest("doc/pages/utilities/sorting.md worked examples", test_sorting_page_examples), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
+
+    !> Mirrors every worked example on doc/pages/utilities/sorting.md that prints a concrete
+    !> result, asserting the exact values the page shows in its trailing comments.
+    !>
+    !> Written because that page published a WRONG result for a long time: its
+    !> `call pf_rank(v, r)` example showed `[3, 1, 2, 1, 3, 3, 4, 2]`, which is the *dense*
+    !> ranking, while `pf_rank`'s default method is "competition" and answers
+    !> `[5, 1, 3, 1, 5, 5, 8, 3]`. Nothing caught it: no example from the whole utilities/ group
+    !> was mirrored here. The rank block below is therefore the reason this test exists, and the
+    !> `method="dense"` call beside it is its negative control -- without that second call the
+    !> test would pass just as happily against a `pf_rank` that ignored `method=` altogether,
+    !> which is precisely the failure mode that let the wrong numbers ship.
+    subroutine test_sorting_page_examples(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v6(6) = [30, 10, 50, 20, 60, 40]
+        integer(int32) :: vdup(6) = [5, 3, 5, 1, 5, 3]
+        integer(int32) :: v9(9) = [10, 20, 20, 20, 30, 40, 40, 50, 60]
+        integer(int32) :: v8(8) = [30, 10, 20, 10, 30, 30, 40, 20]
+        integer(int32) :: tie4(4) = [10, 20, 20, 30]
+        integer(int32) :: ma(4) = [1, 4, 6, 9], mb(5) = [2, 3, 6, 7, 10]
+        integer(int32), allocatable :: perm(:), sorted(:), distinct(:), merged(:)
+        integer, allocatable :: ranks(:), dense(:)
+        real(real64) :: fv(2)
+        integer(int32) :: val
+        integer(int64) :: idx
+        integer :: nuniq, lo, hi, first, last
+        logical :: ok
+
+        ! ---- the sort_quickstart example -------------------------------------------------
+        call pf_argsort(v6, perm)
+        call check(error, all(perm == [2, 4, 1, 6, 3, 5]), "sorting.md: pf_argsort perm")
+        if (allocated(error)) return
+        call pf_sort(v6, sorted)
+        call check(error, all(sorted == [10, 20, 30, 40, 50, 60]), "sorting.md: pf_sort sorted")
+        if (allocated(error)) return
+        call pf_permute(v6, perm)
+        call check(error, all(v6 == [10, 20, 30, 40, 50, 60]), "sorting.md: pf_permute in place")
+        if (allocated(error)) return
+        call pf_is_sorted(v6, ok)
+        call check(error, ok, "sorting.md: pf_is_sorted after permuting")
+        if (allocated(error)) return
+
+        ! ---- "The index pf_nth_element reports" ------------------------------------------
+        call pf_nth_element(vdup, 3, val, idx)
+        call check(error, val == 3_int32, "sorting.md: pf_nth_element value at rank 3")
+        if (allocated(error)) return
+        call check(error, idx == 6_int64, "sorting.md: pf_nth_element reports the STABLE index")
+        if (allocated(error)) return
+
+        ! ---- "Searching a sorted array" --------------------------------------------------
+        call pf_lower_bound(v9, 20_int32, lo)
+        call check(error, lo == 2, "sorting.md: pf_lower_bound of 20")
+        if (allocated(error)) return
+        call pf_upper_bound(v9, 20_int32, hi)
+        call check(error, hi == 5, "sorting.md: pf_upper_bound of 20")
+        if (allocated(error)) return
+        call pf_equal_range(v9, 20_int32, first, last)
+        call check(error, first == 2 .and. last == 4, "sorting.md: pf_equal_range of 20")
+        if (allocated(error)) return
+        ! An absent target: last == first - 1, so the count is zero.
+        call pf_equal_range(v9, 25_int32, first, last)
+        call check(error, first == 5 .and. last == 4, "sorting.md: pf_equal_range of an absent 25")
+        if (allocated(error)) return
+
+        ! ---- "Distinct values and ranks" -------------------------------------------------
+        call pf_unique_count(v8, nuniq)
+        call check(error, nuniq == 4, "sorting.md: pf_unique_count")
+        if (allocated(error)) return
+        call pf_unique(v8, distinct)
+        call check(error, all(distinct == [10, 20, 30, 40]), "sorting.md: pf_unique values")
+        if (allocated(error)) return
+        call pf_rank(v8, ranks)
+        call check(error, all(ranks == [5, 1, 3, 1, 5, 5, 8, 3]), &
+            "sorting.md: pf_rank defaults to competition ranks")
+        if (allocated(error)) return
+        ! The negative control for the line above: the same call with the other method must
+        ! answer differently, and must give the dense ranks the page names as the contrast.
+        call pf_rank(v8, dense, method="dense")
+        call check(error, all(dense == [3, 1, 2, 1, 3, 3, 4, 2]), "sorting.md: pf_rank dense ranks")
+        if (allocated(error)) return
+        call check(error, .not. all(dense == ranks), &
+            "sorting.md: method= must change the ranks, or the default is untested")
+        if (allocated(error)) return
+        ! The three-method table in "Tie handling in pf_rank".
+        call pf_rank(tie4, ranks, method="competition")
+        call check(error, all(ranks == [1, 2, 2, 4]), "sorting.md: competition ranks of 10,20,20,30")
+        if (allocated(error)) return
+        call pf_rank(tie4, ranks, method="dense")
+        call check(error, all(ranks == [1, 2, 2, 3]), "sorting.md: dense ranks of 10,20,20,30")
+        if (allocated(error)) return
+        call pf_rank(tie4, ranks, method="ordinal")
+        call check(error, all(ranks == [1, 2, 3, 4]), "sorting.md: ordinal ranks of 10,20,20,30")
+        if (allocated(error)) return
+
+        ! ---- float distinctness is EXACT -------------------------------------------------
+        fv = [0.1_real64 + 0.2_real64, 0.3_real64]
+        call pf_unique_count(fv, nuniq)
+        call check(error, nuniq == 2, "sorting.md: 0.1+0.2 and 0.3 are two distinct values")
+        if (allocated(error)) return
+
+        ! ---- "Merging two sorted arrays" -------------------------------------------------
+        call pf_merge(ma, mb, merged)
+        call check(error, all(merged == [1, 2, 3, 4, 6, 6, 7, 9, 10]), "sorting.md: pf_merge result")
+    end subroutine test_sorting_page_examples
 
     !> The acceptance test for the `parquet` facade module (src/parquet.f90): this whole
     !> test module's only library import is a bare `use parquet`, so naming one entity from

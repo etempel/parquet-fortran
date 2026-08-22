@@ -50,20 +50,36 @@ The first four are covered immediately below; the rest have their own sections �
 [Extremes](#extremes) and
 [Merging two sorted arrays](#merging-two-sorted-arrays).
 
-Optional arguments are shown in square brackets below — they are optional at the call site, not
-part of the syntax.
+Optional arguments are shown in square brackets — in the table above, and in prose throughout this
+page. They are optional at the call site, not part of the syntax, so they never appear that way in a
+runnable example.
+
+**Every index-valued result above is generic over both integer kinds.** `perm`, `ranks`, `index`,
+`pos`, `first`/`last`, `count` and `imin`/`imax` may each be declared `integer(int32)` or
+`integer(int64)`, and the answers are identical either way — declare whichever suits the code around
+the call. The one case where it matters is scale: an array of more than `huge(int32)` elements
+cannot be addressed by an `int32` result, and asking for one aborts rather than wrapping to a
+plausible wrong index. `group_offsets` reaches that ceiling one row sooner than `perm` does, because
+its last entry is the sentinel `n + 1`.
 
 ```fortran
-use parquet
-integer(int32) :: v(6) = [30, 10, 50, 20, 60, 40]
-integer(int32), allocatable :: perm(:), sorted(:)
-logical :: ok
+program sort_quickstart
+    use parquet
+    use iso_fortran_env, only: int32
+    implicit none
+    integer(int32) :: v(6) = [30, 10, 50, 20, 60, 40]
+    integer(int32), allocatable :: perm(:), sorted(:)
+    logical :: ok
 
-call pf_argsort(v, perm)        ! perm = [2, 4, 1, 6, 3, 5]; v unchanged
-call pf_sort(v, sorted)         ! sorted = [10, 20, 30, 40, 50, 60]; v unchanged
-call pf_permute(v, perm)        ! v is now [10, 20, 30, 40, 50, 60]
-call pf_is_sorted(v, ok)        ! ok = .true.
+    call pf_argsort(v, perm)        ! perm = [2, 4, 1, 6, 3, 5]; v unchanged
+    call pf_sort(v, sorted)         ! sorted = [10, 20, 30, 40, 50, 60]; v unchanged
+    call pf_permute(v, perm)        ! v is now [10, 20, 30, 40, 50, 60]
+    call pf_is_sorted(v, ok)        ! ok = .true.
+end program sort_quickstart
 ```
+
+The kind names (`int32`, `int64`, `real64`) come from `iso_fortran_env`, not from `parquet` — the
+later examples on this page are fragments and leave both `use` lines out.
 
 `pf_argsort` is the one to reach for when several arrays have to stay in step: sort one, then
 apply the same permutation to the rest.
@@ -94,6 +110,13 @@ Eleven element types, in three groups.
 answer is a permutation, a boolean or an index, never a value, so a runtime element type is no
 obstacle.
 
+**A `parquet_column` has two restrictions the others do not**, both settled when the sort reads the
+column rather than at compile time. It must be a **scalar** column: a vector column — one whose
+`%colwidth()` is more than 1 — is refused, because a whole vector row has no defined order. And its
+element kind must be one the engine can order: the nine scalar kinds `int32`, `int64`, `float32`,
+`float64`, `logical`, `string`, `date`, `time` and `timestamp`. Anything else aborts and names the
+kind it was given.
+
 The remaining operations follow the same two rules — a type is out wherever the answer would need
 a compile-time element type it does not have, and stays in wherever the answer is a permutation, a
 boolean or an integer:
@@ -115,7 +138,8 @@ be worse than either. `pf_merge` is defined on plain arrays only: merging two co
 The `is_valid=` column says where nullness comes from. The six types with no null state of their
 own take an **optional** `is_valid(:)` mask; the temporal types and the two column types carry
 their own and take no such argument, which keeps a single source of truth for whether an element
-is null.
+is null. When you do pass a mask it must have exactly as many elements as `values`; a length
+mismatch aborts rather than being padded or truncated.
 
 `pf_sort` is deliberately not defined for the two container types: copying a whole column in order
 to sort it serves no purpose, and reordering one in place is `pf_argsort` followed by `pf_permute`,
@@ -139,17 +163,18 @@ That import compiles **4** of this library's Fortran files, against 21 for `use 
 and its Fortran graph never reaches the Parquet C++ bindings. `use parquet_sorting` and
 `use parquet` are unaffected: they re-export the tier and *extend* `pf_argsort` with the five
 element types that need a column, a packed string store or a temporal element, so a single
-`use parquet_sorting` resolves all eleven exactly as it always has. You would never know the split
-existed unless you went looking for the smaller import.
+`use parquet_sorting` resolves all eleven. You would never know the split existed unless you went
+looking for the smaller import.
 
 **What the smaller import does not include**: `pf_sort`, `pf_permute`, `pf_is_sorted`, the
 selection, search, uniqueness, rank, extreme and merge operations, `pf_sort_keys`, and every
 element type beyond the six intrinsic ones. Those all stay in `parquet_sorting`. If you need any of
 them, import that instead — the answers are identical either way, because there is one engine.
 
-**Why it exists**: fpm prunes at module granularity, so a library that wanted one `pf_argsort`
-specific used to compile the whole sorting graph and link the Parquet C++ stack with it. Splitting
-the intrinsic-type argsort out took `use parquet_sampling` from 24 files to 8. See
+**Why it exists**: fpm prunes at module granularity, so without the split a library wanting one
+`pf_argsort` specific would compile the whole sorting graph and link the Parquet C++ stack with it.
+Keeping the intrinsic-type argsort in its own tier is what holds `use parquet_sampling` to 8
+Fortran files. See
 [Choosing a module](../operating/choosing-a-module.html) for the full picture, including the caveat
 that no import makes the *package* Arrow-free.
 
@@ -217,6 +242,10 @@ Keys apply in the order added, the first being primary, and each carries its own
 `nulls_first=`. `%nkeys_added()` reports how many there are — one per `%add` call, whatever their
 types; `%clear()` drops them all, leaving the object reusable for an unrelated sort. Every key must
 describe the same number of rows, which is checked as each one is added rather than at sort time.
+
+A `pf_sort_keys` holding no key at all is an error, not an empty sort: `pf_argsort`, `pf_is_sorted`
+and `pf_partial_argsort` each abort on one, and so "reusable" means reusable after the next `%add`,
+not immediately after `%clear()`.
 
 A `pf_sort_keys` also works with `pf_is_sorted` and `pf_partial_argsort`, so a multi-key order can
 be tested or partially built, not only sorted in full:
@@ -297,6 +326,12 @@ permutation would make the gather read past the end of `values`, and no promise 
 make that defined. What a false promise costs is the other half: elements silently duplicated and
 dropped, with no abort and no symptom.
 
+**"In place" is about the result, not about memory.** `pf_permute` modifies `values` rather than
+handing back a reordered copy, but it gathers through a temporary the size of the array and copies
+back, so it needs room for a second copy of the column while it runs. Passing an `int32` `perm`
+to a `pf_permute` also builds an `int64` copy of the permutation. Neither matters until the array
+is large enough for a second copy to be the constraint.
+
 ## Sorting a table
 
 To reorder a whole `parquet_table`, use its own `%sort_by`, which reorders **every column
@@ -336,13 +371,19 @@ Three operations answer "which element ends up here?" without ordering the whole
 ```fortran
 call pf_partial_sort(v, top, n=10)        ! the 10 smallest, in order
 call pf_partial_argsort(v, perm, n=10)    ! their indices instead
-call pf_nth_element(v, 5, val [, index])  ! the value a full sort puts at rank 5
-call pf_nth_quantile(v, 0.5d0, med)       ! the median of the non-null values
+call pf_nth_element(v, 5, val)            ! the value a full sort puts at rank 5
+call pf_nth_quantile(v, 0.5_real64, med)   ! the median of the non-null values
 ```
 
 **`n` is clamped, not checked.** `pf_partial_sort(v, top, n=1000)` on a 100-element array returns
 all 100, in order — so an `n` derived from a fraction, a config value or a post-filter row count
 needs no `min(n, size(v))` of your own. A *negative* `n` is still an error.
+
+**`pf_nth_element`'s `nth` is the opposite: it is checked, not clamped.** A rank outside
+`1 .. size(values)` aborts rather than being pulled to the nearest end. The two arguments sit one
+line apart and behave oppositely on purpose — asking for "the best 1000 of 100" is a reasonable
+thing to mean, while asking for "the 1000th of 100" is not a request that has an answer. Clamp
+`nth` yourself if it comes from arithmetic that can overshoot.
 
 The four selection operations take `threads=` too; what they do and do not thread is set out under
 [What `threads=` reaches in a selection](#what-threads-reaches-in-a-selection).
@@ -388,9 +429,16 @@ rather than silently answering, because `0.5` is valid on both scales and means 
 different things.
 
 ```fortran
-call pf_nth_quantile(flux, 0.5d0, median)
-call pf_nth_quantile(flux, 0.9d0, p90, is_valid=mask, n_null=nmissing)
+call pf_nth_quantile(flux, 0.5_real64, median)
+call pf_nth_quantile(flux, 0.9_real64, p90, is_valid=mask, n_null=nmissing)
+call pf_nth_quantile(flux, 0.5_real64, median, index)   ! and where that value came from
 ```
+
+`index` is optional here exactly as it is on `pf_nth_element`, and reports the same thing under the
+same rule: the element a full **stable** sort would have put at that position, so a value occurring
+several times reports the right one of them rather than an arbitrary one. The only difference is
+which population the position is taken over — the non-null values, since that is what a quantile of
+this array means.
 
 **Nulls are excluded from the population, not placed in it** — the one operation in this module
 where that is true, and the reason it takes neither `descending` nor `nulls_first`: there is no
@@ -405,7 +453,7 @@ all-null case can happen.
 A fractional position is resolved by `rounding=`, matched case-insensitively:
 
 ```fortran
-call pf_nth_quantile(v, 0.5d0, q, rounding="down")   ! "nearest" (default), "down", "up"
+call pf_nth_quantile(v, 0.5_real64, q, rounding="down")   ! "nearest" (default), "down", "up"
 ```
 
 An unrecognized token aborts and names the valid ones.
@@ -485,8 +533,12 @@ integer :: c
 
 call pf_unique_count(v, c)          ! c = 4
 call pf_unique(v, d)                ! d = [10, 20, 30, 40]
-call pf_rank(v, r)                  ! r = [3, 1, 2, 1, 3, 3, 4, 2]
+call pf_rank(v, r)                  ! r = [5, 1, 3, 1, 5, 5, 8, 3]
 ```
+
+Those ranks are the default `"competition"` method, which leaves a gap after each tie — the two
+`10`s both rank 1 and the next value ranks 3. `"dense"` would give `[3, 1, 2, 1, 3, 3, 4, 2]`
+instead; see [Tie handling in `pf_rank`](#tie-handling-in-pf_rank) below.
 
 **Nulls are outside the population in all three.** They are excluded from the count, absent from
 the distinct values, and given **rank 0** — which is why none of the three takes `nulls_first`:
@@ -586,6 +638,10 @@ module whose length comes from two inputs rather than one.
 too, but thread less of their work — see
 [What `threads=` reaches in a selection](#what-threads-reaches-in-a-selection) below.
 
+Those nine are the whole list. `pf_permute`, `pf_is_sorted`, the three searches, `pf_minmax`,
+`pf_argminmax` and `pf_merge` take no `threads=` at all — each is a single linear pass, so there is
+nothing to hand a team — and passing one is a compile error rather than a silently ignored argument.
+
 `threads=` is therefore how you turn parallelism **down**, not up:
 
 ```fortran
@@ -610,7 +666,7 @@ answer. `threads=` is a performance control and nothing else.
 | explicit `threads=n`, inside a region running on 1 thread | **1** — see below |
 | explicit `threads=n`, ordinary serial code | `n` |
 | array below the minimum-work threshold | 1 |
-| a low-cardinality integer key | 1 (see below) |
+| a narrow-range integer key, on a small team | 1 — the counting path (see below) |
 
 The second row is the one worth knowing. Inside a parallel region, auto stays serial because
 *nested regions are the caller's business* — eight OpenMP threads each asking for eight more would
@@ -622,7 +678,8 @@ single thread** — `!$omp parallel if(cond)` with `cond` false, or any region a
 `OMP_NUM_THREADS=1`. A sort there runs serially however many threads you asked for. This is not a
 policy choice: opening a thread team one level down from such a region deadlocks GNU's OpenMP
 runtime, intermittently and with no diagnostic, and refusing is the only reliable way to avoid it.
-A region running on two or more threads is unaffected and honours `threads=` exactly as before.
+A region running on two or more threads is unaffected and honours `threads=` exactly as it does in
+ordinary serial code.
 
 `pf_sort_threads()` reports what auto would do right now, if you want to log it or size something
 against it.
@@ -632,11 +689,19 @@ against it.
 **A small array.** Spawning threads to sort a few thousand elements costs more than the sort, so
 there is a minimum below which `threads=` is ignored.
 
-**The integer fast path.** A single integer key with no nulls and a value range under about 4
-million is counting-sorted, which is already O(n) and already produces this exact permutation — so
-it wins over any number of threads. `threads=` is a *hint*, not a command, and a sort that reports
-one thread on such a key is behaving correctly. Note that this keys on the value **range**, not on
-how many distinct values there are.
+**The integer fast path.** A single integer key spanning a narrow enough range is counting-sorted,
+which is already O(n) and already produces this exact permutation, so it is taken in preference to
+threading. `threads=` is a *hint*, not a command, and a sort that reports one thread on such a key
+is behaving correctly.
+
+Two things decide whether that path is taken, and **neither is how many distinct values there are**
+— it keys on the value **range**. The range has to be narrow *relative to the row count*, so the
+same range qualifies on a large array and not on a small one; and the team has to be small, because
+a counting sort is serial and past a couple of threads the parallel radix sort simply wins. Nulls
+do not disqualify it — a null row's slot is skipped when the range is measured, so a null-bearing
+key reaches the same path. `parquet_set_sort_counting_bucket_limit` caps the range in absolute
+terms as well; see [Tuning the sort](../operating/settings.html#tuning-the-sort) for that knob and
+for turning the path off entirely.
 
 ### What it actually buys
 
@@ -663,15 +728,23 @@ size for the same reason — at twenty million rows the working set no longer fi
 sort becomes bound by memory bandwidth rather than by how many threads are available.
 
 **Threading is not the only thing that decides how long a sort takes, and often not the largest.**
-A single integer key with a small value range takes the counting path described above, which is
-O(n), serial, and faster than any threaded sort of the same data — so a key that qualifies will
-beat every row of this table regardless of `threads=`.
+A single integer key with a narrow enough value range takes the counting path described above,
+which is O(n) and serial — so a key that qualifies beats every row of this table without opening a
+team at all. Whether it qualifies depends on the requested team as well as on the data, since past
+a couple of threads the parallel radix sort is the faster of the two.
 
 ### Cost
 
-A threaded sort allocates one extra scratch buffer the size of the permutation, so peak memory is
-roughly **twice** a serial sort's — 16 bytes per row instead of 8. On a billion-row argsort that is
-16 GB instead of 8. Pass `threads=1` where that matters more than the time.
+**Peak memory does not depend on `threads=`.** A threaded sort needs a scratch buffer the size of
+the permutation, but so does a serial one — the threaded arm allocates it up front and the serial
+arm on first need, and they are the same size. Measured peak resident set for a 50-million-row
+`real(real64)` argsort was 2816 MB at `threads=1` and 2816 MB at `threads=8`. So passing
+`threads=1` to save memory gives up the speed and saves nothing.
+
+What the scratch pays for is the **radix path**, not the threading, and that has its own knob: see
+[Tuning the sort](../operating/settings.html#tuning-the-sort), which sets out what the radix path
+costs per row and the trade against turning it off. On the same 50-million-row sort,
+`parquet_set_sort_radix_path(.false.)` took the peak from 2816 MB to 1216 MB.
 
 ### What `threads=` reaches in a selection
 

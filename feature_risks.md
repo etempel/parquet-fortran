@@ -193,6 +193,7 @@ something a reader is expected to have.
 | [Risk-131](#risk-131--the-row-samples-mask-is-indexed-by-live-row-instead-of-physical-row) | The row sample's mask is indexed by LIVE row instead of PHYSICAL row | 4 — covered |
 | [Risk-130](#risk-130--a-generator-that-derives-through-libm-emits-a-different-table-on-every-machine) | A GENERATOR that derives through libm emits a different table on every machine | 4 — covered |
 | [Risk-132](#risk-132--an-unrecognised-qc-miss-value-resolves-to-a-logical-and-means-the-opposite) | An unrecognised `qc: miss:` value resolves to a logical, and means the OPPOSITE | 4 — covered |
+| [Risk-134](#risk-134--the-shared-table-guard-can-be-rewritten-to-key-on-the-region-and-every-abort-test-still-passes) | The shared-table guard can be rewritten to key on the REGION, and every abort test still passes | 4 — covered |
 
 ---
 
@@ -200,7 +201,7 @@ something a reader is expected to have.
 
 *Nothing here.* A risk lands in this section when it is first identified — before anyone has
 decided whether it is testable, and before any test is written. Give it the next unused number
-(**Risk-134**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
+(**Risk-135**), state what breaks and why the failure is quiet, and leave the **Test** half to whoever
 triages it into one of the three sections below.
 
 ## 2. Risks with a proposed testing scenario
@@ -5829,3 +5830,39 @@ message against their own schema would find no `miss:` declared empty anywhere i
   it. A `miss:` is meaningful on every type including `boolean`, whose write path calls
   `parquet_check_qc_miss` exactly as the numeric ones do — see the boolean half of this page's
   neighbouring guidance in `doc/pages/schema/quality-control.md`.
+
+### Risk-134 — The shared-table guard can be rewritten to key on the REGION, and every abort test still passes
+
+**Covered** by `test_table_write_shared_aborts` (`test/test_errors.f90`) over the
+`table_write_shared_in_parallel` scenario, which is in this document for its **shape** rather than
+for the assertion it makes.
+
+`unsafe_shared_mutation` (`src/parquet_tables_parallel.f90`) answers "may this table be shared?" as
+`.not. (cache%opened_in_parallel .and. cache%owner_thread == omp_get_thread_num())` — an
+**ownership** test, not a region test. `table_check_not_shared` turns that into the refusal that
+every structural entry point runs, `parquet_write_table` included (a write is structural because
+`release=` evicts each column once it has been written).
+
+**The trap is that the two failure directions are not symmetric, and only one of them is loud.** A
+guard that stops firing lets two threads pull storage out from under each other — bad, but at least
+something eventually crashes. A guard rewritten to fire whenever `omp_in_parallel()` is true is
+**silent in the test suite and fatal to a documented use case**: it refuses a table the calling
+thread opened itself inside the region, which is exactly the per-thread slice pattern
+`doc/pages/tables/table-open.md` teaches and `doc/pages/operating/thread-safety.md` permits. Every
+abort test ever written for this guard keeps passing, because they all assert that a *shared* table
+is refused, and a guard refusing everything refuses that too.
+
+**So the rule for anyone editing this area: an abort assertion is not a test of this guard.** The
+test must carry a **positive** arm in the same process — a thread-private table, opened by the
+calling thread inside the region, whose write must succeed — and assert an observable that proves it
+ran. `scenario_table_write_shared_in_parallel` prints `private write inside the region succeeded`
+before attempting the shared write, and the wrapper requires that marker as well as the abort.
+Verified by mutation in both directions: replacing the ownership test with `unsafe = .true.` fails
+on the marker while still aborting, and deleting `table_check_not_shared` from the write path fails
+on the abort.
+
+**Three call sites implement this same ownership test and must agree** — `unsafe_shared_mutation`,
+`unsafe_first_touch` and `record_open_thread` — as `src/parquet_tables_parallel.f90`'s own header
+says. A change to one of them is a change to all three, and only the write path has a
+positive-arm test today; the other nineteen `table_check_not_shared` callers rest on this one.
+

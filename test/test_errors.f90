@@ -824,6 +824,8 @@ contains
                 test_table_reserve_columns_negative_aborts), &
             new_unittest("table: reserve_columns on a shared table in a region aborts", &
                 test_table_reserve_columns_shared_aborts), &
+            new_unittest("table: parquet_write_table on a shared table in a region aborts", &
+                test_table_write_shared_aborts), &
             new_unittest("table: a direction token plus descending= aborts", &
                 test_table_key_direction_conflict_aborts), &
             new_unittest("table: a long conflicting key list is clipped in the message", &
@@ -978,7 +980,7 @@ contains
                 test_table_copy_metadata_unknown_key_aborts), &
             new_unittest("copy_metadata on an in-memory table aborts", &
                 test_table_copy_metadata_in_memory_aborts), &
-            new_unittest("copy_metadata= and metadata_keys= together abort", &
+            new_unittest("copy_metadata=.true. with metadata_keys= aborts", &
                 test_table_copy_metadata_both_forms_aborts), &
             new_unittest("opening a table slice starting before row 1 aborts", &
                 test_table_slice_below_first_row_aborts), &
@@ -1837,7 +1839,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_copy_metadata_both_forms", expect_abort=.true., &
             failure_message="copy_metadata= with metadata_keys= was expected to abort", &
-            required_stderr="cannot both be given")
+            required_stderr="copy_metadata=.true. and metadata_keys= cannot both be given")
     end subroutine test_table_copy_metadata_both_forms_aborts
 
     subroutine test_table_write_unbuilt_schema_aborts(error)
@@ -2347,6 +2349,52 @@ contains
             failure_message="reserving columns on a shared table in a region was expected to abort", &
             required_stderr="reserve_columns")
     end subroutine test_table_reserve_columns_shared_aborts
+
+    !> `parquet_write_table` on a table that may be shared aborts, and on a thread-private one
+    !! does not.
+    !!
+    !! **Both halves are asserted, and the second is the one that earns the test.**
+    !! `table_check_not_shared` keys on whether THIS thread opened the table inside the current
+    !! region, not on `omp_in_parallel()`. A guard rewritten to key on the latter would abort here
+    !! too, so an abort assertion alone cannot tell a correct guard from one that refuses every
+    !! write made anywhere inside a region -- which would break the documented per-thread slice
+    !! pattern that `doc/pages/tables/table-open.md` teaches. The scenario therefore writes a
+    !! thread-private table first and prints a marker; this test requires that marker as well as
+    !! the abort.
+    subroutine test_table_write_shared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: seen
+        ! Same precondition as the sibling above: without OpenMP there is no region for the guard
+        ! to notice, both writes simply succeed, and the scenario exits 0. That is a build which
+        ! cannot run the test, not a guard that failed to fire.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the shared-table guard has no parallel region to " // &
+            "fire in, so the scenario writes both tables successfully and exits 0")
+        return
+#endif
+        ! Driven through run_error_scenario rather than check_scenario_exit_status_and_stderr so
+        ! that ONE scenario process yields both observations: the abort, and the marker proving
+        ! the private write preceded it.
+        call run_error_scenario("table_write_shared_in_parallel", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "writing a shared table from inside a parallel region was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "this table was not opened by this thread inside the parallel region", seen)
+        call check(error, seen, &
+            "the abort must name why the table may be shared, not merely that something failed")
+        if (allocated(error)) return
+        ! The negative control: the private write must have got through first.
+        call scenario_capture_contains(out_file, err_file, &
+            "private write inside the region succeeded", seen)
+        call check(error, seen, &
+            "the guard aborted the shared write but also blocked the thread-private one, so it " // &
+            "is keying on the region rather than on ownership")
+    end subroutine test_table_write_shared_aborts
 
     !> The message must name `descending=`, since that is what the caller has to remove -- an
     !! abort saying only "conflict" leaves them guessing which half to drop.

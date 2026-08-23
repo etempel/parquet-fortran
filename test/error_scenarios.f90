@@ -1734,6 +1734,8 @@ program error_scenarios
         call scenario_table_append_during_read()
     case ("table_add_column_shared_in_parallel")
         call scenario_table_add_column_shared_in_parallel()
+    case ("table_write_shared_in_parallel")
+        call scenario_table_write_shared_in_parallel()
     case ("table_set_null_no_validity_in_parallel")
         call scenario_table_set_null_no_validity_in_parallel()
     case ("table_string_write_shared_in_parallel")
@@ -13864,6 +13866,49 @@ contains
         !$omp end parallel
         print '(a,i0)', "unexpectedly added a column to a shared table in a region, ncols=", t%ncols()
     end subroutine scenario_table_add_column_shared_in_parallel
+    !
+    !> parquet_write_table on a SHARED table inside a parallel region aborts.
+    !!
+    !! A write counts as a structural change rather than a read because `release=` evicts each
+    !! column once it has been written, so another thread reading the same table would have storage
+    !! pulled out from under it. `doc/pages/operating/thread-safety.md` lists `parquet_write_table`
+    !! among the calls a shared table refuses, and `doc/pages/tables/table-write.md` now says so on
+    !! the page too.
+    !!
+    !! **The negative control is in this same process, and it has to be**: `table_check_not_shared`
+    !! keys on OWNERSHIP, not on `omp_in_parallel()`, so a guard that fired whenever a region was
+    !! open would pass an abort test while breaking every legitimate write. The scenario therefore
+    !! writes a table the SAME thread opened inside the region first -- which must succeed and
+    !! prints a marker the wrapper checks for -- and only then writes the shared one. Without the
+    !! marker, "it aborted" is equally consistent with a guard that refuses everything.
+    subroutine scenario_table_write_shared_in_parallel()
+        type(parquet_table) :: shared
+        character(len=*), parameter :: src = "test_run/es_table_omp_write.parquet"
+        character(len=*), parameter :: out = "test_run/es_table_omp_write_out.parquet"
+        character(len=*), parameter :: out2 = "test_run/es_table_omp_write_shared.parquet"
+        call write_table_scenario_fixture(src)
+        call parquet_open_table(shared, src)
+        call shared%materialize_all()
+        ! Both writes live in ONE `block`, because `!$omp single` takes a structured block: with
+        ! `block` as the first statement of two, gfortran pairs the directive with the block
+        ! construct alone and then rejects the trailing `!$omp end single`.
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        block
+            type(parquet_table) :: mine        ! block-local, NOT private() -- see CLAUDE.md
+            ! Negative control: this thread opened `mine` itself inside the region, so it is
+            ! thread-private and the write is permitted.
+            call parquet_open_table(mine, src)
+            call mine%materialize_all()
+            call parquet_write_table(mine, out)
+            print '(a)', "private write inside the region succeeded"
+            ! `shared` was opened OUTSIDE the region, so it may be shared -> aborts.
+            call parquet_write_table(shared, out2)
+        end block
+        !$omp end single
+        !$omp end parallel
+        print '(a)', "unexpectedly wrote a shared table from inside a parallel region"
+    end subroutine scenario_table_write_shared_in_parallel
 
     !> Nulling an element of a column with no validity storage yet ALLOCATES that storage, and two
     !! threads doing it race with no diagnostic. Refused, naming %ensure_validity -- which is the

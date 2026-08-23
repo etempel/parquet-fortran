@@ -52,6 +52,8 @@ contains
             new_unittest("doc/pages/tables/table.md mean_mass example", test_mean_mass_example), &
             new_unittest("doc/pages/tables/table-open.md per-thread slices example", &
                 test_per_thread_slices_example), &
+            new_unittest("doc/pages/tables/table-write.md build_and_write example", &
+                test_build_and_write_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -1209,5 +1211,114 @@ contains
             "random.md: a shifted stream index gave the same array, so the draw is not " // &
             "addressed by `i` at all and the assertions above prove nothing")
     end subroutine test_random_quickstart_example
+    !
+    !> `doc/pages/tables/table-write.md`'s opening `build_and_write` example: the only complete
+    !! runnable program on that page, and the first thing a reader building a table from scratch
+    !! copies.
+    !!
+    !! One deviation from the page, and it is the standing one for every mirrored example here: the
+    !! output filename is under `test_run/` rather than the page's `out.parquet`, because tests in
+    !! a suite run concurrently and two sharing a fixture path is a documented source of
+    !! intermittent failure. Nothing else about the example changes.
+    !!
+    !! **What is actually asserted is the page's own claim about widths**, not merely that a file
+    !! appeared. The example declares `names` as `character(len=8)` while the schema declares
+    !! `array_size=32`, and the page now says the two need not agree because the array decides the
+    !! values and `array_size:` decides the file's storage width. So the round trip checks that
+    !! `%get` comes back sized to the longest REAL value (5, for "alpha"/"gamma") -- neither the
+    !! declared 8 nor the schema's 32. A test that only compared `trim()`ed values would pass
+    !! against a library that padded every name to 32 characters.
+    !!
+    !! **The negative control is the second table**, built from the same three names in a different
+    !! order. Asserting `names(1) == "alpha"` alone would pass against a write that stored the
+    !! first value three times, or against a read that ignored the row index; the control must give
+    !! a DIFFERENT first name from the same code path.
+    subroutine test_build_and_write_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/example_build_and_write.parquet"
+        character(len=*), parameter :: ctl_file = "test_run/example_build_and_write_ctl.parquet"
+        type(parquet_table)  :: t, back
+        type(parquet_schema) :: s
+        integer(int64)   :: ids(3)
+        real(real64)     :: masses(3)
+        character(len=8) :: names(3)
+        integer(int64), allocatable :: id_back(:)
+        real(real64), allocatable :: mass_back(:)
+        character(len=:), allocatable :: name_back(:)
+        !
+        ! ---- the example, verbatim apart from the filename ----
+        ids    = [1_int64, 2_int64, 3_int64]
+        masses = [1.5_real64, 2.5_real64, 3.5_real64]
+        names  = ["alpha   ", "beta    ", "gamma   "]
+        !
+        call parquet_new_table(t)
+        call t%add_column("id",   ids)
+        call t%add_column("mass", masses, unit="Msun")
+        call t%add_column("name", names)
+        !
+        call s%init("catalogue")
+        call s%add_field("id",   "int64")
+        call s%add_field("mass", "float64", unit="Msun")
+        call s%add_field("name", "string", array_size=32)
+        call parquet_write_table(t, out_file, s)
+        !
+        ! The example's own trailing print: 3 rows, 3 columns.
+        call check(error, t%nrows() == 3_int64 .and. t%ncols() == 3, &
+            "table-write.md: the example's own output line says 3 rows and 3 columns")
+        if (allocated(error)) return
+        !
+        ! ---- the round trip ----
+        call parquet_open_table(back, out_file)
+        call back%get("id", id_back)
+        call back%get("mass", mass_back)
+        call back%get("name", name_back)
+        call check(error, size(id_back) == 3 .and. all(id_back == ids), &
+            "table-write.md: the written id column should read back row for row")
+        if (allocated(error)) return
+        call check(error, all(abs(mass_back - masses) < 1.0e-12_real64), &
+            "table-write.md: the written mass column should read back row for row")
+        if (allocated(error)) return
+        !
+        ! The width claim: sized to the longest real value, not to len(names) and not to
+        ! array_size=32.
+        call check(error, len(name_back) == 5, &
+            "table-write.md: %get should be sized to the longest real name (5), not to the " // &
+            "declared character(len=8) nor to the schema's array_size=32")
+        if (allocated(error)) return
+        call check(error, name_back(1) == "alpha" .and. name_back(2) == "beta " .and. &
+            name_back(3) == "gamma", &
+            "table-write.md: the written name column should read back row for row")
+        if (allocated(error)) return
+        !
+        ! ---- negative control: the same names in a different order must differ ----
+        call build_and_write_control(ctl_file, name_back(1), error)
+    end subroutine test_build_and_write_example
+    !
+    !> Negative control for `test_build_and_write_example`: the same three names written in a
+    !! different order, so that the assertions above are shown to be about the DATA rather than
+    !! about the call sequence. Separated out only to keep the example above readable as the
+    !! page prints it.
+    subroutine build_and_write_control(fname, first_name, error)
+        character(len=*), intent(in) :: fname             !! control fixture, its own path.
+        character(len=*), intent(in) :: first_name        !! what the real example read back first.
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_table)  :: t, back
+        type(parquet_schema) :: s
+        character(len=8) :: names(3)
+        character(len=:), allocatable :: name_back(:)
+        !
+        names = ["gamma   ", "beta    ", "alpha   "]
+        call parquet_new_table(t)
+        call t%add_column("name", names)
+        call s%init("catalogue")
+        call s%add_field("name", "string", array_size=32)
+        call parquet_write_table(t, fname, s)
+        !
+        call parquet_open_table(back, fname)
+        call back%get("name", name_back)
+        call check(error, name_back(1) /= first_name, &
+            "table-write.md: reversing the names gave the same first value back, so the " // &
+            "round-trip assertions above are not reading the data at all")
+    end subroutine build_and_write_control
     !
 end module test_examples

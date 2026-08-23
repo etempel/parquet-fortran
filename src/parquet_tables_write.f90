@@ -57,9 +57,10 @@ contains
         want_metadata = present(metadata_keys)
         if (present(copy_metadata)) then
             if (present(metadata_keys) .and. copy_metadata) then
-                error stop EP // "parquet_write_table: copy_metadata= and metadata_keys= cannot " // &
-                    "both be given; copy_metadata=.true. carries every key, metadata_keys= only " // &
-                    "the listed ones"
+                error stop EP // "parquet_write_table: copy_metadata=.true. and metadata_keys= " // &
+                    "cannot both be given; copy_metadata=.true. carries every key, metadata_keys= " // &
+                    "only the listed ones (copy_metadata=.false. alongside metadata_keys= is " // &
+                    "accepted, and carries the listed keys)"
             end if
             want_metadata = want_metadata .or. copy_metadata
         end if

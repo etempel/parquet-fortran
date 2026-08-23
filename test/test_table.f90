@@ -277,6 +277,8 @@ contains
                 test_write_table_copy_metadata), &
             new_unittest("copy_metadata carries a <KEY>.datatype companion exactly once", &
                 test_copy_metadata_carries_datatype_once), &
+            new_unittest("a schema field the schema itself disabled is skipped, not demanded", &
+                test_write_table_skips_disabled_field), &
             new_unittest("resident_only, has_nulls, get_valid_mask, set_null(mask), generation", &
                 test_introspection_additions), &
             new_unittest("clone_structure works on a table that has read nothing", &
@@ -6913,6 +6915,7 @@ contains
         character(len=*), parameter :: fo = "test_run/table_copymeta_out.parquet"
         character(len=*), parameter :: fk = "test_run/table_copymeta_keys.parquet"
         character(len=*), parameter :: fn = "test_run/table_copymeta_none.parquet"
+        character(len=*), parameter :: fb = "test_run/table_copymeta_false_keys.parquet"
         !
         do i = 1, NROW
             v(i) = real(i, real64)
@@ -6966,7 +6969,79 @@ contains
         if (allocated(error)) return
         call plain%get_file_metadata("instrument", val, found=ok)
         call check(error, .not. ok, "metadata_keys= should carry no key it does not name")
+        if (allocated(error)) return
+        !
+        ! copy_metadata=.false. ALONGSIDE metadata_keys= is accepted, and carries the listed keys.
+        ! The guard is `present(metadata_keys) .and. copy_metadata`, so it cannot fire here -- the
+        ! two arguments are only in conflict when both are asking for something. Its negative
+        ! control is the error scenario `table_copy_metadata_both_forms`, which passes .true. to
+        ! this same argument pair and must still abort; without that pair of tests, a guard
+        ! widened to "both present" would look correct from either side alone.
+        call parquet_write_table(t, fb, out_s, copy_metadata=.false., metadata_keys=["origin"])
+        call parquet_open_table(plain, fb)
+        call plain%get_file_metadata("origin", val, found=ok)
+        call check(error, ok .and. val == "survey_A", &
+            "copy_metadata=.false. alongside metadata_keys= should carry the key it names")
+        if (allocated(error)) return
+        call plain%get_file_metadata("instrument", val, found=ok)
+        call check(error, .not. ok, &
+            "copy_metadata=.false. with metadata_keys= should carry no key it does not name")
     end subroutine test_write_table_copy_metadata
+    !
+    !> A schema field turned off with `%set_column_unavailable` is SKIPPED by parquet_write_table,
+    !! so the table need not carry a column for it.
+    !!
+    !! This is one of three outcomes the write loop's field walk has, and the only one that is not
+    !! an abort: a field naming a column the table does not have is an error, a field naming a
+    !! column that holds no values is a different error, and a DISABLED field is neither -- it
+    !! makes no claim about the table at all. `src/parquet_tables_write.f90`'s
+    !! `if (.not. sch%is_column_set(fname)) cycle` is the line under test.
+    !!
+    !! **The negative control is an existing error scenario, not code here.**
+    !! `table_write_missing_column` (test/error_scenarios.f90) is this same shape with the field
+    !! ENABLED, and it must still abort. That pairing is what makes this a test of `is_column_set`
+    !! rather than of anything else: with the field enabled the write aborts, with it disabled the
+    !! write succeeds and the column is absent from the output. Asserting only that the write
+    !! succeeded would pass against an implementation that silently tolerated a missing column,
+    !! and asserting only the output's column count would pass against one that wrote the field
+    !! from whatever slot happened to be first.
+    subroutine test_write_table_skips_disabled_field(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t, back
+        type(parquet_schema) :: s
+        real(real64) :: v(NROW)
+        integer :: i
+        logical :: has
+        character(len=*), parameter :: fo = "test_run/table_disabled_field.parquet"
+        !
+        do i = 1, NROW
+            v(i) = real(i, real64)
+        end do
+        ! The table carries ONLY "kept". Nothing named "dropped" exists anywhere in it.
+        call parquet_new_table(t)
+        call t%add_column("kept", v)
+        !
+        call s%init("dest")
+        call s%add_field("kept", "float64")
+        call s%add_field("dropped", "float64")
+        call s%set_column_unavailable("dropped")
+        !
+        ! With "dropped" disabled the write must succeed despite the table having no such column.
+        call parquet_write_table(t, fo, s)
+        call parquet_open_table(back, fo)
+        call check(error, back%ncols() == 1, &
+            "a disabled schema field should not reach the output, so one column should be written")
+        if (allocated(error)) return
+        has = back%has_column("kept")
+        call check(error, has, "the enabled field should be the one that was written")
+        if (allocated(error)) return
+        has = back%has_column("dropped")
+        call check(error, .not. has, &
+            "the disabled field should be absent from the output, not written empty")
+        if (allocated(error)) return
+        call check(error, back%nrows() == int(NROW, int64), &
+            "disabling a field should not disturb the rows of the field that was written")
+    end subroutine test_write_table_skips_disabled_field
     !
     !> A typed keyword's "<KEY>.datatype" companion must survive a copy_metadata= round trip
     !! exactly once, and carry the right token.

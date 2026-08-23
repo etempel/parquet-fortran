@@ -51,23 +51,28 @@ disturbing that.
 Three things the library cannot see, which stay your responsibility:
 
 - **A pointer you already hold.** `%append` reallocates every column's storage, so a `%col`/`%ref`
-  pointer taken before an append points at freed memory afterwards. Fortran gives no way to detect
-  a dangling pointer; re-fetch after an append, and use `%generation()` if you want to check.
+  pointer taken before an append points at freed memory afterwards. Fortran gives no way to detect a
+  dangling pointer; re-fetch after an append, and use `%generation()` if you want to check.
 - **Threads the library cannot identify.** The guards use OpenMP thread identity. If you thread some
   other way (pthreads through C interop, coarrays), none of them apply.
 - **The exact instant a violation starts.** The read/append checks catch an overlap of any real
   duration, but a read beginning fractionally before an append publishes itself is not seen. They
   are a safety net over the append-only rule, not a substitute for it.
 
-**Appended row order is not deterministic** — it depends on which thread got the lock first. Sort
-in memory afterwards (`%sort_by`) if you need a reproducible result.
+**Appended row order is not deterministic** — it depends on which thread got the lock first. Sort in
+memory afterwards (`%sort_by`) if you need a reproducible result.
 
 **Three groups of operations thread internally, and all of them stand down inside your own parallel
 region.** `%prefetch`/`%materialize_all` read several columns at once, each on its own reader;
 `%sort_by`, `%filter_rows`, `%top_n`, `%delete_rows` and `%truncate` rewrite several columns at
 once; and `%clone` copies several columns at once. You do not ask for any of them and cannot get
-them wrong — but two consequences are worth knowing:
+them wrong — but four consequences are worth knowing:
 
+- **A small table is rewritten serially, and that is not a failure.** The rewrite group has a work
+  floor: it threads only when there are at least **two** columns to rewrite and the largest of them
+  holds at least **131072** elements (rows times width). Below either, one thread does the work,
+  because splitting it would cost more than it saves. The read group has its own floor in the same
+  spirit — see [Reading a table from several threads](#reading-a-table-from-several-threads).
 - **Called from inside a parallel region of your own, both run serially.** A nested region is your
   business, not the library's: without that rule, *T* of your threads would each ask for *T* more,
   and the oversubscription is slower than not threading at all. So the per-thread-slice pattern
@@ -105,10 +110,11 @@ end do
 !$omp end parallel do
 ```
 
-A table a thread **opens for itself inside** the region is a different case: it cannot be shared,
-so its lazy reads are allowed — that is what the [slice regime](../tables/table-open.html#reading-part-of-a-file-the-slice-regime)
-below is for. That extends to changing it: a thread-private table can be filtered, sorted, renamed
-and dropped from inside the region, because no other thread can see it.
+A table a thread **opens for itself inside** the region is a different case: it cannot be shared, so
+its lazy reads are allowed — that is what the
+[slice regime](../tables/table-open.html#reading-part-of-a-file-the-slice-regime) below is for. That
+extends to changing it: a thread-private table can be filtered, sorted, renamed and dropped from
+inside the region, because no other thread can see it.
 
 `%prefetch` and `%materialize_all` **read their columns on several threads by themselves**, so a
 wide file is faster to bring into memory without you writing any OpenMP at all:
@@ -120,7 +126,8 @@ call t%materialize_all()      ! reads the columns in parallel, internally
 
 Each thread drives its own reader, so nothing is shared and nothing needs a lock. This happens only
 when it is both safe and worth it: at least two columns to read, and more than one thread available.
-Measured at **3.9x** on a 24-column, 900k-row file with 8 threads.
+On a wide file this is several times faster than reading the columns one after another;
+`tools/benchmark_table.sh` measures it on your own hardware.
 
 **One large column is parallel too**, split across its **row groups** instead of its columns — so a
 `%get` or `%prefetch` of a single name is not serial just because there is only one of it:
@@ -130,13 +137,14 @@ call parquet_open_table(t, "one-wide.parquet")
 call t%get("flux", flux)      ! read on several threads, by row group
 ```
 
-Measured at **3.5–3.8x** on a 30-million-row `float64` column stored in 16 row groups. The two splits
-are alternatives — a read is divided by column when there is more than one to read, and by row group
-otherwise — and both need the same things: more than one thread, a file to open a second reader on,
-and no `filter=`/`sort=` (see the table below). The row-group split additionally needs **more than one
-row group**, **enough work to pay for opening the extra readers** (a column of a few hundred kilobytes
-or less stays serial), and a **non-string** column: a string column's packed variable-length store has
-no fixed row slots to write row groups into, so it keeps the ordinary whole-column read.
+This too is worth several times a serial read on a large column spread over many row groups. The two
+splits are alternatives — a read is divided by column when there is more than one to read, and by
+row group otherwise — and both need the same two things: more than one thread, and a file to open a
+second reader on. **Neither is refused by a `filter=` or a `sort=`**; see the table below for why.
+The row-group split additionally needs **more than one row group**, **enough work to pay for opening
+the extra readers** (a column of a few hundred kilobytes or less stays serial), and a **non-string**
+column: a string column's packed variable-length store has no fixed row slots to write row groups
+into, so it keeps the ordinary whole-column read.
 
 **A read-time transform keeps all of this.** The extra readers do not re-derive the table's
 `filter=` mask or its `sort=` permutation — they **share** them, which is a refcount increment
@@ -156,12 +164,14 @@ The transformed cases fall short of 4.5x because the transform itself is still w
 once, before the parallel read begins — not because any of it is repeated.
 
 **Qc warnings are not duplicated by this.** A `qc_soft=.true.` violation prints at most once per
-column per reader, and each column is read by exactly one thread, so the parallel read prints exactly
-what the serial read prints — including for a column the filter itself touches, since only the
-table's own reader ever evaluates the filter.
+column per reader, and each column is read by exactly one thread, so the parallel read prints
+exactly what the serial read prints — including for a column the filter itself touches, since only
+the table's own reader ever evaluates the filter.
 
 If you open readers yourself rather than through a table, `parquet_reader_adopt_transform` is the
-same mechanism, available directly — see [Thread safety](thread-safety.html).
+same mechanism, available directly — see
+[Sharing a filter or a sort between your own readers](#sharing-a-filter-or-a-sort-between-your-own-readers)
+below.
 
 ### Growing one table from several threads
 
@@ -197,18 +207,18 @@ Three things to know:
 - **Prepare it first.** Adding a column is a structural change and is refused inside the region, so
   the destination needs its columns before the region starts.
 
-Declare per-thread tables inside a `block`, **never** in an OpenMP `private()` clause: `parquet_table`
-is finalizable, and a `private` copy of such a type is not reliably initialised — the first
-finalization then frees an undefined pointer.
+Declare per-thread tables inside a `block`, **never** in an OpenMP `private()` clause:
+`parquet_table` is finalizable, and a `private` copy of such a type is not reliably initialised —
+the first finalization then frees an undefined pointer.
 
 The full per-operation table is in
-[What a `parquet_table` allows concurrently](thread-safety.html#what-a-parquet_table-allows-concurrently).
+[What a `parquet_table` allows concurrently](#what-a-parquet_table-allows-concurrently).
 
 ### Nulling elements from several threads
 
 Validity storage is allocated lazily — a null-free column carries no bitmap at all, which is what
-keeps it cheap. That means the *first* null on a column allocates, and two threads doing that at once
-would race. The library refuses it rather than racing, and tells you the fix:
+keeps it cheap. That means the *first* null on a column allocates, and two threads doing that at
+once would race. The library refuses it rather than racing, and tells you the fix:
 
 ```fortran
 call t%ensure_validity("flags")     ! or t%ensure_validity() for every resident column
@@ -221,8 +231,9 @@ end do
 
 `%ensure_validity` changes no value and no null state — it only decides *when* the allocation
 happens. It belongs **before** the region: it allocates, so calling it from inside one on a shared
-table is refused for the same reason `%set_null` is. A `date`/`time`/`timestamp` column never needs it (its null state lives in the element), and
-a string column cannot be written from several threads at all.
+table is refused for the same reason `%set_null` is. A `date`/`time`/`timestamp` column never needs
+it (its null state lives in the element), and a string column cannot be written from several threads
+at all.
 
 ## Sharing a filter or a sort between your own readers
 
@@ -271,72 +282,173 @@ procedure is for the case where you are managing the readers yourself.
 
 ## Random numbers need no rules at all
 
-`parquet_random` is the one part of this library with nothing to say in this page's terms. It has no shared state to protect, so there is nothing to lock, nothing to give one instance per thread, and no ordering to preserve: every value is a pure function of `(seed, i [, draw])`, computed from those arguments and nothing else. Call it from any number of threads at once, on any schedule.
+`parquet_random` is the one part of this library with nothing to say in this page's terms. It has no
+shared state to protect, so there is nothing to lock, nothing to give one instance per thread, and
+no ordering to preserve: every value is a pure function of `(seed, i [, draw])`, computed from those
+arguments and nothing else. Call it from any number of threads at once, on any schedule.
 
-That is stronger than thread *safety*, and the difference matters. A conventional generator can be made safe with a lock and still be useless in a parallel loop, because which value an iteration receives depends on how many draws happened first — and a lock does not decide that, the schedule does. Here a draw is **reproducible**, and being reproducible it is automatically safe. See [Random numbers](../utilities/random.html).
+That is stronger than thread *safety*, and the difference matters. A conventional generator can be
+made safe with a lock and still be useless in a parallel loop, because which value an iteration
+receives depends on how many draws happened first — and a lock does not decide that, the schedule
+does. Here a draw is **reproducible**, and being reproducible it is automatically safe. See
+[Random numbers](../utilities/random.html).
 
-The single exception is `pf_random_seed()`, which by design is not a pure function — it exists to produce a value that has never been produced before. It increments a process-wide counter inside a named critical region, so concurrent calls return different seeds; that is its only interaction with other threads, and it is handled internally.
+The single exception is `pf_random_seed()`, which by design is not a pure function — it exists to
+produce a value that has never been produced before. It increments a process-wide counter with a
+lock-free atomic fetch-and-add, so concurrent calls return different seeds; that is its only
+interaction with other threads, and it is handled internally.
 
 ## Practical cases
 
 - Safe: many threads, each opening/writing/closing its own `parquet_writer` to a different file.
-- Safe: many threads, each opening/reading/closing its own `parquet_reader` — including multiple threads independently opening their own reader on the *same* file at the same time (each thread's `parquet_open_reader` call is independent).
-- Safe: parsing MAML files (`parquet_parse_maml`, `parquet_validate_maml`, etc.) concurrently across threads. Internally this path is lock-serialized for correctness, so it is thread-safe but not expected to speed up with more threads.
-- **Not safe:** sharing a single `parquet_writer`/`parquet_reader` variable across threads (e.g. a module-level or `!$omp shared` instance that multiple threads call into at once).
-- **Not safe:** two threads writing to the *same* output file at the same time, even with separate `parquet_writer` instances — the underlying file itself isn't safe to write from more than one place at once.
+- Safe: many threads, each opening/reading/closing its own `parquet_reader` — including multiple
+  threads independently opening their own reader on the *same* file at the same time (each thread's
+  `parquet_open_reader` call is independent).
+- Safe: parsing MAML files (`parquet_parse_maml`, `parquet_validate_maml`, etc.) concurrently across
+  threads. Internally this path is lock-serialized for correctness, so it is thread-safe but not
+  expected to speed up with more threads.
+- **Not safe:** sharing a single `parquet_writer`/`parquet_reader` variable across threads (e.g. a
+  module-level or `!$omp shared` instance that multiple threads call into at once).
+- **Not safe:** two threads writing to the *same* output file at the same time, even with separate
+  `parquet_writer` instances — the underlying file itself isn't safe to write from more than one
+  place at once.
 
 ## Building for genuine multi-threaded use
 
-`parquet-fortran`'s own `fpm.toml` declares a dependency on fpm's built-in `openmp` metapackage, which automatically supplies the right compiler-specific OpenMP flag (`-fopenmp` for gfortran, `-qopenmp` for ifx, ...) for the whole build — this project's dependency and your own project's sources alike, since fpm computes one consistent flag set across the full resolved dependency graph. You do not need to pass an OpenMP flag manually via `FPM_FFLAGS` for this library's own concurrency-related code paths to run multi-threaded. If you call into this library concurrently from your own `!$omp parallel` regions and want to be certain OpenMP is active for your own sources too, you can add the same dependency to your own `fpm.toml`:
+`parquet-fortran`'s own `fpm.toml` declares a dependency on fpm's built-in `openmp` metapackage,
+which automatically supplies the right compiler-specific OpenMP flag (`-fopenmp` for gfortran,
+`-qopenmp` for ifx, ...) for the whole build — this project's dependency and your own project's
+sources alike, since fpm computes one consistent flag set across the full resolved dependency graph.
+You do not need to pass an OpenMP flag manually via `FPM_FFLAGS` for this library's own
+concurrency-related code paths to run multi-threaded. If you call into this library concurrently
+from your own `!$omp parallel` regions and want to be certain OpenMP is active for your own sources
+too, you can add the same dependency to your own `fpm.toml`:
 ```toml
 [dependencies]
 openmp = "*"
 ```
-(If you're developing `parquet-fortran` itself, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#testing-genuine-openmp-concurrency) for how this project's own tests exercise real concurrency.)
+(If you're developing `parquet-fortran` itself, see
+[CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#testing-genuine-openmp-concurrency)
+for how this project's own tests exercise real concurrency.)
 
 ## The concurrency guard
 
-Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an immediate process exit (status 134) with a diagnostic on stderr. This is a fail-fast race guard, not a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed. (This is one of two classes of process-abort failure in this library — see [Error handling](error-handling.html#the-two-failure-classes) for the other, Fortran `error stop`.)
+Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the
+"not safe" case above) is actively detected and rejected: the second concurrent caller triggers an
+immediate process exit (status 134) with a diagnostic on stderr. This is a fail-fast race guard, not
+a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed. (This is
+one of two classes of process-abort failure in this library — see
+[Error handling](error-handling.html#the-two-failure-classes) for the other, Fortran `error stop`.)
 
-The guard is claimed at the *first* statement of a call, before any of the writer's or reader's own bookkeeping is touched. That ordering is what makes the diagnostic reliable rather than a race in its own right: a colliding thread is stopped before it can write anything, so the message you get names the actual mistake instead of a segfault somewhere further along. It also means the guard tracks *which* thread holds a handle, so the library's own nested calls into one handle are fine — only a genuinely different thread is rejected.
+The guard is claimed at the *first* statement of a call, before any of the writer's or reader's own
+bookkeeping is touched. That ordering is what makes the diagnostic reliable rather than a race in
+its own right: a colliding thread is stopped before it can write anything, so the message you get
+names the actual mistake instead of a segfault somewhere further along. It also means the guard
+tracks *which* thread holds a handle, so the library's own nested calls into one handle are fine —
+only a genuinely different thread is rejected.
 
-Note that the diagnostic is written by the thread that detected the collision while every other thread is still running, so on a machine with many cores you may see the message repeated, or interleaved with unrelated runtime output, before the process dies. The message and the nonzero exit status are the contract; the exact surrounding output is not.
+Note that the diagnostic is written by the thread that detected the collision while every other
+thread is still running, so on a machine with many cores you may see the message repeated, or
+interleaved with unrelated runtime output, before the process dies. The message and the nonzero exit
+status are the contract; the exact surrounding output is not.
 
 ## Streaming/chunked writes and reads
 
-**The streaming row-group write API** (`parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` — see [Streaming/chunked writes](../io/writing.html#streamingchunked-writes)) is bound by the same "one thread at a time per writer" rule as `parquet_write_column`, with one addition: those three calls must also stay in strict row-group order for a given writer, since Parquet's row groups are laid out sequentially on disk. Wrapping that triplet itself in an `!$omp parallel`/`parallel do` region — e.g. one thread per row group — would hit the concurrency guard above (an immediate abort, not silent corruption) at best, and doesn't make sense at any rate: row groups have no ordering guarantee across threads, so even without the guard the file's row order would be nondeterministic. If you want to parallelize a streaming write, parallelize the *data preparation* for each row group (pure computation, no calls into the writer) and keep the `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` calls themselves serial, on one thread, in order.
+**The streaming row-group write API**
+(`parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` — see
+[Streaming/chunked writes](../io/writing.html#streamingchunked-writes)) is bound by the same "one
+thread at a time per writer" rule as `parquet_write_column`, with one addition: those three calls
+must also stay in strict row-group order for a given writer, since Parquet's row groups are laid out
+sequentially on disk. Wrapping that triplet itself in an `!$omp parallel`/`parallel do` region —
+e.g. one thread per row group — would hit the concurrency guard above (an immediate abort, not
+silent corruption) at best, and doesn't make sense at any rate: row groups have no ordering
+guarantee across threads, so even without the guard the file's row order would be nondeterministic.
+If you want to parallelize a streaming write, parallelize the *data preparation* for each row group
+(pure computation, no calls into the writer) and keep the
+`parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` calls themselves
+serial, on one thread, in order.
 
-**The chunked read API** (`parquet_read_column_chunk` — see [Streaming/chunked reads](../io/reading.html#streamingchunked-reads)) is bound by the same "one thread at a time per reader" rule as every other reader call, but unlike the streaming write API it has no ordering requirement: reads are stateless/random-access, so calls for different row groups (or the same one, repeatedly) can happen in any order. This means a row-group loop *can* be parallelized directly, as long as each thread uses its own `parquet_reader` instance opened on the same file (independent readers on the same file are always safe to use concurrently — see "Practical cases" above) rather than sharing one reader across threads, which would still hit the concurrency guard.
+**The chunked read API** (`parquet_read_column_chunk` — see
+[Streaming/chunked reads](../io/reading.html#streamingchunked-reads)) is bound by the same "one
+thread at a time per reader" rule as every other reader call, but unlike the streaming write API it
+has no ordering requirement: reads are stateless/random-access, so calls for different row groups
+(or the same one, repeatedly) can happen in any order. This means a row-group loop *can* be
+parallelized directly, as long as each thread uses its own `parquet_reader` instance opened on the
+same file (independent readers on the same file are always safe to use concurrently — see "Practical
+cases" above) rather than sharing one reader across threads, which would still hit the concurrency
+guard.
 
 ## Thread-pool tuning
 
-Both `parquet_open_reader` and `parquet_open_writer` accept an optional `use_threads` (`logical`, default `.true.`):
+Both `parquet_open_reader` and `parquet_open_writer` accept an optional `use_threads` (`logical`,
+default `.true.`):
 ```fortran
 call parquet_open_reader(reader, "data.parquet", use_threads=.true.)
 call parquet_open_writer(writer, "data.parquet", use_threads=.true.)
 ```
-When `.true.` (the default), that reader/writer decodes or encodes column data across Arrow's internal CPU thread pool instead of a single thread — Arrow's own library default is actually `.false.`, so this library turns it on by default since the extra parallelism is normally a pure win. This is on a per-reader/per-writer basis: it costs nothing to leave it on, and there's no shared state to worry about between independent readers/writers.
+When `.true.` (the default), that reader/writer decodes or encodes column data across Arrow's
+internal CPU thread pool instead of a single thread — Arrow's own library default is actually
+`.false.`, so this library turns it on by default since the extra parallelism is normally a pure
+win. This is on a per-reader/per-writer basis: it costs nothing to leave it on, and there's no
+shared state to worry about between independent readers/writers.
 
-The most common reason to pass `use_threads=.false.` is to avoid **oversubscription** when you're already parallelizing at a coarser level — e.g. many OpenMP threads (see "Rules at a glance" above) each opening their own reader/writer: without this, every one of those threads would *also* fan out across Arrow's thread pool, so N OpenMP threads times Arrow's pool size threads end up competing for the same cores. It's also useful for deterministic single-threaded benchmarking/profiling.
+The most common reason to pass `use_threads=.false.` is to avoid **oversubscription** when you're
+already parallelizing at a coarser level — e.g. many OpenMP threads (see "Rules at a glance" above)
+each opening their own reader/writer: without this, every one of those threads would *also* fan out
+across Arrow's thread pool, so N OpenMP threads times Arrow's pool size threads end up competing for
+the same cores. It's also useful for deterministic single-threaded benchmarking/profiling.
 
 `parquet_set_arrow_threads(n)` caps the size of Arrow's thread pool itself:
 ```fortran
 call parquet_set_arrow_threads(4)
 ```
-Unlike `use_threads`, this is **not** a per-reader/per-writer setting — Arrow's CPU thread pool is a single, process-global resource shared by every reader/writer (in every thread) that has `use_threads` enabled. Call it once, e.g. near the start of your program, before opening readers/writers on other threads; calling it repeatedly with different values from multiple concurrent threads is a race, since each call resizes a pool everyone else is using at that same moment. `n` must be `>= 1`; values below that fail immediately with `error stop`.
+Unlike `use_threads`, this is **not** a per-reader/per-writer setting — Arrow's CPU thread pool is a
+single, process-global resource shared by every reader/writer (in every thread) that has
+`use_threads` enabled. Call it once, e.g. near the start of your program, before opening
+readers/writers on other threads; calling it repeatedly with different values from multiple
+concurrent threads is a race, since each call resizes a pool everyone else is using at that same
+moment. `n` must be `>= 1`; values below that fail immediately with `error stop`.
 
-(If you're developing `parquet-fortran` itself and want to measure how these two knobs actually affect write/read throughput on your own hardware, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#other-tools-helpers)'s `tools/benchmark_threads.sh` entry.)
-
+(If you're developing `parquet-fortran` itself and want to measure how these two knobs actually
+affect write/read throughput on your own hardware, see
+[CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#other-tools-helpers)'s
+`tools/benchmark_threads.sh` entry.)
 ## A note on functions returning `character(len=:), allocatable`
 
-This is a library-wide compiler caveat, not specific to any one type, but it was found and root-caused via `parquet_string_column`, so it's documented here in full.
+**No accessor in this library returns a `character(len=:), allocatable` function result.** Every one
+that would naturally be written that way — `parquet_string_column`'s `get` and `summary`, the
+`parquet_string` handle's `to_string`, `schema%add_col_qc`/`schema%set_col_qc` (see
+[Quality control](../schema/quality-control.html#building-a-qc-maml-in-code)) and the rest — is a
+**subroutine** writing into an `intent(out)`/`intent(inout)` allocatable `character` argument
+instead.
 
-**Past gfortran/OpenMP runtime caveat — now worked around throughout this library's source.** Two fully independent threads, each with its own, separate object (no sharing at all — sharing a single instance across threads is covered by the rules above), could still silently corrupt memory under concurrent execution on some gfortran/OpenMP builds. Root-caused to a specific, still-open gfortran bug ([PR113797](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=113797); related: [PR97977](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97977)): the compiler's codegen for *receiving* a `character(len=:), allocatable` function result uses a hidden length-tracking variable that isn't always properly thread-local. Confirmed with a minimal reproducer using no code from this library — the hazard needed nothing more than a `character(len=:), allocatable` function called concurrently on a type with two or more allocatable components; it did not depend on construction/destruction, `class()` dispatch, or sharing, and did not affect non-`character` allocatable results.
+That shape is deliberate and is a thread-safety measure. gfortran's codegen for *receiving* such a
+function result uses a hidden length-tracking variable that is not reliably thread-local
+([PR113797](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=113797); related:
+[PR97977](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=97977)), so two threads calling one
+concurrently — **each on its own separate object, sharing nothing** — can corrupt memory. The
+subroutine form does not go near that codegen path.
 
-The fix, applied throughout `src/*.f90`: **every accessor that used to return `character(len=:), allocatable` as a function result is now a subroutine** that writes into an `intent(out)`/`intent(inout)` allocatable `character` argument instead — this sidesteps the defective codegen path entirely rather than working around a symptom. This was independently verified on `parquet_string_column`'s own accessors (`get`, `summary`, and the `parquet_string` handle's `to_string`): the identical reproducer converted from a function to a subroutine reproduced **zero** failures across tens of thousands of iterations, vs. hundreds of failures per 8000 for the function form. No special precaution is needed for concurrent, independent use of any type in this library as a result — the sharing rules at the top of this page remain the only thread-safety rules that apply. (`schema%add_col_qc`/`schema%set_col_qc` — see [Quality control](../schema/quality-control.html#building-a-qc-maml-in-code) — are two of the public procedures shaped by this same fix: neither is a function returning `character(len=:), allocatable`.)
+**Nothing is asked of you by this.** Concurrent, independent use of any type in this library needs
+no precaution on this account; the sharing rules at the top of this page remain the only
+thread-safety rules that apply. It is worth knowing only if you write your own such function and
+call it from several threads.
 
 ## A note on Arrow's own type-singleton construction
 
-**Past Arrow-library caveat on the very first concurrent use of a given column type — now worked around internally.** Arrow represents each column type (`int32`, `utf8`, ...) as a reference to a shared, process-wide singleton object, one per type, used by every thread. Confirmed via ThreadSanitizer that this project's apt-installed Arrow build has data races on two independent pieces of lazily-populated state hanging off that same shared object: the singleton's own one-time construction (normally safe under the standard C++ "magic statics" pattern, but not on this Arrow build), and a lazily-cached "fingerprint" Arrow computes internally the first time it needs to compare or serialize that type (used by Arrow's own type/schema equality checks, not something this library calls directly). Both have the same shape: if two independent OpenMP threads each write (or otherwise first touch) a column of the *same* type at close to the same moment — entirely possible the first time a multi-threaded program starts up and several threads open their own writer/reader within the same instant — they can race on whichever piece of that singleton's state neither thread has populated yet. The corruption this causes does not crash where it happens; it surfaces later, in whatever unrelated code next touches the heap, which is what made the original symptom (a process abort inside a completely unrelated, trivial boolean check) so misleading to trace back, and why fixing the first race alone did not fully resolve it — the second was still there.
+Arrow represents each column type (`int32`, `utf8`, ...) as a reference to a shared, process-wide
+singleton, one per type, used by every thread. On some Arrow builds two pieces of lazily-populated
+state hanging off those singletons are not safe to touch concurrently for the first time — the
+singleton's own construction, and a "fingerprint" Arrow caches internally the first time it compares
+or serializes a type. Two threads each opening their own writer or reader for a column of the *same*
+type within the same instant could race on whichever piece neither had populated yet, and the
+resulting corruption surfaces later, in unrelated code that next touches the heap.
 
-Fixed internally, the same way this library already handles Arrow's compute-kernel registry (also a lazily-initialized, process-global Arrow resource): every singleton this library's C++ layer uses, and every piece of lazy state on it this project has found racing, is forced into existence exactly once, from a single thread, the first time any thread calls `parquet_open_reader`/`parquet_open_writer` — after that first call, every later concurrent read is just a read of already-published state, which is safe. No caller action is needed; this is purely internal to the library. If you construct `arrow::`/`parquet::` objects directly yourself in the same process (outside this library's own API) and open your first reader/writer/column of a given type from multiple threads at once, the same underlying Arrow behavior could in principle still apply to types (or to lazy state on those types) this library's own warm-up doesn't cover.
+**The library forces all of it into existence once, from a single thread, on the first
+`parquet_open_reader`/`parquet_open_writer` any thread makes** — the same treatment it already gives
+Arrow's compute-kernel registry. Every later concurrent use is then a read of already-published
+state. No caller action is needed.
+
+The one case this does not cover: if you construct `arrow::`/`parquet::` objects **yourself**, in
+the same process and outside this library's API, and first touch a given type from several threads
+at once, the underlying Arrow behaviour still applies to whatever the warm-up does not reach.

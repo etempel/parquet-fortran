@@ -36,9 +36,9 @@ module test_table_parallel
     use parquet
     use iso_fortran_env, only : int32, int64, real64
     use iso_c_binding, only : c_int64_t
-    use testdrive, only : new_unittest, unittest_type, error_type, check
+    use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
 #ifdef _OPENMP
-    use omp_lib, only : omp_get_max_threads
+    use omp_lib, only : omp_get_max_threads, omp_get_num_threads
 #endif
     !
     implicit none
@@ -161,7 +161,9 @@ contains
             new_unittest("a sampled single-column read splits onto one sample", &
                 test_colread_sampled_agrees), &
             new_unittest("no two row groups' pastes share a validity block", &
-                test_colread_block_alignment) &
+                test_colread_block_alignment), &
+            new_unittest("concurrent set_null keeps every null when rows share a validity block", &
+                test_concurrent_set_null_shares_block) &
             ]
     end subroutine collect_tests_table_parallel
     !
@@ -1551,5 +1553,101 @@ contains
         call check(error, mid_lo == 7_int64 .and. mid_hi == 19_int64, &
             "when every row fills whole blocks the range must be used untrimmed")
     end subroutine test_colread_block_alignment
+    !
+    !> Concurrent `%set_null` on ONE column must keep every null, including when the rows two
+    !> threads write share a validity block.
+    !>
+    !> **The two arms are the whole point, and neither is sufficient alone.** Validity is packed
+    !> `parquet_validity_block_bits` elements to one `integer(int64)`, so "different rows" is not
+    !> "different memory": without the `!$omp atomic` in `bit_set`
+    !> (`src/parquet_columns_util.f90`) two threads writing rows in one block both read, modify and
+    !> write it, and one update is lost silently -- the column still validates and the row count is
+    !> still right. See feature_risks.md Risk-135.
+    !>
+    !>   * The **sharing** arm uses `schedule(dynamic)`, which hands out single iterations, so
+    !>     threads interleave across every block. Measured against the unfixed code on machine A:
+    !>     333666 of 819200 nulls lost, about 41%.
+    !>   * The **aligned** arm is the negative control. Each thread owns a contiguous, block-aligned
+    !>     span, so no block is ever touched by two threads and the arm passes with or without the
+    !>     atomic. It is what localises a future regression: if the atomic is removed, the first arm
+    !>     fails and this one still passes, which says the defect is block sharing rather than
+    !>     anything else about concurrent nulling.
+    !>
+    !> `NR` is a multiple of the block size so the aligned arm can be exact, and the loop asserts it
+    !> really ran on more than one thread -- a one-thread run would pass both arms while testing
+    !> nothing.
+    subroutine test_concurrent_set_null_shares_block(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), parameter :: NR = 4096_int64
+        type(parquet_table) :: t
+        real(real64) :: v(NR)
+        integer(int64) :: i, blk, lo, hi
+        integer :: lost, avail, seen_threads, nblocks
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: both arms below would run serially, so the equality " // &
+            "they assert would hold because nothing was concurrent rather than because the " // &
+            "bitmap update is atomic")
+        return
+#endif
+        if (avail < 2) then
+            call skip_test(error, "needs at least 2 threads: one thread cannot share a validity " // &
+                "block with itself, so neither arm would exercise the atomic")
+            return
+        end if
+        v = 1.0_real64
+        !
+        ! ---- Arm 1: interleaved, so threads share blocks. Fails without the atomic. ----
+        call parquet_new_table(t)
+        call t%add_column("x", v)
+        call t%ensure_validity("x")
+        seen_threads = 1
+        !$omp parallel default(shared) private(i)
+        !$omp single
+        seen_threads = omp_get_num_threads()
+        !$omp end single
+        !$omp do schedule(dynamic)
+        do i = 1_int64, NR
+            call t%set_null("x", i)
+        end do
+        !$omp end do
+        !$omp end parallel
+        call check(error, seen_threads > 1, &
+            "the interleaved arm must actually run on more than one thread, or it tests nothing")
+        if (allocated(error)) return
+        lost = 0
+        do i = 1_int64, NR
+            if (.not. t%is_null("x", i)) lost = lost + 1
+        end do
+        call check(error, lost == 0, &
+            "every concurrently written null must survive when threads share validity blocks")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 2 (negative control): block-aligned spans, so no block is shared. ----
+        nblocks = int(NR/parquet_validity_block_bits)
+        call parquet_new_table(t)
+        call t%add_column("x", v)
+        call t%ensure_validity("x")
+        !$omp parallel do default(shared) private(blk, lo, hi, i) schedule(static)
+        do blk = 1_int64, int(nblocks, int64)
+            lo = (blk - 1_int64)*parquet_validity_block_bits + 1_int64
+            hi = blk*parquet_validity_block_bits
+            do i = lo, hi
+                call t%set_null("x", i)
+            end do
+        end do
+        !$omp end parallel do
+        lost = 0
+        do i = 1_int64, NR
+            if (.not. t%is_null("x", i)) lost = lost + 1
+        end do
+        call check(error, lost == 0, &
+            "the block-aligned control must keep every null too -- if this fails, the problem is " // &
+            "not block sharing")
+    end subroutine test_concurrent_set_null_shares_block
     !
 end module test_table_parallel

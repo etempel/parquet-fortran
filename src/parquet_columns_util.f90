@@ -143,19 +143,41 @@ contains
     end procedure bit_test
     !
     !> Sets bit `b` of an allocated bitmap (marks the element null).
+    !!
+    !! **The update is `!$omp atomic`, and both halves of how it is written are required.**
+    !! Validity is packed `BITS_PER_BLOCK` elements to one `integer(int64)`, so "different rows"
+    !! is not "different memory": two threads writing rows that share a block both read, modify
+    !! and write that block, and one update is lost. Nothing announces it -- the column still
+    !! validates, the row count is still right, and some row's null flag is simply wrong. This is
+    !! reachable straight from the public API (`%set_null` in a parallel loop, which
+    !! `doc/pages/operating/thread-safety.md` documents as safe) and from any concurrent value
+    !! write to a null-carrying column, since a setter clears the element's bit. See
+    !! feature_risks.md Risk-135.
+    !!
+    !! The two halves: the mask is built *before* the directive, because `!$omp atomic update`
+    !! accepts only `x = x op expr` or `x = intrinsic(x, expr)` with `intrinsic` one of
+    !! `max`/`min`/`iand`/`ior`/`ieor` -- `ibset` is not in that list, which is why this reads
+    !! `ior(map(blk), msk)` rather than the more obvious `ibset(map(blk), pos)`. And the procedure
+    !! is not `pure`, because gfortran rejects any OpenMP directive in a `pure` procedure.
     module procedure bit_set
-        integer(int64) :: k, blk
+        integer(int64) :: k, blk, msk
         k = b - 1_int64
         blk = k/BITS_PER_BLOCK + 1_int64
-        map(blk) = ibset(map(blk), int(mod(k, BITS_PER_BLOCK)))
+        msk = ibset(0_int64, int(mod(k, BITS_PER_BLOCK)))
+        !$omp atomic update
+        map(blk) = ior(map(blk), msk)
     end procedure bit_set
     !
-    !> Clears bit `b` of an allocated bitmap (marks the element valid).
+    !> Clears bit `b` of an allocated bitmap (marks the element valid). Atomic and non-`pure` for
+    !! the reasons `bit_set` records; `iand` with the complement is the `ibclr` this construct
+    !! will accept.
     module procedure bit_clear
-        integer(int64) :: k, blk
+        integer(int64) :: k, blk, msk
         k = b - 1_int64
         blk = k/BITS_PER_BLOCK + 1_int64
-        map(blk) = ibclr(map(blk), int(mod(k, BITS_PER_BLOCK)))
+        msk = ibset(0_int64, int(mod(k, BITS_PER_BLOCK)))
+        !$omp atomic update
+        map(blk) = iand(map(blk), not(msk))
     end procedure bit_clear
     !
     module procedure bits_set_range

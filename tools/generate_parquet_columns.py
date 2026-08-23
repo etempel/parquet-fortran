@@ -1227,12 +1227,22 @@ module parquet_columns
             logical :: res                                    !! .true. when the bit is set.
         end function bit_test
         !> Sets bit `b` (1-based) of an allocated bitmap.
-        pure module subroutine bit_set(map, b)
+        !!
+        !! **NOT `pure`, and that is load-bearing rather than an oversight.** The body updates the
+        !! bitmap word under `!$omp atomic`, and gfortran rejects an OpenMP directive inside a
+        !! `pure` procedure outright ("OpenMP directive is not pure and thus may not appear in a
+        !! PURE procedure"). Restoring `pure` therefore means removing the atomic, which silently
+        !! reintroduces a lost-update race: validity is packed `BITS_PER_BLOCK` elements to one
+        !! `integer(int64)`, so two threads writing *different rows* of one column collide whenever
+        !! those rows share a block -- see feature_risks.md Risk-135. Nothing here needs purity;
+        !! no caller is `pure` or `elemental`, and no `do concurrent` reaches this.
+        module subroutine bit_set(map, b)
             integer(int64), intent(inout) :: map(:) !! the bitmap.
             integer(int64), intent(in) :: b         !! 1-based bit index.
         end subroutine bit_set
-        !> Clears bit `b` (1-based) of an allocated bitmap.
-        pure module subroutine bit_clear(map, b)
+        !> Clears bit `b` (1-based) of an allocated bitmap. Not `pure`, for the reason `bit_set`
+        !! records.
+        module subroutine bit_clear(map, b)
             integer(int64), intent(inout) :: map(:) !! the bitmap.
             integer(int64), intent(in) :: b         !! 1-based bit index.
         end subroutine bit_clear
@@ -1244,6 +1254,13 @@ module parquet_columns
         !! ragged ends are masked. A range that does not start or end on a word boundary is the
         !! normal case, not an edge case -- `width` need not divide 64 -- so both ends are handled,
         !! and a range lying inside one word is handled by the first end alone.
+        !!
+        !! **Still `pure`, unlike `bit_set`/`bit_clear`, because nothing reaches it concurrently.**
+        !! Its only callers are `grow_rows` and `insert_null_rows`
+        !! (`src/parquet_columns_structural.f90`), both row-structural operations that the table
+        !! layer refuses outright on a shared table. Give it the same atomic treatment as `bit_set`
+        !! if that ever stops being true -- its two ragged-end words are read-modify-writes and
+        !! would race exactly as a single bit does.
         pure module subroutine bits_set_range(map, lo, hi)
             integer(int64), intent(inout) :: map(:) !! the bitmap.
             integer(int64), intent(in) :: lo        !! first 1-based bit to set.

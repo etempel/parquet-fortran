@@ -766,40 +766,28 @@ contains
     !!     each column is read by exactly one thread, so nothing is checked or warned twice.
     !!     Measured on a 16-column x 2 M-row file, 8 threads, best of 5, four rounds: **3.5x** for
     !!     the sample and **3.3x** for qc, against 4.5x with no transform at all.
-    !!   * **A `sort=` and a `filter=` still fall back to the serial reader -- both on COST, and
-    !!     both as a DEFERRAL rather than a property of the problem.** Each per-thread reader would
-    !!     redo the transform's own derived state, which is the "does not duplicate real work"
-    !!     clause of the principle above:
-    !!       - a **sort** rebuilds the whole permutation, serially (`pf_sort_threads` stands down
-    !!         inside a region) -- 5.88 s at 20.8 M rows on one measured machine, against a
-    !!         prefetch saving of a couple of seconds on the same file;
-    !!       - a **filter** re-decodes its key columns, re-runs the statistics screen and rebuilds
-    !!         the row mask -- a cost that grows with the thread count while the read saving decays
-    !!         with it, so the curve peaks early and then goes negative. Measured on the same file,
-    !!         three rounds, speedup against a forced-serial read by thread cap: **2 -> 1.06x,
-    !!         3 -> 1.22x, 4 -> 1.19x, 5 -> 1.21x, 6 -> 1.04x, 7 -> 0.94x, 8 -> 0.94x**, against
-    !!         4.0-4.7x for the same file with no filter. So it is refused **at the automatic
-    !!         thread count, which is what a caller actually gets** -- the peak is real but is worth
-    !!         a fifth of what the untransformed case wins, and capturing it would mean inventing a
-    !!         thread-count heuristic from one machine's numbers. Correctness is not the issue at
-    !!         all (a filter is a pure function of the file, so every reader computes the same mask,
-    !!         and that path is implemented and tested); only the cost is.
+    !!   * **A `sort=` and a `filter=` are CARRIED too, and there is deliberately no clause for
+    !!     either.** Each per-thread reader *adopts* the table's own row mask and sort permutation
+    !!     (`table_open_reader_with_transform`) instead of rebuilding them: both are immutable Arrow
+    !!     arrays, so adopting one is a refcount increment however large the file. Nothing is
+    !!     recomputed, so no transform can cost a second reader anything to reproduce, and none of
+    !!     them can produce a different row set. `per_thread_readers_ok` says the same at the site
+    !!     of the test -- **a clause added back here "to be safe" would refuse a case that is now
+    !!     both correct and fast.**
     !!
-    !!         **More filter columns makes this monotonically worse, not better** -- the natural
-    !!         next question, and the answer is the opposite of the intuition. The per-reader cost
-    !!         is proportional to how many key columns the filter decodes, so the optimum thread
-    !!         count falls as sqrt(columns read / columns filtered on). Same file, best speedup over
-    !!         every thread count tried: **1 key column -> 1.29x, 2 -> 1.02x, 4 -> 0.77x,
-    !!         8 -> 0.65x.** From two key columns on there is NO thread count at which this wins.
-    !!     **Both are fixable the same way, and by the same milestone.** The permutation is an
-    !!     immutable `shared_ptr<arrow::Array>` and the mask is likewise derived once and never
-    !!     mutated, so each could be *shared* with a per-thread reader for a refcount increment
-    !!     instead of rebuilt. That is milestone P9, which these two clauses both wait on. Do not
-    !!     read either line as "this cannot be parallelised".
+    !!     This is the milestone the earlier version of this comment called P9 and described as
+    !!     future work; it has landed. What remains true from that analysis is only why the
+    !!     *transform itself* is still worked out serially, once, before the parallel read begins:
+    !!     a sort's permutation is built by one thread (`pf_sort_threads` stands down inside a
+    !!     region) and a filter's mask is evaluated by the table's own reader. That is why a
+    !!     transformed read is somewhat below an untransformed one rather than equal to it -- not
+    !!     because any of it is repeated per reader.
     !!   * **Not detached, and file-backed**, or there is no file to open a second reader on.
-    !!   * **At least two top-level names to read.** One column cannot be split, and the release
-    !!     policy groups a struct's leaves under their top-level name (see `materialize_marked`),
-    !!     so that is the unit of work.
+    !!   * **At least two top-level names to read.** The release policy groups a struct's leaves
+    !!     under their top-level name (see `materialize_marked`), so that is the unit of work.
+    !!     A *single* column is not left serial by this -- it is split a different way, across its
+    !!     row groups, by `materialize_column_parallel`; this clause only decides which of the two
+    !!     splits applies.
     !!   * **Not already inside a parallel region.** Nested regions are the caller's business, and
     !!     a table reached from inside one is exactly the shared-store case the first-touch guard
     !!     refuses anyway.

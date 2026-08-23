@@ -194,6 +194,7 @@ something a reader is expected to have.
 | [Risk-130](#risk-130--a-generator-that-derives-through-libm-emits-a-different-table-on-every-machine) | A GENERATOR that derives through libm emits a different table on every machine | 4 — covered |
 | [Risk-132](#risk-132--an-unrecognised-qc-miss-value-resolves-to-a-logical-and-means-the-opposite) | An unrecognised `qc: miss:` value resolves to a logical, and means the OPPOSITE | 4 — covered |
 | [Risk-134](#risk-134--the-shared-table-guard-can-be-rewritten-to-key-on-the-region-and-every-abort-test-still-passes) | The shared-table guard can be rewritten to key on the REGION, and every abort test still passes | 4 — covered |
+| [Risk-135](#risk-135--a-validity-bit-update-that-is-not-atomic-loses-a-null-whenever-two-threads-write-rows-in-one-block) | A validity bit update that is not atomic loses a null whenever two threads write rows in one block | 4 — covered |
 
 ---
 
@@ -5868,4 +5869,68 @@ on the abort.
 `unsafe_first_touch` and `record_open_thread` — as `src/parquet_tables_parallel.f90`'s own header
 says. A change to one of them is a change to all three, and only the write path has a
 positive-arm test today; the other nineteen `table_check_not_shared` callers rest on this one.
+
+### Risk-135 — A validity bit update that is not atomic loses a null whenever two threads write rows in one block
+
+**Covered** by `concurrent set_null keeps every null when rows share a validity block`
+(`test/test_table_parallel.f90`). This is [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null)'s
+mechanism on the **public API** rather than inside `materialize_column_parallel`, and it shipped for
+the same reason: Risk-64 was fixed where it was found, and the same arithmetic one layer down was
+left alone.
+
+`parquet_column` packs validity `parquet_validity_block_bits` (64) elements to one
+`integer(int64)`. `bit_set`/`bit_clear` (`src/parquet_columns_util.f90`) update that word, so **two
+threads writing different ROWS of one column collide whenever those rows share a block** — they
+read, modify and write the same word and one update is lost. Nothing announces it: the column still
+validates, the row count is still right, and some row's null flag is simply wrong.
+
+**Two public paths reach it**, and the second is easy to miss: `%set_null`/`%clear_null` in a
+parallel loop, which `doc/pages/operating/thread-safety.md` documents as permitted once
+`%ensure_validity` has run; and **any concurrent value write to a column that has nulls**, because
+every typed setter does `if (col%has_nulls) call bit_clear(...)` to clear the element's bit. The
+table's own guard (`cache_check_shared_write`) refuses only a string column and a column with no
+validity storage yet, so once the storage exists both paths are permitted and unsynchronised.
+
+**Whether you see it depends on the OpenMP SCHEDULE, which is why it survived.** Measured on machine
+A before the fix, 200 trials x 4096 rows = 819200 nulls written and read back:
+
+| schedule | nulls lost |
+|---|---|
+| default `static` (512-row chunks) | **0** |
+| `schedule(static, 1)` | 10781 (1.3 %) |
+| `schedule(dynamic)` | **333666 (41 %)** |
+
+**The zero is the dangerous row: it passes for the wrong reason.** 4096 rows over 8 threads gives
+512-row chunks, and 512 is a multiple of 64, so no two threads ever touch one block. Change the row
+count, the thread count or the schedule and the alignment is gone.
+
+**The fix** is `!$omp atomic update` on the word, and two details of how it is written are forced:
+the mask is built before the directive, because `atomic update` accepts only `x = x op expr` or
+`x = intrinsic(x, expr)` with `intrinsic` in `max`/`min`/`iand`/`ior`/`ieor` — **`ibset` is not in
+that list** — and the two procedures had to **stop being `pure`**, because gfortran rejects any
+OpenMP directive in a `pure` procedure ("OpenMP directive is not pure and thus may not appear in a
+PURE procedure"). Measured cost on the serial path: **nil**. `%set_null` went 24.794 -> 25.259
+ns/call while an untouched control arm (a value write on a null-free column, which never reaches
+`bit_set`) moved 24.789 -> 25.056 across the same two builds, so the whole difference is inside the
+cross-build floor.
+
+**What this forbids.**
+
+- **Do not restore `pure` to `bit_set`/`bit_clear`.** It is not a style choice: `pure` and the
+  atomic cannot coexist, so restoring it silently removes the synchronisation. Their doc-comments
+  say so at the declaration, in the generator's template text.
+- **Do not reason from "the rows are disjoint" to "the writes are disjoint"** — Risk-64's rule,
+  which this entry exists because the code violated one layer below where that rule was applied.
+  Rows, elements and bits are three granularities and only the last is what a read-modify-write
+  touches.
+- **`bits_set_range`/`bits_clear_range` are still `pure`, and that is a claim about their callers,
+  not about their safety.** Their ragged-end words are read-modify-writes and would race exactly as
+  a single bit does; they are safe only because `grow_rows` and `insert_null_rows`
+  (`src/parquet_columns_structural.f90`) are their only callers and both are row-structural
+  operations the table refuses on a shared table. A new caller must re-check that.
+- **A test for this needs an interleaving schedule and a block-aligned control.** The default
+  `static` schedule cannot see the defect at a fixture size whose chunks happen to be 64-aligned, so
+  a test written the obvious way passes against the unfixed code. The two-arm shape is the point:
+  remove the atomic and the interleaved arm fails while the aligned arm passes, which localises the
+  defect instead of merely reporting one.
 

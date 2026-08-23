@@ -616,9 +616,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sample_fraction=` read 3.3–3.5x, where a filtered or sorted read used to be serial. A soft `qc=`
   violation still warns at most once per column.
   New `%ensure_validity([name])` materializes a column's validity storage up
-  front, which is what makes nulling elements of one column from several threads safe — validity is
-  allocated lazily, so the *first* null would otherwise allocate, and two threads doing that race.
-  `parquet_string_column` gains the matching `has_validity`/`reserve_validity` pair.
+  front, which is one of the two things that make nulling elements of one column from several
+  threads safe — validity is allocated lazily, so the *first* null would otherwise allocate, and two
+  threads doing that race. The other is that the bitmap word is updated atomically: validity is
+  packed 64 elements to an `integer(int64)`, so threads writing *different rows* still share a word
+  whenever those rows fall in one block, and a plain read-modify-write there loses a null with
+  nothing to report it. `parquet_string_column` gains the matching
+  `has_validity`/`reserve_validity` pair.
 
   **Every remaining single-threaded requirement is now a hard `error stop` naming what to do
   instead, not a documented convention**: changing a shared table's structure inside a parallel

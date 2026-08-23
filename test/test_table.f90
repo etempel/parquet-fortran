@@ -9660,6 +9660,31 @@ contains
         call t%validate_qc()
         call check(error, t%residency("i32") == RES_EMPTY, &
             "%validate_qc on a table with no qc should read nothing")
+        if (allocated(error)) return
+        !
+        ! A DETACHED table declares qc but has no file to re-read from, so there is nothing left to
+        ! check: a no-op rather than an abort. Everything above is this arm's negative control --
+        ! the same fixture, the same qc, and there %validate_qc really did read and release a
+        ! column -- so a %validate_qc that had become a no-op for every table would fail there
+        ! rather than pass here.
+        call parquet_open_table(t, f, qc=qc)
+        call t%prefetch("f64")               ! one resident column, so the truncate has rows to cut
+        call t%truncate(2)
+        call check(error, t%is_detached(), "precondition: %truncate should detach the table")
+        if (allocated(error)) return
+        call t%validate_qc()
+        call check(error, t%residency("i32") == RES_EMPTY, &
+            "%validate_qc on a detached table must read nothing rather than abort")
+        if (allocated(error)) return
+        !
+        ! A table built in memory never had a file either, and declares no qc: the same no-op, and
+        ! it must leave the table entirely alone.
+        call parquet_new_table(t)
+        call t%add_column("a", [1_int32, 2_int32])
+        call t%validate_qc()
+        call t%get("a", i32)
+        call check(error, t%ncols() == 1 .and. size(i32) == 2 .and. i32(2) == 2_int32, &
+            "%validate_qc on an in-memory table must be a clean no-op, leaving its values intact")
     end subroutine test_validate_qc
     !
     !> A MAML's own extra: filter:/extra: sort: apply on their own, and AND/append with a

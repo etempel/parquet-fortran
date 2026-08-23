@@ -1430,6 +1430,18 @@ contains
         self%cache%cols(idx)%residency = RES_FULL
         self%cache%cols(idx)%user_populated = .false.
         self%cache%row_index_live = .true.
+        ! Said HERE, and not only at open, because this is the moment the confusion could bite: the
+        ! open-time warning fires whether or not the program ever asks for the name, so a program
+        ! that scrolled past it (or ran under a captured stream) now holds row numbers where it may
+        ! have meant the file's own column of that name. Nothing else can report it -- the values
+        ! are perfectly valid row numbers, so no guard downstream has anything to object to.
+        if (self%cache%row_index_shadowed) then
+            call table_context_suffix(self%cache, "", sfx)
+            call parquet_emit_warning("parquet_table: '" // PARQUET_ROW_INDEX // "' holds this " // &
+                "table's own physical row numbers; the file's own column of that name was dropped " // &
+                "at open and is reachable only by giving it another name with a read-in MAML's " // &
+                "extra: remap:" // sfx)
+        end if
     end procedure table_make_row_index
     !
     module procedure table_validate_qc

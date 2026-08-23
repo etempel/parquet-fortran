@@ -1506,6 +1506,8 @@ program error_scenarios
         call scenario_table_write_unbuilt_schema()
     case ("table_row_index_after_detach")
         call scenario_table_row_index_after_detach()
+    case ("table_row_index_shadowed_warning")
+        call scenario_table_row_index_shadowed_warning()
     case ("table_evict_in_memory")
         call scenario_table_evict_in_memory()
     case ("table_evict_detached")
@@ -13124,6 +13126,42 @@ contains
     !> The row index says which row of the SOURCE FILE each row came from, so a table that has
     !! cut its file loose can no longer produce it. Materializing it before the mutation is the
     !! documented way round, which is what the message says.
+    !> Materializing the automatic row index on a table whose file carried its OWN column of that
+    !! name warns, and a table whose file did not stays silent.
+    !!
+    !! Both halves run in one process on purpose: the second is the negative control, and a
+    !! warning that fires unconditionally would pass every assertion written for the first.
+    !! Neither half aborts -- the expected exit status is 0 -- so this scenario is about what
+    !! reaches the stream, not about a guard.
+    subroutine scenario_table_row_index_shadowed_warning()
+        type(parquet_table) :: t
+        type(parquet_writer) :: w
+        integer(int64), allocatable :: ri(:)
+        character(len=*), parameter :: shadowed = "test_run/es_rowindex_shadowed.parquet"
+        character(len=*), parameter :: clean = "test_run/es_rowindex_clean.parquet"
+
+        ! A file carrying its own parquet_row_index column. The open-time warning fires here.
+        call parquet_open_writer(w, shadowed)
+        call parquet_write_column(w, "a", [10_int32, 20_int32, 30_int32])
+        call parquet_write_column(w, PARQUET_ROW_INDEX, [7_int32, 8_int32, 9_int32])
+        call parquet_close_writer(w)
+
+        call parquet_open_table(t, shadowed)
+        print '(a)', "opened the shadowed file"
+        call t%get(PARQUET_ROW_INDEX, ri)
+        print '(a,i0,a,i0)', "shadowed row index n=", size(ri), " first=", ri(1)
+
+        ! The control: same read, on a file with no such column of its own.
+        call parquet_open_writer(w, clean)
+        call parquet_write_column(w, "a", [10_int32, 20_int32, 30_int32])
+        call parquet_close_writer(w)
+
+        call parquet_open_table(t, clean)
+        deallocate(ri)
+        call t%get(PARQUET_ROW_INDEX, ri)
+        print '(a,i0,a,i0)', "clean row index n=", size(ri), " first=", ri(1)
+    end subroutine scenario_table_row_index_shadowed_warning
+
     subroutine scenario_table_row_index_after_detach()
         type(parquet_table) :: t
         integer(int64), allocatable :: ri(:)

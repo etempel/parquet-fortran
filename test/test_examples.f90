@@ -50,6 +50,8 @@ contains
             new_unittest("doc/pages/utilities/generated-tables.md generated_table_quickstart example", &
                 test_generated_table_quickstart_example), &
             new_unittest("doc/pages/tables/table.md mean_mass example", test_mean_mass_example), &
+            new_unittest("doc/pages/tables/table-open.md per-thread slices example", &
+                test_per_thread_slices_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -541,6 +543,84 @@ contains
     !! first; nothing else about it changes. One deviation from the page is unavoidable: the
     !! example says `use parquet_tables`, and this module already carries `use parquet`, so the
     !! narrow import is NOT what is exercised here -- see the note in feature_doc_table.md.
+    !> `doc/pages/tables/table-open.md`'s per-thread slice example: one slice per row group covers
+    !! every row of the file exactly once.
+    !!
+    !! **Run serially here, and that is a deliberate deviation from the page.** The example is
+    !! written as an `!$omp parallel do`, but test-drive runs each suite's tests inside its OWN
+    !! `!$omp parallel do` (`examples` is not in `run_tester.f90`'s exclusion list), so a nested
+    !! region here would be exactly the libgomp nesting hazard `feature_risks.md` Risk-104 records.
+    !! Nothing is lost: the claim under test is the SLICE ARITHMETIC -- that
+    !! `parquet_table_row_group_bounds` partitions the file and each slice reads its own rows --
+    !! which is what the example is really teaching and is independent of who runs the loop.
+    !! `test/test_table_parallel.f90` is where the threaded shape itself is exercised.
+    subroutine test_per_thread_slices_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/example_per_thread_slices.parquet"
+        integer, parameter :: N = 30, CH = 7
+        type(parquet_writer) :: writer
+        type(parquet_table) :: whole
+        integer(int64), allocatable :: bounds(:,:)
+        real(real64), allocatable :: all_mass(:)
+        real(real64) :: total, expect, wrong
+        integer :: rg, i
+
+        ! Several row groups, so the bounds really partition rather than trivially covering.
+        call parquet_open_writer(writer, out_file, chunk_size=CH)
+        call parquet_write_column(writer, "mass", [(real(i, real64), i = 1, N)])
+        call parquet_close_writer(writer)
+
+        ! --- the example, verbatim apart from the filename and the serial loop ---
+        call parquet_table_row_group_bounds(out_file, bounds)
+
+        total = 0.0_real64
+        do rg = 1, size(bounds, 2)
+            block
+                type(parquet_table) :: mine        ! NOT private(mine) -- see the page
+                real(real64), allocatable :: x(:)
+                call parquet_open_table(mine, out_file, bounds(1, rg), bounds(2, rg))
+                call mine%get("mass", x)
+                total = total + sum(x)
+            end block
+        end do
+        ! --- end of the example ---
+
+        call check(error, size(bounds, 2) > 1, &
+            "precondition: the fixture must have several row groups, or the slices prove nothing")
+        if (allocated(error)) return
+
+        ! The whole-file read is the independent oracle: the slices must reproduce it exactly.
+        call parquet_open_table(whole, out_file)
+        call whole%get("mass", all_mass)
+        expect = sum(all_mass)
+        call check(error, abs(total - expect) < 1.0e-9_real64, &
+            "one slice per row group must cover every row of the file exactly once")
+        if (allocated(error)) return
+        call check(error, abs(expect - real(N * (N + 1) / 2, real64)) < 1.0e-9_real64, &
+            "precondition: the fixture's own total should be the hand-computed one")
+        if (allocated(error)) return
+
+        ! Negative control. Deliberately mis-cut ranges -- row group 1's bounds used twice, so its
+        ! rows are counted twice and the last row group's not at all -- must give a DIFFERENT
+        ! total. Without this the test passes just as happily against a slice open that ignores
+        ! row_lo/row_hi and hands every slice the whole file.
+        wrong = 0.0_real64
+        do rg = 1, size(bounds, 2)
+            block
+                type(parquet_table) :: mine
+                real(real64), allocatable :: x(:)
+                integer :: pick
+                pick = rg
+                if (pick == size(bounds, 2)) pick = 1
+                call parquet_open_table(mine, out_file, bounds(1, pick), bounds(2, pick))
+                call mine%get("mass", x)
+                wrong = wrong + sum(x)
+            end block
+        end do
+        call check(error, abs(wrong - expect) > 1.0e-9_real64, &
+            "the negative control: mis-cut ranges must NOT reproduce the whole-file total")
+    end subroutine test_per_thread_slices_example
+
     subroutine test_mean_mass_example(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: out_file = "test_run/example_mean_mass.parquet"

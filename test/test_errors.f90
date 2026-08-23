@@ -966,6 +966,8 @@ contains
                 test_table_write_unbuilt_schema_aborts), &
             new_unittest("asking for the row index after a detach aborts", &
                 test_table_row_index_after_detach_aborts), &
+            new_unittest("materializing the row index warns when the file had its own column of that name", &
+                test_table_row_index_shadowed_warns), &
             new_unittest("evicting an in-memory column aborts", &
                 test_table_evict_in_memory_aborts), &
             new_unittest("evicting a column of a detached table aborts", &
@@ -1743,6 +1745,58 @@ contains
             failure_message="the row index after a detach was expected to abort", &
             required_stderr="materialize it BEFORE the mutation that detaches")
     end subroutine test_table_row_index_after_detach_aborts
+
+    !> The automatic row index warns, on first use, when the file carried its own column of that
+    !! name -- and stays silent when it did not.
+    !!
+    !! The open-time warning is not enough on its own: it fires whether or not the program ever
+    !! asks for the name, so a program that scrolled past it holds row numbers where it may have
+    !! meant the file's data. Nothing downstream can report that -- the values ARE valid row
+    !! numbers -- so this warning is the only thing standing between the collision and a silently
+    !! wrong answer.
+    !!
+    !! The second half is the negative control, and it is what makes the first half mean anything:
+    !! a warning emitted for every table would satisfy the first assertion while telling a reader
+    !! nothing. Both halves run in one scenario process, over two files, so the two observations
+    !! are made under identical conditions.
+    subroutine test_table_row_index_shadowed_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: warned, saw_clean, saw_shadowed
+
+        call run_error_scenario("table_row_index_shadowed_warning", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 0, "a shadowed row-index column must warn, never abort")
+        if (allocated(error)) return
+
+        ! Both reads really happened -- otherwise a warning count proves nothing.
+        call scenario_capture_contains(out_file, err_file, "shadowed row index n=3 first=1", saw_shadowed)
+        call check(error, saw_shadowed, &
+            "the automatic row index must still be produced for the shadowed file, and hold row numbers")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "clean row index n=3 first=1", saw_clean)
+        call check(error, saw_clean, "the control read must have happened too")
+        if (allocated(error)) return
+
+        ! The whole tail, file included: the open-time warning names the same file, so a probe on
+        ! the filename alone could not tell the two apart.
+        call scenario_capture_contains(out_file, err_file, &
+            "extra: remap: (file 'test_run/es_rowindex_shadowed.parquet')", warned)
+        call check(error, warned, &
+            "materializing the row index on a table whose file had its own column of that name " // &
+            "must say so, name the file, and say how to reach the file's column")
+        if (allocated(error)) return
+
+        ! The control: the same warning must NOT be there for the file that has no such column.
+        call scenario_capture_contains(out_file, err_file, &
+            "extra: remap: (file 'test_run/es_rowindex_clean.parquet')", warned)
+        call check(error, .not. warned, &
+            "a table whose file has no column of that name must not warn -- a warning on every " // &
+            "table would tell a reader nothing")
+    end subroutine test_table_row_index_shadowed_warns
 
     subroutine test_table_evict_in_memory_aborts(error)
         type(error_type), allocatable, intent(out) :: error

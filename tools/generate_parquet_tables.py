@@ -2245,14 +2245,6 @@ def gen_spec_interfaces():
             integer, intent(out) :: n                !! entries found; 0 if there is no remap: block.
             character(len=*), intent(in) :: maml_file !! the MAML's own path, for error messages.
         end subroutine parse_read_maml_remap
-        !> Validates a parsed remap against the file's own column names and fills `cache%cols`
-        !! accordingly -- the enumeration that would otherwise be one slot per physical column.
-        !!
-        !! Every physical column is visited in file order and expanded into the internal names that
-        !! claim it, so file order (and therefore struct-leaf adjacency, which the batch release
-        !! policy depends on) is preserved and two internal names reading one column land in
-        !! adjacent slots. A physical column whose own name is claimed as an INTERNAL name by some
-        !! remap entry is skipped: that is the deliberate shadow, not an error.
         !> Parses one plain YAML string list nested under the MAML's `extra:` section -- the shape
         !! both `extra: filter:` and `extra: sort:` have -- into `items(1:n)`, unquoted and in list
         !! order. `n` is 0 (and `items` is allocated empty) when the MAML has no such key.
@@ -2316,7 +2308,11 @@ def gen_spec_interfaces():
         !> Fills the cache's column slots from the file's own column names, expanding each physical
         !! column into whatever `extra: remap:` claims it (two internal names may target one
         !! physical column, so slots can outnumber the file's columns). Walks the file's order, so
-        !! a struct's leaves stay adjacent for the batch release policy.
+        !! a struct's leaves stay adjacent for the batch release policy, and two internal names
+        !! reading one column land in adjacent slots.
+        !!
+        !! A physical column whose own name is claimed as an INTERNAL name by some remap entry is
+        !! skipped: that is the deliberate shadow, not an error.
         module subroutine table_enumerate_columns(cache, names, internal, physical, n_remap, filename)
             type(parquet_table_cache), intent(inout) :: cache !! the column store to fill.
             character(len=*), intent(in) :: names(:) !! the file's own column names, in file order.

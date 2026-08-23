@@ -379,9 +379,10 @@ call t%compact()             ! give the slack back
 ```
 
 **Both invalidate every `%col` pointer and row handle into the table**, because both reallocate
-storage — they are the only two operations that do so without changing the row set. `%generation()`
-advances only when something actually moved, so the usual take-it-before / compare-it-after /
-re-fetch pattern re-fetches only when a pointer really did die.
+storage without changing the row set — as do `%cast`, `%evict_column` and `%reload`, which replace
+or release one column's storage while the rows stay as they were. `%generation()` advances only
+when something actually moved, so the usual take-it-before / compare-it-after / re-fetch pattern
+re-fetches only when a pointer really did die.
 
 `%compact()` is a **no-op on a table that has not been appended to**: reading a column from a file
 allocates exactly what it holds, and so does every rebuild (`%filter_rows`, `%sort_by`, `%top_n`,

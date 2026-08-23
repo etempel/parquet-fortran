@@ -297,6 +297,9 @@ contains
     !
     module procedure set_arr_strcol
         integer :: idx
+        integer(int64) :: n, k
+        logical :: mod_nulls
+        logical, allocatable :: was_null(:)
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "set", idx, found, writing=.true.)
@@ -307,7 +310,28 @@ contains
         ! and the table's do not end up sharing storage. %set is a value replacement, exactly as
         ! the character-array form is; it is not a way to hand ownership over.
         call parquet_column_string_column(self%cache%cols(idx)%values, store)
+        ! modify_nulls = .false. keeps a row null if it was null HERE, on top of whatever the
+        ! source says -- the union of the two, not one replacing the other. The character-array
+        ! sibling (`refill_string_store`) can simply restore the destination's mask because its
+        ! source is a plain array with no validity of its own; this source carries nulls, and
+        ! discarding them would throw away something the caller explicitly supplied. Where the
+        ! source is null-free the two rules agree, which is every case the sibling covers.
+        ! Captured BEFORE the overwrite, or there is nothing left to read it from.
+        mod_nulls = .true.
+        if (present(modify_nulls)) mod_nulls = modify_nulls
+        if (.not. mod_nulls) then
+            n = store%size()
+            allocate(was_null(n))
+            do k = 1_int64, n
+                was_null(k) = store%is_null(k)
+            end do
+        end if
         store = arr%clone()
+        if (.not. mod_nulls) then
+            do k = 1_int64, n
+                if (was_null(k)) call store%set_null(k)
+            end do
+        end if
         if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_strcol
@@ -1456,7 +1480,8 @@ contains
     module procedure set_arr_i32
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_INT32, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1469,7 +1494,8 @@ contains
     module procedure set_arr_i64
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_INT64, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1482,7 +1508,8 @@ contains
     module procedure set_arr_f32
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_FLOAT32, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1495,7 +1522,8 @@ contains
     module procedure set_arr_f64
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_FLOAT64, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1508,7 +1536,8 @@ contains
     module procedure set_arr_bool
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_LOGICAL, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1521,7 +1550,8 @@ contains
     module procedure set_arr_date
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_DATE, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1534,7 +1564,8 @@ contains
     module procedure set_arr_time
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_TIME, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1547,7 +1578,8 @@ contains
     module procedure set_arr_ts
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_TIMESTAMP, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1560,7 +1592,8 @@ contains
     module procedure set_arr_i32v
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_INT32_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1573,7 +1606,8 @@ contains
     module procedure set_arr_i64v
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_INT64_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1586,7 +1620,8 @@ contains
     module procedure set_arr_f32v
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_FLOAT32_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1599,7 +1634,8 @@ contains
     module procedure set_arr_f64v
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_FLOAT64_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1612,7 +1648,8 @@ contains
     module procedure set_arr_boolv
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_LOGICAL_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1625,7 +1662,8 @@ contains
     module procedure set_arr_datev
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_DATE_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1638,7 +1676,8 @@ contains
     module procedure set_arr_timev
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_TIME_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1651,7 +1690,8 @@ contains
     module procedure set_arr_tsv
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_TIMESTAMP_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1664,7 +1704,8 @@ contains
     module procedure set_arr_chr
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -1677,7 +1718,8 @@ contains
     module procedure set_arr_chrv
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)

@@ -528,10 +528,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flattened into a fixed-width character array to be put into a table. A row handle can write as
   well as read: `r%set(name, value)` updates the table it is a view of, and `r%ref(name, p)` gives
   a zero-copy pointer to that one row's storage (every kind but the two string ones, which have no
-  fixed slot to point at). **`found=` now reaches every procedure that takes a column name**,
-  mutators included — and on a mutating call `found=.false.` means nothing was changed, since the
-  column is looked up before anything is written. On a reported miss a reading call leaves an
-  empty result rather than an undefined one, so a program that ignores `found` gets nothing rather
+  fixed slot to point at). **`found=` reaches every procedure that looks an existing column up by
+  name**, `%set` included — and on a mutating call `found=.false.` means nothing was changed, since
+  the column is looked up before anything is written. Three name-taking calls are deliberately
+  outside that: `%add_column` creates a column rather than looking one up, and
+  `%require_columns`/`%missing_columns` exist to report absence. `%set` given a
+  `parquet_string_column` takes `modify_nulls=` too, matching its sibling forms; because that
+  source carries nulls of its own, `modify_nulls=.false.` there gives the union of the two null
+  sets — a row stays null if it was null in the table or is null in the column being written.
+  On a reported miss a reading call leaves an empty result rather than an undefined one, so a
+  program that ignores `found` gets nothing rather
   than something it must not touch: `%get`, `%get_slice` and `%get_element` all leave a
   zero-length array (a defined zero, blank or null element for a scalar receiver) and `%col` a
   null pointer.

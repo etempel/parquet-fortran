@@ -4512,163 +4512,182 @@ module parquet_tables
     ! ---- Copy back (parquet_tables_access) ----
     interface
         !> Replaces every value of a PK_INT32 column. The array must have the column's own shape.
-        module subroutine set_arr_i32(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_i32(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             integer(int32), intent(in) :: arr(:)            !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_i32
         !> Replaces every value of a PK_INT64 column. The array must have the column's own shape.
-        module subroutine set_arr_i64(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_i64(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             integer(int64), intent(in) :: arr(:)            !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_i64
         !> Replaces every value of a PK_FLOAT32 column. The array must have the column's own shape.
-        module subroutine set_arr_f32(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_f32(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             real(real32), intent(in) :: arr(:)              !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_f32
         !> Replaces every value of a PK_FLOAT64 column. The array must have the column's own shape.
-        module subroutine set_arr_f64(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_f64(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             real(real64), intent(in) :: arr(:)              !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_f64
         !> Replaces every value of a PK_LOGICAL column. The array must have the column's own shape.
-        module subroutine set_arr_bool(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_bool(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             logical, intent(in) :: arr(:)                   !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_bool
         !> Replaces every value of a PK_DATE column. The array must have the column's own shape.
-        module subroutine set_arr_date(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_date(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_date), intent(in) :: arr(:)        !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_date
         !> Replaces every value of a PK_TIME column. The array must have the column's own shape.
-        module subroutine set_arr_time(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_time(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_time), intent(in) :: arr(:)        !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_time
         !> Replaces every value of a PK_TIMESTAMP column. The array must have the column's own shape.
-        module subroutine set_arr_ts(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_ts(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_timestamp), intent(in) :: arr(:)   !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_ts
         !> Replaces every value of a PK_INT32_VEC column. The array must have the column's own shape.
-        module subroutine set_arr_i32v(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_i32v(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             integer(int32), intent(in) :: arr(:,:)          !! (element, row), shaped (width, nrows).
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_i32v
         !> Replaces every value of a PK_INT64_VEC column. The array must have the column's own shape.
-        module subroutine set_arr_i64v(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_i64v(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             integer(int64), intent(in) :: arr(:,:)          !! (element, row), shaped (width, nrows).
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_i64v
         !> Replaces every value of a PK_FLOAT32_VEC column. The array must have the column's own shape.
-        module subroutine set_arr_f32v(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_f32v(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             real(real32), intent(in) :: arr(:,:)            !! (element, row), shaped (width, nrows).
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_f32v
         !> Replaces every value of a PK_FLOAT64_VEC column. The array must have the column's own shape.
-        module subroutine set_arr_f64v(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_f64v(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             real(real64), intent(in) :: arr(:,:)            !! (element, row), shaped (width, nrows).
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_f64v
         !> Replaces every value of a PK_LOGICAL_VEC column. The array must have the column's own shape.
-        module subroutine set_arr_boolv(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_boolv(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             logical, intent(in) :: arr(:,:)                 !! (element, row), shaped (width, nrows).
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_boolv
         !> Replaces every value of a PK_DATE_VEC column. The array must have the column's own shape.
-        module subroutine set_arr_datev(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_datev(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_date), intent(in) :: arr(:,:)      !! (element, row), shaped (width, nrows).
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_datev
         !> Replaces every value of a PK_TIME_VEC column. The array must have the column's own shape.
-        module subroutine set_arr_timev(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_timev(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_time), intent(in) :: arr(:,:)      !! (element, row), shaped (width, nrows).
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_timev
         !> Replaces every value of a PK_TIMESTAMP_VEC column. The array must have the column's own shape.
-        module subroutine set_arr_tsv(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_tsv(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             type(parquet_timestamp), intent(in) :: arr(:,:) !! (element, row), shaped (width, nrows).
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_tsv
         !> Replaces every value of a PK_STRING column from a character array. **Trailing blanks
         !! are trimmed** -- every element of a `character(len=*)` array shares one declared length,
         !! so a shorter value is blank-padded by Fortran and those blanks carry nothing the caller
         !! could have meant. `%set_element`, which takes a scalar, stores its value verbatim.
-        module subroutine set_arr_chr(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_chr(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             character(len=*), intent(in) :: arr(:)       !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_chr
         !> Replaces every value of a PK_STRING_VEC column from a character (element, row) array.
         !! Trailing blanks are trimmed, as in the rank-1 form above.
-        module subroutine set_arr_chrv(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_chrv(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             character(len=*), intent(in) :: arr(:,:)     !! (element, row) values.
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_chrv
         !> Replaces every value of a PK_STRING column from a compact parquet_string_column.
         !!
         !! The counterpart of `%get(name, packed)`: an independent copy is taken, so the caller's
         !! own column and the table's do not share storage afterwards. The row count must match,
         !! exactly as it must for the character-array form.
-        module subroutine set_arr_strcol(self, name, arr, is_valid, found)
+        module subroutine set_arr_strcol(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self         !! the table.
             character(len=*), intent(in) :: name                !! column name.
             type(parquet_string_column), intent(in) :: arr      !! one value per row.
             logical, intent(in), optional :: is_valid(:)        !! present: rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls       !! .false. keeps a row null if it was.
             logical, intent(out), optional :: found             !! present: report a miss instead of aborting.
         end subroutine set_arr_strcol
     end interface

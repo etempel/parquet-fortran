@@ -437,6 +437,10 @@ contains
                 test_bind_predefined_float_vector_kind), &
             new_unittest("copy_metadata carries into an output schema that declares none", &
                 test_write_table_copy_metadata_bare_schema), &
+            new_unittest("%set reports a missing column through found= instead of aborting", &
+                test_set_found), &
+            new_unittest("%set on a parquet_string_column unions nulls under modify_nulls", &
+                test_set_strcol_modify_nulls), &
             new_unittest("a slice answers has_nulls and row_group_bounds in its own scope", &
                 test_slice_has_nulls_and_bounds) &
             ]
@@ -591,6 +595,108 @@ contains
         call check(error, g64(6) == 6000000000_int64, &
             "i64 values should survive the write/reopen round trip")
     end subroutine test_roundtrip_scalar_numeric
+    !
+    !> %set reports a missing column through found=, on all three argument families.
+    !!
+    !! The negative control is the second half of every pair: the same call against a column that
+    !! DOES exist must report .true. AND have changed the values. Without that half the test passes
+    !! just as happily against a %set that writes nothing at all.
+    subroutine test_set_found(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_string_column) :: sc
+        real(real64), allocatable :: back(:)
+        character(len=:), allocatable :: cback(:)
+        logical :: ok
+        !
+        call parquet_new_table(t)
+        call t%add_column("flux", [1.0_real64, 2.0_real64, 3.0_real64])
+        call t%add_column("tag", [character(len=4) :: "aa", "bb", "cc"])
+        !
+        ! Numeric form: miss reports, hit writes.
+        call t%set("no_such_column", [7.0_real64, 8.0_real64, 9.0_real64], found=ok)
+        call check(error, .not. ok, "%set on a missing numeric column should report found=.false.")
+        if (allocated(error)) return
+        call t%set("flux", [7.0_real64, 8.0_real64, 9.0_real64], found=ok)
+        call check(error, ok, "%set on a present numeric column should report found=.true.")
+        if (allocated(error)) return
+        call t%get("flux", back)
+        call check(error, back(1) == 7.0_real64 .and. back(3) == 9.0_real64, &
+            "the negative control: a found=.true. %set must actually have written the values")
+        if (allocated(error)) return
+        !
+        ! Character-array form.
+        call t%set("no_such_column", [character(len=4) :: "xx", "yy", "zz"], found=ok)
+        call check(error, .not. ok, "%set on a missing character column should report found=.false.")
+        if (allocated(error)) return
+        call t%set("tag", [character(len=4) :: "xx", "yy", "zz"], found=ok)
+        call check(error, ok, "%set on a present character column should report found=.true.")
+        if (allocated(error)) return
+        call t%get("tag", cback)
+        call check(error, trim(cback(1)) == "xx", &
+            "the negative control: a found=.true. character %set must have written the values")
+        if (allocated(error)) return
+        !
+        ! parquet_string_column form.
+        call sc%append_string("pp")
+        call sc%append_string("qq")
+        call sc%append_string("rr")
+        call t%set("no_such_column", sc, found=ok)
+        call check(error, .not. ok, "%set on a missing strcol column should report found=.false.")
+        if (allocated(error)) return
+        call t%set("tag", sc, found=ok)
+        call check(error, ok, "%set on a present strcol column should report found=.true.")
+        if (allocated(error)) return
+        call t%get("tag", cback)
+        call check(error, trim(cback(1)) == "pp", &
+            "the negative control: a found=.true. strcol %set must have written the values")
+    end subroutine test_set_found
+    !
+    !> modify_nulls on the parquet_string_column form of %set gives the UNION of the two null sets.
+    !!
+    !! The character-array sibling can simply restore the destination's mask, because its source is
+    !! a plain array with no validity. This source carries nulls, so .false. must keep a row null
+    !! if it was null HERE or is null in the SOURCE -- discarding either would throw away something
+    !! the caller supplied. The default .true. is the negative control: same fixture, same call,
+    !! and the destination's null must NOT survive.
+    subroutine test_set_strcol_modify_nulls(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_string_column) :: sc
+        !
+        ! Source: row 3 null, rows 1 and 2 hold values.
+        call sc%append_string("pp")
+        call sc%append_string("qq")
+        call sc%append_string("rr")
+        call sc%set_null(3_int64)
+        !
+        ! Destination: row 2 null. So the union is {2, 3}.
+        call parquet_new_table(t)
+        call t%add_column("tag", [character(len=4) :: "aa", "bb", "cc"])
+        call t%set_null("tag", 2_int64)
+        call t%set("tag", sc, modify_nulls=.false.)
+        call check(error, t%is_null("tag", 2_int64), &
+            "modify_nulls=.false. must keep row 2 null -- it was null in the destination")
+        if (allocated(error)) return
+        call check(error, t%is_null("tag", 3_int64), &
+            "modify_nulls=.false. must keep row 3 null -- it is null in the source")
+        if (allocated(error)) return
+        call check(error, .not. t%is_null("tag", 1_int64), &
+            "modify_nulls=.false. must leave row 1 non-null -- it is null in neither")
+        if (allocated(error)) return
+        !
+        ! Negative control: the default .true. adopts the SOURCE's nulls only, so the
+        ! destination's row-2 null does not survive.
+        call parquet_new_table(t)
+        call t%add_column("tag", [character(len=4) :: "aa", "bb", "cc"])
+        call t%set_null("tag", 2_int64)
+        call t%set("tag", sc)
+        call check(error, .not. t%is_null("tag", 2_int64), &
+            "the negative control: at the default modify_nulls=.true. row 2 must NOT stay null")
+        if (allocated(error)) return
+        call check(error, t%is_null("tag", 3_int64), &
+            "at the default the source's own null on row 3 still applies")
+    end subroutine test_set_strcol_modify_nulls
     !
     subroutine test_roundtrip_string(error)
         type(error_type), allocatable, intent(out) :: error

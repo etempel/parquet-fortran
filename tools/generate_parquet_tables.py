@@ -3918,12 +3918,13 @@ def set_iface(k):
     tag, pk, decl, comp, rank, cat = k
     mdims, mdoc = mask_dims(rank), valid_in_comment(rank)
     return f"""        !> Replaces every value of a {pk} column. The array must have the column's own shape.
-        module subroutine set_arr_{tag}(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_{tag}(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
 {decl_line(12, f"{decl}, intent(in) :: arr{dims(rank)}", f"!! {shape_comment(rank)}.")}
             logical, intent(in), optional :: is_valid{mdims} {mdoc}
             logical, intent(in), optional :: modify_nulls !! .false. leaves null entries untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_{tag}"""
 
 
@@ -3932,21 +3933,23 @@ def set_str_iface():
         !! are trimmed** -- every element of a `character(len=*)` array shares one declared length,
         !! so a shorter value is blank-padded by Fortran and those blanks carry nothing the caller
         !! could have meant. `%set_element`, which takes a scalar, stores its value verbatim.
-        module subroutine set_arr_chr(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_chr(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             character(len=*), intent(in) :: arr(:)       !! one value per row.
             logical, intent(in), optional :: is_valid(:) !! present: rows marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_chr
         !> Replaces every value of a PK_STRING_VEC column from a character (element, row) array.
         !! Trailing blanks are trimmed, as in the rank-1 form above.
-        module subroutine set_arr_chrv(self, name, arr, is_valid, modify_nulls)
+        module subroutine set_arr_chrv(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self  !! the table.
             character(len=*), intent(in) :: name         !! column name.
             character(len=*), intent(in) :: arr(:,:)     !! (element, row) values.
             logical, intent(in), optional :: is_valid(:,:) !! present: elements marked .false. become null.
             logical, intent(in), optional :: modify_nulls !! .false. leaves null rows untouched.
+            logical, intent(out), optional :: found       !! present: report a miss instead of aborting.
         end subroutine set_arr_chrv"""
 
 
@@ -4001,11 +4004,12 @@ def set_strcol_iface():
         !! The counterpart of `%get(name, packed)`: an independent copy is taken, so the caller's
         !! own column and the table's do not share storage afterwards. The row count must match,
         !! exactly as it must for the character-array form.
-        module subroutine set_arr_strcol(self, name, arr, is_valid, found)
+        module subroutine set_arr_strcol(self, name, arr, is_valid, modify_nulls, found)
             class(parquet_table), intent(inout) :: self         !! the table.
             character(len=*), intent(in) :: name                !! column name.
             type(parquet_string_column), intent(in) :: arr      !! one value per row.
             logical, intent(in), optional :: is_valid(:)        !! present: rows marked .false. become null.
+            logical, intent(in), optional :: modify_nulls       !! .false. keeps a row null if it was.
             logical, intent(out), optional :: found             !! present: report a miss instead of aborting.
         end subroutine set_arr_strcol"""
 
@@ -4863,6 +4867,9 @@ def col_ref_str_impl():
 def set_strcol_impl():
     return """    module procedure set_arr_strcol
         integer :: idx
+        integer(int64) :: n, k
+        logical :: mod_nulls
+        logical, allocatable :: was_null(:)
         type(parquet_string_column), pointer :: store
         !
         call table_resolve(self, name, "set", idx, found, writing=.true.)
@@ -4873,7 +4880,28 @@ def set_strcol_impl():
         ! and the table's do not end up sharing storage. %set is a value replacement, exactly as
         ! the character-array form is; it is not a way to hand ownership over.
         call parquet_column_string_column(self%cache%cols(idx)%values, store)
+        ! modify_nulls = .false. keeps a row null if it was null HERE, on top of whatever the
+        ! source says -- the union of the two, not one replacing the other. The character-array
+        ! sibling (`refill_string_store`) can simply restore the destination's mask because its
+        ! source is a plain array with no validity of its own; this source carries nulls, and
+        ! discarding them would throw away something the caller explicitly supplied. Where the
+        ! source is null-free the two rules agree, which is every case the sibling covers.
+        ! Captured BEFORE the overwrite, or there is nothing left to read it from.
+        mod_nulls = .true.
+        if (present(modify_nulls)) mod_nulls = modify_nulls
+        if (.not. mod_nulls) then
+            n = store%size()
+            allocate(was_null(n))
+            do k = 1_int64, n
+                was_null(k) = store%is_null(k)
+            end do
+        end if
         store = arr%clone()
+        if (.not. mod_nulls) then
+            do k = 1_int64, n
+                if (was_null(k)) call store%set_null(k)
+            end do
+        end if
         if (present(is_valid)) call table_apply_valid(self, idx, is_valid, name, "set")
         self%cache%cols(idx)%user_populated = .true.
     end procedure set_arr_strcol
@@ -5277,7 +5305,8 @@ def set_impl(k):
     return f"""    module procedure set_arr_{tag}
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, {pk}, "set")
         call table_require_length(self, idx, {size_expr}, "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -5406,7 +5435,8 @@ def set_str_impl():
     return """    module procedure set_arr_chr
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING, "set")
         call table_require_length(self, idx, size(arr, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)
@@ -5419,7 +5449,8 @@ def set_str_impl():
     module procedure set_arr_chrv
         integer :: idx
         !
-        call table_resolve(self, name, "set", idx, writing=.true.)
+        call table_resolve(self, name, "set", idx, found, writing=.true.)
+        if (idx == 0) return
         call table_require_kind(self, idx, PK_STRING_VEC, "set")
         call table_require_length(self, idx, size(arr, 2, kind=int64), "set")
         call self%cache%cols(idx)%values%set_all(arr, modify_nulls)

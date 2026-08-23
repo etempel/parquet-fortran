@@ -47,7 +47,7 @@ which module each name lives in, for when you want that.
 
 | you write | its own module |
 |---|---|
-| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `RES_EMPTY`/`RES_FULL` | `parquet_tables` |
+| `parquet_table`, `parquet_open_table`, `parquet_new_table`, `parquet_write_table`, `parquet_table_row`, `parquet_slice`/`parquet_slice_range`/`parquet_slice_list`, `parquet_table_row_group_bounds`, `RES_EMPTY`/`RES_FULL` (and `RES_PARTIAL`, reserved and never returned today) | `parquet_tables` |
 | the `PK_*` kind constants, `parquet_kind_name` | `parquet_columns` |
 | `parquet_schema`, `parquet_parse_maml`, `parquet_filter`, `parquet_sortkey`, `parquet_read_qc` | `parquet_io` (a facade over the internal `parquet_core`) |
 | `parquet_string_column` | `parquet_strings` |
@@ -103,9 +103,11 @@ Four things to know about `%col`:
   the column first with [`%cast`](#changing-a-columns-type) — a column already of that kind is
   left alone, so the call is safe to make unconditionally.
 - **Do not keep the pointer across a structural change.** Adding or replacing a column may
-  relocate the store, and every row-changing operation does. Re-fetch the pointer after any such
-  call. Fortran cannot detect a stale pointer and neither can this library, but `%generation()`
-  can tell you whether anything structural happened:
+  relocate the store, and every row-changing operation does. So does anything that replaces one
+  column's storage in place while leaving the row set alone — `%cast`, `%compact`, `%reserve`, and
+  the two that give a column's values back and read them again, `%evict_column` and `%reload`.
+  Re-fetch the pointer after any such call. Fortran cannot detect a stale pointer and neither can
+  this library, but `%generation()` can tell you whether anything structural happened:
 
 ```fortran
 g = t%generation()
@@ -192,7 +194,10 @@ Four things to know:
   `logical` array in the column for a pointer to refer to. Writing through the value pointer
   afterwards does not update the mask you were given.
 - **It is the same data as `%get_valid_mask(name, mask)`**, which is the way to ask for validity
-  on its own without copying the values too — and which accepts either shape (see below).
+  on its own without copying the values too — and which accepts either shape: a rank-1 `mask` is
+  the per-row summary, a rank-2 one the true per-element state. See
+  [Null values, and changing them](table-mutate.html#null-values-and-changing-them) for the two
+  side by side.
 - **A wide column's mask is not free.** `logical` is four bytes, so a `(width, nrows)` mask costs
   `4 * width * nrows` bytes — for a width-100 column of a million rows, 400 MB. Ask for it when you
   want the whole thing; use `%is_null(name, i, e)` for a few elements.
@@ -231,29 +236,45 @@ column is numeric at all.
 | call | answer |
 |---|---|
 | `t%nrows()` | rows every column holds |
-| `t%nrows_unfiltered()` | rows before `filter=`/`sample_fraction=` — the slice's length, or the file's |
-| `t%row_group_extent()` | rows in the row groups this table covers, i.e. what reading it decodes |
+| `t%nrows_unfiltered()` | rows before `filter=`/`sample_fraction=` — the slice's length, or the file's; 0 for a table built in memory |
+| `t%row_group_extent()` | rows in the row groups this table covers, i.e. what reading it decodes; 0 for a table built in memory |
 | `t%ncols([resident_only])` | number of columns; `resident_only=.true.` counts only the ones already read |
 | `call t%column_names(names [, resident_only])` | every column name, in file order; `resident_only=.true.` lists only the ones already read |
 | `t%has_column(name)` | whether a column of that name exists |
+| `call t%require_columns(names)` | aborts unless the table has every one of these — naming every missing one, not just the first |
+| `call t%missing_columns(names, absent)` | which of these the table does **not** have, as a packed array; zero-size when it has them all |
 | `t%column_index(name [, found])` | its 1-based position among the table's columns, or 0 when absent |
 | `call t%column_name(j, nm [, found])` | the name of the column at 1-based position `j` |
 | `t%kind(name)` | its `PK_*` kind (`PK_NONE` if unreadable) |
 | `t%width(name)` | values per row: 1 for a scalar column, the element count for a vector one |
-| `call t%unit(name, u)` | its unit string, or `""` |
+| `call t%unit(name, u)` | a column's unit, from the read-in MAML's `unit:` key |
 | `t%residency(name)` | `RES_FULL` once read, `RES_EMPTY` before that (and for an unreadable column) |
 | `t%is_supported(name)` | whether its physical type is one this library can read (see the note below for plain `LIST` columns) |
-| `t%is_null(name, i)` | whether row `i` of that column is null |
+| `t%is_null(name, i [, e])` | whether row `i` of that column is null, or element `e` of it |
 | `t%has_nulls(name [, found])` | whether the column holds any null — from the file's footer if it has not been read |
-| `call t%get_valid_mask(name, mask [, found])` | its per-row validity as a `logical` array, `.true.` where the row holds a value |
+| `call t%get_valid_mask(name, mask [, found])` | its validity as a `logical` array, `.true.` where a value is present — rank-1 for one entry per row, rank-2 for the `(width, nrows)` per-element state |
 | `t%generation()` | a counter bumped by every structural change (see [pointers](#two-ways-to-reach-a-column)) |
 | `t%is_detached()` | whether a row-changing operation has cut the table loose from its file |
 | `call t%filename(f)` | the file this table was opened from, or `""` for one built in memory |
 | `call t%get_file_metadata(key, value, [found])` | one key from the source file's metadata — an error on a table built in memory, which has no file to ask |
-| `call t%unit(name, u)` | a column's unit, from the read-in MAML's `unit:` key |
 
 (An argument in **square brackets** is optional — `[found]` above means `found` may be omitted.
 The brackets are notation for this documentation, never something you type.)
+
+**`%require_columns` is the one to reach for when your program needs certain columns to exist.**
+A loop over `%has_column` reports the first name that is missing; this reports **every** one, in a
+single message, so a program run against the wrong file is told what is actually wrong with it
+rather than being fixed one name at a time:
+
+```fortran
+call t%require_columns("ra,dec,mag")     ! aborts naming every one of the three that is absent
+```
+
+`%missing_columns(names, absent)` is the non-aborting half: it hands back the absent names in a
+`character(len=:), allocatable` array, zero-size when the table has them all, so a program can
+report or recover for itself. Both take `names` as an array or as one separated string, exactly as
+`%materialize` does (see [Laziness](#laziness-and-what-it-costs)). Neither takes `found=` — and
+neither needs it, since reporting absence is what both are for.
 
 **`%is_supported` answers about the column's TYPE, and for one type that is not the same as "the
 read will succeed".** It reads no data. For everything except a plain `LIST`/`LARGE_LIST` the
@@ -308,12 +329,17 @@ rule covers every reading form: `%get`, `%get_slice` and `%get_element` leave a 
 (a defined zero, blank or null element where the receiver is a scalar), and `%col` a null
 pointer.
 
-**Every procedure that takes a column name now accepts it**, mutators included — `%is_null`,
-`%set`, `%set_element`, `%set_null`, `%clear_null`, `%get_slice`, `%set_slice`, `%get_element`,
-`%has_nulls`, `%get_valid_mask`, `%compact_validity`, `%drop_column`, `%rename_column`,
-`%copy_column` and `%cast`. On a mutating call `found=.false.` means **nothing was changed**: the
-column is looked up before anything is written. `%row(i)` is the exception, since it names no
-column, and `%get_file_metadata`'s `found` reports a missing **key** rather than a missing column.
+**Every procedure that looks an existing column up by name accepts it**, mutators included —
+`%set`, `%is_null`, `%set_element`, `%set_null`, `%clear_null`, `%get_slice`, `%set_slice`,
+`%get_element`, `%has_nulls`, `%get_valid_mask`, `%compact_validity`, `%drop_column`,
+`%rename_column`, `%copy_column` and `%cast`. On a mutating call `found=.false.` means **nothing
+was changed**: the column is looked up before anything is written. `%row(i)` is the exception,
+since it names no column, and `%get_file_metadata`'s `found` reports a missing **key** rather than
+a missing column.
+
+Three name-taking calls are deliberately outside this: `%add_column` *creates* a column rather
+than looking one up, and `%require_columns`/`%missing_columns` report absence as their whole
+purpose (see [above](#what-the-table-tells-you-about-itself)).
 
 On `%prefetch`'s array form, `found` is the *conjunction*: it comes back `.false.` if any name
 was missing, and the names that do exist are still read. A column whose type this library cannot
@@ -344,7 +370,7 @@ copying into storage of its own, and it asks the file's own statistics whether t
 Null before building a validity mask — for a Null-free column, which is most columns of most files, no
 mask is built at all. `parquet_column_has_nulls` exposes that same question if you want it directly.
 
-Three calls control it explicitly:
+Four calls control it explicitly:
 
 | call | does |
 |---|---|
@@ -353,7 +379,6 @@ Three calls control it explicitly:
 | `call t%reload(name, [force], [found])` | re-read one column from the file, discarding local `%set` edits |
 | `call t%evict_column(name, [force], [found])` | release a column's values, keeping the column |
 
-(Square brackets mark optional arguments throughout this page; they are not part of the syntax.)
 
 **`%materialize` and `%prefetch` are the same call under two names** — they bind the same
 procedures, so they cannot behave differently. The pair to reach for is
@@ -562,9 +587,10 @@ end do
 
 **The point is what it removes.** `%get_element(name, i, v)` looks the column up by name on every
 call, and that lookup is **52–77% of what the call costs** — measured on four toolchains across
-three machines. A handle resolves it once. On the shipped code a per-cell loop measured **4.17x**
-(gfortran) and **3.93x** (ifx) the name form's throughput, and a realistic four-column loop with
-arithmetic in the body **4.43x** and **4.08x**.
+three machines, which is why this is quoted as a range rather than a number. A handle resolves it
+once. A per-cell loop over a handle runs **several times** the name form's throughput, and so does
+a realistic four-column loop with arithmetic in the body; measure your own case with
+`tools/benchmark_table.sh` if the margin matters to you.
 
 `t%column(j, c)` takes a 1-based position instead of a name, which is what makes a
 `do j = 1, t%ncols()` loop work. Both forms take `[found]`, and report a missing name or an
@@ -586,8 +612,9 @@ What a column handle can do — brackets mark optional arguments:
 
 **`c%get(i, e, value)` is new capability, not a faster spelling.** There has never been a way to
 read one element of a vector row without materialising the whole row — `%get_element` on a vector
-column allocates a width-long array on every call. This reads the one element, and measured
-**1.9x** (gfortran) / **3.0x** (ifx) cheaper than reading the row it avoids building.
+column allocates a width-long array on every call. This reads the one element, and is
+**appreciably cheaper** than reading the row it avoids building — by how much depends on the
+column's width and on your compiler.
 
 A handle is a **view**: `%set` through it changes the table, and the change is visible through the
 name form immediately. `%ref` hands back exactly the pointer `%col` does, with exactly the same
@@ -611,9 +638,9 @@ Two traps, both of which only appear at scale:
 
 - **Hoist the handle out of the loop; never re-fetch it inside one.** Making a handle costs *more*
   than using one, so re-fetching per cell does not merely give back what the handle won — it leaves
-  you **worse off than the name form you replaced**. Measured on one machine, two toolchains:
-  re-fetching cost **+39.1 ns per cell** (gfortran) and **+51.4 ns** (ifx) over a hoisted handle,
-  putting it above `%get_element` on both. If the loop *changes* the table's structure, do not use a
+  you **worse off than the name form you replaced**. Measured on two toolchains, re-fetching cost
+  **tens of nanoseconds per cell** over a hoisted handle — enough to put it above `%get_element` on
+  both. If the loop *changes* the table's structure, do not use a
   handle at all — use the name form, which resolves afresh each time.
 - **`t%column(j, c)` READS column `j`.** Making a handle resolves the column, which triggers the
   same lazy first touch any value access does. A `do j = 1, t%ncols()` loop that builds a handle
@@ -692,8 +719,11 @@ Four things follow from strings having no fixed-width storage:
   — the column's row count is kept separately and would stop matching.
 - **A `parquet_string_column` is a first-class value in both directions.** `%get`, `%set` and
   `%add_column` all take one (`%set` and `%add_column` copy it in, so the caller's own column and
-  the table's do not share storage afterwards). The `character(len=*)` forms are still there for
-  when a fixed-width array is what you have.
+  the table's do not share storage afterwards). The `character(len=*)` forms remain available for
+  when a fixed-width array is what you have. `%set` takes the same `is_valid=`, `modify_nulls=`
+  and `found=` here as it does for a plain array — and because *this* source carries nulls of its
+  own, `modify_nulls=.false.` gives the **union**: a row stays null if it was null in the table or
+  is null in the column you are writing.
 - **A character ARRAY is trimmed on the way in; a character SCALAR is not.** Every element of a
   `character(len=*)` array shares one declared length, so a shorter value is blank-padded by
   Fortran and those blanks carry nothing you could have meant — `%add_column`, `%set` and
@@ -842,9 +872,6 @@ This is still a deliberately narrow version of the table layer.
   There is no unit *conversion* anywhere in this library.
 - **Vector string columns are trimmed.** A rank-2 string column has no compact read path, so it
   goes through the fixed-width reader, where trailing blanks cannot be told from padding.
-- **String columns are copy-only.** There is no `%col` pointer form for them, and `%set`/
-  `%add_column` take a character array rather than a `parquet_string_column` — see [String columns
-  in a table](#string-columns-in-a-table).
 
 One topic a reader may expect on this page lives with the generator instead:
 [Extending `parquet_table` with your own type](../utilities/generated-tables.html#extending-parquet_table-with-your-own-type)

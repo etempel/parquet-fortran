@@ -49,6 +49,7 @@ contains
                 test_random_quickstart_example), &
             new_unittest("doc/pages/utilities/generated-tables.md generated_table_quickstart example", &
                 test_generated_table_quickstart_example), &
+            new_unittest("doc/pages/tables/table.md mean_mass example", test_mean_mass_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -533,6 +534,54 @@ contains
     !> parquet_date column (with one null) and a parquet_timestamp column (set
     !> from civil fields, an ISO-8601 string, and set_unix), reads them back,
     !> and checks the round-tripped values/null state/to_string output.
+    !> doc/pages/tables/table.md's opening "mean_mass" example -- the first thing a reader of the
+    !! table layer copies, and the only complete runnable program on that page.
+    !!
+    !! The example as printed opens a file that must already exist, so the fixture is written here
+    !! first; nothing else about it changes. One deviation from the page is unavoidable: the
+    !! example says `use parquet_tables`, and this module already carries `use parquet`, so the
+    !! narrow import is NOT what is exercised here -- see the note in feature_doc_table.md.
+    subroutine test_mean_mass_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/example_mean_mass.parquet"
+        type(parquet_writer) :: writer
+        type(parquet_table) :: t
+        real(real64), allocatable :: mass(:)
+        real(real64) :: expect
+        logical :: ok
+
+        ! The fixture the example's "catalogue.parquet" stands for.
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "mass", &
+            [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64])
+        call parquet_close_writer(writer)
+
+        ! --- the example, verbatim apart from the filename ---
+        call parquet_open_table(t, out_file)
+        call t%get("mass", mass)
+        ! print *, "rows:", t%nrows(), " mean mass:", sum(mass) / size(mass)
+        ! --- end of the example ---
+
+        call check(error, t%nrows() == 4_int64, "the example's table should report 4 rows")
+        if (allocated(error)) return
+        call check(error, size(mass) == 4, "%get should hand back one value per row")
+        if (allocated(error)) return
+        expect = 2.5_real64
+        call check(error, abs(sum(mass) / size(mass) - expect) < 1.0e-12_real64, &
+            "the example's mean should be 2.5")
+        if (allocated(error)) return
+
+        ! Negative control. Without it this test passes just as happily against a %get that never
+        ! read anything: every assertion above would still hold if `mass` came from somewhere else.
+        ! A column the fixture does not have must report a miss and leave an EMPTY result, not a
+        ! stale or undefined one -- which is the rule the page states for every reading form.
+        call t%get("no_such_column", mass, found=ok)
+        call check(error, .not. ok, "a column the fixture lacks should report found=.false.")
+        if (allocated(error)) return
+        call check(error, size(mass) == 0, &
+            "the negative control: a reported miss must leave a zero-length array")
+    end subroutine test_mean_mass_example
+    !
     subroutine test_datetime_quickstart_example(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: out_file = "test_run/readme_datetime_quickstart.parquet"

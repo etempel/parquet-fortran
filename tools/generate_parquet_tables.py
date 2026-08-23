@@ -385,9 +385,9 @@ module parquet_tables
         !!
         !! **Maintained EAGERLY, by the mutations that change the column set** -- never rebuilt
         !! lazily inside a lookup. `cache_find` takes the cache `intent(in)` precisely so that
-        !! concurrent readers of a shared table need no atomics (see `readers_active`); a lookup
-        !! that rebuilt this would be a write on that path, and two threads reallocating one
-        !! array is heap corruption rather than a stale answer.
+        !! concurrent readers of a shared table need no synchronisation to read it (see
+        !! `readers_active`); a lookup that rebuilt this would be a write on that path, and two
+        !! threads reallocating one array is heap corruption rather than a stale answer.
         !!
         !! **A stale or absent index can never produce a wrong answer**, only a slow one:
         !! `cache_find` re-checks the name at the slot it lands on and falls back to the linear
@@ -475,12 +475,20 @@ module parquet_tables
         !! `!$omp atomic`, and deliberately an integer rather than a logical so the atomic update
         !! is an increment (nested/overlapping appends stay correct without a second flag).
         integer :: append_active = 0
-        !> Table read entry points currently in flight. %append checks it under the lock and
-        !! aborts rather than reallocating storage another thread is reading. Only the COARSE
-        !! entry points maintain it (%get, %col, %get_slice, %row, %get_valid_mask, %prefetch,
-        !! %materialize_all) -- the per-element accessors deliberately do not, since two atomics
-        !! per cell would dominate a %get_element loop over a large column, and they still take
-        !! the cheap `append_active` check above. Do not "fix" that asymmetry.
+        !> Long reads currently in flight -- the ones that would still be reading storage when a
+        !! concurrent %append reallocated it. %append checks this under the lock and aborts
+        !! rather than reallocating underneath one.
+        !!
+        !! **Maintained around exactly TWO windows, and neither is "a coarse accessor":** the lazy
+        !! FIRST TOUCH inside table_resolve_slot -- whichever accessor triggered it, %get and
+        !! %get_element alike -- and %prefetch/%materialize_all's bulk materialize
+        !! (materialize_marked). Both read from the file and take real time.
+        !!
+        !! **No accessor of any kind maintains it for a column that is already RESIDENT.** Two
+        !! atomics per cell would dominate a %get_element loop over a large column, and a resident
+        !! read is a memcpy over memory no %append can be reallocating -- the cheap
+        !! `append_active` check above already covers that shorter window, and every accessor
+        !! takes it, resident or not. Do not "fix" that asymmetry.
         integer :: readers_active = 0
         ! --- read-time transform, composed ONCE at parquet_open_table time and retained only so
         !     %clone can reattach the same one when it reopens the file. Already translated to
@@ -2472,9 +2480,10 @@ def gen_spec_interfaces():
             character(len=*), intent(in) :: proc           !! calling procedure, for the message.
         end subroutine table_check_no_append
         !> `table_check_no_append`, plus registering this read as in flight so a concurrent %append
-        !! can refuse. Only the COARSE read entry points pair this with `table_read_exit`; the
-        !! per-element accessors take `table_check_no_append` alone -- see parquet_table_cache's
-        !! `readers_active` comment for why that asymmetry is deliberate.
+        !! can refuse. Paired with `table_read_exit` around the two LONG windows only -- a lazy
+        !! first touch and the bulk materialize -- never around a read of a column that is already
+        !! resident, whichever accessor asked for it; see parquet_table_cache's `readers_active`
+        !! comment for why that asymmetry is deliberate.
         module subroutine table_read_enter(cache, proc)
             type(parquet_table_cache), intent(inout) :: cache !! the column store.
             character(len=*), intent(in) :: proc              !! calling procedure, for the message.

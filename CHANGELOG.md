@@ -1324,6 +1324,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The C++20 build guard now prints one readable sentence.** `src/parquet_wrapper.cpp` opens with
+  an `#if __cplusplus < 202002L` guard whose whole job is to name the flag to set. Its message was
+  two adjacent string literals — and `#error` prints its token sequence as-is rather than
+  concatenating them, so the compiler emitted a stray `" "` pair and the intervening whitespace in
+  the middle of the sentence. It is a single literal now, and leads with the action (set
+  `FPM_CXXFLAGS` to include `-std=c++20`) rather than with the reason.
+
 - **An integer `qc: min:`/`max:` bound is now exact at any magnitude.** A bound written as a plain
   integer is parsed straight to `int64` instead of through a 64-bit float, on the write side as the
   read side always did. Two consequences a reader of 1.0.0 can observe: a bound past 2^53 no longer

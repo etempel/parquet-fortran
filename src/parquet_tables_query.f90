@@ -951,9 +951,9 @@ contains
             ! the whole accessor: a first touch reads from the file and takes real time, while the
             ! copy the accessor performs afterwards is a memcpy over already-resident memory. The
             ! cheap check above covers that shorter window, and keeping the counter off the
-            ! resident path is what keeps a read of a resident column entirely free of atomics --
-            ! the property this whole design exists to protect. See parquet_table_cache's
-            ! `readers_active` comment.
+            ! resident path is what leaves a read of a resident column costing the ONE atomic read
+            ! table_resolve already made and nothing further -- the property this whole design
+            ! exists to protect. See parquet_table_cache's `readers_active` comment.
             call table_read_enter(self%cache, proc)
             call table_touch(self%cache, table_scope_of(self), idx, proc)
             call table_read_exit(self%cache)

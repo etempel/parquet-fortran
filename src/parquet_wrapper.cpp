@@ -1,6 +1,8 @@
 #if __cplusplus < 202002L
-#error "parquet-fortran requires C++20 (Arrow/Parquet headers use std::span unconditionally, regardless of Arrow version). " \
-	"Set FPM_CXXFLAGS to include -std=c++20 (see README.md) before running fpm build/test."
+// Keep the message ONE string literal: #error prints its token sequence as-is and does NOT
+// concatenate adjacent string literals, so a two-literal form reaches the user with a stray
+// `" "` pair and the intervening whitespace in the middle of the sentence.
+#error "parquet-fortran requires C++20: set FPM_CXXFLAGS to include -std=c++20 (see README.md) before running fpm build or fpm test. Arrow/Parquet headers use std::span unconditionally, regardless of Arrow version."
 #endif
 
 #include <arrow/api.h>

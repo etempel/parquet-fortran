@@ -124,6 +124,8 @@ lint:
     - python3 tools/generate_parquet_ziggurat.py --check
     - python3 tools/generate_random_golden_vectors.py --self-test
     - python3 tools/generate_random_golden_vectors.py --check
+    - python3 tools/generate_random_perm_vectors.py --self-test
+    - python3 tools/generate_random_perm_vectors.py --check
 
 test:
   # Selects the Docker-executor runner; the image: above overrides its default

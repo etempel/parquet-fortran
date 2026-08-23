@@ -13,13 +13,16 @@
 !! the same ownership test `unsafe_shared_mutation` below uses, and the three must agree.
 !!
 !! **The concurrency model, in one paragraph.** Reading an already-resident column is free: no
-!! lock, no atomic, unlimited threads -- that is the property everything here exists to protect,
-!! and any change that puts a lock on the read path is a design change rather than an
-!! optimisation. A *first touch* is refused on a shared table (`unsafe_first_touch`), because it
-!! publishes an allocation with no ordering guarantee behind it. A *structural* change is refused
-!! on a shared table (`unsafe_shared_mutation`). `%append` is the one mutation that is allowed
-!! concurrently, and it is allowed because this file serialises it -- so the caller never writes
-!! `!$omp critical` by hand and cannot wrap the wrong statement.
+!! lock, no bookkeeping, unlimited threads. It is not literally atomic-free -- every value
+!! accessor makes the one `atomic read` of `append_active` that `table_check_no_append` below
+!! performs -- but that single relaxed read is the whole cost, and it is the property everything
+!! here exists to protect. Any change that puts a lock, or a second atomic, on the resident read
+!! path is a design change rather than an optimisation. A *first touch* is refused on a shared
+!! table (`unsafe_first_touch`), because it publishes an allocation with no ordering guarantee
+!! behind it. A *structural* change is refused on a shared table (`unsafe_shared_mutation`).
+!! `%append` is the one mutation that is allowed concurrently, and it is allowed because this
+!! file serialises it -- so the caller never writes `!$omp critical` by hand and cannot wrap the
+!! wrong statement.
 !!
 !! **What the guards can and cannot see.** They key on OpenMP thread identity, so a caller
 !! threading some other way (pthreads through C interop, coarrays) gets no enforcement at all, and

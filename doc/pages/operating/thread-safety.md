@@ -23,8 +23,9 @@ below aborts with a message naming what you did and what to do instead, rather t
 cases at the end cannot be detected at all, and are called out as such.
 
 The design principle behind the whole table: **reading an already-resident column is free** — no
-lock, no atomic, no bookkeeping, any number of threads. Everything else is arranged around not
-disturbing that.
+lock, no bookkeeping, any number of threads. The one thing every read does pay is a single atomic
+read of a flag, which is what lets a concurrent `%append` be refused rather than silently
+reallocating the storage you are reading. Everything else is arranged around not disturbing that.
 
 | what you do | concurrently? | what happens if you break the rule |
 |---|---|---|

@@ -86,6 +86,13 @@ module parquet_columns
     public :: parquet_column_clear_null
     public :: parquet_column_string_column
     !
+    ! INTERNAL API, for the same reason and on the same terms as the tier above: a NON-MUTATING
+    ! `any_null`, so that a table read accessor holding its table by `intent(in)` can ask the
+    ! question without writing to the column. The type-bound `%any_null()` refreshes the temporal
+    ! null cache and so cannot be called from a shared column -- see its own interface below.
+    ! `src/parquet.f90` privatises this too; a user calls `%any_null()`.
+    public :: parquet_column_any_null
+    !
     !> Error-message prefix for every `error stop` raised by this module.
     character(len=*), parameter :: EP = "parquet_columns: "
     !
@@ -594,12 +601,36 @@ module parquet_columns
         !> Whether the column holds at least one null. Cheap for bitmap-backed and string kinds;
         !! for temporal kinds (whose null state lives inside each element) the answer is cached,
         !! and a rescan is needed after a mutation -- which is why `self` is `intent(inout)`
-        !! despite this being a query. The column is reached through the table's `cache` pointer,
-        !! so this does not stop a table read-accessor from staying `intent(in)`.
+        !! despite this being a query.
+        !!
+        !! **That `intent(inout)` is real: this WRITES to the column, so it must not be called on
+        !! one another thread can reach.** The temporal rescan ends by clearing the dirty flag,
+        !! which silently discards a `set_null` that another thread raised during the scan -- and
+        !! the column then reports "no nulls" for good, with nothing to notice. Being reached
+        !! through the table's `cache` POINTER is what makes that possible from a table accessor
+        !! declared `intent(in)`, so the compiler cannot object either. Anything on a read path
+        !! must call `parquet_column_any_null` below instead; `%has_nulls` learned this the hard
+        !! way. See feature_risks.md Risk-136.
         module function any_null(self) result(res)
             class(parquet_column), intent(inout) :: self !! the column (null cache may be refreshed).
             logical :: res                               !! .true. when at least one row is null.
         end function any_null
+        !> Whether the column holds at least one null, WITHOUT writing to it -- the read path's
+        !! form of `any_null`, and the one every shared reader must use.
+        !!
+        !! Identical answer, and identical cost on every kind but one. A temporal column's cache
+        !! is read when it is clean and simply re-scanned when it is dirty, rather than being
+        !! refreshed: the memoisation is an optimisation for `any_null`, never part of the answer,
+        !! so giving it up costs a dirty column one O(n) walk per call and buys the property that
+        !! any number of threads may ask at once.
+        !!
+        !! `type(parquet_column)`, not `class`, for the reason the per-cell tier above records --
+        !! and a `class` actual may be passed to it freely, which is how the two bulk validity
+        !! walks in this module reach it while holding `self` by `intent(in)`.
+        module function parquet_column_any_null(col) result(res)
+            type(parquet_column), intent(in) :: col !! the column.
+            logical :: res                          !! .true. when at least one row is null.
+        end function parquet_column_any_null
         !> Whether row `i` is null. On a *_VEC kind that means **any element** of the row is null.
         !!
         !! The row forms of the validity API are deliberately asymmetric, and the asymmetry is the
@@ -2480,9 +2511,15 @@ module parquet_columns
         end subroutine check_width
         !> Number of validity bits the column needs: one per ELEMENT, so `nrows*width` for a
         !! vector kind and `nrows` for a scalar kind (RF8).
-        pure module function bits_needed(self) result(res)
-            class(parquet_column), intent(in) :: self !! the column.
-            integer(int64) :: res                     !! required bit count.
+        !!
+        !! `type`, not `class`, so that a procedure in the typed tier may call it -- a `class`
+        !! dummy here would hand a `type` actual to a `class` one and rebuild the descriptor block
+        !! that tier exists to remove (the same conversion `ensure_bitmap` needed). Widening it
+        !! this way is source-compatible: a `class` actual passes to a `type` dummy freely, so
+        !! every existing caller still compiles unchanged.
+        pure module function bits_needed(col) result(res)
+            type(parquet_column), intent(in) :: col !! the column.
+            integer(int64) :: res                   !! required bit count.
         end function bits_needed
         !> Number of int64 blocks needed to hold `nbits` bits.
         pure module function blocks_for(nbits) result(res)

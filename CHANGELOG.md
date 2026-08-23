@@ -622,7 +622,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packed 64 elements to an `integer(int64)`, so threads writing *different rows* still share a word
   whenever those rows fall in one block, and a plain read-modify-write there loses a null with
   nothing to report it. `parquet_string_column` gains the matching
-  `has_validity`/`reserve_validity` pair.
+  `has_validity`/`reserve_validity` pair. Reading a resident column is free of both concerns
+  because no read accessor writes to the column: `%has_nulls` in particular answers a
+  date/time/timestamp column without refreshing its cached null flag, so any number of threads may
+  ask at once while another writes.
 
   **Every remaining single-threaded requirement is now a hard `error stop` naming what to do
   instead, not a documented convention**: changing a shared table's structure inside a parallel

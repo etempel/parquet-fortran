@@ -38,7 +38,7 @@ module test_table_parallel
     use iso_c_binding, only : c_int64_t
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
 #ifdef _OPENMP
-    use omp_lib, only : omp_get_max_threads, omp_get_num_threads
+    use omp_lib, only : omp_get_max_threads, omp_get_num_threads, omp_get_thread_num, omp_get_wtime
 #endif
     !
     implicit none
@@ -163,7 +163,11 @@ contains
             new_unittest("no two row groups' pastes share a validity block", &
                 test_colread_block_alignment), &
             new_unittest("concurrent set_null keeps every null when rows share a validity block", &
-                test_concurrent_set_null_shares_block) &
+                test_concurrent_set_null_shares_block), &
+            new_unittest("concurrent clear_null and value writes keep every clear when rows share a block", &
+                test_concurrent_clear_null_shares_block), &
+            new_unittest("has_nulls still reports a null a concurrent writer set on a date column", &
+                test_has_nulls_survives_concurrent_null) &
             ]
     end subroutine collect_tests_table_parallel
     !
@@ -1608,7 +1612,9 @@ contains
         seen_threads = 1
         !$omp parallel default(shared) private(i)
         !$omp single
+#ifdef _OPENMP
         seen_threads = omp_get_num_threads()
+#endif
         !$omp end single
         !$omp do schedule(dynamic)
         do i = 1_int64, NR
@@ -1649,5 +1655,243 @@ contains
             "the block-aligned control must keep every null too -- if this fails, the problem is " // &
             "not block sharing")
     end subroutine test_concurrent_set_null_shares_block
+    !
+    !> **The clearing half of the same bitmap update, which `%set_null` alone cannot reach.**
+    !!
+    !! `bit_set` and `bit_clear` (`src/parquet_columns_util.f90`) are separate procedures with
+    !! separate `!$omp atomic update` directives, and the test above exercises only the first: it
+    !! nulls rows and never clears one. Removing the atomic from `bit_clear` alone therefore left
+    !! the whole suite green while losing roughly two thirds of the clears -- measured at 119659
+    !! to 128777 rows of 200003 at 8 and 16 threads, in both arms below.
+    !!
+    !! Both public paths that clear a bit are covered, because they are different entry points
+    !! reaching one primitive: `%clear_null` says so outright, while a VALUE write clears the
+    !! row's null as a side effect -- which is the shape a user is far more likely to reach, since
+    !! filling a null-carrying column from several threads is the documented pattern.
+    subroutine test_concurrent_clear_null_shares_block(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int64), parameter :: NR = 4096_int64
+        type(parquet_table) :: t
+        real(real64) :: v(NR)
+        real(real64) :: cell
+        integer(int64) :: i, blk, lo, hi
+        integer :: left, avail, seen_threads, nblocks
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: every arm below would run serially, so no two " // &
+            "threads could share a validity block and the equality would hold for the wrong reason")
+        return
+#endif
+        if (avail < 2) then
+            call skip_test(error, "needs at least 2 threads: one thread cannot share a validity " // &
+                "block with itself, so no arm would exercise the atomic")
+            return
+        end if
+        v = 1.0_real64
+        !
+        ! ---- Arm 1: interleaved %clear_null on an all-null column. Fails without the atomic. ----
+        call fill_all_null(t, v, NR)
+        seen_threads = 1
+        !$omp parallel default(shared) private(i)
+        !$omp single
+#ifdef _OPENMP
+        seen_threads = omp_get_num_threads()
+#endif
+        !$omp end single
+        !$omp do schedule(dynamic)
+        do i = 1_int64, NR
+            call t%clear_null("x", i)
+        end do
+        !$omp end do
+        !$omp end parallel
+        call check(error, seen_threads > 1, &
+            "the interleaved clear arm must actually run on more than one thread, or it tests nothing")
+        if (allocated(error)) return
+        left = 0
+        do i = 1_int64, NR
+            if (t%is_null("x", i)) left = left + 1
+        end do
+        call check(error, left == 0, &
+            "every concurrent clear_null must survive when threads share validity blocks")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 2: interleaved VALUE writes, which clear each row's null in passing. ----
+        call fill_all_null(t, v, NR)
+        !$omp parallel do default(shared) private(i) schedule(dynamic)
+        do i = 1_int64, NR
+            call t%set_element("x", i, real(i, real64))
+        end do
+        !$omp end parallel do
+        left = 0
+        do i = 1_int64, NR
+            if (t%is_null("x", i)) then
+                left = left + 1
+            else
+                call t%get_element("x", i, cell)
+                ! Row-distinct values, so a misplaced write is caught as well as a lost clear --
+                ! a constant would make this arm pass against either.
+                if (cell /= real(i, real64)) left = left + 1
+            end if
+        end do
+        call check(error, left == 0, &
+            "a concurrent value write must clear its own row's null and store its own value")
+        if (allocated(error)) return
+        !
+        ! ---- Arm 3 (negative control): block-aligned spans, so no block is shared. ----
+        nblocks = int(NR/parquet_validity_block_bits)
+        call fill_all_null(t, v, NR)
+        !$omp parallel do default(shared) private(blk, lo, hi, i) schedule(static)
+        do blk = 1_int64, int(nblocks, int64)
+            lo = (blk - 1_int64)*parquet_validity_block_bits + 1_int64
+            hi = blk*parquet_validity_block_bits
+            do i = lo, hi
+                call t%clear_null("x", i)
+            end do
+        end do
+        !$omp end parallel do
+        left = 0
+        do i = 1_int64, NR
+            if (t%is_null("x", i)) left = left + 1
+        end do
+        call check(error, left == 0, &
+            "the block-aligned control must clear every null too -- if this fails, the problem " // &
+            "is not block sharing")
+    end subroutine test_concurrent_clear_null_shares_block
+    !
+    !> A fresh single-column table of `n` rows, resident, with validity allocated and EVERY row
+    !> null -- the starting state all three arms above clear from.
+    subroutine fill_all_null(t, v, n)
+        type(parquet_table), intent(out) :: t   !! the table to build.
+        real(real64), intent(in) :: v(:)        !! values to seed the column with.
+        integer(int64), intent(in) :: n         !! rows.
+        integer(int64) :: i
+        call parquet_new_table(t)
+        call t%add_column("x", v)
+        ! Before the region, deliberately: allocating validity on first use is itself a race, and
+        ! is refused rather than raced -- which is a different guard from the one under test.
+        call t%ensure_validity("x")
+        do i = 1_int64, n
+            call t%set_null("x", i)
+        end do
+    end subroutine fill_all_null
+    !
+    !> **A read accessor must not WRITE to the column it is asked about.**
+    !!
+    !! A temporal column caches "does this hold a null?", because answering means an O(n) element
+    !! scan (`nulls_cached`/`nulls_dirty`, `src/parquet_columns.f90`). No other kind caches
+    !! anything. `%has_nulls` used to answer through the type-bound `%any_null()`, which is
+    !! `intent(inout)` and REFRESHES that cache -- so a documented read became a writer, reaching
+    !! the column through the table's `cache` POINTER, which is what let it compile while the
+    !! table itself stayed `intent(in)`.
+    !!
+    !! The refresh ends by clearing the dirty flag. A `%set_null` raised on another thread during
+    !! the scan sets that flag; the clearing discards it, and the column then reports "no nulls"
+    !! for good -- single-threaded, afterwards, with nothing to notice. Observed on 194-200 of 200
+    !! rounds at 4, 8 and 16 threads before the fix.
+    !!
+    !! **Both assertions are deterministic once `%has_nulls` stops writing**, which is what makes
+    !! this a regression test rather than a flaky one: the cache stays dirty, so the final call
+    !! always rescans and always finds the null. The `%is_null` assertion is the discriminator --
+    !! without it a failure could equally mean the `%set_null` never landed, which is a different
+    !! defect with a different fix.
+    subroutine test_has_nulls_survives_concurrent_null(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: NDATE = 200000 !! long enough that one scan outlasts the writer's stagger.
+        !> Rounds. ONE round caught the regression in only 8 of 10 runs -- the interleaving has to
+        !! happen, and sometimes does not. Repeating is what makes the test reliable, and it is
+        !! machine-independent in a way that tuning the stagger is not: a faster or slower machine
+        !! moves the per-round odds but not the conclusion. Post-fix every round is deterministic,
+        !! so this can never fail spuriously, only fail to catch.
+        integer, parameter :: ROUNDS = 8
+        type(parquet_table) :: t
+        type(parquet_date), allocatable :: d(:)
+        integer(int64) :: i
+        integer :: avail, seen_threads, tid, q, r, latched, unset
+        logical :: res
+        real(real64) :: t0
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: with one thread the null is set before any scan " // &
+            "begins, so the final assertion would hold whether or not %has_nulls writes the cache")
+        return
+#endif
+        if (avail < 2) then
+            call skip_test(error, "needs at least 2 threads: one thread cannot be scanning while " // &
+                "another raises the dirty flag, which is the whole mechanism under test")
+            return
+        end if
+        allocate(d(NDATE))
+        do i = 1_int64, int(NDATE, int64)
+            d(i) = parquet_date(2026, 7, 1)
+        end do
+        seen_threads = 1
+        latched = 0
+        unset = 0
+        do r = 1, ROUNDS
+            ! A FRESH table each round, so the null cache starts dirty and the readers really
+            ! rescan. A cache already settled is the state in which no reader scans and the race
+            ! cannot occur -- which is why the precondition below is asserted through %is_null and
+            ! not through %has_nulls.
+            call parquet_new_table(t)
+            call t%add_column("d", d)
+            if (r == 1) then
+                call check(error, .not. t%is_null("d", 1_int64), &
+                    "row 1 must start non-null, or the assertions below say nothing about the cache")
+                if (allocated(error)) return
+            end if
+            !$omp parallel default(shared) private(tid, q, res, t0)
+            !$omp single
+#ifdef _OPENMP
+            seen_threads = omp_get_num_threads()
+#endif
+            !$omp end single
+            tid = 0
+#ifdef _OPENMP
+            tid = omp_get_thread_num()
+#endif
+            !$omp barrier
+            if (tid == 0) then
+                ! A short stagger so the readers are already INSIDE a scan when the flag is
+                ! raised. One scan of NDATE rows takes several times this, so the writer lands
+                ! mid-scan rather than before it, which is the ordering the lost update needs.
+                ! It is a stagger, not a synchronisation: the assertions hold whatever order
+                ! results, and a round in which the ordering does not occur simply proves nothing.
+#ifdef _OPENMP
+                t0 = omp_get_wtime()
+                do while (omp_get_wtime() - t0 < 2.0e-4_real64)
+                end do
+#endif
+                call t%set_null("d", 1_int64)
+            else
+                do q = 1, 4
+                    res = t%has_nulls("d")
+                end do
+            end if
+            !$omp end parallel
+            if (.not. t%is_null("d", 1_int64)) unset = unset + 1
+            if (.not. t%has_nulls("d")) latched = latched + 1
+        end do
+        call check(error, seen_threads > 1, &
+            "this test must actually run on more than one thread, or it tests nothing")
+        if (allocated(error)) return
+        ! The discriminator: without it a failure below could equally mean the %set_null never
+        ! landed, which is a different defect with a different fix.
+        call check(error, unset == 0, &
+            "the concurrent set_null must have landed in every round -- if this fails the null " // &
+            "cache is not the problem")
+        if (allocated(error)) return
+        call check(error, latched == 0, &
+            "%has_nulls must still report the null a concurrent writer set: a read accessor that " // &
+            "refreshes the temporal null cache discards that writer's dirty flag permanently")
+    end subroutine test_has_nulls_survives_concurrent_null
+    !
     !
 end module test_table_parallel

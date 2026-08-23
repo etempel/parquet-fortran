@@ -669,11 +669,12 @@ instead — expect it to be very noisy (several thousand warnings), dominated by
 
 **The one category that is genuinely load-bearing is `Unknown entity`,** which is the
 use-association accessibility limitation documented under "FORD config gotchas" and stands at
-**113** as of 2026-08-21, across **nine** modules (115 across eight before version reporting left
-the facade: that change drops `c_int` and the two version bindings from `parquet`'s `private ::`
-list and adds one `public ::` re-export in `parquet_tables` — **derived, not measured, because no
-FORD was installed on the machine that made the change; re-derive with the command below before
-quoting it**). **It is stable only in the sense that it moves
+**118** as of 2026-08-23, across **ten** modules — **measured**, and it corrects a figure this file
+carried for two days. The previous entry said 113 across nine and was *derived* rather than measured
+(no FORD on the machine that made the change): the derivation reasoned about what left the facade
+but never counted `parquet_version`'s own four re-exports, so it under-reported by exactly that
+group. The lesson is the one the note already gave and which was not followed — re-derive with the
+command below rather than quoting the stored number. **It is stable only in the sense that it moves
 for a reason** — it rises by one for each name any module re-exports or hides with an accessibility
 statement naming a **use-associated** name, which is the expected cost of keeping a sibling module's
 plumbing out of a user's namespace, and a rise of exactly that size is not a regression. It was 23
@@ -785,20 +786,21 @@ Keep new code to the same standard:
   fix without first checking a newer FORD release against upstream issue
   (https://github.com/Fortran-FOSS-Programmers/ford/issues/738).
 - **FORD 7.0.13 cannot resolve a `use`-association accessibility statement** — an
-  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **113** of
-  them as of 2026-08-21 and the one FORD number worth tracking across a change (derived from the
-  measured 115 as described above, not re-measured). Nine modules
+  `Unknown entity '<name>' with attribute '<public|private>' in module '<m>'` warning, **118** of
+  them as of 2026-08-23 and the one FORD number worth tracking across a change (measured with the
+  command above, not derived). Ten modules
   contribute, and the per-module census is what to compare across a change rather than the total:
 
   | module | attribute | names |
   |---|---|---|
   | `parquet_sorting` | public | 31 |
   | `parquet_settings` | public | 22 |
-  | `parquet` | private | 15 |
+  | `parquet` | private | 16 |
   | `parquet_core` | public | 14 |
   | `parquet_argsort` | public | 12 |
   | `parquet_io` | private | 8 |
   | `parquet_strings` | public | 6 |
+  | `parquet_version` | public | 4 |
   | `parquet_sampling` | public | 4 |
   | `parquet_tables` | public | 1 |
 
@@ -3990,6 +3992,25 @@ reported "NO configuration built -- this run proves nothing".
   no reason; `git status` will not show them.
 
 ### Stale `fpm` build cache
+
+**`fpm build` does NOT build anything under `test/`, so editing a `test/*.f90` file and then
+running `fpm build` leaves the previous test binary in place — and running it afterwards measures
+the edit you did not make.** It compiles the library and the `app/` targets and reports "Project
+compiled successfully", which reads as confirmation. This cost a full diagnostic detour: four
+rounds of adding `print` markers to an `error_scenarios` scenario, each rebuilt with `fpm build`,
+each apparently proving the markers never executed — the binary predated all of them. Use
+**`fpm build --tests`** to compile the test targets without running them (which is what you want
+when the next step is running one scenario binary by hand), or `fpm test`. The tell is that a
+marker on the FIRST executable statement of a block does not appear: code cannot skip its own first
+line, so the binary is old.
+
+**And when mutation-testing, delete the test binary rather than trusting fpm's staleness check.**
+`fpm test` reported a mutation as *caught* here when the `run_tester` binary in fact predated the
+restore and still carried an earlier mutation, printing "Project is up to date" throughout. The
+verdict was inverted — a genuine coverage gap read as covered. `find build -name run_tester -type f
+-delete` before each round, or `fpm clean --skip`, is what separates one round's result from the
+previous one's. Cross-check anything surprising with a *separately built* program: an independent
+probe reproducing the same shape is what exposed both incidents.
 
 If `fpm test` behaves unexpectedly after source changes (e.g. a test target seems to run old
 code), try `fpm clean --skip` to force a clean rebuild before spending time debugging — fpm's

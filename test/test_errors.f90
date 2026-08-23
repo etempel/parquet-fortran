@@ -831,6 +831,8 @@ contains
                 test_table_reserve_columns_shared_aborts), &
             new_unittest("table: parquet_write_table on a shared table in a region aborts", &
                 test_table_write_shared_aborts), &
+            new_unittest("table: a first parquet_row_index read on a shared table names the caller", &
+                test_table_row_index_shared_aborts), &
             new_unittest("table: a direction token plus descending= aborts", &
                 test_table_key_direction_conflict_aborts), &
             new_unittest("table: a long conflicting key list is clipped in the message", &
@@ -2400,6 +2402,59 @@ contains
             "the guard aborted the shared write but also blocked the thread-private one, so it " // &
             "is keying on the region rather than on ownership")
     end subroutine test_table_write_shared_aborts
+
+    !> The reserved row-index name is materialized on FIRST USE, which adds a column -- so asking
+    !! for it on a shared table inside a region is refused. What this test is really about is the
+    !! MESSAGE: the refusal used to come out of `table_new_slot` naming `add_column`, a procedure
+    !! the caller never invoked and cannot find in their own source, and the advice that followed
+    !! was the generic one about structural mutation rather than the specific one that fixes it.
+    !!
+    !! Two further things are asserted because neither follows from the abort alone. The message
+    !! must name the CALLER (`get`), which is the whole point of threading `proc` through. And the
+    !! guard must run BEFORE the reader is touched: on a filtered or sorted table the values come
+    !! from `parquet_get_physical_row_indices`, so a guard placed after it let two threads into
+    !! the shared reader first and the C++ concurrency guard reported a reader collision instead.
+    !! The marker from before the region is the negative control -- it proves the refusal is about
+    !! sharing, not about the name being unavailable in this build.
+    subroutine test_table_row_index_shared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: seen
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: with no region the row index is simply materialized " // &
+            "on first use and the scenario exits 0, which is a build that cannot run the test")
+        return
+#endif
+        call run_error_scenario("table_row_index_shared_in_parallel", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "a first parquet_row_index read on a shared table in a region was expected to abort")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "get: 'parquet_row_index'", seen)
+        call check(error, seen, &
+            "the abort must name the procedure the caller invoked and the column, not add_column")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "ADDS a column", seen)
+        call check(error, seen, &
+            "the abort must say WHY a read is refused -- that materializing this name adds a column")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "row index materialized before the region", seen)
+        call check(error, seen, &
+            "the same request outside the region must have succeeded, or the refusal is about " // &
+            "the name rather than about the table being shared")
+        if (allocated(error)) return
+        ! The control that earns the test: a table this thread opened INSIDE the region is
+        ! thread-private, and materializing its row index must still be allowed. A guard keying on
+        ! omp_in_parallel() instead of on ownership would abort here too and satisfy every
+        ! assertion above -- feature_risks.md Risk-134.
+        call scenario_capture_contains(out_file, err_file, &
+            "thread-private row index inside the region succeeded", seen)
+        call check(error, seen, &
+            "the guard refused the shared table but also the thread-private one, so it is keying " // &
+            "on the region rather than on ownership")
+    end subroutine test_table_row_index_shared_aborts
 
     !> The message must name `descending=`, since that is what the caller has to remove -- an
     !! abort saying only "conflict" leaves them guessing which half to drop.

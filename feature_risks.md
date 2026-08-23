@@ -195,6 +195,7 @@ something a reader is expected to have.
 | [Risk-132](#risk-132--an-unrecognised-qc-miss-value-resolves-to-a-logical-and-means-the-opposite) | An unrecognised `qc: miss:` value resolves to a logical, and means the OPPOSITE | 4 — covered |
 | [Risk-134](#risk-134--the-shared-table-guard-can-be-rewritten-to-key-on-the-region-and-every-abort-test-still-passes) | The shared-table guard can be rewritten to key on the REGION, and every abort test still passes | 4 — covered |
 | [Risk-135](#risk-135--a-validity-bit-update-that-is-not-atomic-loses-a-null-whenever-two-threads-write-rows-in-one-block) | A validity bit update that is not atomic loses a null whenever two threads write rows in one block | 4 — covered |
+| [Risk-136](#risk-136--a-read-accessor-that-refreshes-a-cache-is-a-writer-and-loses-another-threads-flag) | A READ accessor that refreshes a cache is a writer, and loses another thread's flag | 4 — covered |
 
 ---
 
@@ -5872,8 +5873,10 @@ positive-arm test today; the other nineteen `table_check_not_shared` callers res
 
 ### Risk-135 — A validity bit update that is not atomic loses a null whenever two threads write rows in one block
 
-**Covered** by `concurrent set_null keeps every null when rows share a validity block`
-(`test/test_table_parallel.f90`). This is [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null)'s
+**Covered** by `concurrent set_null keeps every null when rows share a validity block` and
+`concurrent clear_null and value writes keep every clear when rows share a block` (both
+`test/test_table_parallel.f90`) — **one test per primitive, and the pair is not optional; see the
+last bullet below.** This is [Risk-64](#risk-64--two-threads-pasting-adjacent-row-groups-share-a-validity-bitmap-block-and-lose-a-null)'s
 mechanism on the **public API** rather than inside `materialize_column_parallel`, and it shipped for
 the same reason: Risk-64 was fixed where it was found, and the same arithmetic one layer down was
 left alone.
@@ -5933,4 +5936,76 @@ cross-build floor.
   a test written the obvious way passes against the unfixed code. The two-arm shape is the point:
   remove the atomic and the interleaved arm fails while the aligned arm passes, which localises the
   defect instead of merely reporting one.
+- **`bit_set` and `bit_clear` need SEPARATE tests, because they are separate procedures with
+  separate directives.** The first test written here covered only `bit_set`: it nulls rows and never
+  clears one. Removing the atomic from `bit_clear` alone then left the whole suite green while
+  losing **119659 to 128777 rows of 200003** at 8 and 16 threads. Both public routes to `bit_clear`
+  are now covered, and they are different entry points rather than a duplicate: `%clear_null` says
+  so outright, while a VALUE write clears the row's null as a side effect — which is the likelier
+  one in practice, since filling a null-carrying column from several threads is a documented
+  pattern. A future third primitive on this bitmap needs its own arm on the same reasoning.
+- **When mutation-testing this area, FORCE A RELINK.** `fpm` served a stale `run_tester` here and
+  reported the `bit_clear`-only mutation as *caught* when it was not — the binary predated the
+  restore and still carried an earlier both-primitives mutation, while `fpm` printed "Project is up
+  to date". Deleting the test binary (or `fpm clean --skip`) before each round is what separates a
+  real verdict from the previous round's. The cross-check that exposed it was an independent probe
+  reproducing the same shape in a freshly built program.
 
+### Risk-136 — A READ accessor that refreshes a cache is a writer, and loses another thread's flag
+
+**Covered** by `has_nulls still reports a null a concurrent writer set on a date column`
+(`test/test_table_parallel.f90`). Found by auditing the read path for writes after
+[Risk-135](#risk-135--a-validity-bit-update-that-is-not-atomic-loses-a-null-whenever-two-threads-write-rows-in-one-block),
+and it is the same shape one level up: a lost update on shared state, silent, permanent.
+
+**Only the temporal kinds cache anything.** Bitmap kinds answer `any_null` by scanning blocks and
+string kinds ask the embedded column; date/time/timestamp carry their null inside each element, so
+answering means an O(n) element scan and the answer is memoised in `nulls_cached`/`nulls_dirty`
+(`src/parquet_columns.f90`). `rescan_temporal_nulls` sets `nulls_cached` from the scan and then
+clears `nulls_dirty`.
+
+**That clearing discards a concurrent writer's flag.** A temporal `%set_null`/`%set` writes its
+element and then raises `nulls_dirty`. If it does so while a reader is mid-scan, the reader's
+trailing `nulls_dirty = .false.` overwrites it — so the column is left holding a null while
+recording "clean, no nulls". Nothing dirties it again, so **the wrong answer is permanent**, and it
+is returned to a single-threaded caller long afterwards.
+
+**It reached the public API through a POINTER.** `slot_has_nulls` (`src/parquet_tables_query.f90`)
+is `class(parquet_table), intent(in)` and called the type-bound `%any_null()`, which is
+`intent(inout)`. Reaching the column through `cache` — a pointer component — is what makes that
+legal, so the compiler cannot object and `intent(in)` on the table says nothing about whether the
+call mutates. Measured before the fix, one thread nulling row 1 of a 400000-row date column while
+others called `%has_nulls`:
+
+| threads | rounds left permanently wrong |
+|---|---|
+| 4 | 198 / 200 |
+| 8 | 200 / 200 |
+| 16 | 194 / 200 |
+
+**The fix** is `parquet_column_any_null`, a `type(parquet_column), intent(in)` form that reads the
+cache when clean and re-scans when dirty rather than refreshing it. The read-only body already
+existed — two bulk validity walks used it — but was submodule-local, so the table layer could not
+reach it; making it a public `module procedure` is the whole change. Its cost is that a dirty
+temporal column re-scans per call instead of memoising, which is the trade `any_null_view` was
+created for in the first place.
+
+**What this forbids.**
+
+- **A query is not a read until its dummy says so.** `intent(inout)` on `any_null` was accurate and
+  documented, and the documentation still ended by saying the pointer meant a table accessor could
+  stay `intent(in)` — reading as reassurance where it was the hazard. When an accessor reaches
+  through a pointer, `intent(in)` on the outer object constrains nothing.
+- **Do not point `%has_nulls`, or any future read accessor, back at `%any_null()`.** The two differ
+  by one word at the call site and by nothing at all in the answer, single-threaded.
+- **Reads of the two cache scalars are fine; only the write was ever the problem.** Both are plain
+  scalars written whole, so a concurrent reader sees one value or the other and both are legitimate
+  snapshots of a column being mutated. Adding synchronisation to the read path would cost the
+  property the table layer is built around — that reading a resident column takes no atomics.
+- **PURE READS could not reproduce it, so do not test for it that way.** 204000 concurrent
+  `%has_nulls` calls across 8, 32 and 96 threads produced no wrong answer: every thread enters the
+  rescan together, so none observes another's mid-scan `.false.`. The defect needs a concurrent
+  WRITE, and a test that omits it passes against the unfixed code.
+- **A single round caught it only 8 times in 10.** The test repeats the race, which is
+  machine-independent in a way that tuning the writer's stagger is not; post-fix every round is
+  deterministic, so repetition cannot make it flaky in the failing direction.

@@ -99,6 +99,9 @@ module parquet
     private :: parquet_column_get_elem, parquet_column_set_elem
     private :: parquet_column_data_ptr, parquet_column_string_column
     private :: parquet_column_is_null, parquet_column_set_null, parquet_column_clear_null
+    ! Not part of that per-cell tier, hidden here for the same reason: it is the non-mutating
+    ! `any_null` the table's read accessors must use, and a user already has `%any_null()`.
+    private :: parquet_column_any_null
     !
     ! ---- The sorting tiers' internals need NO `private ::` here, and that is worth stating ----
     !

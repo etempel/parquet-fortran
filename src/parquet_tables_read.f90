@@ -1352,7 +1352,7 @@ contains
         if (idx == 0) then
             if (name == PARQUET_ROW_INDEX) then
                 if (allocated(self%cache%meta_keys)) then
-                    call table_make_row_index(self)
+                    call table_make_row_index(self, proc)
                     idx = table_find(self, name)
                 end if
             end if
@@ -1386,6 +1386,24 @@ contains
             error stop EP // "the " // PARQUET_ROW_INDEX // " column says which row of the " // &
                 "source file each row came from, so it is only available while the table still " // &
                 "has that file; materialize it BEFORE the mutation that detaches" // sfx
+        end if
+        ! REFUSED HERE, not by table_new_slot at the bottom of this procedure, for two reasons.
+        ! The message: a caller who wrote %get or %prefetch got one naming `add_column`, a
+        ! procedure they never invoked and cannot find in their own code -- and the real advice
+        ! ("ask for it once before the region") is specific to this column, not to structural
+        ! mutation in general. And the ORDER: on a filtered, sampled or sorted table the branch
+        ! below reads the shared reader, so the late guard let two threads into
+        ! parquet_get_physical_row_indices first and the C++ concurrency guard aborted instead,
+        ! reporting a reader collision for what is really a table-structure problem. Everything
+        ! above this line only reads scalars, so this is the first point at which anything is at
+        ! stake.
+        if (unsafe_shared_mutation(self%cache)) then
+            call table_context_suffix(self%cache, PARQUET_ROW_INDEX, sfx)
+            error stop EP // trim(proc) // ": '" // PARQUET_ROW_INDEX // "' does not exist yet, " // &
+                "and materializing it ADDS a column -- which a table this thread did not open " // &
+                "inside the parallel region cannot do, since it would move every other column's " // &
+                "descriptor. Ask for it ONCE before the region (%get, %col or %prefetch) and it " // &
+                "is an ordinary resident column inside it" // sfx
         end if
         allocate(rows(self%row_count))
         if (self%regime == REGIME_SLICE .and. .not. table_transform_narrows(self%cache) .and. &

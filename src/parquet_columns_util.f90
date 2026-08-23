@@ -115,7 +115,7 @@ contains
     !
     !> Number of validity bits the column needs: one per element.
     module procedure bits_needed
-        res = self%nrows*int(self%width, int64)
+        res = col%nrows*int(col%width, int64)
     end procedure bits_needed
     !
     !> Number of int64 blocks needed to hold `nbits` bits.

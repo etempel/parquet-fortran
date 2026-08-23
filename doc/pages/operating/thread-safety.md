@@ -30,7 +30,7 @@ disturbing that.
 |---|---|---|
 | Read a resident column: `%get`, `%col`, `%get_slice`, `%row`, `%get_element`, `%is_null` | **yes**, unrestricted | — |
 | Read through a `%col`/`%ref` pointer you already hold | **yes**, unrestricted | — |
-| Metadata: `%nrows`, `%ncols`, `%column_names`, `%kind`, `%width`, `%unit`, `%residency` | **yes** | — |
+| Metadata: `%nrows`, `%ncols`, `%column_names`, `%kind`, `%width`, `%unit`, `%residency`, `%has_nulls` | **yes** | — |
 | First read of a column not yet resident, on a table **another** thread opened | no | hard error; `%prefetch` before the region |
 | First read of a column, on a table **this** thread opened inside the region | **yes** | — (this is the per-thread slice pattern) |
 | `%prefetch` / `%materialize_all` called from one thread | **yes, internally** — the library reads the columns on several threads for you | — |

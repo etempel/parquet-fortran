@@ -209,10 +209,10 @@ contains
         n = self%nrows
         if (n <= 0_int64) return
         ! Case 1. O(1) for a column that never had a null set, so it costs nothing on the common
-        ! path. Goes through any_null_view rather than the type-bound any_null because this
-        ! procedure is intent(in): see the interface's own note in parquet_columns.f90 for why that
-        ! matters more than the cache refresh it gives up.
-        if (.not. any_null_view(self)) return
+        ! path. Goes through parquet_column_any_null rather than the type-bound any_null because
+        ! this procedure is intent(in): see the interface's own note in parquet_columns.f90 for
+        ! why that matters more than the cache refresh it gives up.
+        if (.not. parquet_column_any_null(self)) return
         allocate(valid(n))
         valid = .true.
         w = int(self%width, int64)
@@ -307,7 +307,7 @@ contains
         !
         n = self%nrows
         if (n <= 0_int64) return
-        if (.not. any_null_view(self)) return
+        if (.not. parquet_column_any_null(self)) return
         w = int(self%width, int64)
         allocate(valid(w, n))
         valid = .true.
@@ -726,53 +726,58 @@ contains
         call drop_bitmap(self)
     end procedure compact_validity
     !
-    !> Recomputes a temporal column's cached "has at least one null" flag (the O(n) scan the
-    !! cache exists to avoid repeating).
-    !> `any_null` for a caller that holds the column by `intent(in)`.
+    !> Whether the column holds at least one null, without writing to it. The interface in
+    !! `parquet_columns.f90` carries the contract; two implementation notes belong here.
     !!
-    !! Identical answer, and identical cost on every kind but one. The type-bound `any_null` is
-    !! `intent(inout)` solely so that a temporal column can refresh its null cache while answering;
-    !! that one word put the whole bulk-validity API out of reach of every read-only consumer,
-    !! which then fell back to `is_null(i)` per row -- measured at ~20 ms on a 4M-row sort key,
-    !! against ~2 ms for the word walk it was avoiding.
+    !! The temporal arm reads `nulls_dirty` and `nulls_cached` without synchronisation, which is
+    !! sound in a way the type-bound `any_null` is not. Both are plain scalars written as whole
+    !! words, so a concurrent reader sees the value before or after another thread's write and
+    !! never a mixture -- and BOTH are legitimate snapshots of a column something is mutating at
+    !! that moment. What made `any_null` unsafe was never the reads; it was the write that
+    !! discarded another thread's `nulls_dirty = .true.` (feature_risks.md Risk-136).
     !!
-    !! So this reads the cache when it is clean and scans when it is dirty, rather than writing it.
-    !! The only thing given up is that a dirty temporal column stays dirty; the next `any_null`
-    !! call refreshes it as before, and nothing depends on the refresh happening here.
-    logical function any_null_view(self) result(res)
-        class(parquet_column), intent(in) :: self !! the column.
+    !! It calls `parquet_column_is_null`, not `col%is_null`, because a type-bound call on a
+    !! non-polymorphic dummy is the conversion the typed tier exists to remove -- enforced by
+    !! `check_no_type_bound_column_access` for every `parquet_column_*` procedure.
+    module procedure parquet_column_any_null
         integer(int64) :: k, nbits, nblk
         res = .false.
-        if (self%nrows <= 0_int64) return
-        if (is_string_kind(self%kind)) then
-            if (allocated(self%str)) res = self%str%null_count() > 0_int64
+        if (col%nrows <= 0_int64) return
+        if (is_string_kind(col%kind)) then
+            if (allocated(col%str)) res = col%str%null_count() > 0_int64
             return
         end if
-        if (is_temporal_kind(self%kind)) then
-            if (.not. self%nulls_dirty) then
-                res = self%nulls_cached
+        if (is_temporal_kind(col%kind)) then
+            if (.not. col%nulls_dirty) then
+                res = col%nulls_cached
                 return
             end if
-            do k = 1_int64, self%nrows
-                if (self%is_null(k)) then
+            do k = 1_int64, col%nrows
+                if (parquet_column_is_null(col, k)) then
                     res = .true.
                     return
                 end if
             end do
             return
         end if
-        if (.not. self%has_nulls) return
-        if (.not. allocated(self%validity)) return
-        nbits = bits_needed(self)
-        nblk = min(blocks_for(nbits), size(self%validity, kind=int64))
+        if (.not. col%has_nulls) return
+        if (.not. allocated(col%validity)) return
+        nbits = bits_needed(col)
+        nblk = min(blocks_for(nbits), size(col%validity, kind=int64))
         do k = 1_int64, nblk
-            if (self%validity(k) /= 0_int64) then
+            if (col%validity(k) /= 0_int64) then
                 res = .true.
                 return
             end if
         end do
-    end function any_null_view
+    end procedure parquet_column_any_null
     !
+    !> Recomputes a temporal column's cached "has at least one null" flag (the O(n) scan the
+    !! cache exists to avoid repeating).
+    !!
+    !! **Writes to the column, so only `any_null` and `compact_validity` may reach it** -- both
+    !! are declared `intent(inout)` and neither is on a read path. Clearing `nulls_dirty` at the
+    !! end is what discards a concurrent `set_null`'s dirty flag; see feature_risks.md Risk-136.
     subroutine rescan_temporal_nulls(self)
         class(parquet_column), intent(inout) :: self !! the temporal column.
         integer(int64) :: k

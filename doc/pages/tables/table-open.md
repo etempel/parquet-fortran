@@ -366,7 +366,7 @@ It answers for every regime, and each is a different question:
 The last two are the reason it exists: which rows survived and what order they ended up in lives
 inside the reader and is not otherwise visible.
 
-Four things to know:
+Five things to know:
 
 - **It is virtual until you ask for it.** It costs 8 bytes a row — 8 GB at a billion rows — so it
   is not built at open. `%has_column(PARQUET_ROW_INDEX)` answers `.true.` before the first use,
@@ -384,6 +384,12 @@ Four things to know:
   column, so a file that has its own `parquet_row_index` gets a warning at open and that column is
   dropped from the table. A read-in MAML's [`extra: remap:`](#renaming-a-files-columns-with-a-read-in-maml)
   is how to reach it, by giving it another internal name.
+- **Ask for it before a parallel region, on a table you share.** The first request builds the
+  column, which adds a slot and moves every other column's descriptor — the one thing a shared
+  table refuses inside a region, exactly as `%add_column` is refused. Asking once beforehand
+  (`%get`, `%col` or `%prefetch`) makes it an ordinary resident column, readable from any number
+  of threads thereafter. A table *this* thread opened inside the region is thread-private and is
+  not affected.
 - **A table built in memory has no such column** — it was not read from anywhere.
 
 `parquet_get_physical_row_indices(reader, rows)` is the same answer at the reader level, if you

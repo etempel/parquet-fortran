@@ -3976,8 +3976,8 @@ contains
     end subroutine test_set_validity_rows_element_carried
     !
     !> A temporal column caches "does this column hold a null?", because answering it means an O(n)
-    !! element scan. The read-only view of that question (`any_null_view`, used by every bulk
-    !! validity path that holds the column `intent(in)`) has two arms: READ the cache when it is
+    !! element scan. The read-only view of that question (`parquet_column_any_null`, used by every
+    !! bulk validity path that holds the column `intent(in)`) has two arms: READ the cache when it is
     !! clean, and rescan when it is dirty. Only the rescan had run -- so a cache that was never
     !! consulted would have looked exactly like one that was.
     !!

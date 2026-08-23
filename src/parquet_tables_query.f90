@@ -645,7 +645,14 @@ contains
         ! conservative (see the interface's own note), and it is not asked for a column that is
         ! not file-backed or a table that has detached, since neither has a footer to ask.
         if (self%cache%cols(idx)%residency == RES_FULL) then
-            any_null = self%cache%cols(idx)%values%any_null()
+            ! parquet_column_any_null, NOT the type-bound %any_null(): the latter is
+            ! `intent(inout)` and refreshes a temporal column's null cache while answering, which
+            ! makes this read accessor a WRITER on a column any number of threads may be reading.
+            ! Reaching the column through `cache` (a pointer) is what lets that compile under
+            ! `self` being intent(in), so nothing but this comment stands between the two forms.
+            ! The cost of the safe one is that a dirty temporal column rescans per call instead of
+            ! memoising. See feature_risks.md Risk-136.
+            any_null = parquet_column_any_null(self%cache%cols(idx)%values)
             return
         end if
         if (.not. self%cache%cols(idx)%file_source) return
@@ -900,7 +907,7 @@ contains
                 ! longer have it), while one built in memory never had a file row to name and
                 ! falls through to the ordinary "no column of this name".
                 if (allocated(self%cache%meta_keys)) then
-                    call table_make_row_index(self)
+                    call table_make_row_index(self, proc)
                     idx = table_find(self, name)
                 end if
             end if

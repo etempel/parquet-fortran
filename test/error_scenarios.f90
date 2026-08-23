@@ -1738,6 +1738,8 @@ program error_scenarios
         call scenario_table_add_column_shared_in_parallel()
     case ("table_write_shared_in_parallel")
         call scenario_table_write_shared_in_parallel()
+    case ("table_row_index_shared_in_parallel")
+        call scenario_table_row_index_shared_in_parallel()
     case ("table_set_null_no_validity_in_parallel")
         call scenario_table_set_null_no_validity_in_parallel()
     case ("table_string_write_shared_in_parallel")
@@ -13908,6 +13910,50 @@ contains
         !$omp end parallel
         print '(a,i0)', "unexpectedly added a column to a shared table in a region, ncols=", t%ncols()
     end subroutine scenario_table_add_column_shared_in_parallel
+    !
+    !> Asking a SHARED table for `parquet_row_index` for the first time inside a parallel region.
+    !!
+    !! The name resolves to a column that does not exist yet, so the first request MATERIALIZES
+    !! it -- which adds a slot and reallocates `cols(:)`, exactly as `%add_column` would. It is
+    !! refused for that reason, and the message has to say so in the caller's own terms: it names
+    !! the procedure the user actually called (`get` here) and the column, rather than reporting
+    !! `add_column`, which appears nowhere in their code.
+    !!
+    !! The negative control is inside the same process: the row index is asked for BEFORE the
+    !! region on a second table, proving the refusal is about sharing rather than about the name.
+    subroutine scenario_table_row_index_shared_in_parallel()
+        type(parquet_table) :: t, early
+        integer(int64), allocatable :: got(:)
+        character(len=*), parameter :: src = "test_run/es_table_omp_rowindex.parquet"
+        call write_table_scenario_fixture(src)
+        ! Control: the same request, before any region, must succeed.
+        call parquet_open_table(early, src)
+        call early%get(PARQUET_ROW_INDEX, got)
+        print '(a,i0)', "row index materialized before the region, rows=", size(got)
+        call parquet_open_table(t, src)
+        call t%materialize_all()
+        ! Both requests live in ONE `block`, because `!$omp single` takes a structured block --
+        ! the same constraint scenario_table_write_shared_in_parallel documents.
+        !$omp parallel num_threads(2) default(shared)
+        !$omp single
+        block
+            type(parquet_table) :: mine        ! block-local, NOT private() -- see CLAUDE.md
+            integer(int64), allocatable :: mine_rows(:)
+            ! Second negative control, and the one that matters: this thread opened `mine` itself
+            ! inside the region, so it is thread-private and materializing its row index is
+            ! permitted. A guard rewritten to key on `omp_in_parallel()` rather than on ownership
+            ! would refuse this too and still pass every abort assertion (feature_risks.md
+            ! Risk-134).
+            call parquet_open_table(mine, src)
+            call mine%get(PARQUET_ROW_INDEX, mine_rows)
+            print '(a,i0)', "thread-private row index inside the region succeeded, rows=", size(mine_rows)
+            ! `t` was opened OUTSIDE the region, so it may be shared -> aborts.
+            call t%get(PARQUET_ROW_INDEX, got)
+        end block
+        !$omp end single
+        !$omp end parallel
+        print '(a)', "unexpectedly materialized the row index on a shared table inside a region"
+    end subroutine scenario_table_row_index_shared_in_parallel
     !
     !> parquet_write_table on a SHARED table inside a parallel region aborts.
     !!

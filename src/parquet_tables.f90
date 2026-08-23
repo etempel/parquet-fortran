@@ -3858,8 +3858,14 @@ module parquet_tables
         !!
         !! Private: reached through the ordinary column API, which resolves the reserved name to
         !! this on first use.
-        module subroutine table_make_row_index(self)
+        !!
+        !! `proc` is the name the CALLER was invoked under -- `get`, `col`, `prefetch` -- because
+        !! every abort here happens while the user is asking for a column, never while adding one.
+        !! Without it the shared-table refusal came out of `table_new_slot` naming `add_column`,
+        !! which is a procedure the caller did not invoke and cannot find in their own code.
+        module subroutine table_make_row_index(self, proc)
             class(parquet_table), intent(in) :: self !! the table (fills through %cache).
+            character(len=*), intent(in) :: proc     !! calling procedure name (for the message).
         end subroutine table_make_row_index
         !> Checks this table's read-time qc against the file, WITHOUT leaving the columns resident.
         !!

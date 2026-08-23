@@ -1010,6 +1010,7 @@ concurrency_scenarios=(
     "table_compact_shared_in_parallel"
     "table_add_column_shared_in_parallel"
     "table_write_shared_in_parallel"
+    "table_row_index_shared_in_parallel"
     "table_set_null_no_validity_in_parallel"
     "table_string_write_shared_in_parallel"
     "table_reserve_columns_shared_in_parallel"

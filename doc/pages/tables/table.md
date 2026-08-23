@@ -300,7 +300,8 @@ not have to copy a name out just to ask about it:
 ```fortran
 do j = 1, t%ncols()
     call t%column_name(j, nm)
-    print *, nm, parquet_kind_name(t%kind(j)), t%width(j)
+    call parquet_kind_name(t%kind(j), kname)
+    print *, nm, kname, t%width(j)
 end do
 ```
 

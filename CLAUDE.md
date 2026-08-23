@@ -511,6 +511,23 @@ Working rules:
   machine's throughput*. This applies to performance figures only: a compiler named in a
   **correctness** or **build** context (a miscompilation to avoid, a flag to pass, a reproducibility
   guarantee across compilers) is information the reader needs and stays.
+- **A page has ONE name, and the two index lists quote it under one rule.** The frontmatter
+  `title:` is the page's canonical name — FORD uses it for the browser tab, the `<h1>` and its own
+  self-links — so **`doc/pages/index.md`'s flat every-page list carries the whole title** (that list
+  has no descriptions; the link text is all a reader gets), while **a group `index.md`'s bullet
+  carries the title or an initial prefix of it** (a one-line description follows after the dash, so
+  repeating the title's tail is redundant). Backticks are ignored on both sides — no frontmatter
+  `title:` in the guide carries one. Enforced by `check_page_titles_match_their_list_entries`
+  (`tools/check_source_conventions.py`). **The corollary is the useful half: a page whose flat-list
+  entry says more than its own `<h1>` is under-named**, and the fix is to lengthen the title rather
+  than shorten the entry — six pages differed this way before the rule was settled, including one
+  titled "Random numbers" for a page half about sampling.
+- **A count written out beside the list it counts, or a module list the code also owns, needs a
+  check.** `doc/pages/index.md` carries three such claims — the page count, the entry-module
+  enumeration, and the page titles above — and each had drifted from what it described while every
+  test stayed green. All three are now compared against the thing they describe by
+  `tools/check_source_conventions.py`; a fourth of this shape should get the same treatment rather
+  than a careful review.
 - **Optional arguments are shown in square brackets** when a signature is written out in prose or
   in a table — `call t%get_file_metadata(key, value, [found])`, `%ncols([resident_only])`. This
   applies to *descriptions* of a call, never to a runnable code example inside a ```fortran fence,

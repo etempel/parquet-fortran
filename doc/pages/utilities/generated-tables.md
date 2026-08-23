@@ -1,5 +1,5 @@
 ---
-title: Generated table types
+title: Generated table types: named accessors from a MAML schema
 ---
 
 A program that always reads the same columns can have them as **named accessors on its own table

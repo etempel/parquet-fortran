@@ -1,5 +1,5 @@
 ---
-title: Sorting arrays and columns
+title: Sorting arrays and columns with pf_sort/pf_argsort
 ---
 
 `parquet_sorting` sorts plain Fortran arrays and this library's own column types. It is also the

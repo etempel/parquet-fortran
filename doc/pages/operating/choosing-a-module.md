@@ -1,5 +1,5 @@
 ---
-title: Choosing a module
+title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is

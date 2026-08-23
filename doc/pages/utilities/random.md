@@ -1,5 +1,5 @@
 ---
-title: Random numbers
+title: Random numbers and sampling with pf_random_at
 ---
 
 `parquet_random` gives you random numbers that do not depend on the order in which you ask for

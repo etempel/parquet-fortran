@@ -1993,6 +1993,144 @@ def check_doc_page_index_consistency():
                     "depth-first walk of the groups -- expected [%s], found [%s]"
                     % (", ".join(expected), ", ".join(actual))
                 )
+            # Rule 6: that list's own introductory sentence STATES its length ("All 24 pages, in
+            # reading order"), and until this check existed nothing compared the two. It said 23
+            # while the list held 24 and the tree held 24, stale since operating/choosing-a-module.md
+            # was inserted -- and the same list's length was written down in two further places that
+            # had each drifted to a different number. A count in prose beside the thing it counts is
+            # the cheapest form of the hazard CLAUDE.md records under "A static check that enumerates
+            # names goes stale silently"; here the list is machine-readable, so the sentence can
+            # simply be held to it.
+            #
+            # Matched by SHAPE rather than by the exact sentence, so rewording the line does not
+            # silently switch the check off -- and a missing number FAILS rather than passes, since
+            # an absent count is indistinguishable from a check that has gone blind.
+            stated = re.search(r"\ball\s+(\d+)\s+pages\b", body, re.I)
+            if stated is None:
+                problems.append(
+                    "doc/pages/index.md: the every-page-at-a-glance list no longer states its own "
+                    "length (\"All N pages\") -- either the sentence was reworded past this check "
+                    "or the count was dropped; restore it or remove this rule deliberately"
+                )
+            elif int(stated.group(1)) != len(actual):
+                problems.append(
+                    "doc/pages/index.md: the list says \"All %s pages\" but holds %d entries -- the "
+                    "count is hand-written prose beside a hand-written list and goes stale the "
+                    "moment a page is added" % (stated.group(1), len(actual))
+                )
+    return problems
+
+
+def check_landing_page_names_every_entry_module():
+    """doc/pages/index.md's orientation must name every entry module the authority lists.
+
+    `operating/choosing-a-module.md` says outright that its table is the authority -- "anywhere else
+    in the repository that appears to enumerate entry modules is describing it, not defining it" --
+    and `tools/check_module_footprints.sh`'s ENTRY_MODULES is the same list, measured. The guide's
+    landing page is one of those "anywhere else" enumerations, and it had drifted: it omitted
+    `parquet_version`, which is in the table, is measured by the footprint tool, and is the only
+    route to `parquet_get_version` outside `use parquet` -- i.e. exactly the case the sentence is
+    addressed to, a reader taking a narrow import.
+
+    **One direction only, deliberately.** The page legitimately names one module the table does not:
+    `parquet_maml_base`, which `choosing-a-module.md` describes as "importable and promised but
+    deliberately absent from the table". A both-directions rule would fail on that deliberate entry,
+    and a check that fails on purpose gets switched off.
+
+    ENTRY_MODULES is read from the shell script rather than re-listed here, so this check cannot
+    drift from the thing it is checking against -- and an empty parse FAILS rather than passes.
+    """
+    problems = []
+    doc = REPO_ROOT / "doc" / "pages" / "index.md"
+    tool = REPO_ROOT / "tools" / "check_module_footprints.sh"
+    m = re.search(r'ENTRY_MODULES="(.*?)"', tool.read_text(), re.S)
+    if m is None:
+        return ["tools/check_module_footprints.sh: could not find ENTRY_MODULES -- this check "
+                "needs updating"]
+    modules = [w for w in m.group(1).replace("\\\n", " ").split() if w and w != "parquet"]
+    if not modules:
+        return ["tools/check_module_footprints.sh: ENTRY_MODULES parsed empty -- this check needs "
+                "updating"]
+    text = doc.read_text()
+    # The orientation prose only: everything before the group entries. A module named further down
+    # (in a group description, say) does not make it discoverable as an import.
+    cut = text.find("\nThe guide is organised into six groups")
+    orientation = text[:cut] if cut > 0 else text
+    for mod in modules:
+        if "`%s`" % mod not in orientation:
+            problems.append(
+                "doc/pages/index.md: `%s` is an advertised entry module (it is in "
+                "tools/check_module_footprints.sh's ENTRY_MODULES and in "
+                "doc/pages/operating/choosing-a-module.md's table) but the landing page's "
+                "orientation never names it -- a reader looking for a narrower import cannot "
+                "discover it" % mod)
+    return problems
+
+
+def check_page_titles_match_their_list_entries():
+    """A page's title, its flat-list entry and its group-index bullet must line up.
+
+    Two clauses, because the three places are not in the same position. The frontmatter `title:` is
+    the page's CANONICAL name -- FORD uses it for the browser tab, the `<h1>` and its own self-links
+    -- so:
+
+    1. the top-level flat list carries NO descriptions, so its entry must be the whole title;
+    2. a group-index bullet carries a one-line description after the dash, so a shorter label is
+       legitimate there, as long as it is an initial prefix of the title.
+
+    Settled at row 29 of feature_doc.md's guide review after being parked twice. Before it, six flat
+    entries said more than their page's own `<h1>` did -- `utilities/random.md` was titled "Random
+    numbers" while its list entry said "Random numbers and sampling with pf_random_at", for a page
+    half about sampling. The fix was to lengthen the titles, not to shorten the entries.
+
+    Backticks are ignored on both sides: no frontmatter `title:` in the guide carries one, which is
+    itself a settled convention.
+    """
+    problems = []
+    pages = REPO_ROOT / "doc" / "pages"
+    top = pages / "index.md"
+    if not top.is_file():
+        return ["doc/pages/index.md: missing -- this check needs updating"]
+    top_text = top.read_text()
+
+    def norm(t):
+        return re.sub(r"\s+", " ", t.replace("`", "")).strip()
+
+    seen = 0
+    for group in sorted(d for d in pages.iterdir() if d.is_dir()):
+        index = group / "index.md"
+        if not index.is_file():
+            continue                      # reported by check_doc_page_index_consistency
+        index_text = index.read_text()
+        for page in sorted(group.glob("*.md")):
+            if page.name == "index.md":
+                continue
+            rel = "doc/pages/%s/%s" % (group.name, page.name)
+            title_m = re.search(r"^title:\s*(.+)$", page.read_text(), re.M)
+            if title_m is None:
+                problems.append("%s: no frontmatter title:" % rel)
+                continue
+            title = norm(title_m.group(1))
+            html = page.name[: -len(".md")] + ".html"
+            flat_m = re.search(r"- \[([^\]]+)\]\(%s/%s\)"
+                               % (re.escape(group.name), re.escape(html)), top_text)
+            bullet_m = re.search(r"- \[([^\]]+)\]\(%s\)" % re.escape(html), index_text)
+            if flat_m is None or bullet_m is None:
+                continue                  # reported by check_doc_page_index_consistency
+            seen += 1
+            flat, bullet = norm(flat_m.group(1)), norm(bullet_m.group(1))
+            if flat != title:
+                problems.append(
+                    "%s: the top-level flat list calls it %r but its title is %r -- the flat list "
+                    "carries no description, so its entry must be the whole title" % (rel, flat, title))
+            if bullet != title and not (
+                    title.startswith(bullet) and title[len(bullet):][:1] in (" ", ":", ",")):
+                problems.append(
+                    "doc/pages/%s/index.md: the bullet for %s reads %r, which is neither its title "
+                    "%r nor an initial prefix of it" % (group.name, page.name, bullet, title))
+    if seen == 0:
+        return ["doc/pages/: matched no page against both lists -- either the guide moved or this "
+                "check needs updating"]
     return problems
 
 
@@ -2757,6 +2895,8 @@ CHECKS = (
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),
     ("doc/pages index files agree with the page tree", check_doc_page_index_consistency),
+    ("the landing page names every entry module", check_landing_page_names_every_entry_module),
+    ("page titles match their list entries", check_page_titles_match_their_list_entries),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
     ("parquet_random takes array lengths as int64", check_fill_size_kind),

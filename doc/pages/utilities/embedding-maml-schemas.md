@@ -1,5 +1,5 @@
 ---
-title: Embedding your own MAML schemas
+title: Embedding your own MAML schemas in your own project
 ---
 
 `tools/generate_parquet_maml.sh` (bundled with this library) is a generic tool any project

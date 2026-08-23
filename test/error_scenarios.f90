@@ -15,7 +15,7 @@ program error_scenarios
     ! parquet_emit_info is deliberately PRIVATE in the `parquet` facade (it is an output
     ! channel, not user API), so the informational-channel scenario imports it from the
     ! settings module directly.
-    use parquet_settings, only : parquet_emit_info
+    use parquet_settings, only : parquet_emit_info, parquet_emit_warning
     use parquet_columns
     use parquet_table_example, only : parquet_table_test
     use parquet_tables
@@ -724,6 +724,8 @@ program error_scenarios
         call scenario_close_writer_no_columns_with_mask()
     case ("close_writer_missing_write")
         call scenario_close_writer_missing_write()
+    case ("close_writer_missing_write_silenced")
+        call scenario_close_writer_missing_write_silenced()
     case ("close_writer_missing_write_unnamed_schema")
         call scenario_close_writer_missing_write_unnamed_schema()
     case ("read_unknown_column")
@@ -2661,6 +2663,46 @@ contains
         ! col_c is never written.
         call parquet_close_writer(writer)
     end subroutine scenario_close_writer_missing_write
+
+    !> Same as scenario_close_writer_missing_write, but with BOTH output knobs turned against it:
+    !> verbosity="errors_only" and message_stream="stderr".
+    !>
+    !> "errors_only" rather than "silent" on purpose, and the distinction is the whole point of the
+    !> control below: the levels are normal(0) < silent(1) < errors_only(2), and parquet_emit_warning
+    !> returns only at `cfg_verbosity >= verb_errors_only`. "silent" quiets informational and
+    !> solicited output and leaves warnings alone, so a control emitted under it would still print
+    !> and would prove nothing about the knob being in force.
+    !>
+    !> Neither may reach the error-context lines. parquet_emit_error_context
+    !> (src/parquet_settings_base.f90) writes to output_unit unconditionally -- it does not test
+    !> cfg_verbosity and does not consult message_unit() -- because those lines carry the filename
+    !> and schema name that parquet_close_writer's abort message deliberately leaves out. Routing
+    !> them through parquet_emit_warning instead would let verbosity="errors_only" produce an abort
+    !> naming no file at all, which is the failure this arrangement exists to prevent.
+    !>
+    !> So the abort here must still print its two context lines on STDOUT while the ERROR STOP goes
+    !> to stderr, exactly as it does with both knobs at their defaults. The warning emitted first is
+    !> the negative control and must vanish: it proves the knobs were really in force, which is what
+    !> separates "this channel ignores the settings" from "the settings did nothing at all".
+    subroutine scenario_close_writer_missing_write_silenced()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: data(1) = [1_int32]
+
+        call parquet_set_verbosity("errors_only")
+        call parquet_set_message_stream("stderr")
+        ! The control: a warning emitted under these settings, which must reach neither stream.
+        call parquet_emit_warning("control warning that must be suppressed")
+
+        schema = parquet_schema(table="demo")
+        call schema%add_field("col_a", "int32")
+        call schema%add_field("col_b", "int32")
+
+        call parquet_open_writer(writer, "test_run/error_scenario_missing_write_silenced.parquet", schema)
+        call parquet_write_column(writer, "col_a", data)
+        ! col_b is never written, so the close below aborts -- after printing its context.
+        call parquet_close_writer(writer)
+    end subroutine scenario_close_writer_missing_write_silenced
 
     !> Same as scenario_close_writer_missing_write, but the schema is built
     !> fully by hand (schema%maml%lines set directly, never going through

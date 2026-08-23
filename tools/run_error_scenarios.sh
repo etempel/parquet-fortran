@@ -729,6 +729,7 @@ scenarios=(
     "close_reader_before_open:1"
     "close_writer_before_open:1"
     "close_writer_missing_write:1"
+    "close_writer_missing_write_silenced:1"
     "close_writer_missing_write_unnamed_schema:1"
     "close_writer_no_columns_written:0"
     "close_writer_zero_length_writes_quiet:0"

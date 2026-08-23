@@ -670,6 +670,11 @@ contains
                 test_close_writer_missing_write_aborts), &
             new_unittest("closing a hand-built-schema writer with an unwritten enabled column " // &
                 "aborts with an unnamed-schema message", test_close_writer_missing_write_unnamed_schema_aborts), &
+            new_unittest("error context reaches stdout even at verbosity=errors_only, " // &
+                "message_stream=stderr", &
+                test_error_context_ignores_output_settings), &
+            new_unittest("the two failure classes exit with the two documented statuses", &
+                test_failure_classes_exit_statuses), &
             new_unittest("closing a writer with NO column written writes them empty and warns", &
                 test_close_writer_no_columns_written_warns), &
             new_unittest("explicit zero-length writes produce no empty-close warning", &
@@ -5818,6 +5823,99 @@ contains
     !> "internal:<table>" for a schema built via parquet_schema(...) (never
     !> loaded from a .maml file) -- see schema_init in src/parquet_metadata.f90
     !> and parquet_close_writer in src/parquet_write.f90.
+    !> The two failure classes exit with the two statuses
+    !> doc/pages/operating/error-handling.md documents: 1 for a Fortran `error stop`, 134 for a
+    !> C++-side failure.
+    !!
+    !! **Every other assertion in this file checks `exitstat /= 0`.** That is the right question for
+    !! "did this abort", and it is why nothing here pinned either number until the error-handling
+    !! page started printing them -- at which point they became a contract with no test behind them.
+    !! A reader writing a wrapper around this library will branch on these.
+    !!
+    !! **The negative control is each scenario asserted against the OTHER class's number.** Checking
+    !! only that the Fortran one exits 1 would pass just as happily if the C++ path exited 1 too,
+    !! and the whole value of the pair is that they DIFFER -- that is what lets a script tell a
+    !! precondition failure from an Arrow-side one without parsing stderr.
+    !!
+    !! **What this does NOT protect**, and the doc-comment says so rather than letting a future
+    !! reader assume otherwise: reverting `fatal_exit`'s `std::_Exit(134)` to `std::abort()` would
+    !! still exit 134 here, because a single-threaded abort reports the same status. What catches
+    !! that is the concurrency scenarios hanging and being killed by the per-scenario timeout cap
+    !! (see tools/run_error_scenarios.sh's header). This test pins the user-visible contract, not
+    !! the mechanism behind it.
+    subroutine test_failure_classes_exit_statuses(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+
+        ! Fortran side: an unopened reader, which check_reader_open rejects before anything else.
+        call run_error_scenario("read_before_open", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 1, &
+            "a Fortran `error stop` must exit with status 1, as the error-handling page documents")
+        if (allocated(error)) return
+        call check(error, exitstat /= 134, &
+            "a Fortran `error stop` must NOT exit 134 -- that is the C++ class, and the page tells " // &
+            "readers the two can be told apart by exit status alone")
+        if (allocated(error)) return
+
+        ! C++ side: a type mismatch detected inside parquet_wrapper.cpp, which reaches fatal_exit.
+        call run_error_scenario("read_array_full_bool_type_mismatch", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat == 134, &
+            "a C++-side failure must exit with status 134, as the error-handling page documents")
+        if (allocated(error)) return
+        call check(error, exitstat /= 1, &
+            "a C++-side failure must NOT exit 1 -- that is the Fortran class")
+    end subroutine test_failure_classes_exit_statuses
+
+    !> Error CONTEXT lines reach stdout even when both output settings are turned against them --
+    !> `verbosity="errors_only"`, the strictest level, and `message_stream="stderr"`.
+    !!
+    !! `parquet_emit_error_context` (src/parquet_settings_base.f90) carries a contract its own
+    !! doc-comment states outright -- *"Never suppressed and never redirected"* -- and nothing
+    !! tested it. The lines it prints are the ones parquet_close_writer's abort message
+    !! deliberately leaves out, the output filename and the schema name, so losing them turns a
+    !! diagnosable failure into one that names nothing.
+    !!
+    !! **This needs check_scenario_streams, not the usual helper.** Every other assertion here goes
+    !! through scenario_capture_contains, which searches BOTH captured streams -- so a context line
+    !! that started honouring `message_stream` and moved to stderr would look byte-identical to it.
+    !! check_scenario_streams asserts the text is on one stream *and absent from the other*, which
+    !! is the half with teeth (feature_risks.md Risk-41's decorative-knob rule).
+    !!
+    !! **The negative control is the warning the scenario emits first.** Under the same two settings
+    !! it must reach neither stream. Without it, this test would pass just as happily against a
+    !! build where `parquet_set_verbosity` did nothing at all -- it is the warning vanishing that
+    !! proves the knobs were really in force while the context lines ignored them.
+    subroutine test_error_context_ignores_output_settings(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call check_scenario_streams(error, "close_writer_missing_write_silenced", &
+            "parquet_close_writer: output file:", "stdout", &
+            "the error-context filename must stay on stdout at verbosity=errors_only, message_stream=stderr")
+        if (allocated(error)) return
+
+        call check_scenario_streams(error, "close_writer_missing_write_silenced", &
+            "ERROR STOP parquet_close_writer: missing write for enabled column", "stderr", &
+            "the abort message itself belongs on stderr")
+        if (allocated(error)) return
+
+        ! The negative control: a warning emitted under the same settings must reach NEITHER stream.
+        call run_error_scenario("close_writer_missing_write_silenced", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, "control warning that must be suppressed", found)
+        call check(error, .not. found, &
+            "verbosity=errors_only must suppress the warning -- if it did not, this test proves " // &
+            "nothing about the error-context channel ignoring the same setting")
+    end subroutine test_error_context_ignores_output_settings
+
     subroutine test_close_writer_missing_write_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 

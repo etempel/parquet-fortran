@@ -296,7 +296,7 @@ openmp = "*"
 
 ## The concurrency guard
 
-Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an immediate process abort (`std::abort()`) with a diagnostic on stderr. This is a fail-fast race guard, not a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed. (This is one of two classes of process-abort failure in this library — see [Error handling](error-handling.html#the-two-failure-classes) for the other, Fortran `error stop`.)
+Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thread at a time (the "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an immediate process exit (status 134) with a diagnostic on stderr. This is a fail-fast race guard, not a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed. (This is one of two classes of process-abort failure in this library — see [Error handling](error-handling.html#the-two-failure-classes) for the other, Fortran `error stop`.)
 
 The guard is claimed at the *first* statement of a call, before any of the writer's or reader's own bookkeeping is touched. That ordering is what makes the diagnostic reliable rather than a race in its own right: a colliding thread is stopped before it can write anything, so the message you get names the actual mistake instead of a segfault somewhere further along. It also means the guard tracks *which* thread holds a handle, so the library's own nested calls into one handle are fine — only a genuinely different thread is rejected.
 

@@ -4827,6 +4827,25 @@ identically when the team is one thread, or it is asserting something else. Guar
 that a team existed. Distinguishing the two is the whole judgement — over-applying this hollows out
 the suite on exactly the builds that ship.
 
+**Skipping is a RUNTIME decision, so the test must still COMPILE without OpenMP — and that is a
+separate obligation the skip guard does nothing about.** `!$omp` directives vanish in such a build
+because they are comments; the ordinary Fortran around them does not, so an unguarded
+`omp_get_num_threads()`, `use omp_lib` or `omp_lock_kind` is an undeclared name and the file fails
+to compile long before any test can skip. Every such reference needs its own `#ifdef _OPENMP`, with
+the serial arm given a value (`tid = 0` before the guard, `avail = 1`), exactly as the existing
+`avail = omp_get_max_threads()` sites do.
+
+`check_openmp_calls_are_guarded` (`tools/check_source_conventions.py`) enforces it across `src/` and
+`test/`, because nothing else can: fpm's `openmp = "*"` metapackage supplies `-fopenmp` for gfortran
+and ifx, so `_OPENMP` is defined in CI and in every ordinary `fpm test`, and the other arm is only
+reached by a toolchain the metapackage does not cover. It has bitten twice — `materialize_marked_parallel`
+in `src/`, and a threading test in `test_table_parallel.f90` that left the file uncompilable
+serially for two days with every check green. **To verify a no-OpenMP build by hand**, comment out
+`openmp = "*"` in `fpm.toml`, build into a throwaway `FPM_BUILD_DIR`, and restore it; confirm from
+`fpm build --show-model` that the flags line really carries no `-fopenmp`. The suite runs there —
+1845 passed, 0 failed, 22 skipped on gfortran 15.2 as of 2026-08-23 — and every one of those skips
+should name a threading assertion.
+
 ### A static check that enumerates names goes stale silently
 
 A check in `tools/check_source_conventions.py` that works from a *list* of names — helper procedures,

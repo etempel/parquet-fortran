@@ -2579,8 +2579,92 @@ def check_threads_are_forwarded():
     return problems
 
 
+def check_openmp_calls_are_guarded():
+    """Every reference to an `omp_*` entity sits inside `#ifdef _OPENMP`.
+
+    A build without OpenMP compiles every `!$omp` directive away -- they are comments -- but NOT
+    the ordinary Fortran that surrounds them. So `use omp_lib`, `omp_get_thread_num()` and
+    `omp_lock_kind` are undeclared names there, and the file fails to compile rather than falling
+    back to the serial path the guards exist to provide.
+
+    **Nothing in the ordinary fleet can see this.** fpm's `openmp = "*"` metapackage supplies
+    `-fopenmp` for gfortran and ifx, so `_OPENMP` is always defined in CI and in every local
+    `fpm test`; only a toolchain the metapackage does not cover (flang, per CLAUDE.md) or a
+    deliberately disabled build reaches the other arm. It has bitten twice -- once in
+    `materialize_marked_parallel` (src) and once in `test_table_parallel.f90`, where a threading
+    test added an unguarded `omp_get_num_threads()` and the file stopped compiling serially for
+    two days with every check green.
+
+    Directives need no guard and are not flagged: `!$omp ...` is a comment, so `strip_comment`
+    removes it before this check ever sees it. What is flagged is the ordinary code -- the import,
+    the runtime call, the kind parameter.
+
+    String LITERALS are blanked as well as comments. Several error scenarios print a skip message
+    naming `omp_get_max_threads()` in prose, and `strip_comment` respects quotes without removing
+    what is inside them -- so without this the check reports six violations that are text.
+    """
+    def blank_strings(text):
+        """`text` with the contents of every quoted literal replaced by spaces."""
+        out = []
+        quote = None
+        for ch in text:
+            if quote:
+                out.append(" ")
+                if ch == quote:
+                    out[-1] = ch
+                    quote = None
+            elif ch in ("'", '"'):
+                quote = ch
+                out.append(ch)
+            else:
+                out.append(ch)
+        return "".join(out)
+
+    problems = []
+    open_re = re.compile(r"^\s*#\s*if(n?)def\s+_OPENMP\b|^\s*#\s*if\s+.*\bdefined\s*\(\s*_OPENMP\s*\)", re.I)
+    any_if_re = re.compile(r"^\s*#\s*if", re.I)
+    else_re = re.compile(r"^\s*#\s*el(se|if)\b", re.I)
+    endif_re = re.compile(r"^\s*#\s*endif\b", re.I)
+    omp_re = re.compile(r"\bomp_\w+", re.I)
+    for path in sorted(list(SRC.glob("*.f90")) + list(TEST.glob("*.f90"))):
+        # Stack of per-#if states: True while the enclosing branch is one where _OPENMP is known
+        # defined. An unrelated #if contributes None -- neither guarding nor un-guarding, so a
+        # nested `#ifdef _OPENMP` inside it still counts.
+        stack = []
+        for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
+            m = open_re.match(raw)
+            if m:
+                # `#ifdef _OPENMP` guards; `#ifndef _OPENMP` is the arm where it is NOT defined.
+                stack.append(False if m.group(1) else True)
+                continue
+            if any_if_re.match(raw):
+                stack.append(None)
+                continue
+            if else_re.match(raw):
+                if stack and stack[-1] is not None:
+                    stack[-1] = not stack[-1]
+                continue
+            if endif_re.match(raw):
+                if stack:
+                    stack.pop()
+                continue
+            if any(state is True for state in stack):
+                continue
+            code = blank_strings(strip_comment(raw))
+            hit = omp_re.search(code)
+            if hit:
+                problems.append(
+                    "%s:%d: `%s` is referenced outside `#ifdef _OPENMP`, so this file does not "
+                    "compile without OpenMP -- the `!$omp` directives vanish there but this line "
+                    "does not. Guard it (and give the serial arm a value, or skip the test):\n    %s"
+                    % (path.relative_to(REPO_ROOT), lineno, hit.group(0), raw.strip())
+                )
+    return problems
+
+
 CHECKS = (
     ("threads= is forwarded to every callee that takes it", check_threads_are_forwarded),
+    ("omp_* references are guarded by #ifdef _OPENMP", check_openmp_calls_are_guarded),
     ("benchmark build-tree names carry the compiler", check_build_tree_names_carry_the_compiler),
     ("parquet_table has no allocatable component", check_no_allocatable_component),
     ("MAML block headers are matched case-insensitively", check_maml_keys_case_insensitive),

@@ -38,7 +38,7 @@ point in the library.
 - [Schemas, metadata and quality control](schema/index.html) — declare a file's contents in MAML
   or in code, with qc bounds and read-time renaming, ending on two worked examples.
 - [Whole tables in memory](tables/index.html) — the high-level `parquet_table` layer: a whole
-  file as one object, columns by name, read only when touched.
+  file as one object, columns by name, read only when touched — or built in memory and written out.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns,
   reproducible random numbers and the sampling built on them, generated table types, and embedding
   your own MAML schemas.

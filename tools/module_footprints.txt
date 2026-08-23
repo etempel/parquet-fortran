@@ -17,6 +17,11 @@
 #     handful its callers touch, and why moving one procedure between two modules can move a
 #     dozen files between two sections.
 #
+# The set of sections is the entry-module table in doc/pages/operating/choosing-a-module.md,
+# which is the single authority for what counts as an advertised entry module. Adding a row
+# there means adding it to this file's generator list (ENTRY_MODULES in
+# tools/check_module_footprints.sh) and regenerating with --print.
+#
 # Only lines inside a [section] are data; anything above the first section is a comment.
 
 [parquet_version]
@@ -94,6 +99,12 @@ parquet_strings.f90
 parquet_temporal.f90
 parquet_wrapper.cpp
 
+[parquet_settings]
+parquet_bindings.f90
+parquet_settings.f90
+parquet_settings_base.f90
+parquet_wrapper.cpp
+
 [parquet_io]
 parquet_argsort.f90
 parquet_argsort_engine.f90
@@ -110,6 +121,7 @@ parquet_core.f90
 parquet_expkey.f90
 parquet_io.f90
 parquet_maml_base.f90
+parquet_maml_base_add_col_qc.f90
 parquet_metadata.f90
 parquet_metadata_base.f90
 parquet_metadata_get.f90
@@ -140,6 +152,71 @@ parquet_write_string.f90
 parquet_write_temporal.f90
 parquet_ziggurat.f90
 
+[parquet_tables]
+parquet_argsort.f90
+parquet_argsort_engine.f90
+parquet_argsort_kernel.f90
+parquet_bindings.f90
+parquet_columns.f90
+parquet_columns_access.f90
+parquet_columns_mutate.f90
+parquet_columns_string.f90
+parquet_columns_structural.f90
+parquet_columns_util.f90
+parquet_columns_validity.f90
+parquet_core.f90
+parquet_expkey.f90
+parquet_maml_base.f90
+parquet_maml_base_add_col_qc.f90
+parquet_metadata.f90
+parquet_metadata_base.f90
+parquet_metadata_get.f90
+parquet_metadata_maml.f90
+parquet_random.f90
+parquet_read.f90
+parquet_read_filter.f90
+parquet_read_numeric.f90
+parquet_read_sort.f90
+parquet_read_string.f90
+parquet_read_temporal.f90
+parquet_settings.f90
+parquet_settings_base.f90
+parquet_sorting.f90
+parquet_sorting_argsort.f90
+parquet_sorting_keys.f90
+parquet_sorting_permute.f90
+parquet_sorting_reduce.f90
+parquet_sorting_search.f90
+parquet_sorting_select.f90
+parquet_sorting_unique.f90
+parquet_strings.f90
+parquet_tables.f90
+parquet_tables_access.f90
+parquet_tables_addcol.f90
+parquet_tables_clone.f90
+parquet_tables_col.f90
+parquet_tables_colaccess.f90
+parquet_tables_lifecycle.f90
+parquet_tables_maml.f90
+parquet_tables_materialize.f90
+parquet_tables_mutate.f90
+parquet_tables_parallel.f90
+parquet_tables_predefined.f90
+parquet_tables_query.f90
+parquet_tables_read.f90
+parquet_tables_row.f90
+parquet_tables_rowmutate.f90
+parquet_tables_slice.f90
+parquet_tables_sort.f90
+parquet_tables_write.f90
+parquet_temporal.f90
+parquet_wrapper.cpp
+parquet_write.f90
+parquet_write_numeric.f90
+parquet_write_string.f90
+parquet_write_temporal.f90
+parquet_ziggurat.f90
+
 [parquet]
 parquet.f90
 parquet_argsort.f90
@@ -157,6 +234,7 @@ parquet_core.f90
 parquet_expkey.f90
 parquet_io.f90
 parquet_maml_base.f90
+parquet_maml_base_add_col_qc.f90
 parquet_metadata.f90
 parquet_metadata_base.f90
 parquet_metadata_get.f90
@@ -207,4 +285,3 @@ parquet_write_numeric.f90
 parquet_write_string.f90
 parquet_write_temporal.f90
 parquet_ziggurat.f90
-

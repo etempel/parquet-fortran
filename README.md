@@ -200,13 +200,14 @@ Every layer underneath is importable on its own, and several cost a great deal l
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling, weighted draws |
 | `parquet_columns` | 10 | no | the `parquet_column` container |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type |
-| `parquet_io` | 43 | **yes** | reading and writing files, without the table layer |
-| `parquet_tables` | 64 | **yes** | the `parquet_table` container |
-| `parquet` | 65 | **yes** | everything, through one `use` |
+| `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
+| `parquet_io` | 44 | **yes** | reading and writing files, without the table layer |
+| `parquet_tables` | 62 | **yes** | the `parquet_table` container |
+| `parquet` | 66 | **yes** | everything, through one `use` |
 
 **One caveat, and it is the one that matters: no import makes the *package* Arrow-free.** `link` is a package-level key in `fpm.toml` and fpm cannot prune a C++ translation unit, so depending on parquet-fortran compiles `src/parquet_wrapper.cpp` and links `-larrow -larrow_compute -lparquet` whichever module you name — `use parquet_temporal` included. Without Arrow's headers the build fails at `arrow/api.h` regardless. What the *Arrow-free* rows guarantee is narrower and is about the Fortran graph: none of the modules fpm compiles for that import names `parquet_bindings`.
 
-Two further entry modules are importable on their own and carry the same stability promise, and are left out of the table above because you would reach for either for what it holds rather than for what it costs to compile: **`parquet_settings`**, the process-global settings in full (`parquet_print_settings`, `parquet_reset_settings`, `parquet_settings_from_env`, `parquet_get_arrow_version`), and **`parquet_maml_base`**, the MAML schemas bundled with this library together with the shared `parquet_maml_file` type — see [Embedding your own MAML schemas](doc/pages/utilities/embedding-maml-schemas.md) for generating the equivalent module from your *own* schemas.
+One further entry module is importable on its own and carries the same stability promise, and is left out of the table above because you would reach for it for what it holds rather than for what it costs to compile: **`parquet_maml_base`**, the MAML schemas bundled with this library together with the shared `parquet_maml_file` type — see [Embedding your own MAML schemas](doc/pages/utilities/embedding-maml-schemas.md) for generating the equivalent module from your *own* schemas.
 
 Each of the modules above re-exports, getter and setter both, the process-global settings its own code reads, so a narrow import can still be configured without naming `parquet_settings`. `parquet_get_version` is the deliberate exception to that pattern: it is not a setting and no tier re-exports it, so a narrow import that wants to report the library version adds `use parquet_version` (two files, no C++ boundary) alongside whatever else it imports. `parquet_core` is the one module never to import: it is internal, and `parquet_io` is its supported face. See [Choosing a module](doc/pages/operating/choosing-a-module.md) for the full story.
 

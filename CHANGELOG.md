@@ -23,11 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `use parquet_sampling` compiles 8 of this library's files where it used to compile 24. Each of
   those modules also re-exports, getter and setter both, the process-global settings its own code
   reads, so a narrow import can be configured without naming `parquet_settings` — which would put
-  the C++ boundary back. A tenth entry module, `parquet_version`, is new with this release and is
-  two files: it carries `parquet_get_version` alone, so a program built on any of the Arrow-free
-  tiers can report which parquet-fortran it was built against. It is the one module whose contents
-  no other tier re-exports (`use parquet` aside) — a version string is not a setting, and nothing
-  in the library reads it. **One caveat that no import removes**: `link` is a package-level key in
+  the C++ boundary back. A further entry module, `parquet_version`, is new with this release and is
+  two files: it carries `parquet_get_version`, so a program built on any of the Arrow-free tiers
+  can report which parquet-fortran it was built against, plus `verbosity` and `message_stream`,
+  because it can print — `parquet_get_version` remarks on a development build, and a program
+  importing nothing else has to be able to quiet it. `parquet_get_version` itself is the one name
+  no other tier re-exports (`use parquet` aside): a version string is not a setting, and nothing in
+  the library reads it. **One caveat that no import removes**: `link` is a package-level key in
   `fpm.toml`, so depending on parquet-fortran still compiles `src/parquet_wrapper.cpp` and still
   links `-larrow -larrow_compute -lparquet` whichever module you name. See
   [Choosing a module](doc/pages/operating/choosing-a-module.md).

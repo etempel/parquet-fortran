@@ -1031,18 +1031,28 @@ parquet_maml_base               (module — generated)
 parquet_wrapper.cpp             (C++ TU)
 ```
 
-**Every module in that list except `parquet_core`, `parquet_bindings`, `parquet_settings_base`,
-`parquet_expkey`, `parquet_ziggurat`, `parquet_sorting_oracle` and the submodules is an ADVERTISED
-ENTRY MODULE**, documented in `doc/pages/operating/choosing-a-module.md` and covered by the
-semantic-versioning promise **in its own right**. That is wider than it sounds: a change to
+**The ADVERTISED ENTRY MODULES are the rows of the table in
+`doc/pages/operating/choosing-a-module.md`, which is the authority — do not re-derive the list from
+this tree by subtracting exceptions.** That is how this paragraph used to read, and it was wrong in
+both directions: it swept in `parquet_maml_base`, whose only user-facing names are three types the
+facade imports with an `only:` list, and it read as though the list lived here rather than on the
+page. The same list is `ENTRY_MODULES` in `tools/check_module_footprints.sh`, which had drifted from
+the page in the direction that measures nothing — `parquet_tables` and `parquet_settings` were both
+absent, so the number the page printed for `parquet_tables` had never been measured by anything.
+Every one of the twelve is covered by the semantic-versioning promise **in its own right**. That is wider than it sounds: a change to
 `parquet_column`'s bindings is a breaking change even when nothing reachable through `use parquet`
 moves. Two properties follow, and both are enforced rather than intended:
 
-- **Seven tiers keep their FORTRAN graph clear of `parquet_bindings`** — `parquet_temporal`,
-  `parquet_strings`, `parquet_random`, `parquet_argsort`, `parquet_sampling`, `parquet_columns`
-  and `parquet_sorting`. `check_parquet_argsort_stays_arrow_free` and its two siblings
-  (`tools/check_source_conventions.py`) walk the closure, **including submodules**, and fail if one
-  ever reaches it; `tools/check_argsort_standalone.sh` proves it by compiling the argsort tier with
+- **Eight tiers keep their FORTRAN graph clear of `parquet_bindings`** — `parquet_version`,
+  `parquet_temporal`, `parquet_strings`, `parquet_random`, `parquet_argsort`, `parquet_sampling`,
+  `parquet_columns` and `parquet_sorting`. **There is now one check per tier**
+  (`tools/check_source_conventions.py`), each walking that tier's closure **including submodules**
+  and failing if it ever reaches `parquet_bindings`. One check per tier rather than a few for the
+  group is deliberate and was arrived at the hard way: three of these tiers used to be covered only
+  *transitively*, because `parquet_sorting` happens to import `parquet_columns` which imports
+  `parquet_temporal` — real coverage that would evaporate silently the day that import went — and
+  `parquet_version` was covered by nothing at all, since no checked module imports it.
+  `tools/check_argsort_standalone.sh` proves it the other way round, by compiling the argsort tier with
   a bare compiler and no Arrow at all. **This never made the PACKAGE Arrow-free** — `link` is a
   package-level key in `fpm.toml`, so `parquet_wrapper.cpp` is compiled and `-larrow` linked
   whichever module a consumer names. Say which of the two you mean.

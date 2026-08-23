@@ -18,16 +18,34 @@
 !> rule that each module re-exports the settings its own code reads -- a version
 !> string is not a setting, and nothing in this library reads it.
 !>
+!> It does re-export the two OUTPUT settings, `verbosity` and `message_stream`,
+!> because this module can print: `parquet_get_version` emits a remark on a
+!> development build whose `RELEASE_VERSION` substitution did not happen, and a
+!> program importing nothing else has to be able to quiet or redirect it. That
+!> is the ordinary rule applying, not a second exception to it.
+!>
 !> For the version of the Arrow and Parquet C++ libraries actually linked, call
 !> `parquet_get_arrow_version` instead (`parquet_settings`, and so also
 !> `parquet_io` and `parquet`). That query needs the C++ boundary, which is
 !> exactly what this module is defined not to have.
 module parquet_version
-    use parquet_settings_base, only: parquet_emit_info
+    use parquet_settings_base, only: parquet_emit_info, &
+        parquet_set_verbosity, parquet_get_verbosity, &
+        parquet_set_message_stream, parquet_get_message_stream
     implicit none
     private
 
     public :: parquet_get_version
+    !
+    ! The output pair, re-exported for the same reason every other emitting tier re-exports it:
+    ! this module CAN print -- parquet_get_version emits the development-build remark below -- and
+    ! a program whose only import is `use parquet_version` must still be able to silence it or
+    ! send it elsewhere. Reaching parquet_settings for that would put the C++ boundary back into
+    ! an otherwise two-file, Arrow-free import, which is the whole thing this module exists to
+    ! avoid. Costs nothing: parquet_settings_base is already imported and already in the
+    ! footprint. See doc/pages/operating/choosing-a-module.md's settings table, which lists it.
+    public :: parquet_set_verbosity, parquet_get_verbosity
+    public :: parquet_set_message_stream, parquet_get_message_stream
 
     !> The hand-maintained release string, "vX.Y.Z (date)". Kept in step with VERSION.txt by the
     !! release checklist in CONTRIBUTING.md; parquet_get_version compares the two and remarks when

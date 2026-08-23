@@ -341,6 +341,166 @@ contains
 
 end module test_module_surface_io
 
+!> `parquet_columns` alone: the column container, its kind constants and its per-cell surface.
+!!
+!! **One library import, and it must stay that way.** `parquet_columns` is advertised as a ten-file
+!! Arrow-free import in doc/pages/operating/choosing-a-module.md, so a program that wants a typed,
+!! null-aware column and nothing else must reach the whole container through this one `use`. It had
+!! no such test: test_columns.f90 imports `parquet_strings` and `parquet_temporal` alongside it, so
+!! a re-export dropped from `parquet_columns` would go on compiling there.
+!!
+!! It reads no settings, which is why this module asserts a capability rather than a knob -- and why
+!! its own row in that page's settings table says "none".
+module test_module_surface_columns
+    use parquet_columns                ! THE ONLY library import.
+    use iso_fortran_env, only : int64, real64
+    implicit none
+    private
+    public :: check_columns_surface
+
+contains
+
+    !> Builds, fills, nulls and reads a column back through `use parquet_columns` alone.
+    subroutine check_columns_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        type(parquet_column) :: col
+        real(real64) :: v
+        character(len=:), allocatable :: kname
+
+        what = ""
+        call col%init(PK_FLOAT64, 3_int64)
+        if (col%kindof() /= PK_FLOAT64) what = "%kindof after init"
+        if (what == "" .and. col%length() /= 3_int64) what = "%length after init"
+        if (what == "" .and. col%colwidth() /= 1) what = "%colwidth on a scalar kind"
+        ! parquet_kind_name is the module's own name-for-a-kind helper; naming it here is what
+        ! keeps it re-exported, since nothing else in this file can reach it. A SUBROUTINE with an
+        ! allocatable-character result argument, per the project-wide rule in CLAUDE.md.
+        call parquet_kind_name(PK_FLOAT64, kname)
+        if (what == "" .and. kname /= "PK_FLOAT64") what = "parquet_kind_name"
+
+        call col%set_at(1_int64, 1.5_real64)
+        call col%set_at(2_int64, 2.5_real64)
+        call col%set_null(3_int64)
+        call col%get_at(1_int64, v)
+        if (what == "" .and. v /= 1.5_real64) what = "%set_at/%get_at round trip"
+        if (what == "" .and. .not. col%is_null(3_int64)) what = "%set_null/%is_null"
+        if (what == "" .and. col%is_null(1_int64)) what = "a written row reads as null"
+        call col%clear()
+    end subroutine check_columns_surface
+
+end module test_module_surface_columns
+
+!> `parquet_random` alone: a draw, and the deliberate ABSENCE of any settings re-export.
+!!
+!! **One library import, and it must stay that way.** The generator is a three-file leaf and had no
+!! single-import test at all -- every random suite in this directory reaches it through
+!! `use parquet`, which cannot notice its own surface shrinking.
+!!
+!! This module is the one place in this file where **what is not exported is the point**.
+!! `parquet_random` reads no setting: the thread rule and the parallel-element floor both live in
+!! `parquet_sampling`, one tier up, and re-exporting them here would advertise knobs this module
+!! does not consult. That absence cannot be asserted by a call, so it is asserted by this module
+!! compiling with no reference to them -- which is exactly how a dropped re-export is caught
+!! elsewhere in this file, run backwards.
+module test_module_surface_random
+    use parquet_random                 ! THE ONLY library import.
+    use iso_fortran_env, only : int64, real64
+    implicit none
+    private
+    public :: check_random_surface
+
+contains
+
+    !> Draws through `use parquet_random` alone and checks the two frozen identities hold.
+    subroutine check_random_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        integer(int64), parameter :: seed = 20260823_int64
+        real(real64) :: u
+        integer(int64) :: k, bits
+        character(len=:), allocatable :: algo
+
+        what = ""
+        u = pf_random_at(seed, 1_int64)
+        if (u < 0.0_real64 .or. u >= 1.0_real64) what = "pf_random_at is outside [0,1)"
+
+        ! The contract identity, not merely a range check: pf_random_at is the top 53 bits of
+        ! pf_random_bits_at for the same coordinate (see CLAUDE.md, "Each parquet_random generic
+        ! reads its OWN word space"). Asserting it here means this test fails if the two ever
+        ! drift apart, which a bounds check alone would sail past.
+        bits = pf_random_bits_at(seed, 1_int64)
+        if (what == "" .and. u /= real(ishft(bits, -11), real64) * (0.5_real64 ** 53)) &
+            what = "pf_random_at is not the top 53 bits of pf_random_bits_at"
+
+        k = pf_random_int_at(seed, 1_int64, 1_int64, 6_int64)
+        if (what == "" .and. (k < 1_int64 .or. k > 6_int64)) what = "pf_random_int_at is out of range"
+
+        ! The frozen contract identifier is a parameter, not a call -- naming it here is what
+        ! keeps it re-exported, and a change to it is a change to every value above.
+        algo = pf_random_algorithm
+        if (what == "" .and. len_trim(algo) == 0) what = "pf_random_algorithm is empty"
+    end subroutine check_random_surface
+
+end module test_module_surface_random
+
+!> `parquet_tables` alone: build a table, write it, open it, read it back.
+!!
+!! **One library import, and it must stay that way.** `parquet_tables` is the last advertised entry
+!! module to get one of these, and it is the one where the gap mattered most: at 62 of the facade's
+!! 66 files it re-exports a large `only:` slice of `parquet_core` and the whole of
+!! `parquet_columns`, so it has more to lose than any other tier and test_table.f90 -- which imports
+!! `parquet`, `parquet_columns`, `parquet_strings`, `parquet_temporal` AND `parquet_tables` -- could
+!! never have noticed a name dropped from that slice.
+!!
+!! The round trip is the assertion's shape rather than its subject: what is being tested is that
+!! `parquet_new_table`, `%add_column`, `parquet_write_table`, `parquet_open_table` and the value
+!! accessors are all reachable from this single `use`, which is a BUILD-time property.
+module test_module_surface_tables
+    use parquet_tables                 ! THE ONLY library import.
+    use iso_fortran_env, only : int64, real64
+    implicit none
+    private
+    public :: check_tables_surface
+
+contains
+
+    !> Round-trips a two-column table through `use parquet_tables` alone.
+    subroutine check_tables_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        ! Its own filename: tests in a suite run concurrently and test_module_surface_io already
+        ! writes test_run/module_surface_io.parquet.
+        character(len=*), parameter :: out_file = "test_run/module_surface_tables.parquet"
+        type(parquet_table) :: t, back
+        integer(int64) :: ids(3)
+        real(real64) :: mass(3)
+        real(real64), allocatable :: got(:)
+
+        what = ""
+        ids = [1_int64, 2_int64, 3_int64]
+        mass = [1.5_real64, 2.5_real64, 3.5_real64]
+
+        call parquet_new_table(t)
+        call t%add_column("id", ids)
+        call t%add_column("mass", mass)
+        if (t%nrows() /= 3_int64) what = "%nrows on a table built in memory"
+        if (what == "" .and. t%ncols() /= 2) what = "%ncols on a table built in memory"
+
+        call parquet_write_table(t, out_file, overwrite=.true.)
+
+        call parquet_open_table(back, out_file)
+        if (what == "" .and. back%nrows() /= 3_int64) what = "%nrows after reopening"
+        call back%get("mass", got)
+        if (what == "" .and. size(got) /= 3) what = "%get returned the wrong size"
+        if (what == "" .and. got(2) /= 2.5_real64) what = "%get did not round-trip the value"
+        if (what == "" .and. back%residency("mass") /= RES_FULL) what = "%residency after %get"
+        ! The regime constants have no public accessor to compare against -- `regime` is a private
+        ! component -- so they are named here purely so that dropping either from this module's
+        ! public list breaks the build, which is the property this whole file exists to hold. The
+        ! comparison is trivially true and is not the test; the reference is.
+        if (what == "" .and. REGIME_FULL == REGIME_SLICE) what = "the regime constants collide"
+    end subroutine check_tables_surface
+
+end module test_module_surface_tables
+
 module test_module_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
@@ -348,6 +508,9 @@ module test_module_surface
     use test_module_surface_strings, only : check_strings_surface
     use test_module_surface_sampling, only : check_sampling_surface
     use test_module_surface_version, only : check_version_surface
+    use test_module_surface_columns, only : check_columns_surface
+    use test_module_surface_random, only : check_random_surface
+    use test_module_surface_tables, only : check_tables_surface
     use parquet_settings_base          ! THE ONLY library import -- see the note above.
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use iso_fortran_env, only : int64
@@ -448,8 +611,41 @@ contains
             new_unittest("parquet_version alone reports the library version", &
                 test_version_surface), &
             new_unittest("parquet_io alone reaches every layer of the read/write API", &
-                test_io_surface) ]
+                test_io_surface), &
+            new_unittest("parquet_columns alone builds, nulls and reads a column", &
+                test_columns_surface), &
+            new_unittest("parquet_random alone draws, and exposes no setting", &
+                test_random_surface), &
+            new_unittest("parquet_tables alone round-trips a table through a file", &
+                test_tables_surface) ]
     end subroutine collect_tests_module_surface
+
+    !> The test-drive wrapper over check_columns_surface.
+    subroutine test_columns_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_columns_surface(what)
+        call check(error, what == "", "the column was not usable through `use parquet_columns` alone: " // what)
+    end subroutine test_columns_surface
+
+    !> The test-drive wrapper over check_random_surface.
+    subroutine test_random_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_random_surface(what)
+        call check(error, what == "", "the generator was not usable through `use parquet_random` alone: " // what)
+    end subroutine test_random_surface
+
+    !> The test-drive wrapper over check_tables_surface.
+    subroutine test_tables_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_tables_surface(what)
+        call check(error, what == "", "the table was not usable through `use parquet_tables` alone: " // what)
+    end subroutine test_tables_surface
 
     !> The test-drive wrapper over check_version_surface.
     subroutine test_version_surface(error)

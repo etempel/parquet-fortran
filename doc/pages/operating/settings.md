@@ -61,12 +61,13 @@ Each setting documents its own capture point, because they genuinely differ and 
 the others wrong. `parquet_set_arrow_threads` resizes a pool everyone already shares, so it takes
 effect **immediately**, for readers and writers opened before the call as well as after.
 
-**Four settings are read by the library's C++ half, and those reach it when a reader or writer is
+**Six settings are read by the library's C++ half, and those reach it when a reader or writer is
 opened — not at the moment you set them.** They are `verbosity`, `message_stream`,
-`sort_counting_path` and `sort_counting_bucket_limit`. Setting one and then opening a reader works
-exactly as you would expect; changing one *while a reader is already open* leaves that reader using
-the value that was current when it was opened, for the rest of its life. Open the reader after
-setting the knob, which is what the advice above already asks for.
+`sort_counting_path`, `sort_counting_bucket_limit`, `target_row_group_bytes` and
+`statistics_prescreen`. Setting one and then opening a reader works exactly as you would expect;
+changing one *while a reader is already open* leaves that reader using the value that was current
+when it was opened, for the rest of its life. Open the reader after setting the knob, which is what
+the advice above already asks for.
 
 The reason is worth one sentence, because it is what makes the rest of this library's module
 structure possible: a setter that pushed its value across to C++ immediately would have to live in

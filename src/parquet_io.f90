@@ -32,8 +32,8 @@
 !> Parquet file *is* the Arrow-facing half of parquet-fortran, so this module's
 !> graph reaches `parquet_bindings` and the C++ wrapper by design -- unlike
 !> `parquet_argsort`, `parquet_sampling`, `parquet_sorting`, `parquet_strings`,
-!> `parquet_temporal`, `parquet_columns` and `parquet_random`, whose Fortran
-!> graphs do not. Note that no module makes the *package* Arrow-free: `link` is a
+!> `parquet_temporal`, `parquet_columns`, `parquet_random` and `parquet_version`,
+!> whose Fortran graphs do not. Note that no module makes the *package* Arrow-free: `link` is a
 !> package-level key in `fpm.toml`, so `src/parquet_wrapper.cpp` is compiled and
 !> `-larrow -larrow_compute -lparquet` linked whichever module you import. See
 !> doc/pages/operating/choosing-a-module.md.

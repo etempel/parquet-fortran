@@ -3,7 +3,7 @@ title: Choosing a module
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **64** of this library's Fortran files.
+also the largest: a project that imports it compiles **66** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -20,10 +20,13 @@ build fails at `arrow/api.h` regardless of what you wrote in your `use` statemen
 What the tiers below labelled *Arrow-free* do guarantee is narrower and is about the **Fortran**
 graph: no module fpm compiles for that import names `parquet_bindings`, so none of your Fortran
 code path crosses the C++ boundary. That is what keeps those modules fast to compile, independently
-testable, and free of the reader/writer machinery — and it is enforced, not merely intended:
-`tools/check_source_conventions.py` fails the build if one of those graphs ever reaches
-`parquet_bindings`, and `tools/check_argsort_standalone.sh` compiles the argsort tier with a bare
-compiler and no Arrow on the system at all.
+testable, and free of the reader/writer machinery — and it is enforced, not merely intended.
+`tools/check_source_conventions.py` carries one check per Arrow-free tier and fails the build if
+that tier's graph — submodules included — ever reaches `parquet_bindings`, and
+`tools/check_argsort_standalone.sh` proves it the other way round, compiling the argsort tier with
+a bare compiler and no Arrow on the system at all. A check per tier rather than one for the group
+is deliberate: several of these modules sit in each other's graphs, so a single check would go on
+passing for a tier that had stopped being reachable from it.
 
 If you need a genuinely Arrow-free *package*, this is not it, and no `use` statement will make it
 one.
@@ -45,11 +48,12 @@ in every one of them.
 | `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_sorting` | 21 | no | the whole sorting API, every element type, including `pf_sort_keys` |
-| `parquet_io` | 43 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 64 | **yes** | the `parquet_table` container |
-| `parquet` | 65 | **yes** | everything above, through one `use` |
+| `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
+| `parquet_io` | 44 | **yes** | reading and writing Parquet files, and nothing else |
+| `parquet_tables` | 62 | **yes** | the `parquet_table` container |
+| `parquet` | 66 | **yes** | everything above, through one `use` |
 
-Three rows deserve a note.
+Four rows deserve a note.
 
 **`parquet_version` is the only route to `parquet_get_version`**, apart from `use parquet`. No other
 entry module re-exports it, deliberately: a version string is fixed at compile time and nothing in
@@ -60,26 +64,34 @@ Parquet C++ versions are a different question with a different answer: `parquet_
 in `parquet_settings` (and so in `parquet_io`, `parquet_tables` and `parquet`), because reading them
 means calling into the C++ half.
 
-**`parquet_tables` costs all but one file of `parquet`**, so importing it instead of the facade buys
-nothing but a narrower namespace. The table layer sits on the reader, the column container and the
-sorting engine, which between them are almost the whole library.
+**`parquet_tables` costs all but four files of `parquet`**, so importing it instead of the facade
+buys little beyond a narrower namespace. The table layer sits on the reader, the column container
+and the sorting engine, which between them are almost the whole library; the four it leaves behind
+are the two facades themselves, `parquet_sampling` and `parquet_version`.
 
-**`parquet_io` is the one real saving on the Arrow side**, at 43 files against 64: it drops the
-entire table layer, the sampling module and the facade. Reach for it when your program opens files,
-moves columns in and out, and never builds a `parquet_table`.
+**`parquet_io` is the one real saving on the Arrow side**, at 44 files against 66: it drops the
+entire table layer, the sampling module, `parquet_version` and the outer facade. Reach for it when
+your program opens files, moves columns in and out, and never builds a `parquet_table`.
 
-It does **not** drop `parquet_random`, and the three files that are not the table layer's are its:
-`parquet_open_reader(..., sample_fraction=)` picks its rows with this library's own generator, so
-the reader genuinely depends on it. Those three (`parquet_random`, `parquet_expkey`,
-`parquet_ziggurat`) are leaves that import nothing but `iso_fortran_env`, so the graph cannot grow
-further through them.
+It does **not** drop `parquet_random`, and the three files it keeps that belong to none of the
+reader/writer machinery are that generator's: `parquet_open_reader(..., sample_fraction=)` picks its
+rows with this library's own generator, so the reader genuinely depends on it. The three are a
+closed set — `parquet_random` and the two leaves it reads, `parquet_expkey` and `parquet_ziggurat`,
+which import nothing but `iso_fortran_env` — so the graph cannot grow further through them.
+
+**`parquet_settings` is the cheapest import that reaches Arrow**, at three files, and that is the
+point of listing it: what naming it costs you is not compile time, it is the C++ boundary. Those
+three are the knob state, this module, and `parquet_bindings` — which it imports because it is the
+module that mirrors `verbosity`, `message_stream` and the four performance knobs across to the C++
+half. Everything below explains why the Arrow-free tiers cannot import it, and re-export the knobs
+they read instead.
 
 ## Why the numbers jump the way they do
 
 fpm prunes at **module** granularity, and a submodule is never pruned separately from the module it
 belongs to. So each row above is a union of *whole modules*, not of the procedures you actually
 call. `parquet_sorting` costs 21 files whether you use one specific or all of them, because its
-eleven submodules come as a set.
+seven submodules come as a set.
 
 That is also why the argsort tier exists at all. `parquet_sampling` needs exactly one sorting
 specific — `pf_argsort` over a `real64` array, for `pf_weighted_permutation` — and taking it from
@@ -100,6 +112,7 @@ anything else.
 
 | Import | Settings it re-exports |
 |---|---|
+| `parquet_version` | `verbosity` and `message_stream` — it can print, see below |
 | `parquet_temporal` | none — it reads none |
 | `parquet_random` | none — it reads none; the thread rule lives in `parquet_sampling` |
 | `parquet_columns` | none — it reads none |
@@ -107,18 +120,22 @@ anything else.
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |
 | `parquet_sorting` | the same six as `parquet_argsort` |
-| `parquet_io`, `parquet_tables`, `parquet` | all of them, via `parquet_settings` |
+| `parquet_settings`, and so `parquet_io`, `parquet_tables`, `parquet` | all of them |
 
 The output pair (`verbosity`, `message_stream`) appears wherever a module can print something: a
 user who imports `parquet_argsort` alone must still be able to silence its thread-clamp warning.
 
-**`parquet_get_version` is deliberately outside this rule** and is not re-exported by any of these
-modules — it is not a setting, nothing in the library reads it, and it has its own two-file entry
+`parquet_version` is in that table for exactly that reason, and it is the one row where the rule is
+easy to miss: `parquet_get_version` prints a remark on a development build, so a program whose only
+import is `use parquet_version` has to be able to quiet it. Two files, still no C++ boundary.
+
+**`parquet_get_version` itself is deliberately outside this rule** and is re-exported by none of
+these modules — it is not a setting, nothing in the library reads it, and it has its own entry
 module. See the note under [The entry modules](#the-entry-modules).
 
 `parquet_settings` remains available and is what `use parquet` gives you; naming it directly is
 only a problem for a build that is deliberately staying clear of Arrow. See
-[Settings](settings.html) for what every knob does, and note in particular that four of them reach
+[Settings](settings.html) for what every knob does, and note in particular that six of them reach
 the C++ half when a reader or writer is **opened** rather than when you set them — which is exactly
 what makes this per-module re-export possible.
 
@@ -135,14 +152,46 @@ what makes this per-module re-export possible.
 - **Never `use parquet_core`.** It is internal, undocumented and may change in any release;
   `parquet_io` is its supported face.
 
+A narrow import is an ordinary program — there is nothing to configure and no facade to go through.
+This one compiles four of this library's Fortran files and reaches no reader, no writer and no
+`parquet_table`:
+
+```fortran
+program narrow_import
+    use parquet_argsort
+    use iso_fortran_env, only: int32
+    implicit none
+    integer(int32) :: v(5) = [30, 10, 50, 20, 40]
+    integer(int32), allocatable :: perm(:)
+
+    call pf_argsort(v, perm)
+    print *, perm            ! 2 4 1 5 3
+end program narrow_import
+```
+
+Swap `parquet_argsort` for any other row of the table and the shape is the same.
+
 ## What the semantic-versioning promise covers
 
-Every module in the table above is public API and is covered by the library's versioning promise —
-which is a wider commitment than it used to be, because a module advertised as an entry point makes
-its own surface a promise separate from `use parquet`. `parquet_columns` is the sharpest case: a
-change to `parquet_column`'s bindings is a public API change even when nothing reachable through
-`use parquet` moves.
+Every module in the table above is public API and is covered by the library's versioning promise. A
+module advertised as an entry point makes its own surface a promise separate from `use parquet`, and
+`parquet_columns` is the sharpest case: a change to `parquet_column`'s bindings is a public API
+change even when nothing reachable through `use parquet` moves.
 
 `parquet_core`, `parquet_bindings`, `parquet_settings_base`, `parquet_expkey`, `parquet_ziggurat`,
 `parquet_sorting_oracle` and every `*_engine`/`*_kernel` submodule are **not** covered. They are
 accessible because Fortran has no package scope, not because they are meant to be imported.
+
+**One module is importable and promised but deliberately absent from the table**: `parquet_maml_base`,
+which holds the MAML schemas bundled with this library and the shared `parquet_maml_file` type. It is
+left out because you would reach for it for what it *holds* rather than for what it costs to compile
+— and because most of its public names are this library's own embedded fixtures rather than API,
+which is why `use parquet` imports three types from it with an `only:` list instead of re-exporting
+it whole. See [Embedding your own MAML schemas](../utilities/embedding-maml-schemas.html).
+
+**The table above is the authority on what costs what.** It is the list
+`tools/check_module_footprints.sh` measures and the list this promise covers; anywhere else in the
+repository that appears to enumerate entry modules is describing it, not defining it. A module added
+to that table needs a section in `tools/module_footprints.txt` and, if its Fortran graph is meant to
+stay clear of Arrow, its own check in `tools/check_source_conventions.py` — both of which fail
+loudly when they are missing, which is how the list stays one list.

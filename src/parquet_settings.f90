@@ -628,7 +628,7 @@ contains
             int(cfg_message_stream, kind=c_int))
     end subroutine push_output_settings
 
-    !> Mirrors the five performance knobs to the C++ side, which owns the sort engine, the row-group
+    !> Mirrors the four performance knobs to the C++ side, which owns the sort engine, the row-group
     !> sizing and the statistics screen.
     !>
     !> **The `0`-means-built-in sentinel is resolved here**, via the getters, so parquet_wrapper.cpp
@@ -636,7 +636,7 @@ contains
     !> own. That is what keeps each default spelled in exactly one place per side, and the C++ side's
     !> initialisers are only ever what applies before the first push.
     !>
-    !> One push rather than five, so parquet_reset_settings cannot restore some knobs and leave
+    !> One push rather than four, so parquet_reset_settings cannot restore some knobs and leave
     !> others stale on the far side of the boundary (feature_risks.md Risk-42).
     subroutine push_performance_settings()
 

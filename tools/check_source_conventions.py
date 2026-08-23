@@ -1142,6 +1142,80 @@ def check_parquet_sampling_stays_arrow_free():
         "A weighted draw needs one argsort, which parquet_argsort provides.")
 
 
+def check_parquet_columns_stays_arrow_free():
+    """`use parquet_columns` must not reach parquet_bindings.
+
+    The column container is advertised in doc/pages/operating/choosing-a-module.md as a ten-file,
+    Arrow-free import: a project that wants a typed, null-aware column and nothing else can depend
+    on it alone. It was covered before this check existed, but only BY ACCIDENT -- `parquet_sorting`
+    happens to import it, so check_parquet_sorting_stays_arrow_free walked it on the way past. That
+    is real coverage right up until the day the sorting tier stops needing the column container, at
+    which point it evaporates with nothing to announce it. A tier the guide advertises deserves a
+    check of its own rather than a side effect of someone else's.
+    """
+    return _check_stays_arrow_free(
+        "parquet_columns",
+        "The column container is advertised as an Arrow-free import in its own right.")
+
+
+def check_parquet_temporal_stays_arrow_free():
+    """`use parquet_temporal` must not reach parquet_bindings.
+
+    The smallest import in the library -- one file, and today no `use` statement at all -- which is
+    exactly why it is worth pinning: there is nothing here to break, so a future import would be
+    the whole of the change and would otherwise pass unremarked. Same accidental-coverage story as
+    parquet_columns above: it was reached only through parquet_sorting -> parquet_columns.
+    """
+    return _check_stays_arrow_free(
+        "parquet_temporal",
+        "The date/time/timestamp elements are advertised as a one-file, Arrow-free import.")
+
+
+def check_parquet_version_stays_arrow_free():
+    """`use parquet_version` must not reach parquet_bindings.
+
+    This one was covered by NOTHING. Every other Arrow-free tier fell inside some checked module's
+    closure; parquet_version is imported by no tier at all -- only by the `parquet` facade, which
+    reaches Arrow by design and so is not walked -- so the page's promise that its graph stays clear
+    of the C++ boundary rested on nobody having added an import. It is two files and the obvious
+    import to add is the very one that would break it: `parquet_settings`, for the output knobs.
+    Those come from `parquet_settings_base` instead, which is the whole point of that leaf existing.
+    """
+    return _check_stays_arrow_free(
+        "parquet_version",
+        "Reporting a compile-time string must not require the Arrow stack.")
+
+
+def check_get_version_has_one_home():
+    """`parquet_get_version` must be `public ::` in exactly one module.
+
+    doc/pages/operating/choosing-a-module.md, README.md and src/parquet.f90's own header all say
+    parquet_version is the ONLY route to it apart from `use parquet` -- and nothing asserted the
+    "only" half. test_module_surface_version proves the module provides it and
+    test_facade_covers_every_layer proves the facade re-exports it; a stray `public ::` added to
+    some tier for convenience would pass both while quietly making that tier grow a file, and the
+    claim would go on being printed on the page.
+
+    The rule it protects is not tidiness: a version string is fixed at compile time and nothing in
+    the library reads it, so a tier carrying it grows its graph for a name none of its callers need.
+    Re-exporting it from the facade is done with a bare `use parquet_version`, which names nothing
+    and so does not match here.
+    """
+    pat = re.compile(r"^\s*public\s*::.*\bparquet_get_version\b", re.M)
+    homes = sorted(f.name for f in SRC.glob("*.f90") if pat.search(f.read_text()))
+    if homes == ["parquet_version.f90"]:
+        return []
+    if not homes:
+        return ["src/: no module declares `public :: parquet_get_version`. Either it was renamed "
+                "-- update this check and the three documents that name it -- or the facade is the "
+                "only thing still exporting it, which the guide says it is not."]
+    return ["src/: `parquet_get_version` is public from %s. It belongs to parquet_version alone: "
+            "doc/pages/operating/choosing-a-module.md, README.md and src/parquet.f90's header all "
+            "promise that, and a tier re-exporting it grows that tier's compile footprint for a "
+            "compile-time constant none of its callers read. Use a second `use parquet_version` "
+            "line in the consumer instead." % ", ".join(homes)]
+
+
 def check_no_submodule_oracle_pointer_call():
     """No `src/` SUBMODULE may name one of the sort oracle's `p_*` procedure pointers.
 
@@ -2527,6 +2601,10 @@ CHECKS = (
     ("parquet_argsort stays Arrow-free", check_parquet_argsort_stays_arrow_free),
     ("parquet_sorting stays Arrow-free", check_parquet_sorting_stays_arrow_free),
     ("parquet_sampling stays Arrow-free", check_parquet_sampling_stays_arrow_free),
+    ("parquet_columns stays Arrow-free", check_parquet_columns_stays_arrow_free),
+    ("parquet_temporal stays Arrow-free", check_parquet_temporal_stays_arrow_free),
+    ("parquet_version stays Arrow-free", check_parquet_version_stays_arrow_free),
+    ("parquet_get_version has exactly one home", check_get_version_has_one_home),
     ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
     ("no submodule calls a sort-oracle procedure pointer",
      check_no_submodule_oracle_pointer_call),

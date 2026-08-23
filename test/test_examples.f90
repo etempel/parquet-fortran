@@ -56,6 +56,8 @@ contains
                 test_build_and_write_example), &
             new_unittest("doc/pages/tables/table-mutate.md rank_by_flux example", &
                 test_rank_by_flux_example), &
+            new_unittest("doc/pages/operating/choosing-a-module.md narrow_import example", &
+                test_narrow_import_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -349,6 +351,31 @@ contains
         call check(error, len(ver) > 0, &
             "parquet_get_arrow_version must be reachable through the facade")
     end subroutine test_facade_covers_every_layer
+
+    !> Mirrors the `narrow_import` example in doc/pages/operating/choosing-a-module.md.
+    !!
+    !! **This mirrors the example's VALUES, not its import.** That page's example is a complete
+    !! program on `use parquet_argsort` alone, and the property that the import is enough to compile
+    !! it belongs to test/test_module_surface.f90's `test_module_surface_argsort`, which is the only
+    !! module here with a single library `use` line. This module imports `parquet`, so it can check
+    !! that the printed permutation the page shows is still the one `pf_argsort` produces -- which is
+    !! the half a reader would notice first, and the half nothing else asserts.
+    subroutine test_narrow_import_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer(int32) :: v(5) = [30, 10, 50, 20, 40]
+        integer(int32), allocatable :: perm(:)
+
+        call pf_argsort(v, perm)
+        call check(error, size(perm) == 5, "narrow_import: pf_argsort returned the wrong size")
+        if (allocated(error)) return
+        ! The comment on the page reads `! 2 4 1 5 3`. If this changes, the page is wrong.
+        call check(error, all(perm == [2, 4, 1, 5, 3]), &
+            "narrow_import: the permutation is no longer the 2 4 1 5 3 the page prints")
+        if (allocated(error)) return
+        ! v is not modified -- the sentence the page's surrounding prose rests on.
+        call check(error, all(v == [30, 10, 50, 20, 40]), &
+            "narrow_import: pf_argsort modified its input, which the page says it never does")
+    end subroutine test_narrow_import_example
 
     !> "Minimal writer example" + "Minimal reader example"
     !> (README sections "Writing parquet files..." / "Reading parquet files...")

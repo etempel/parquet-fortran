@@ -277,6 +277,8 @@ contains
                 test_write_table_copy_metadata), &
             new_unittest("copy_metadata carries a <KEY>.datatype companion exactly once", &
                 test_copy_metadata_carries_datatype_once), &
+            new_unittest("has_nulls is conservative without statistics and exact once resident", &
+                test_has_nulls_without_statistics), &
             new_unittest("a schema field the schema itself disabled is skipped, not demanded", &
                 test_write_table_skips_disabled_field), &
             new_unittest("resident_only, has_nulls, get_valid_mask, set_null(mask), generation", &
@@ -6987,6 +6989,64 @@ contains
         call check(error, .not. ok, &
             "copy_metadata=.false. with metadata_keys= should carry no key it does not name")
     end subroutine test_write_table_copy_metadata
+    !
+    !> `%has_nulls` is ONE-SIDED from the footer and exact once the column is resident.
+    !!
+    !! `doc/pages/tables/table-mutate.md` states the rule this pins: `.false.` from the footer is a
+    !! guarantee, `.true.` means "may hold nulls" because a file written without statistics cannot
+    !! say -- so `.true.` is a reason to read the column, not a fact to branch on, and reading it
+    !! may turn the answer into `.false.`.
+    !!
+    !! **The transition is the test.** `test/fixtures/no_stats.parquet` has no statistics at all, so
+    !! its genuinely null-free column `c` must answer `.true.` while unread and `.false.` once read.
+    !! Asserting only the first half would pass against an implementation that always answered
+    !! `.true.`; asserting only the second would pass against one that read the column to answer.
+    !!
+    !! **The residency checks either side are belt-and-braces on THIS fixture, and the mutation
+    !! testing says so.** Two mutations that make `%has_nulls` read the column both failed on the
+    !! *value* assertion rather than the residency one, because on a statistics-free file reading is
+    !! exactly what turns the conservative `.true.` into `.false.`. They are kept because they make
+    !! the reason explicit, and because on a file that DOES carry statistics an early read would not
+    !! change the answer and the residency check is the only thing that could notice --
+    !! `test_resident_only_and_nulls` is where that case lives.
+    !!
+    !! `test_materialize_without_statistics` covers the same conservatism one layer down, at
+    !! `parquet_column_has_nulls` on a reader; the table-level path is what the guide documents and
+    !! is what this covers.
+    subroutine test_has_nulls_without_statistics(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        character(len=*), parameter :: f = "test/fixtures/no_stats.parquet"
+        !
+        call parquet_open_table(t, f)
+        ! Precondition: nothing read yet, so the answers below come from the footer.
+        call check(error, t%residency("c") == RES_EMPTY, &
+            "precondition: the column must be unread for the footer path to be under test")
+        if (allocated(error)) return
+        call check(error, t%has_nulls("c"), &
+            "without statistics even a genuinely null-free column must answer .true. -- the " // &
+            "footer answer is one-sided")
+        if (allocated(error)) return
+        call check(error, t%residency("c") == RES_EMPTY, &
+            "%has_nulls must not have read the column to answer")
+        if (allocated(error)) return
+        !
+        ! Reading it turns the conservative .true. into the exact .false.
+        call t%materialize("c")
+        call check(error, t%residency("c") == RES_FULL, "precondition: the column is now resident")
+        if (allocated(error)) return
+        call check(error, .not. t%has_nulls("c"), &
+            "once resident the answer is exact, so a null-free column must answer .false. -- " // &
+            "this is the transition the guide documents")
+        if (allocated(error)) return
+        !
+        ! And the column that really does hold nulls answers .true. either way.
+        call check(error, t%has_nulls("v"), &
+            "a column that genuinely holds nulls must answer .true. from the footer")
+        if (allocated(error)) return
+        call t%materialize("v")
+        call check(error, t%has_nulls("v"), "...and still .true. once it has been read")
+    end subroutine test_has_nulls_without_statistics
     !
     !> A schema field turned off with `%set_column_unavailable` is SKIPPED by parquet_write_table,
     !! so the table need not carry a column for it.

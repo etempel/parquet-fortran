@@ -1770,7 +1770,10 @@ untested.
 
 `%col` (and `%ref`, and a `parquet_string_column` pointer) hands back a live pointer into a column's
 storage, and every row-structural mutation (`%filter_rows`, `%sort_by`, `%top_n`, `%delete_rows`,
-`%truncate`, `%append`, `%append_null_rows`) reallocates that storage exact-fit. `%cast` replaces the storage too,
+`%truncate`, `%append`, `%append_null_rows`) replaces that storage. The rebuilds reallocate
+**exact-fit**; the appends grow **geometrically** (`ensure_capacity`, 1.5x) and so may not
+reallocate at all on a given call — but they bump the generation counter unconditionally, so the
+rule below is unchanged and a pointer is to be treated as dead either way. `%cast` replaces the storage too,
 and so does `%evict_column` — including the eviction `parquet_write_table(release=.true.)` performs.
 A pointer taken before any of them points at freed memory afterwards, and **Fortran offers no way to
 detect this** — the code compiles and usually appears to work. Mitigation is documentation plus the

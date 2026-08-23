@@ -22,6 +22,13 @@ By default every row is written and the column's null bitmap is dropped outright
 `%set` the column holds no nulls at all. Pass `modify_nulls=.false.` to leave the null rows, and
 their bitmap, exactly as they were.
 
+`%set` takes two more optional arguments, both shared with the rest of the table API rather than
+special to it: `is_valid=` carries validity alongside the values, shaped like them — per row for a
+scalar column, `(width, nrows)` for a vector one — and is applied *after* the values, so it survives
+the bitmap drop above; and `found=` reports a missing column instead of aborting. Both are described
+once, for every call that takes them, in [Reading and writing a column's nulls alongside its
+values](table.html#reading-and-writing-a-columns-nulls-alongside-its-values).
+
 To write a single cell, use `%set_element`, and to read one, `%get_element`:
 
 ```fortran
@@ -78,14 +85,29 @@ answers "which rows are complete?" — so both are available, and which you get 
 declared the array.
 
 It only ever *adds* nulls: a `.true.` entry leaves the entry exactly as it was, so a mask describing
-only part of what you know cannot clear a null you did not mention. `%has_nulls(name)` answers
-whether there are any at all — and for a column that has not been read yet it answers from the
-file's footer without reading it, so it is cheap enough to ask before deciding to.
+only part of what you know cannot clear a null you did not mention.
+
+`%has_nulls(name)` answers whether a column holds any, as cheaply as its state allows — a column
+already read answers from its own validity, and one that has not been read answers from the **file's
+footer statistics** without reading a byte, which is what makes it worth asking before deciding to
+read. **The footer answer is one-sided**: `.false.` is a guarantee, `.true.` means "may hold nulls",
+because a file written without statistics cannot say. So `.true.` is a reason to read the column and
+look, not a fact to branch on — and reading it may well turn the answer into `.false.`. Once the
+column is resident the answer is exact. `%has_nulls` also takes a 1-based column position in place
+of a name.
 
 A column that holds no null at all carries no null bitmap, which is why `%compact_validity(name)`
 exists: it drops the bitmap of a column that once had nulls and no longer does. A whole-column
 `%set` already does this on its own, so `%compact_validity` is only for a column edited cell by
 cell.
+
+`%ensure_validity([name])` is the other side of that laziness. Because the bitmap is allocated on
+demand, the **first** null written to a null-free column allocates — which is fine on one thread and
+a race on several, so a shared table refuses it. Calling `%ensure_validity` first makes the
+allocation happen up front and lets the concurrent nulling proceed; with no `name` it prepares every
+resident column. A temporal column never needs it, since its null state lives inside each element
+and nulling one allocates nothing. See [Thread
+safety](../operating/thread-safety.html) for where this matters.
 
 ## Changing a table
 
@@ -105,8 +127,12 @@ call t%sort_by("-mass")                  ! or sort_by(["mass"], descending=[.tru
 call t%drop_column("scratch")
 ```
 
-The two simplest column changes are worth a sentence each, because both are cheaper than they
-look:
+Two of the five are explained on the neighbouring page rather than here, because both are really
+about a column's *type* rather than about mutating a table: `%cast` converts a column to another
+numeric kind in place, and `%copy_column` adds a converted (or plain) copy beside the original —
+see [Changing a column's type](table.html#changing-a-columns-type). The other three are here.
+
+The two simplest of those are worth a sentence each, because both are cheaper than they look:
 
 - **`%drop_column` never reads the column it drops.** Dropping one that was never touched is the
   memory-reclaiming case and costs nothing; the remaining columns keep their order, so
@@ -114,8 +140,8 @@ look:
   remaining columns' storage is handed over rather than copied.
 - **`%rename_column` changes only the name you look the column up by.** A file-backed column that
   has not been read yet still reads from the same physical column afterwards, which is what lets a
-  rename compose with a MAML [remap](table-open.html#renaming-a-files-columns-with-a-read-in-maml) in either
-  order. The new name must not be blank and must not already be taken.
+  rename compose with a MAML [remap](table-open.html#renaming-a-files-columns-with-a-read-in-maml)
+  in either order. The new name must not be blank and must not already be taken.
 
 ### What "detaching" means
 
@@ -249,15 +275,16 @@ call t%materialize("name")               ! or %materialize_all()
 call t%top_n("-flux", 100)
 ```
 
-That includes [`parquet_row_index`](table-open.html#which-row-of-the-file-is-this), which is how to find out *which*
-file rows survived — ask for it before the call and it is gathered along with everything else.
+That includes [`parquet_row_index`](table-open.html#which-row-of-the-file-is-this), which is how to
+find out *which* file rows survived — ask for it before the call and it is gathered along with
+everything else.
 
 There is deliberately no `%take(indices)` taking a permutation you built yourself. Applying an
 arbitrary row order to a table is the one thing this type refuses: applied to some columns and not
 others, or applied from an array that has since gone stale, it breaks the row correspondence that
-makes a table a table, and nothing detects it. `%top_n` is safe because it builds the indices itself,
-from this table's own columns, and applies them to every column together. If you want to *read* rows
-in an order without changing anything, that is `%argsort_by` and `%get_slice`, next.
+makes a table a table, and nothing detects it. `%top_n` is safe because it builds the indices
+itself, from this table's own columns, and applies them to every column together. If you want to
+*read* rows in an order without changing anything, that is `%argsort_by` and `%get_slice`, next.
 
 ### Ordering rows without reordering them
 
@@ -288,8 +315,14 @@ call syntax:
 | `call t%top_n(keys, n, [descending], [nulls_first])` | *(mutating)* keeps only those `n` rows — see [above](#keeping-only-the-best-rows) |
 | `ok = t%is_sorted_by(keys, [descending], [nulls_first])` | whether the rows are already in that order |
 
-`perm` may be declared `integer(int32)` or `integer(int64)`; `group_offsets` follows whichever you
-chose, since its entries are positions in `perm`.
+`perm` may be declared `integer(int32)` or `integer(int64)` on **both** `%argsort_by` and
+`%argsort_partial`, and `group_offsets` follows whichever you chose, since its entries are positions
+in `perm`.
+
+**`n` is the exception to this library's usual two-kind rule**, on `%top_n` and `%argsort_partial`
+alike: it is a plain default-kind `integer` with no `int64` form, deliberately, because an `n` that
+large is not a top-N at all but a whole sort — which is what both delegate to. Row counts and row
+indices elsewhere on this page (`%truncate`, `%delete_rows`) do take either kind.
 
 **`%argsort_partial` is the one with an asymptotic argument.** Asking a 100-million-row table for
 its brightest 100 rows through `%sort_by` sorts everything and reallocates every column;
@@ -319,8 +352,9 @@ end do
 ```
 
 The array has length `ngroups + 1` and its last entry is the sentinel `nrows + 1`, so every group
-slices the same way and the last one needs no special case. All nulls form one group and all NaNs
-form one group.
+slices the same way and the last one needs no special case. It is **always allocated when asked
+for** — an empty table gives `[1]`, so the loop above runs zero times rather than touching an
+unallocated array. All nulls form one group and all NaNs form one group.
 
 `group_nkeys=` groups on the first few keys **without changing the sort**, which is what gives
 "grouped by field, ordered by magnitude within each group":
@@ -332,11 +366,12 @@ call t%argsort_by(["field_id", "mag     "], perm, group_offsets=go, group_nkeys=
 It counts key *names*, must be between 1 and the number of keys, and requires `group_offsets`.
 
 > **A permutation goes stale silently.** It describes the table *as it was*. Any row-structural
-> change — `%sort_by`, `%top_n`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append` — invalidates it, and
-> nothing reports that: against a table that has since shrunk, the indices stay in range and name
-> the wrong rows. This is the same hazard as a saved `%col` pointer, except that a stale pointer
-> usually crashes while a stale permutation just answers wrongly. `%generation()` is bumped by every
-> such change — record it beside a permutation you intend to keep, and compare before reusing it.
+> change — `%sort_by`, `%top_n`, `%filter_rows`, `%delete_rows`, `%truncate`, `%append` —
+> invalidates it, and nothing reports that: against a table that has since shrunk, the indices stay
+> in range and name the wrong rows. This is the same hazard as a saved `%col` pointer, except that a
+> stale pointer usually crashes while a stale permutation just answers wrongly. `%generation()` is
+> bumped by every such change — record it beside a permutation you intend to keep, and compare
+> before reusing it.
 
 ### Adding rows
 
@@ -362,8 +397,8 @@ conversion, so appending "km/h" rows to an "m/s" column is refused.
 
 `%append(row)` adds one row from a `parquet_table_row` handle, copying just that row out of the
 handle's table. The batch form above is still cheaper per row — a row append takes the table's lock,
-advances the generation counter and detaches once per call — but it is no longer quadratic, so
-building a table a row at a time is a perfectly reasonable thing to do.
+advances the generation counter and detaches once per call — but the cost is linear in the rows
+added, not quadratic, so building a table a row at a time is a perfectly reasonable thing to do.
 
 Growing a table row by row costs nothing extra in allocation either: a column's storage grows
 **geometrically**, so a run of appends reallocates a handful of times rather than once per row. The
@@ -457,7 +492,8 @@ of them. `before` must be declared as the same concrete table type as `t`.
 ## Looking a value up in a sorted table
 
 There is no table-level binary search, and it is not missing: `%col` hands back a plain pointer to a
-column's storage, and [`parquet_sorting`](../utilities/sorting.html)'s searches work on that directly.
+column's storage, and [`parquet_sorting`](../utilities/sorting.html)'s searches work on that
+directly.
 
 ```fortran
 real(real64), pointer :: ra(:)
@@ -485,18 +521,55 @@ sorted, deliberately: a stale "still sorted" flag would return wrong rows silent
 
 ## Ranking rows by a column
 
-Likewise there is no `%rank` — adding a rank or percentile column is three lines through `%col`:
+Likewise there is no `%rank` — adding a rank column is four calls through `%col`, shown here as a
+complete program since it is the one place on this page where getting the nulls right matters:
 
 ```fortran
-real(real64), pointer :: flux(:)
-integer(int64), allocatable :: ranks(:)
+program rank_by_flux
+    use parquet
+    use iso_fortran_env, only: int64, real64
+    implicit none
 
-call t%col("flux", flux)
-call pf_rank(flux, ranks, descending=.true.)   ! 1 = brightest
-call t%add_column("flux_rank", ranks)
+    type(parquet_table) :: t
+    real(real64) :: flux(5)
+    real(real64), pointer :: fp(:)
+    integer(int64), allocatable :: ranks(:)
+    logical, allocatable :: valid(:)
+    integer :: i
+
+    flux = [3.0_real64, 1.0_real64, 4.0_real64, 1.0_real64, 5.0_real64]
+    call parquet_new_table(t)
+    call t%add_column("flux", flux)
+    call t%set_null("flux", 2_int64)          ! two rows with no measurement
+    call t%set_null("flux", 4_int64)
+
+    call t%col("flux", fp)                    ! the values...
+    call t%get_valid_mask("flux", valid)      ! ...and which of them are real
+    call pf_rank(fp, ranks, descending=.true., is_valid=valid)   ! 1 = brightest
+    call t%add_column("flux_rank", ranks)
+
+    do i = 1, int(t%nrows())
+        print '(a,i0,a,i0)', "row ", i, " rank ", ranks(i)
+    end do
+end program rank_by_flux
 ```
+
+which prints ranks `3 0 2 0 1` — the two nulled rows ranked 0, and the three real values ranked
+brightest-first.
 
 `method=` picks how ties are handled — `"competition"` (1,2,2,4, the default), `"dense"` (1,2,2,3)
 or `"ordinal"` (1,2,3,4) — and **a null gets rank 0**, since a missing value has no rank rather than
 the last one. Dense ranks over a sorted key column are also the cheapest way to label groups: every
 row of a group gets the same number.
+
+**`is_valid=` is what makes that rank-0 rule reachable, and leaving it out is a silent wrong
+answer.** `%col` hands back the *values* array and nothing else — a `parquet_column` keeps its nulls
+in a separate bitmap — so a `pf_rank` given only the pointer has no idea which rows are missing and
+ranks them as ordinary values. Worse, a null row's value bytes are unspecified, so what it ranks
+them *by* is undefined. On a five-row column with rows 2 and 4 nulled, the call without the mask
+gives `3 4 2 4 1` where the call with it gives `3 0 2 0 1` — plausible ranks either way, and only
+one of them right. Pass the mask, or be sure the column holds no nulls.
+
+The same applies to every `pf_*` operation reached through a `%col` pointer, including the searches
+[above](#looking-a-value-up-in-a-sorted-table): each takes its own optional `is_valid=`, and without
+it a null row participates as whatever its value slot happens to hold.

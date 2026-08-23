@@ -1921,7 +1921,9 @@ Rules a change here must not break:
 
 `%col` hands back a live pointer into a column's storage, and `%filter_rows`, `%sort_by`, `%top_n`,
 `%delete_rows`, `%truncate`, `%append` and `%append_null_rows` all reallocate that storage
-(`delete_by_mask`, `reindex`, `gather` and `append` each grow or shrink exact-fit). A pointer taken
+(the rebuilds — `delete_by_mask`, `reindex`, `gather` — exact-fit, while `append` grows
+geometrically and so may not reallocate at all on a given call; it bumps the generation counter
+regardless, so a pointer is to be treated as dead either way). A pointer taken
 before one of them therefore points at freed memory afterwards, and **Fortran offers no way to
 detect this** — the code compiles, and usually appears to work.
 
@@ -1990,15 +1992,26 @@ be assigned *after* `allocate(table%cache)`, not before.
 
 ### Assembling a `parquet_column` from pieces: preallocate and `%paste`
 
-`grow_storage` (`parquet_columns_mutate.f90`, generated) reallocates **exact-fit** and copies
-everything already in the column — there is no capacity headroom and no geometric growth. So
-`%append` in a loop is O(k²) in both copying and allocation: building a column from k pieces copies
-k(k-1)/2 pieces' worth of data and allocates k(k+1)/2, ending up holding only k. This is invisible
-in a unit test and only shows up at scale — it made `parquet_table`'s slice regime cost as much as
-reading the whole file.
+**A column's storage grows GEOMETRICALLY, and a REBUILD is exact-fit — the two halves are
+different procedures and it is worth knowing which you are in.** `grow_storage`
+(`parquet_columns_mutate.f90`, generated) is two lines over `ensure_capacity`, whose rule is
+`newcap = max(need_rows, self%cap + self%cap/2_int64)` — 1.5x — so `%append` in a loop is amortised
+O(1) per row, and building a column a row at a time is a reasonable thing to do. `gather_storage`
+and the other rebuilds behind `%filter_rows`/`%sort_by`/`%top_n`/`%delete_rows`/`%truncate`
+allocate **exact-fit** and say so in their own comment (*"Only grow_storage ever creates slack"*),
+which is what makes `%shrink_to_fit` — and `parquet_table`'s `%compact` — a no-op on any column
+that has not been appended to. The price of the growth half is that an appended-to column can hold
+up to 1.5x the storage its rows need. `feature_risks.md` **Risk-67** records the consequence that
+matters most — `size(storage)` is `cap`, not `nrows`, so every read must be bounded by `1:nrows`.
+
+**An earlier version of this section said the opposite** — exact-fit everywhere, no headroom, and
+`%append` in a loop O(k²) — and it was true when written; `ensure_capacity` came later. The advice
+below did not change, and is worth keeping for a different reason than the one originally given.
 
 **When the final row count is known before the pieces are, `init` the column once at full size and
-`%paste` each piece into place.** `%paste(src, at [, from] [, count])` overwrites an existing row
+`%paste` each piece into place.** Not because appending is quadratic — it is not — but because
+`%paste` avoids the intermediate copies altogether rather than merely amortising them, and it
+allocates once. `%paste(src, at [, from] [, count])` overwrites an existing row
 range without reallocating or changing `nrows`; `from`/`count` copy a sub-range of the source, so
 trimming a piece needs no `keep` mask and no `%delete_by_mask` either. `materialize_slice`
 (`parquet_tables_read.f90`) is the worked example. Two things to know before using it:

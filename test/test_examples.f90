@@ -54,6 +54,8 @@ contains
                 test_per_thread_slices_example), &
             new_unittest("doc/pages/tables/table-write.md build_and_write example", &
                 test_build_and_write_example), &
+            new_unittest("doc/pages/tables/table-mutate.md rank_by_flux example", &
+                test_rank_by_flux_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -1320,5 +1322,66 @@ contains
             "table-write.md: reversing the names gave the same first value back, so the " // &
             "round-trip assertions above are not reading the data at all")
     end subroutine build_and_write_control
+    !
+    !> `doc/pages/tables/table-mutate.md`'s `rank_by_flux` example: the ranks a nulled column gets,
+    !! and the reason the example passes `is_valid=` at all.
+    !!
+    !! **This test exists because the page was wrong before it.** The example used to call
+    !! `pf_rank(flux, ranks, descending=.true.)` on a bare `%col` pointer, immediately above a
+    !! sentence saying "a null gets rank 0" -- which `pf_rank` does, and that call cannot, because
+    !! `%col` hands back the VALUES array and a `parquet_column` keeps its nulls in a separate
+    !! bitmap. Nothing in the suite noticed, because nothing asserted the composition.
+    !!
+    !! **The negative control is the maskless call**, run here on the same data. Asserting only
+    !! `3 0 2 0 1` would pass against a `pf_rank` that ignored `is_valid=` and happened to agree;
+    !! requiring the two calls to DIFFER is what makes this a test of the page's claim rather than
+    !! of `pf_rank` alone. The measured maskless answer is `3 4 2 4 1` -- plausible, and wrong for
+    !! every row rather than only the two null ones, since the null slots' values participate in
+    !! the ordering.
+    !!
+    !! No fixture: the example is in-memory (`parquet_new_table` + `%add_column`), so there is no
+    !! file and no chance of the concurrent-suite path collision CLAUDE.md warns about.
+    subroutine test_rank_by_flux_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        real(real64) :: flux(5)
+        real(real64), pointer :: fp(:)
+        integer(int64), allocatable :: ranks(:), bare(:)
+        logical, allocatable :: valid(:)
+        !
+        ! ---- the example, verbatim ----
+        flux = [3.0_real64, 1.0_real64, 4.0_real64, 1.0_real64, 5.0_real64]
+        call parquet_new_table(t)
+        call t%add_column("flux", flux)
+        call t%set_null("flux", 2_int64)
+        call t%set_null("flux", 4_int64)
+        !
+        call t%col("flux", fp)
+        call t%get_valid_mask("flux", valid)
+        call pf_rank(fp, ranks, descending=.true., is_valid=valid)
+        call t%add_column("flux_rank", ranks)
+        !
+        call check(error, size(ranks) == 5, "table-mutate.md: one rank per row")
+        if (allocated(error)) return
+        call check(error, all(ranks == [3_int64, 0_int64, 2_int64, 0_int64, 1_int64]), &
+            "table-mutate.md: the rank_by_flux example should print 3 0 2 0 1 -- the two nulled " // &
+            "rows ranked 0, the three real values ranked brightest-first")
+        if (allocated(error)) return
+        !
+        ! The rank column really was added, and holds what was ranked.
+        call check(error, t%has_column("flux_rank") .and. t%ncols() == 2, &
+            "table-mutate.md: the example's %add_column should leave a second column behind")
+        if (allocated(error)) return
+        !
+        ! ---- negative control: without the mask the answer must DIFFER ----
+        call pf_rank(fp, bare, descending=.true.)
+        call check(error, .not. all(bare == ranks), &
+            "table-mutate.md: pf_rank gave the same answer with and without is_valid=, so the " // &
+            "page's reason for passing the mask is untested and the rank-0 rule proves nothing")
+        if (allocated(error)) return
+        call check(error, .not. any(bare == 0_int64), &
+            "table-mutate.md: the maskless call should rank the null rows as ordinary values, " // &
+            "which is precisely the defect the example's is_valid= exists to avoid")
+    end subroutine test_rank_by_flux_example
     !
 end module test_examples

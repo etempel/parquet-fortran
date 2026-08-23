@@ -696,6 +696,8 @@ program error_scenarios
         call scenario_qc_maml_unknown_subkey()
     case ("maml_line_too_long")
         call scenario_maml_line_too_long()
+    case ("embedded_maml_unknown_name")
+        call scenario_embedded_maml_unknown_name()
     case ("metadata_datatype_key_collision")
         call scenario_metadata_datatype_key_collision()
     case ("metadata_datatype_no_collision_control")
@@ -7748,6 +7750,35 @@ contains
         call parquet_parse_maml("test_run/maml_line_too_long.maml", schema)
         print '(a)', "unexpectedly parsed a MAML file with a line exceeding the length limit"
     end subroutine scenario_maml_line_too_long
+
+    !> get_parquet_maml resolves an embedded fixture by name and error stops on
+    !> one it does not have -- the `case default` arm of the select case
+    !> tools/generate_parquet_maml.sh emits. The same template serves both of
+    !> that script's modes, so this also pins the message a DOWNSTREAM project's
+    !> generated parquet_maml produces (see
+    !> doc/pages/utilities/embedding-maml-schemas.md); nothing in this repository
+    !> compiles that mode, which is what tools/check_downstream_maml_module.sh is
+    !> for.
+    !>
+    !> The successful lookup first is the negative control, and it is what makes
+    !> the abort evidence: without it the scenario would pass just as happily if
+    !> get_parquet_maml aborted on EVERY name, or if the module had stopped
+    !> embedding anything at all. It also exercises the extension-optional
+    !> matching from the other side -- "maml_example" without the .maml.
+    subroutine scenario_embedded_maml_unknown_name()
+        type(parquet_maml_file) :: maml
+
+        maml = get_parquet_maml("maml_example")
+        if (.not. allocated(maml%lines)) then
+            print '(a)', "control lookup returned a fixture with no lines"
+            return
+        end if
+        print '(a,i0,a)', "control: get_parquet_maml('maml_example') returned ", &
+            size(maml%lines), " lines"
+
+        maml = get_parquet_maml("no_such_embedded_schema")
+        print '(a)', "unexpectedly resolved an embedded MAML name that does not exist"
+    end subroutine scenario_embedded_maml_unknown_name
 
     !> Opening a nonexistent file for reading previously called Arrow's
     !> ValueOrDie() with no status check first, which aborts the process

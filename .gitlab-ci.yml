@@ -197,6 +197,14 @@ test:
     # graph got -- and is deliberately NOT here: it cold-builds a probe project per module,
     # including the C++ wrapper each time, which is minutes rather than seconds.
     - tools/check_argsort_standalone.sh
+    # Compiles what tools/generate_parquet_maml.sh emits in its DOWNSTREAM (no-argument) mode --
+    # the consumer-facing mode documented in doc/pages/utilities/embedding-maml-schemas.md, which
+    # nothing else here builds. The lint stage above runs `base --check`, and base mode emits no
+    # `use` statement at all, so the four names the downstream module imports from `parquet` are
+    # unchecked by it: rename one and every check stays green while every downstream project's next
+    # regeneration fails to compile. It belongs in this stage rather than lint because it needs a
+    # Fortran compiler and the library's own .mod files, neither of which the lint image has.
+    - tools/check_downstream_maml_module.sh
     # --exclude-lines-by-pattern auto-excludes every standalone report_fatal_error(...) call
     # site in src/parquet_wrapper.cpp (present and future -- no per-call-site source comment
     # needed) without needing GCOVR_EXCL_LINE comments at each one: std::abort() there discards

@@ -84,8 +84,9 @@ module parquet_maml_base
 contains
 
     !> Returns the named embedded .maml fixture from schemas/ as a raw parquet_maml_file
-    !> (unparsed lines only); error stops on an unknown name. Names are matched
-    !> both with and without the .maml extension.
+    !> (unparsed lines only); error stops on an unknown name. A fixture is matched
+    !> by its filename, with or without the .maml extension; one held in a
+    !> subdirectory is also matched by its full relative path.
     function get_parquet_maml(name) result(maml)
         character(len=*), intent(in) :: name !! embedded fixture name, with or without .maml.
         type(parquet_maml_file) :: maml !! the matching MAML, unparsed (raw lines only).

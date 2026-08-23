@@ -5,15 +5,24 @@ work_dir="$(pwd)"
 mode=""
 maml_dir="schemas"
 check=""
+module_override=""
 
 # --dir=NAME / --dir NAME selects the directory (relative to the project
 # root) to scan for .maml files; may appear before or after the positional
 # mode argument (empty, or "base"). Defaults to "schemas" -- this project's
 # own convention, and the one downstream projects following "Embedding your
 # own MAML schemas" are expected to match unless they have their own.
+# --module=NAME / --module NAME names the generated module (and therefore the
+# file, src/NAME.f90), for a downstream project whose own conventions require a
+# different name than the default parquet_maml -- e.g. one that enables fpm's
+# module-naming rule, which requires every module to carry the package's own
+# prefix. It is rejected in `base` mode: parquet_maml_base is this library's own
+# module and the rest of the library refers to it by name.
 # --check compares the regenerated content with the committed file instead of
 # writing it, exiting nonzero on drift -- mirrors generate_parquet_columns.py's
 # own --check. For this project's own base MAML, run as: base --check
+# A --check run must repeat whatever --dir/--module the generating run used;
+# with different flags it is comparing against a different file.
 while [ $# -gt 0 ]; do
     case "$1" in
         --dir=*)
@@ -22,6 +31,14 @@ while [ $# -gt 0 ]; do
             ;;
         --dir)
             maml_dir="${2:?--dir requires a value}"
+            shift 2
+            ;;
+        --module=*)
+            module_override="${1#--module=}"
+            shift
+            ;;
+        --module)
+            module_override="${2:?--module requires a value}"
             shift 2
             ;;
         --check)
@@ -35,7 +52,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-python3 - "$work_dir" "$mode" "$maml_dir" "$check" <<'PY'
+python3 - "$work_dir" "$mode" "$maml_dir" "$check" "$module_override" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -44,12 +61,33 @@ work_dir = Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
 maml_dir_name = sys.argv[3]
 check = bool(sys.argv[4])
+module_override = sys.argv[5]
 is_base = (mode == 'base')
 
-maml_source_dir = work_dir / maml_dir_name
-module_name = 'parquet_maml_base' if is_base else 'parquet_maml'
+if is_base:
+    if module_override:
+        raise SystemExit(
+            '--module cannot be combined with base mode: parquet_maml_base is this library\'s '
+            'own module and the rest of the library refers to it by that name.')
+    module_name = 'parquet_maml_base'
+elif module_override:
+    # A Fortran module name, and one short enough to survive as a filename and as
+    # the `end module <name>` line: letters/digits/underscore, leading letter, and
+    # the standard's own 63-character identifier limit.
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', module_override):
+        raise SystemExit(
+            f"--module: '{module_override}' is not a valid Fortran module name (letters, digits "
+            'and underscores only, starting with a letter).')
+    if len(module_override) > 63:
+        raise SystemExit(
+            f"--module: '{module_override}' is {len(module_override)} characters; a Fortran "
+            'identifier may be at most 63.')
+    module_name = module_override
+else:
+    module_name = 'parquet_maml'
 out_path = work_dir / 'src' / f'{module_name}.f90'
 
+maml_source_dir = work_dir / maml_dir_name
 maml_files = sorted(maml_source_dir.rglob('*.maml'))
 if not maml_files:
     raise SystemExit(f'No .maml files found under {maml_dir_name}/')
@@ -67,6 +105,46 @@ def make_identifier(name: str) -> str:
 
 def fstr(s: str) -> str:
     return '"' + s.replace('"', '""') + '"'
+
+
+# The names get_parquet_maml matches for one embedded file. A file directly in
+# the scanned directory answers to its filename and to that filename without the
+# extension; a file in a subdirectory answers to those two as well, plus its full
+# relative path. The scan is recursive (rglob below), so subdirectories are an
+# organisational choice with no effect on how a schema is addressed -- which
+# holds only because two .maml files may not share a filename (checked below).
+def case_labels(rel_name: str) -> list:
+    labels = [Path(rel_name).name, Path(rel_name).stem]
+    if rel_name != labels[0]:
+        labels.insert(0, rel_name)
+    return labels
+
+
+# REFUSE BEFORE WRITING ANYTHING, and name both files. Two .maml files whose
+# names collide -- the same filename in two subdirectories, or names differing
+# only in case or punctuation, since make_identifier lowercases and collapses
+# every run of non-alphanumerics -- would otherwise emit a duplicate `public ::`,
+# a duplicate function and a duplicate `case` label. The generator would report
+# success and the failure would surface in the consumer's build as
+# "ACCESS specification at (1) was already specified", naming neither this script
+# nor either schema.
+def check_for_collisions(paths: list) -> None:
+    seen = {}
+    for path in paths:
+        rel_name = path.relative_to(maml_source_dir).as_posix()
+        claims = [('accessor name', make_identifier(path.name))]
+        claims += [('name', label) for label in case_labels(rel_name)]
+        for what, key in claims:
+            previous = seen.get((what, key))
+            if previous is not None:
+                raise SystemExit(
+                    f"Two MAML files under {maml_dir_name}/ share the {what} '{key}':\n"
+                    f'    {previous}\n'
+                    f'    {rel_name}\n'
+                    'Every .maml filename must be unique across that directory, including its '
+                    'subdirectories, and two filenames differing only in case or punctuation '
+                    'count as the same.')
+            seen[(what, key)] = rel_name
 
 
 # Wraps a leading '!>' doc-comment to the project's 132-column limit, splitting
@@ -119,7 +197,7 @@ lines.append(f'! Instead, edit the MAML files under {maml_dir_name}/ and run gen
 lines.append('! Generator script: parquet-fortran/tools/generate_parquet_maml.sh')
 lines.append('!===========================================')
 if is_base:
-    lines.append('!> Base-library MAML fixtures: embeds every .maml file under schemas/ bundled')
+    lines.append(f'!> Base-library MAML fixtures: embeds every .maml file under {maml_dir_name}/ bundled')
     lines.append('!> with this library as a compiled-in string array, addressable by filename via')
     lines.append('!> get_parquet_maml, plus the shared parquet_maml_file type and its')
     lines.append('!> add_col_qc/set_col_qc qc-maml builders.')
@@ -217,6 +295,8 @@ if is_base:
     lines.append('    end interface')
     lines.append('')
 
+check_for_collisions(maml_files)
+
 public_names = ['get_parquet_maml']
 if not is_base:
     public_names.append('set_maml')
@@ -266,10 +346,9 @@ for path in maml_files:
     block.append(f'    end function {identifier}')
     function_blocks.append('\n'.join(block))
 
-    case_blocks.append(f'        case ({fstr(rel_name)})')
-    case_blocks.append(f'            {result_var} = {identifier}()')
-    case_blocks.append(f'        case ({fstr(Path(rel_name).stem)})')
-    case_blocks.append(f'            {result_var} = {identifier}()')
+    for label in case_labels(rel_name):
+        case_blocks.append(f'        case ({fstr(label)})')
+        case_blocks.append(f'            {result_var} = {identifier}()')
 
 for public_name in public_names:
     lines.append(f'    public :: {public_name}')
@@ -279,13 +358,15 @@ lines.append('')
 result_var = 'maml' if is_base else 'schema'
 result_type = 'parquet_maml_file' if is_base else 'parquet_schema'
 if is_base:
-    lines.append('    !> Returns the named embedded .maml fixture from schemas/ as a raw parquet_maml_file')
-    lines.append('    !> (unparsed lines only); error stops on an unknown name. Names are matched')
-    lines.append('    !> both with and without the .maml extension.')
+    lines.append(f'    !> Returns the named embedded .maml fixture from {maml_dir_name}/ as a raw parquet_maml_file')
+    lines.append('    !> (unparsed lines only); error stops on an unknown name. A fixture is matched')
+    lines.append('    !> by its filename, with or without the .maml extension; one held in a')
+    lines.append('    !> subdirectory is also matched by its full relative path.')
 else:
     lines.append('    !> Returns the named embedded MAML fixture, already parsed into a ready-to-use')
-    lines.append('    !> parquet_schema; error stops on an unknown name. Names are matched both with')
-    lines.append('    !> and without the .maml extension.')
+    lines.append('    !> parquet_schema; error stops on an unknown name. A fixture is matched by its')
+    lines.append('    !> filename, with or without the .maml extension; one held in a subdirectory is')
+    lines.append('    !> also matched by its full relative path.')
 lines.append(f'    function get_parquet_maml(name) result({result_var})')
 lines.append('        character(len=*), intent(in) :: name !! embedded fixture name, with or without .maml.')
 if is_base:
@@ -349,6 +430,10 @@ if check:
         sys.exit(1)
     print(f'generate_parquet_maml.sh: {out_path.name} is up to date (module {module_name})')
 else:
+    # Create src/ rather than dying in write_text with a FileNotFoundError traceback:
+    # a project that has not added Fortran sources yet has no src/, and every other
+    # failure in this script is a clean one-line message.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding='ascii')
     print(f'Generated {out_path} from {len(maml_files)} MAML files (module {module_name})')
 PY

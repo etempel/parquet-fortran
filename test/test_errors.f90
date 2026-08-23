@@ -640,6 +640,8 @@ contains
                 test_qc_maml_unknown_subkey_aborts), &
             new_unittest("maml: a source line exceeding the length limit aborts (not silently truncated)", &
                 test_maml_line_too_long_aborts), &
+            new_unittest("embedded maml: an unknown fixture name aborts (after a control lookup succeeds)", &
+                test_embedded_maml_unknown_name_aborts), &
             new_unittest("qc: existing Null-abort behavior is unchanged", &
                 test_qc_existing_null_abort_unchanged_aborts), &
             new_unittest("qc: hard mode (default) aborts on a range violation", &
@@ -5563,6 +5565,20 @@ contains
             failure_message="a MAML source line exceeding the length limit was expected to abort", &
             required_stderr="exceeds")
     end subroutine test_maml_line_too_long_aborts
+
+    !> get_parquet_maml's `case default` arm -- the one tools/generate_parquet_maml.sh emits into
+    !! both of its modes from the same template, so this pins the message a downstream project's
+    !! own generated parquet_maml produces too (doc/pages/utilities/embedding-maml-schemas.md).
+    !! The scenario looks a real fixture up first, so an implementation that aborted on every name
+    !! would fail its control rather than pass this test.
+    subroutine test_embedded_maml_unknown_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "embedded_maml_unknown_name", &
+            expect_abort=.true., &
+            failure_message="an unknown embedded MAML fixture name was expected to abort", &
+            required_stderr="get_parquet_maml: unknown internal MAML file: no_such_embedded_schema")
+    end subroutine test_embedded_maml_unknown_name_aborts
 
     !> qc being active must never change the existing strict-by-default Null
     !> behavior: reading a column with a genuine Null and no null_value=/

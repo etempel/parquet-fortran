@@ -798,6 +798,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generator is **not cryptographic** and is documented as such. See
   [Random numbers](doc/pages/utilities/random.md).
 
+- **`tools/generate_parquet_maml.sh` gains `--module=<name>`**, naming the module it generates for a
+  downstream project — and so the file it writes, `src/<name>.f90` — instead of the fixed
+  `parquet_maml`. The default is unchanged. It exists for projects whose own conventions require
+  every module of theirs to carry their package's prefix, and it is what makes more than one
+  embedded-schema module per project possible at all, since both the module name and the output
+  path derive from it. Rejected in `base` mode, where the name is this library's own. See
+  [Embedding your own MAML schemas](doc/pages/utilities/embedding-maml-schemas.md).
+
 ### Changed
 
 - **`parquet_get_version` no longer reports the Arrow and Parquet C++ versions — `parquet_get_arrow_version`
@@ -1466,6 +1474,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row mask with `parquet_write_row_mask`: the mask-consumed check was one combined condition, and
   Fortran does not guarantee short-circuit evaluation, so the unused mask's size was queried
   regardless. Harmless in an ordinary build, but it aborted at close under `-fcheck=all`.
+
+- Fixed three ways `tools/generate_parquet_maml.sh` mishandled a downstream project's schema
+  directory. **Two `.maml` files sharing a filename** — the same name in two subdirectories, or two
+  names differing only in case or punctuation — made it emit a module with a duplicated accessor,
+  a duplicated `public ::` and a duplicated `case` label, while reporting success; the consumer's
+  build then failed with `ACCESS specification at (1) was already specified`, naming neither the
+  script nor either schema. It now refuses such a pair by name and writes nothing. **A schema in a
+  subdirectory** could be reached by its full relative path or its bare stem but not by its own
+  filename, contradicting the generated module's own documented rule; all three now resolve.
+  **A project with no `src/` directory** — which is any project that has not added Fortran sources
+  yet — got a Python `FileNotFoundError` traceback instead of a generated module; the directory is
+  now created.
 
 - Fixed the concurrency guard **hanging instead of aborting** when several threads trip it at the
   same moment — which is exactly how it is meant to be tripped, since it exists to catch one

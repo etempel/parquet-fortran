@@ -719,6 +719,7 @@ scenarios=(
     "qc_maml_missing_name:1"
     "qc_maml_unknown_subkey:1"
     "maml_line_too_long:1"
+    "embedded_maml_unknown_name:1"
     "write_row_count_mismatch:1"
     "read_row_count_mismatch:1"
     "read_before_open:1"

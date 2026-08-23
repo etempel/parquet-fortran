@@ -361,6 +361,13 @@ tools/check_argsort_standalone.sh             # -O0/-O2/-O3, four cases each
 FC=nagfor tools/check_argsort_standalone.sh   # follows FPM_FC when FC is unset
 ```
 
+`tools/check_downstream_maml_module.sh` protects the *other* mode of `tools/generate_parquet_maml.sh`. That script has two: `base`, which emits `src/parquet_maml_base.f90` for this repository and is checked on every pipeline run (`base --check`, in the `lint` stage), and the no-argument mode a downstream project uses on its own schemas — see ["Embedding your own MAML schemas in your own project"](doc/pages/utilities/embedding-maml-schemas.md). The two do not emit the same text: base mode emits no `use` statement at all, while downstream mode imports four names from `parquet` (`parquet_schema`, `parquet_load_maml_file`, `parquet_parse_maml`, `parquet_validate_user_maml`), calls `parquet_parse_maml` in every accessor, and carries a whole `set_maml` body. Rename any of those four and `base --check`, `fpm test` and the lint stage all stay green while every downstream project's next regeneration fails to compile — this library would have no way to know it had broken them. The script builds a throwaway downstream project in a temporary directory (nothing is written inside this repository), generates from it and compiles the result against the library's own `.mod` files. It **compiles rather than runs**, which is what makes it cheap enough for every pipeline: no linking, no Arrow link line, no dependency resolve. Its five checks also cover the generator's own refusals — a duplicate `.maml` filename, `--check` drift in both directions, `--module=<name>` — and one of them is a deliberate negative control that renames an imported name and requires the compile to *fail*, so a run that had silently stopped compiling anything cannot report success. It runs in CI's `test` job rather than `lint`, because it needs a Fortran compiler and a built library and the lint image has neither.
+
+```bash
+tools/check_downstream_maml_module.sh          # builds the library first if needed
+FC=ifx tools/check_downstream_maml_module.sh   # follows FPM_FC when FC is unset
+```
+
 `tools/check_module_footprints.sh` answers the adjacent question — not *does* an entry module's graph reach Arrow, but *how big did it get*. For each advertised entry module it writes a throwaway consumer project into a temporary directory, points it at this repository through a relative symlink (fpm 0.13.0 alpha rejects an absolute `path =` dependency), builds it **cold**, and compares the set of library files fpm actually compiled against `tools/module_footprints.txt`, which is committed. fpm prunes at *module* granularity and never prunes a submodule separately from its module, so one added `use` line can multiply what a downstream project compiles — a tier can double in size without ever touching `parquet_bindings`, which is exactly what the Arrow-free checks cannot see. **When it fails, the fix is almost never to update the expectation**: a module that grew did so because something it imports gained a dependency, and the right answer is to move whatever needed that import up a tier. Update `tools/module_footprints.txt` only when the growth is the deliberate, reviewed point of the change, and say so in the commit message — a silently-updated expectation is a check that has been switched off. Deliberately **not** in CI: each module is a cold build of its whole subtree, including `src/parquet_wrapper.cpp` every time, so it is minutes rather than the seconds the checks above take. Maintainer-only.
 
 ```bash
@@ -1318,7 +1325,7 @@ branch's committed content determines what's published, not which remote you sta
 
 ## Regenerating the built-in MAML module
 
-Every `.maml` file under `schemas/` is compiled directly into this library via `tools/generate_parquet_maml.sh`, which scans `schemas/*.maml` and writes a Fortran module embedding each file's contents as a string array, keyed by filename — this is what makes a default schema available without shipping or locating a `.maml` file at run time.
+Every `.maml` file under `schemas/` is compiled directly into this library via `tools/generate_parquet_maml.sh`, which scans that directory **recursively** (`schemas/**/*.maml`, so subdirectories are an organisational choice) and writes a Fortran module embedding each file's contents as a string array, keyed by filename — this is what makes a default schema available without shipping or locating a `.maml` file at run time. Because a schema is addressed by its filename rather than its path, **two `.maml` files may not share a filename**, and two names differing only in case or punctuation count as the same; the script refuses such a pair by name and writes nothing rather than emitting a module with a duplicate accessor in it.
 
 Run it from the repository root in `base` mode to regenerate this repository's own embedded module:
 
@@ -1326,9 +1333,9 @@ Run it from the repository root in `base` mode to regenerate this repository's o
 tools/generate_parquet_maml.sh base   # (re)generates src/parquet_maml_base.f90
 ```
 
-`base` mode generates `parquet_maml_base`, which additionally defines the `parquet_maml_file`/`parquet_maml_missing_column` derived types used throughout the library. Run this whenever `schemas/*.maml` changes, or whenever those types themselves change.
+`base` mode generates `parquet_maml_base`, which additionally defines the `parquet_maml_file`/`parquet_maml_missing_column`/`parquet_maml_col_map_entry` derived types used throughout the library. Run this whenever `schemas/*.maml` changes, or whenever those types themselves change.
 
-The script also accepts `--dir=<name>` (or `--dir <name>`) to scan a different directory than the default `schemas/` — this project's own regeneration above never needs it (its fixtures live under `schemas/`), but it exists so downstream projects following ["Embedding your own MAML schemas"](doc/pages/utilities/embedding-maml-schemas.md) can match whatever convention their own project already uses.
+The script also accepts `--dir=<name>` (or `--dir <name>`) to scan a different directory than the default `schemas/` — this project's own regeneration above never needs it (its fixtures live under `schemas/`), but it exists so downstream projects following ["Embedding your own MAML schemas"](doc/pages/utilities/embedding-maml-schemas.md) can match whatever convention their own project already uses. `--module=<name>` likewise names the generated module (and so the file, `src/<name>.f90`) for a downstream project whose own conventions need something other than the default `parquet_maml`; it is rejected in `base` mode, since the rest of this library refers to `parquet_maml_base` by name.
 
 The generated file carries a header stating it is auto-generated — do not hand-edit `src/parquet_maml_base.f90`; instead edit the source `.maml` files under `schemas/` and re-run the script.
 

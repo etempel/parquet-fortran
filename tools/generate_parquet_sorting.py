@@ -3802,13 +3802,13 @@ contains
         ! `prefetch_thread_count` and `parquet_string_threads`. It receives the PRE-clamp count, so
         ! the message names what this call actually asked for rather than the environment's ICV.
         !
-        ! **`pf_sort_threads()` has already clamped SILENTLY on the automatic path**, so the call
-        ! below is a no-op there and the warning comes from inside it instead. That asymmetry is
-        ! deliberate: `pf_sort_threads` is documented as a side-effect-free query, so it clamps
-        ! without printing, and the operation that then runs is what reports. Before the clamp was
-        ! shared, this site was the ONLY one that warned -- and because the automatic path arrived
-        ! here already clamped, the warning was unreachable for exactly the job it was written for
-        ! (one that asked for 64 threads through `OMP_NUM_THREADS` and silently got 2).
+        ! **`pf_sort_threads()` has already clamped on the automatic path**, so the call below is a
+        ! no-op there and the warning has come from inside `pf_sort_threads` instead. It is NOT a
+        ! silent clamp: `parquet_clamp_to_affinity` has no silent variant, deliberately, and its own
+        ! doc-comment says why. Letting a query clamp without printing was tried and is exactly what
+        ! made the warning unreachable for the job it was written for -- an automatic path arriving
+        ! here already clamped, from a caller who asked for 64 threads through `OMP_NUM_THREADS` and
+        ! silently got 2. Before the clamp was shared, this site was the ONLY one that warned.
         count = int(parquet_clamp_to_affinity(int(count), "sorting"), int64)
 #endif
     end procedure resolve_thread_count

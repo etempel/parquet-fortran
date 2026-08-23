@@ -61,13 +61,22 @@ Each setting documents its own capture point, because they genuinely differ and 
 the others wrong. `parquet_set_arrow_threads` resizes a pool everyone already shares, so it takes
 effect **immediately**, for readers and writers opened before the call as well as after.
 
-**Six settings are read by the library's C++ half, and those reach it when a reader or writer is
+**Four settings are mirrored to the library's C++ half, and reach it when a reader or writer is
 opened — not at the moment you set them.** They are `verbosity`, `message_stream`,
-`sort_counting_path`, `sort_counting_bucket_limit`, `target_row_group_bytes` and
-`statistics_prescreen`. Setting one and then opening a reader works exactly as you would expect;
-changing one *while a reader is already open* leaves that reader using the value that was current
-when it was opened, for the rest of its life. Open the reader after setting the knob, which is what
-the advice above already asks for.
+`target_row_group_bytes` and `statistics_prescreen`. Setting one and then opening a reader works
+exactly as you would expect; changing one *while a reader is already open* leaves that reader using
+the value that was current when it was opened, for the rest of its life. Open the reader after
+setting the knob, which is what the advice above already asks for.
+
+For the two output knobs, that delay only affects what the **C++ half** prints — three warnings and
+the `print_stat` report — because everything the Fortran half prints reads them per message. For
+`target_row_group_bytes` and `statistics_prescreen` it is the whole story, since both act only
+inside C++.
+
+The two sort knobs have a C++ mirror too and are deliberately **not** in that list: the sort engine
+is Fortran and reads them on every sort, so they take effect immediately (see [Tuning the
+sort](#tuning-the-sort)). Their mirror serves only the second, C++ implementation that the test
+suite checks the Fortran one against.
 
 The reason is worth one sentence, because it is what makes the rest of this library's module
 structure possible: a setter that pushed its value across to C++ immediately would have to live in
@@ -96,27 +105,28 @@ threads it wants while keeping parquet reads and writes to a smaller share.
 `n` must be at least 1; anything lower aborts. There is no "auto" value — Arrow's own starting
 capacity is hardware-derived, and `parquet_reset_settings` is how you get it back.
 
-## All three thread counts at once
+## All six thread counts at once
 
-`parquet_set_threads(n)` sets Arrow's pool, the sort cap and the prefetch cap together — the common
-case of "give this library `n` threads and no more".
+`parquet_set_threads(n)` sets Arrow's pool and all five per-area caps together — sorting, the table
+prefetch, the table rewrite, one string column's bulk work and the bulk random draws — for the
+common case of "give this library `n` threads and no more".
 
 ```fortran
-call parquet_set_threads(4)          ! all three
+call parquet_set_threads(4)          ! all six
 call parquet_set_sort_threads(1)     ! ...then keep sorting serial
 ```
 
-It holds no state of its own: read the three back individually or with `parquet_print_settings`, and
+It holds no state of its own: read the six back individually or with `parquet_print_settings`, and
 set any one afterwards to override just that one, as above.
 
-**`n` must be at least 1.** `0` means "automatic" to the sort and prefetch caps, but Arrow's pool has
-no automatic value — its starting capacity is hardware-derived — so rather than let one argument mean
+**`n` must be at least 1.** `0` means "automatic" to the five per-area caps, but Arrow's pool has no
+automatic value — its starting capacity is hardware-derived — so rather than let one argument mean
 two things, this takes a real thread count only. Use the individual setters for automatic behaviour,
 or `parquet_reset_settings()` to put everything back.
 
-**The three do not take effect at the same moment.** Arrow's pool is resized immediately and is
-shared, so readers and writers you have already opened are affected too; the sort and prefetch caps
-are read per call and so apply to work started afterwards. Setting them together does not make them
+**The six do not take effect at the same moment.** Arrow's pool is resized immediately and is
+shared, so readers and writers you have already opened are affected too; the five per-area caps are
+read per call and so apply to work started afterwards. Setting them together does not make them
 simultaneous.
 
 ## Threads for sorting
@@ -264,8 +274,9 @@ very high thread count as something to measure on your own toolchain rather than
 in either direction.
 
 `parquet_set_random_parallel_min_elements(n)` is the **work floor**: the fewest elements a thread
-must be given before a team is opened at all. Below `threads * n` elements the call runs serially,
-however many threads are available. The default is 1000.
+must be given before it is worth opening. A call producing fewer than `threads * n` elements does
+not run its full team — it drops to however many threads the work can feed at `n` elements each, and
+becomes serial once there is not enough for two. The default is 1000.
 
 This exists because threading a small permutation is not merely useless but actively harmful — the
 team costs more than the whole job. The floor applies to an explicit `threads=` as well as to the
@@ -346,7 +357,7 @@ Two things about the limit specifically:
 Turning the counting path off has no performance case — it exists so the two implementations can be
 compared against each other on the same data, which is how the library tests that they agree.
 
-Both numbers accept `0`, meaning "restore the built-in value", and both accept either integer kind.
+The limit accepts `0`, meaning "restore the built-in value", and takes either integer kind.
 
 `parquet_set_sort_radix_path(flag)` controls the radix fast path — a stable
 least-significant-digit radix sort that orders a column by bucketing its bytes rather than by
@@ -496,12 +507,14 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 
 | variable | accepts |
 |---|---|
-| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the five below at once |
+| `PARQUET_FORTRAN_THREADS` | integer >= 1 — sets the six below at once |
 | `PARQUET_FORTRAN_ARROW_THREADS` | integer >= 1 |
 | `PARQUET_FORTRAN_SORT_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_PREFETCH_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_TABLE_THREADS` | integer >= 0 (`0` = automatic) |
 | `PARQUET_FORTRAN_STRING_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_RANDOM_THREADS` | integer >= 0 (`0` = automatic) |
+| `PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS` | integer >= 0 (`0` = no floor) |
 | `PARQUET_FORTRAN_SORT_COUNTING_PATH` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_SORT_RADIX_PATH` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_SORT_COUNTING_BUCKET_LIMIT` | integer >= 0 (`0` = built-in) |
@@ -513,10 +526,10 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_VERBOSITY` | `normal`/`silent`/`errors_only` |
 | `PARQUET_FORTRAN_MESSAGE_STREAM` | `stdout`/`stderr` |
 
-`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the other five, so a
+`PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the other six, so a
 specific variable always overrides it — `PARQUET_FORTRAN_THREADS=8 PARQUET_FORTRAN_SORT_THREADS=2`
-gives eight threads to Arrow, the prefetch, the table and the string column, and two to sorting,
-whichever order the two appear in your shell.
+gives eight threads to Arrow, the prefetch, the table, the string column and the random draws, and
+two to sorting, whichever order the two appear in your shell.
 
 ```bash
 export PARQUET_FORTRAN_THREADS=4

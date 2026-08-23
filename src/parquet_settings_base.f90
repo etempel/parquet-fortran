@@ -655,8 +655,11 @@ contains
     !> honoured by the Fortran sites and silently ignored by the C++ ones. Sending messages to a log
     !> file is therefore not supported; a shell redirect or the program's own logging covers it.
     !>
-    !> **Errors always go to stderr regardless**, and the explicitly-called print procedures are
-    !> unaffected -- they keep their own `unit=` argument and its `output_unit` default.
+    !> **The error path does not follow this knob at all.** An `error stop` and the C++ side's
+    !> fatal-error report always go to stderr, and the context lines `parquet_emit_error_context`
+    !> prints just before an abort always go to stdout -- see that procedure for why. The
+    !> explicitly-called print procedures are unaffected too: they keep their own `unit=` argument
+    !> and its `output_unit` default.
     subroutine parquet_set_message_stream(stream)
         character(len=*), intent(in) :: stream !! "stdout" | "stderr".
         character(len=:), allocatable :: tok, expected

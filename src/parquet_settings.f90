@@ -370,29 +370,33 @@ contains
         n = cfg_table_threads
     end function parquet_get_table_threads
 
-    !> Sets all four thread counts at once: Arrow's pool, the sort cap, the table prefetch cap and
-    !> the table mutation cap.
+    !> Sets all six thread counts at once: Arrow's pool and the five per-area caps -- sorting, the
+    !> table prefetch, the table mutation, one string column's bulk work and the bulk random draws.
     !>
     !> A convenience for the common case of "give this library N threads and no more", equivalent to
     !> calling `parquet_set_arrow_threads(n)`, `parquet_set_sort_threads(n)`,
-    !> `parquet_set_prefetch_threads(n)` and `parquet_set_table_threads(n)` in turn. It has no state
-    !> of its own -- read the four back individually, or with `parquet_print_settings`, and set any
+    !> `parquet_set_prefetch_threads(n)`, `parquet_set_table_threads(n)`,
+    !> `parquet_set_string_threads(n)` and `parquet_set_random_threads(n)` in turn. It has no state
+    !> of its own -- read the six back individually, or with `parquet_print_settings`, and set any
     !> one of them afterwards to override just that one.
     !>
-    !> **`n` must be at least 1; `0` is not accepted here even though three of the four take it.**
-    !> `0` means "automatic" to the sort, prefetch, table and string caps, but Arrow's pool has no automatic
+    !> **`n` must be at least 1; `0` is not accepted here even though the five caps take it.**
+    !> `0` means "automatic" to the five per-area caps, but Arrow's pool has no automatic
     !> value at all -- its starting capacity is hardware-derived and is not a number this library gets
     !> to invent. Rather than have one argument mean two different things, this takes a real thread
     !> count only; use the individual setters when you want automatic behaviour, or
     !> `parquet_reset_settings` to put everything back.
     !>
-    !> **The five do not all take effect at the same moment**, which is the one thing worth knowing
+    !> **The six do not all take effect at the same moment**, which is the one thing worth knowing
     !> before reaching for this. Arrow's pool is resized immediately and is shared, so readers and
-    !> writers already open are affected too; the sort, prefetch, table and string caps are read per
-    !> call, so they apply to work started afterwards. Setting all five together does not make them
-    !> simultaneous.
+    !> writers already open are affected too; the five per-area caps are read per call, so they
+    !> apply to work started afterwards. Setting all six together does not make them simultaneous.
+    !>
+    !> **Adding a seventh cap means adding it here and to the assertion in `test_set_threads`.** The
+    !> name says nothing about how many "all" is, so a forgotten call is invisible -- which is how
+    !> this doc-comment came to say "all four" while a fifth and a sixth cap existed.
     subroutine parquet_set_threads(n)
-        integer, intent(in) :: n !! thread count for all five; must be >= 1.
+        integer, intent(in) :: n !! thread count for all six; must be >= 1.
 
         if (n < 1) error stop "parquet_set_threads: n must be >= 1 " // &
             "(0 means automatic to the sort, prefetch, table and string caps, but Arrow's pool " // &

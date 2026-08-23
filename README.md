@@ -98,7 +98,7 @@ link = ["arrow", "parquet"]
 
 4. Build/test your project with `fpm test`.
 
-> **On the link list:** your project lists `link = ["arrow", "parquet"]`, whereas `parquet-fortran`'s own `fpm.toml` lists `["arrow", "arrow_compute", "parquet"]`. The two differ intentionally — `arrow_compute` (used for read-side statistics and for the row-filter/sort kernels) is propagated to you automatically by fpm, and the C++ runtime (`-lstdc++` on Linux/GCC, `-lc++` on macOS/Clang) comes in through `FPM_LDFLAGS` rather than the `link` list, not through a `"c++"` entry here. See [Environment variables](#environment-variables) and the guide's [Troubleshooting](doc/pages/operating/troubleshooting.md).
+> **On the link list:** your project lists `link = ["arrow", "parquet"]`, whereas `parquet-fortran`'s own `fpm.toml` lists `["arrow", "arrow_compute", "parquet"]`. fpm passes that whole list on to whatever depends on the library, so listing `arrow` and `parquet` yourself is insurance rather than a requirement, and `arrow_compute` (used for read-side statistics and for the row-filter/sort kernels) never needs listing. The C++ runtime (`-lstdc++` on Linux/GCC, `-lc++` on macOS/Clang) is added by fpm itself when it links a project containing C++ sources — it comes from neither the `link` list nor `FPM_LDFLAGS`, so there is no `"c++"` entry to add here. See [Environment variables](#environment-variables) and the guide's [Troubleshooting](doc/pages/operating/troubleshooting.md).
 
 ## Important behavior
 
@@ -122,7 +122,11 @@ The code compiles successfully with the following compilers and libraries. It mi
       miscompile part of the schema-building API — see
       [Troubleshooting](doc/pages/operating/troubleshooting.md) if you hit a spurious
       "column not found" abort.
-- FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/))
+- FPM ([Fortran Package Manager](https://fpm.fortran-lang.org/)) — **minimum 0.13.0.**
+  This project's `fpm.toml` uses the `[features]` table and the feature-list form of
+  `[profiles]`, both introduced in that release; fpm 0.12.0 cannot parse the manifest at
+  all, and reports it as an error in *your* package file — see
+  [Troubleshooting](doc/pages/operating/troubleshooting.md#build-and-compile-errors).
 - A C++20-capable C++ compiler (Arrow/Parquet headers use `std::span`
   unconditionally): e.g. GCC ≥ 11 / a recent Clang. `-std=c++20` must be set
   (see [Environment variables](#environment-variables)).
@@ -148,6 +152,9 @@ To build with Intel Fortran (or any supported compiler), set these variables so 
 - FPM_CXXFLAGS should add relevant C++ flags
 - FPM_LDFLAGS should point to arrow and parquet library
 - FPM_FC can be used to set fortran compiler for FPM (e.g. FPM_FC=ifx)
+- FPM_CC / FPM_CXX set the C and C++ compilers. Usually unnecessary — fpm derives them from
+  the Fortran compiler's family — but needed when that family implies nothing, as with
+  `FPM_FC=nagfor` (`FPM_CC=gcc`, `FPM_CXX=g++`).
 
 In bash, initialize them as follows (replace `path_arrow` with your install root):
 
@@ -157,7 +164,7 @@ macOS (Clang/libc++):
 export LIBRARY_PATH=path_arrow/lib:$LIBRARY_PATH
 export FPM_FFLAGS="-Ipath_arrow/include"
 export FPM_CXXFLAGS="-std=c++20 -stdlib=libc++ -Ipath_arrow/include"
-export FPM_LDFLAGS="-Lpath_arrow/lib -lc++"
+export FPM_LDFLAGS="-Lpath_arrow/lib"
 export FPM_FC=ifx
 ```
 
@@ -167,12 +174,18 @@ Linux (GCC/libstdc++):
 export LIBRARY_PATH=path_arrow/lib:$LIBRARY_PATH
 export FPM_FFLAGS="-Ipath_arrow/include"
 export FPM_CXXFLAGS="-std=c++20 -Ipath_arrow/include"
-export FPM_LDFLAGS="-Lpath_arrow/lib -lstdc++"
+export FPM_LDFLAGS="-Lpath_arrow/lib"
 export FPM_FC=gfortran
 ```
 
 Note: `-std=c++20` is required on every platform (Arrow/Parquet headers use `std::span` unconditionally).
 `-stdlib=libc++` is macOS/Clang-specific and should be dropped on Linux.
+
+Note: the C++ standard library needs no entry in `FPM_LDFLAGS` — fpm adds it itself when it
+links a project containing C++ sources. Nor is a *runtime* library path (`DYLD_LIBRARY_PATH`,
+`LD_LIBRARY_PATH`) part of the normal setup; it is only needed if you built Arrow into a
+private prefix, and [Troubleshooting](doc/pages/operating/troubleshooting.md#runtime-errors)
+covers that case.
 
 Note: the exact variable set can vary by operating system and compiler toolchain.
 
@@ -182,7 +195,7 @@ To build/test this repository itself (as opposed to depending on it from your ow
 
 Only fpm is a supported way to consume this library (`[install] library = false` in `fpm.toml` means there's no installed `.mod`/library artifact for a non-fpm build system to link against directly).
 
-Hitting a build or link error? See [Troubleshooting](doc/pages/operating/troubleshooting.md) in the user guide for the common symptoms and their fixes. Hitting a *runtime* "library not found" error instead (`dyld: Library not loaded` / `error while loading shared libraries`) after a successful build? The same page's Troubleshooting guide covers `DYLD_LIBRARY_PATH`/`LD_LIBRARY_PATH` too.
+Hitting a build or link error? See [Troubleshooting](doc/pages/operating/troubleshooting.md) in the user guide for the common symptoms and their fixes. Hitting a *runtime* "library not found" error instead (`dyld: Library not loaded` / `error while loading shared libraries`) after a successful build? See that page's [Runtime errors](doc/pages/operating/troubleshooting.md#runtime-errors) section.
 
 ## Which module do I import?
 

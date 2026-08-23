@@ -541,6 +541,19 @@ Working rules:
   looked right, and only reading the generated HTML found it. So indent a continuation paragraph 4
   spaces, or leave the bullet as one paragraph — and when a page gains a multi-paragraph list item,
   render it once and check the following bullet is still an `<li>`.
+
+  **4 spaces is NECESSARY BUT NOT SUFFICIENT: the paragraph also needs a BLANK LINE after it,
+  before the next bullet.** Get the indent right and omit that blank line and the list still
+  breaks — python-markdown takes the following `- ` lines as *lazy continuation* of the indented
+  paragraph and swallows them into it, so they render as literal `- ` in running prose exactly as
+  the 2-space mistake does. Measured on `doc/pages/operating/troubleshooting.md`: one correct
+  4-space paragraph, no blank line before the next bullet, and the rendered page had **2 `<li>`
+  where the source had 8** — six bullets absorbed. Every check was green (`check_doc_anchors.py`,
+  all 38 source-convention checks including `check_no_indented_code_fence`), and only the render
+  showed it. **The cheap probe is to count, not to read**: compare `<li>` in the generated HTML
+  against `^- ` in the source, since a broken list still looks perfectly ordinary in both the
+  source and the rendered page. Note the safe move is usually neither indent — a bullet needing a
+  second paragraph is a bullet that wants promoting to its own `###` heading.
 - **Code-fence tags: `fortran`, `bash`, `yaml` or bare — never `maml`.** `fortran` for library
   code, `bash` for a shell command, a bare fence for program output and for a plain-text diagram.
   A MAML block takes **either** a bare fence or ```` ```yaml ```` — both are established practice

@@ -14,9 +14,11 @@ expect, and the knobs that change how loudly, how large and how fast the library
 
 - [Choosing a module](choosing-a-module.html) — what each entry module gives you and what it costs
   to compile against, plus the one caveat: no import makes the *package* Arrow-free.
-- [Error handling](error-handling.html) — the two failure classes (`error stop` and the
-  concurrency guard's abort) and what to catch where.
-- [Troubleshooting](troubleshooting.html) — build and link problems and their fixes.
+- [Error handling](error-handling.html) — the two failure classes (Fortran `error stop` and a
+  C++-level process exit), how to tell them apart by exit status, warnings, and asking with
+  `found=` instead of aborting.
+- [Troubleshooting](troubleshooting.html) — build, link and runtime symptoms with their fixes,
+  and what to put in a bug report.
 - [Thread safety](thread-safety.html) — the complete concurrency rules: per-thread readers and
   writers, what a shared `parquet_table` allows, transform sharing, and thread-pool tuning.
 - [Performance and memory](performance.html) — what reads cost, and how the library holds and

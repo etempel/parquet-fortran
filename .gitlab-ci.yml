@@ -20,23 +20,23 @@ before_script:
   - apt-get install -y --no-install-recommends ca-certificates lsb-release wget gnupg
         gfortran gcc g++ make git git-lfs
 
-  # Installing FPM (Fortran Package Manager) via pipx
+  # FPM (Fortran Package Manager) from the upstream release binary, NOT from PyPI.
+  # fpm.toml uses the `[features]` table and the feature-list form of `[profiles]`, both of which
+  # fpm 0.13.0 introduced, so this pin is what lets CI build the manifest the project is actually
+  # developed against -- README.md's Prerequisites states the same 0.13.0 floor for consumers.
+  # It also replaces an earlier `pipx install fpm` (which gave 0.12.0) plus a
+  # tools/prep_gitlab_fpm_toml.sh step that stripped both tables from the CI checkout to get past
+  # the manifest parse; neither is needed once fpm understands them. When moving to a newer fpm,
+  # change the version in the URL and the filename together.
+  - wget -nv -O /usr/local/bin/fpm https://github.com/fortran-lang/fpm/releases/download/v0.13.0/fpm-0.13.0-linux-x86_64-gcc-12
+  - chmod +x /usr/local/bin/fpm
+  - fpm --version
+
+  # python3-venv/pipx are still required, for gcovr below.
   - apt-get install -y python3-venv
   - apt-get install -y pipx
   - pipx ensurepath
-  - pipx install fpm
 
-  # fpm.toml is maintained against fpm 0.13.0-alpha, which is what this project is developed with;
-  # `pipx install fpm` above gives the newest RELEASE, 0.12.0, and that one cannot parse the
-  # manifest's `[features]` table or the feature-list form of `[profiles]`. Without this step the
-  # pipeline dies before compiling anything, with
-  #     <ERROR> *cmd_run* Package error: Key features is not allowed in package file
-  # Both tables have to go: verified against fpm 0.12.0 itself, removing only `[features]` makes
-  # it SEGFAULT rather than report anything. The script rewrites only this ephemeral checkout and
-  # keeps the original as fpm_original.toml; nothing about the local workflow changes, so
-  # `--profile nag`/`nagdeb` keep working for everyone outside CI. Drop this line once a released
-  # fpm understands both tables.
-  - tools/prep_gitlab_fpm_toml.sh
   # gcovr via pipx, NOT `apt-get install gcovr`: Ubuntu's apt archive can lag upstream by a lot
   # (24.04 ships 7.0, which cannot parse gcov output for a file at/past 10,000 lines -- see
   # CLAUDE.md's "gcovr <7.1 cannot parse gcov output for a 10,000+ line file" note, confirmed

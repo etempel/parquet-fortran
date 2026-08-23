@@ -39,8 +39,9 @@ point in the library.
   or in code, with qc bounds and read-time renaming, ending on two worked examples.
 - [Whole tables in memory](tables/index.html) — the high-level `parquet_table` layer: a whole
   file as one object, columns by name, read only when touched.
-- [Utilities and code generation](utilities/index.html) — sorting for plain arrays, reproducible
-  random numbers, generated table types, and embedding your own MAML schemas.
+- [Utilities and code generation](utilities/index.html) — sorting for arrays and columns,
+  reproducible random numbers and the sampling built on them, generated table types, and embedding
+  your own MAML schemas.
 - [Operating the library](operating/index.html) — choosing a module to import, errors,
   troubleshooting, thread safety, performance and settings.
 
@@ -79,7 +80,7 @@ All 23 pages, in reading order. (This list, each group's own page list and the
 **Utilities and code generation**
 
 - [Sorting arrays and columns with `pf_sort`/`pf_argsort`](utilities/sorting.html)
-- [Random numbers with `pf_random_at`](utilities/random.html)
+- [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Generated table types: named accessors from a MAML schema](utilities/generated-tables.html)
 - [Embedding your own MAML schemas in your own project](utilities/embedding-maml-schemas.html)
 

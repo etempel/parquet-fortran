@@ -21,7 +21,8 @@ expect, and the knobs that change how loudly, how large and how fast the library
   and what to put in a bug report.
 - [Thread safety](thread-safety.html) — the complete concurrency rules: per-thread readers and
   writers, what a shared `parquet_table` allows, transform sharing, and thread-pool tuning.
-- [Performance and memory](performance.html) — what reads cost, and how the library holds and
-  releases memory.
+- [Performance and memory](performance.html) — what reads and writes cost in memory, how to reach a
+  table's values without paying a name lookup per cell, and the OpenMP thread placement that
+  silently collapses threading.
 - [Settings](settings.html) — every process-global knob: verbosity, streams, thread caps,
   row-group sizing, and their environment variables.

@@ -197,18 +197,19 @@ counts and much the same amount of copying to do.
 **This one behaves differently from the other thread settings in one respect, and on a large machine
 the difference matters.** The others only ever *lower* the automatic answer. This one *replaces* it:
 the automatic answer is deliberately **capped well below** what OpenMP offers, because past a certain
-thread count a string rebuild stops scaling and begins losing ground — measured on a 384-logical-thread
-dual-socket machine, where taking the full count was 18–40 % **worse** than the best available. If you
-know your machine wants more than the default, say so and it is honoured, bounded only by what OpenMP
-offers:
+thread count a string rebuild stops scaling and begins losing ground — measured on a machine with
+several hundred logical threads, where taking the full count was 18–40 % **worse** than the best
+available. If you know your machine wants more than the default, say so and it is honoured, bounded
+only by what OpenMP offers:
 
 ```fortran
 call parquet_set_string_threads(128)   ! honoured, even though the automatic default is lower
 ```
 
-Measured speedups for the operations this governs, for calibration: about 1.15x on an 8-core laptop,
-1.6–2.7x on an 8-core desktop, and 3.4–4.5x on a 192-core server — larger columns gaining more than
-smaller ones on the same hardware. The result is byte-identical at every thread count.
+Measured speedups for the operations this governs, for calibration: a modest gain on a small
+machine, rising to several times on a large one — larger columns gaining more than smaller ones on
+the same hardware. `tools/benchmark_strings.sh` measures it on yours (see CONTRIBUTING.md). The
+result is byte-identical at every thread count.
 
 `parquet_string_threads()` reports the resolved answer for the current context;
 `parquet_get_string_threads()` reports the raw setting (`0` when automatic).

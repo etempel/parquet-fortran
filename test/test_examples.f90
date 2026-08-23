@@ -58,6 +58,8 @@ contains
                 test_rank_by_flux_example), &
             new_unittest("doc/pages/operating/choosing-a-module.md narrow_import example", &
                 test_narrow_import_example), &
+            new_unittest("doc/pages/operating/performance.md three_ways example", &
+                test_three_ways_example), &
             new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
             ]
     end subroutine collect_tests_parquet_examples
@@ -360,6 +362,50 @@ contains
     !! module here with a single library `use` line. This module imports `parquet`, so it can check
     !! that the printed permutation the page shows is still the one `pf_argsort` produces -- which is
     !! the half a reader would notice first, and the half nothing else asserts.
+    !> `doc/pages/operating/performance.md`'s `three_ways` program: the page's central advice, which
+    !> is that the three ways to reach a cell differ in cost and not in answer.
+    !>
+    !> **What this pins is the "not in answer" half**, which is the claim a reader relies on when
+    !> they rewrite a loop for speed. The page prints `12.0` three times; if any of the three stops
+    !> agreeing, the page's advice has become a correctness trap rather than a performance tip.
+    !> The costs themselves are not asserted here — a timing assertion in a test suite is a flake,
+    !> and `tools/benchmark_colindex.sh` is what measures them.
+    subroutine test_three_ways_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_table) :: t
+        type(parquet_table_col) :: c
+        real(real64), pointer :: p(:)
+        real(real64) :: mass(4) = [1.5_real64, 2.5_real64, 3.5_real64, 4.5_real64]
+        real(real64) :: by_name, by_handle, m
+        integer(int64) :: i
+
+        call parquet_new_table(t)
+        call t%add_column("mass", mass)
+
+        by_name = 0.0_real64
+        do i = 1, t%nrows()
+            call t%get_element("mass", i, m)
+            by_name = by_name + m
+        end do
+        call check(error, abs(by_name - 12.0_real64) < 1.0e-12_real64, &
+            "three_ways: the name form no longer totals the 12.0 the page prints")
+        if (allocated(error)) return
+
+        call t%column("mass", c)
+        by_handle = 0.0_real64
+        do i = 1, t%nrows()
+            call c%get(i, m)
+            by_handle = by_handle + m
+        end do
+        call check(error, abs(by_handle - by_name) < 1.0e-12_real64, &
+            "three_ways: the column handle disagrees with the name form")
+        if (allocated(error)) return
+
+        call t%col("mass", p)
+        call check(error, abs(sum(p) - by_name) < 1.0e-12_real64, &
+            "three_ways: the %col pointer disagrees with the name form")
+    end subroutine test_three_ways_example
+    !
     subroutine test_narrow_import_example(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int32) :: v(5) = [30, 10, 50, 20, 40]

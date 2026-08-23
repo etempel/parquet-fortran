@@ -587,7 +587,7 @@ Five things decide how many threads an operation uses, and the first four all de
 - **A small payload stays serial.** The floor is measured in bytes of payload rather than rows,
   because that is what has to be copied.
 - **Below four threads it stays serial**, which is less obvious and worth knowing: making a rebuild
-  splittable costs a restructure that is about 1.7x slower than the single pass it replaces, so two
+  splittable costs a restructure roughly half again as slow as the single pass it replaces, so two
   or three threads cannot pay for themselves. The library declines rather than running the slower
   shape.
 - **At most one thread per eight rows.** The validity bitmap packs eight rows to a byte, and thread
@@ -598,8 +598,10 @@ Five things decide how many threads an operation uses, and the first four all de
 - **The automatic count is capped well below what OpenMP offers.** Past a certain thread count this
   work stops scaling and starts losing ground — on a machine with several hundred logical threads,
   taking the full count measured 18–40 % *worse* than the best available. If your machine wants
-  more, `parquet_set_string_threads(n)` is honoured above the default, bounded only by what OpenMP
-  offers.
+  more, `parquet_set_string_threads(n)` is honoured above the default, bounded by what OpenMP offers
+  and by the CPU affinity the process actually has — see [Thread
+  placement](../operating/performance.html#thread-placement-omp_places-and-omp_proc_bind) for that
+  second bound, which applies to every thread count in the library and warns once when it bites.
 
 **The result is byte-identical whatever the thread count** — same values, same offsets, same nulls.
 Threading here is purely a wall-clock control, never a change of answer. For calibration: a modest

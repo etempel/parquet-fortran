@@ -136,7 +136,9 @@ properties are worth knowing, because each surprises someone:
 
 - **It is a cap, never a request.** Setting it above `OMP_NUM_THREADS` changes nothing; the library
   never asks for threads OpenMP has not been given.
-- **It does not override an explicit `threads=`.** A caller who names a thread count means it.
+- **It does not override an explicit `threads=`.** A caller who names a thread count means it —
+  except for the affinity clamp below, which bounds an explicit request too, because a request the
+  CPU mask cannot run is not one the library can grant.
 - **It does not lift the serial answer inside an OpenMP parallel region.** An unqualified sort
   called from inside your own parallel region stays serial, whatever this is set to — otherwise
   eight threads would each spawn eight more, which is slower than not threading at all. Pass
@@ -144,6 +146,12 @@ properties are worth knowing, because each surprises someone:
 
 `pf_sort_threads()` reports the resolved answer for the current context; `parquet_get_sort_threads()`
 reports the raw setting (`0` when automatic).
+
+**Every thread count in this library is additionally bounded by the CPU affinity of the process**,
+which under one common `OMP_PLACES` setting is far smaller than the machine. It applies to this cap,
+to the three below, and to an explicit `threads=`; it warns once per process when it bites; and it is
+the first thing to check when threading does nothing on a large machine. See [Thread
+placement](performance.html#thread-placement-omp_places-and-omp_proc_bind).
 
 ## Threads for reading a table
 
@@ -153,7 +161,8 @@ than a request, read per call, with `0` meaning automatic.
 
 `1` makes the prefetch serial. That is not a special case in the library — a one-thread cap simply
 fails the same applicability test that a single-threaded OpenMP environment already fails, and the
-ordinary serial path takes over.
+ordinary serial path takes over. The affinity bound above applies here too, and a mask that leaves
+one processor makes the prefetch serial by the same route.
 
 ## Threads for mutating a table
 
@@ -206,6 +215,10 @@ only by what OpenMP offers:
 call parquet_set_string_threads(128)   ! honoured, even though the automatic default is lower
 ```
 
+It is honoured up to what OpenMP offers and what the process's CPU affinity allows — the same bound
+every other thread count here has, and the one case where "honoured" still stops short of the number
+you named.
+
 Measured speedups for the operations this governs, for calibration: a modest gain on a small
 machine, rising to several times on a large one — larger columns gaining more than smaller ones on
 the same hardware. `tools/benchmark_strings.sh` measures it on yours (see CONTRIBUTING.md). The
@@ -230,20 +243,25 @@ permutation. That is what makes threading admissible here as a setting at all. T
 covers `pf_random_resample`, whose element `k` is a pure function of `(seed, stream, k)`; it splits
 the draw axis rather than the element axis, and is equally bit-identical.
 
-Measured on a 192-core dual-socket server, wall nanoseconds per element:
+How it scales, measured on a large many-core machine with `tools/benchmark_perm_rounds.sh` (see
+CONTRIBUTING.md), as a factor over the one-thread cost:
 
-| threads | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
-|---|---|---|---|---|---|---|---|
-| `m` = 10 000 | 9.53 | 5.01 | 2.79 | 1.58 | 1.17 | 1.09 | 1.60 |
-| `m` = 1 000 000 | 9.55 | 4.78 | 2.39 | 1.20 | 0.60 | 0.31 | 0.17 |
-| `pf_random_resample`, 10**7 draws | 12.04 | 6.02 | 3.01 | 1.51 | 0.75 | 0.38 | 0.19 |
+| threads | 2 | 4 | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|---|---|
+| `m` = 10 000 | ~2x | ~3x | ~6x | ~8x | ~9x | no further gain |
+| `m` = 1 000 000 | ~2x | ~4x | ~8x | ~16x | ~31x | ~56x |
+| `pf_random_resample`, 10**7 draws | ~2x | ~4x | ~8x | ~16x | ~32x | ~63x |
 
-The resample row scales almost perfectly to 64 threads (63×) and then flattens: 128 threads buys only
-0.16 ns. Asking for one thread per core (192 here) was *slower in absolute terms* than asking for 64
-— but that turned out to be a property of the **OpenMP runtime**, not of the machine: the same
-binary built with a different compiler ran 192 threads with no collapse at all. So treat a very high
-thread count as something to measure on your own toolchain rather than a number to assume, in either
-direction.
+**A large draw scales almost perfectly to 64 threads and then flattens; a small one stops much
+earlier**, because the fixed cost of opening a team stops being negligible against the work each
+thread gets. That is the shape to expect, and the sizes at which it turns are your machine's, not
+this table's.
+
+**One thread per core was *slower in absolute terms* than a fraction of that** on the machine
+measured — and that turned out to be a property of the **OpenMP runtime**, not of the machine: the
+same binary built with a different compiler ran the full count with no collapse at all. So treat a
+very high thread count as something to measure on your own toolchain rather than a number to assume,
+in either direction.
 
 `parquet_set_random_parallel_min_elements(n)` is the **work floor**: the fewest elements a thread
 must be given before a team is opened at all. Below `threads * n` elements the call runs serially,
@@ -346,8 +364,8 @@ quadratic in the size of a tied run. A single-key string sort has no such limit.
 **Unlike the counting path, this one has a real reason to turn off, and it is memory.** The radix
 path needs up to about **32 bytes of scratch per row** — four `int64` buffers for a single-key sort,
 three for a multi-key one — where the comparison sort needs none beyond the permutation itself.
-Measured on an 8-core arm64 laptop as the difference in peak resident set between the two paths,
-sorting a scattered `real(real64)` array:
+Measured as the difference in peak resident set between the two paths, sorting a scattered
+`real(real64)` array:
 
 | rows | scratch the radix path adds |
 |---|---|
@@ -364,9 +382,9 @@ row each.
 A string column whose values share more than eight leading bytes can add one further buffer — 8
 bytes per row — but only if such a run actually needs splitting, so an ordinary string column never
 allocates it. What you buy for the scratch is more than an order of magnitude of throughput: on the
-same machine and array, 20 million rows took 51.6 ns per element with the radix path against
-1147.6 ns without, running serially — a factor of 22, and the radix path drops to 20.5 ns on eight
-threads while the comparison sort does not move. So leave it on unless you are sorting near the edge
+same array, a twenty-million-row sort ran more than an order of magnitude faster per element with
+the radix path than without it, running serially — and the radix path halves again on eight threads
+while the comparison sort does not move at all. So leave it on unless you are sorting near the edge
 of available memory.
 
 If the scratch cannot be allocated the library does **not** fail: the radix path stands down and the

@@ -348,6 +348,14 @@ program error_scenarios
         call scenario_settings_env_long_value_preview()
     case ("settings_emit_info_channel")
         call scenario_settings_emit_info_channel()
+    case ("size_queries_read_no_column_data")
+        call scenario_size_queries_read_no_column_data()
+    case ("sort_affinity_clamp_warns")
+        call scenario_sort_affinity_clamp_warns()
+    case ("sort_affinity_clamp_silent")
+        call scenario_sort_affinity_clamp_silent()
+    case ("sort_affinity_clamp_absent")
+        call scenario_sort_affinity_clamp_absent()
     case ("strings_reindex_duplicate_index")
         call scenario_strings_reindex_duplicate_index()
     case ("strings_reindex_trusted_length_mismatch")
@@ -4503,6 +4511,203 @@ contains
     !> Both halves are printed here: the message at the default verbosity, then a second one with
     !> `verbosity="silent"` set, which must NOT appear. The second is the negative control -- a
     !> channel that ignored the setting would still pass a test that only looked for the first.
+    !> Two claims from `doc/pages/operating/performance.md`'s memory section, in one process because
+    !> they share one observable.
+    !>
+    !> **T1: the size queries read NO column data.** `parquet_get_col_size` and
+    !> `parquet_get_column_total_elements` answer from the schema for every column this library
+    !> writes. Three scenarios already assert that neither takes the WHOLE-column path
+    !> (`col_size_and_row_mode_avoid_whole_column_read` and its two siblings), which is strictly
+    !> weaker: a helper that decoded every row group one at a time would satisfy all three. This
+    !> asserts the stronger thing the page actually claims, using the physical-read counter.
+    !>
+    !> **T2: a column stays cached in the reader, so re-reading it is free.**
+    !> `nested_struct_shares_cached_read` asserts one physical read for two struct LEAF PATHS, which
+    !> is a different property -- nothing asserted it for a plain column read twice.
+    !>
+    !> **Both negative controls are the same counter moving.** An assertion that a counter is 0, or
+    !> that it did not change, passes perfectly against a counter that never increments at all; so
+    !> the first `parquet_read_column` must take it above 0, and reading a DIFFERENT column must
+    !> take it up again. Without those two, deleting the counter's increment would leave this green.
+    !>
+    !> Expected exit is 0, so reaching any `error stop` here is itself the failure signal -- the
+    !> same shape `nested_struct_shares_cached_read` uses.
+    subroutine scenario_size_queries_read_no_column_data()
+        interface
+            function parquet_debug_get_physical_column_read_count() result(n) &
+                bind(C, name="parquet_debug_get_physical_column_read_count")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t) :: n
+            end function parquet_debug_get_physical_column_read_count
+
+            subroutine parquet_debug_reset_physical_column_read_count() &
+                bind(C, name="parquet_debug_reset_physical_column_read_count")
+            end subroutine parquet_debug_reset_physical_column_read_count
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_size_queries_read_no_column_data.parquet"
+        integer(int32) :: id(8), vec(3, 8), got_id(8), got_id2(8), got_vec(3, 8)
+        integer(int64) :: total_elems, after_size, after_first, after_repeat, after_other
+        integer :: i, col_size_back
+        character(len=32) :: n_str
+
+        do i = 1, 8
+            id(i) = i
+            vec(:, i) = [100 * i + 1, 100 * i + 2, 100 * i + 3]
+        end do
+        call parquet_open_writer(writer, out_file, chunk_size=2)
+        call parquet_write_column(writer, "id", id)
+        call parquet_write_column(writer, "vec", vec)
+        call parquet_close_writer(writer)
+
+        call parquet_debug_reset_physical_column_read_count()
+        call parquet_open_reader(reader, out_file)
+
+        ! T1. A scalar column's width is 1 by construction and a FIXED_SIZE_LIST's is in the schema,
+        ! so neither of these four calls may touch the data.
+        call parquet_get_col_size(reader, "id", col_size_back)
+        if (col_size_back /= 1) error stop "size_queries: scalar col_size should be 1"
+        call parquet_get_col_size(reader, "vec", col_size_back)
+        if (col_size_back /= 3) error stop "size_queries: vector col_size should be 3"
+        call parquet_get_column_total_elements(reader, "id", total_elems)
+        if (total_elems /= 8_int64) error stop "size_queries: scalar total_elements should be 8"
+        call parquet_get_column_total_elements(reader, "vec", total_elems)
+        if (total_elems /= 24_int64) error stop "size_queries: vector total_elements should be 24"
+
+        after_size = parquet_debug_get_physical_column_read_count()
+        if (after_size /= 0_int64) then
+            write(n_str, '(i0)') after_size
+            error stop "size_queries: the size queries read column data (" // trim(n_str) // &
+                " physical read(s)); they must answer from the schema alone"
+        end if
+
+        ! Negative control for T1, and the one that makes the 0 above mean anything: the counter
+        ! must be able to move at all.
+        call parquet_read_column(reader, "id", got_id)
+        after_first = parquet_debug_get_physical_column_read_count()
+        if (after_first < 1_int64) &
+            error stop "size_queries: the physical-read counter never moved, so asserting 0 proved nothing"
+
+        ! T2: the same column again is served from the reader's cache.
+        call parquet_read_column(reader, "id", got_id2)
+        after_repeat = parquet_debug_get_physical_column_read_count()
+        if (after_repeat /= after_first) then
+            write(n_str, '(i0)') after_repeat - after_first
+            error stop "size_queries: re-reading a cached column cost " // trim(n_str) // &
+                " further physical read(s); it must be free"
+        end if
+        if (any(got_id2 /= got_id)) error stop "size_queries: the cached re-read returned different values"
+
+        ! Negative control for T2: a DIFFERENT column is not in the cache and must cost a read.
+        call parquet_read_column(reader, "vec", got_vec)
+        after_other = parquet_debug_get_physical_column_read_count()
+        if (after_other <= after_repeat) &
+            error stop "size_queries: reading a second column cost no physical read, so the cache " // &
+                "assertion above could not have failed either"
+
+        call parquet_close_reader(reader)
+        print '(a)', "size queries and the read cache exercised"
+    end subroutine scenario_size_queries_read_no_column_data
+    !
+    !> The affinity-clamp warning: it fires, its text is what the guide quotes, and it fires
+    !> **once per process**.
+    !>
+    !> **Why an error scenario for something that does not abort.** The observable is a line on the
+    !> library's message stream, and a test-drive test cannot see its own process's output. Expected
+    !> exit is 0; `test_errors.f90`'s wrapper is what reads the streams.
+    !>
+    !> **How "once per process" is asserted without counting lines.** The two provocations are sent
+    !> to DIFFERENT streams: the first with `message_stream="stderr"`, the second with `"stdout"`.
+    !> A correctly claimed warning therefore appears on stderr and **not** on stdout, which
+    !> `check_scenario_streams` already asserts in both directions -- and its absence half is the
+    !> whole point, since a warning that fired twice would put the second line on stdout. No
+    !> line-counting helper is needed, and the assertion is stronger than a count would be, because
+    !> it also pins which stream the setting sent it to.
+    !>
+    !> **The clamp is forced, not provoked.** `parquet_debug_set_affinity_procs(2)` is the only way
+    !> a test can make it bite: a real clamp needs a process bound to fewer processors than
+    !> `OMP_NUM_THREADS` asks for, and a process cannot bind itself after it has started. `threads=97`
+    !> with 5000 rows is what is asked for. 5000 so the `count > nrows` clamp, which runs FIRST,
+    !> leaves the 97 alone; and **97 rather than a round number so the message's "although N were
+    !> requested" is pinned to the REQUEST**. It used to report `omp_get_max_threads()` there, which
+    !> on a machine whose ICV happens to equal the request is indistinguishable from correct.
+    subroutine scenario_sort_affinity_clamp_warns()
+        real(real64) :: a(5000)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: i
+
+        do i = 1_int64, 5000_int64
+            a(i) = real(mod(i*7919_int64, 5000_int64), real64)
+        end do
+        call parquet_debug_reset_affinity_warning()
+        call parquet_debug_set_affinity_procs(2)
+
+        call parquet_set_message_stream("stderr")
+        call pf_argsort(a, perm, threads=97)
+
+        ! Second provocation, on the OTHER stream. If the once-per-process claim holds, nothing
+        ! lands here -- and that absence is what the wrapper checks.
+        call parquet_set_message_stream("stdout")
+        call pf_argsort(a, perm, threads=97)
+
+        call parquet_debug_set_affinity_procs(0)
+        call parquet_debug_reset_affinity_warning()
+        call parquet_reset_settings()
+        print '(a)', "affinity clamp warning exercised"
+    end subroutine scenario_sort_affinity_clamp_warns
+    !
+    !> Negative control 1: the same forced clamp under `verbosity="silent"` says nothing at all.
+    !>
+    !> Without this, the positive scenario passes just as happily against a warning that ignores the
+    !> verbosity setting -- which is exactly what `doc/pages/operating/performance.md` promises it
+    !> does not. The marker goes to stdout through `print`, which no setting governs, so the wrapper
+    !> can tell "the scenario ran and said nothing" from "the scenario did not run".
+    subroutine scenario_sort_affinity_clamp_silent()
+        real(real64) :: a(5000)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: i
+
+        do i = 1_int64, 5000_int64
+            a(i) = real(mod(i*7919_int64, 5000_int64), real64)
+        end do
+        call parquet_debug_reset_affinity_warning()
+        call parquet_debug_set_affinity_procs(2)
+        call parquet_set_verbosity("silent")
+        call pf_argsort(a, perm, threads=97)
+        call parquet_debug_set_affinity_procs(0)
+        call parquet_debug_reset_affinity_warning()
+        call parquet_reset_settings()
+        print '(a)', "affinity clamp silent control exercised"
+    end subroutine scenario_sort_affinity_clamp_silent
+    !
+    !> Negative control 2, and the important one: with NO clamp the identical sort says nothing.
+    !>
+    !> A warning that fired unconditionally would pass every assertion the positive scenario makes.
+    !> This runs the same `pf_argsort(a, perm, threads=97)` against a mask WIDER than the request, so
+    !> the only difference between the two scenarios is whether the mask is narrower than what was
+    !> asked for.
+    subroutine scenario_sort_affinity_clamp_absent()
+        real(real64) :: a(5000)
+        integer(int64), allocatable :: perm(:)
+        integer(int64) :: i
+
+        do i = 1_int64, 5000_int64
+            a(i) = real(mod(i*7919_int64, 5000_int64), real64)
+        end do
+        call parquet_debug_reset_affinity_warning()
+        ! A mask provably WIDER than the request, rather than the machine's real one: with the real
+        ! mask this control would pass on a machine with 97 or more processors and fail on a smaller
+        ! one, making it a statement about the runner rather than about the library.
+        call parquet_debug_set_affinity_procs(1024)
+        call pf_argsort(a, perm, threads=97)
+        call parquet_debug_reset_affinity_warning()
+        call parquet_reset_settings()
+        print '(a)', "affinity clamp absent control exercised"
+    end subroutine scenario_sort_affinity_clamp_absent
+    !
     subroutine scenario_settings_emit_info_channel()
 
         call parquet_emit_info("info-channel-marker-visible")

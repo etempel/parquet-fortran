@@ -63,7 +63,7 @@ module test_settings
     use iso_fortran_env, only : output_unit, int32, int64, real64
     use iso_c_binding, only : c_null_char, c_int
 #ifdef _OPENMP
-    use omp_lib, only : omp_get_max_threads
+    use omp_lib, only : omp_get_max_threads, omp_get_num_procs
 #endif
     use testdrive, only : new_unittest, unittest_type, error_type, check
     !
@@ -86,6 +86,7 @@ contains
             new_unittest("reset returns every knob to its factory value", test_reset_all_knobs), &
             new_unittest("sort_threads caps the automatic thread count", test_sort_threads_effect), &
             new_unittest("sort_threads never lifts the in-parallel serial answer", test_sort_threads_respects_region), &
+            new_unittest("pf_sort_threads never exceeds the CPU affinity mask", test_sort_threads_affinity_clamp), &
             new_unittest("prefetch_threads caps the parallel prefetch", test_prefetch_threads_effect), &
             new_unittest("table_threads caps the parallel per-column rewrite", test_table_threads_effect), &
             new_unittest("string_threads caps what one string column resolves to", &
@@ -401,6 +402,64 @@ contains
             "a sort_threads cap above the OpenMP thread count must not raise the answer")
         call parquet_reset_settings()
     end subroutine test_sort_threads_effect
+
+    !> The third thing `pf_sort_threads` is documented to account for, after the setting cap and the
+    !> parallel-region rule: the CPU affinity mask. `doc/pages/operating/performance.md` tells a
+    !> reader to call it when threading looks wrong on a large machine, so the number it reports has
+    !> to be one that can actually run.
+    !>
+    !> **This cannot be provoked on an ordinary machine** -- reproducing the clamp needs a process
+    !> bound to fewer processors than `OMP_NUM_THREADS` asks for, which a test cannot arrange from
+    !> inside itself. What it CAN assert is the invariant that clamp exists to maintain, on every
+    !> machine including a bound one: the answer never exceeds `omp_get_num_procs()`. Deleting the
+    !> clamp leaves this passing wherever the two agree and failing wherever they do not, which is
+    !> exactly the population that has the bug.
+    !>
+    !> **The negative control is the second assertion**, and it is what stops a hard-coded `1`
+    !> passing: with the setting automatic and OpenMP available, the answer must also be at least 1
+    !> and must rise when the environment offers more, which `test_sort_threads_effect` next door
+    !> pins from the other side. A one-sided inequality on its own is satisfied by any constant.
+    subroutine test_sort_threads_affinity_clamp(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: n, unbound
+        !
+        call parquet_reset_settings()
+        call parquet_set_verbosity("silent")     ! the clamp warns; this test is about the number
+        call parquet_debug_set_affinity_procs(0)
+        unbound = pf_sort_threads()
+#ifdef _OPENMP
+        call check(error, unbound <= omp_get_num_procs(), &
+            "pf_sort_threads() must never exceed omp_get_num_procs(): threads cannot escape the mask")
+        if (allocated(error)) goto 900
+        call check(error, unbound == min(omp_get_max_threads(), omp_get_num_procs()), &
+            "with the setting automatic, pf_sort_threads() is the smaller of the ICV and the mask")
+        if (allocated(error)) goto 900
+#else
+        call check(error, unbound == 1, "without OpenMP pf_sort_threads() is 1")
+        if (allocated(error)) goto 900
+#endif
+        !
+        ! The clamp made to BITE. Without the override this test is vacuous on any machine whose
+        ! mask is the whole machine, which is every machine a test runs on: verified by mutation --
+        ! deleting the clamp left the two assertions above passing.
+        call parquet_debug_set_affinity_procs(1)
+        n = pf_sort_threads()
+        call check(error, n == 1, "pf_sort_threads() reports the mask when the mask is smaller")
+        if (allocated(error)) goto 900
+        !
+        ! Negative control: the same override raised above what OpenMP offers must change nothing,
+        ! so the clamp is shown to LOWER only. A clamp that fired unconditionally, or one that
+        ! replaced the answer instead of bounding it, fails here while passing the assertion above.
+        call parquet_debug_set_affinity_procs(unbound + 16)
+        n = pf_sort_threads()
+        call check(error, n == unbound, &
+            "a mask wider than the OpenMP thread count must not raise pf_sort_threads()")
+        !
+900     continue
+        call parquet_debug_set_affinity_procs(0)
+        call parquet_debug_reset_affinity_warning()
+        call parquet_reset_settings()
+    end subroutine test_sort_threads_affinity_clamp
 
     !> Risk-40: an unqualified sort inside an OpenMP parallel region runs SERIALLY, and a setting
     !> must not lift that back up -- eight threads each asking for eight more is the oversubscription

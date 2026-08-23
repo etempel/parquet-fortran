@@ -151,17 +151,19 @@ into, so it keeps the ordinary whole-column read.
 because both are immutable Arrow arrays. So every combination is parallel, and every one returns
 exactly what a serial read would:
 
-| opened with | measured, 16 columns × 2 M rows, 8 threads |
+| opened with | speedup over a serial read, 16 columns × 2 M rows, 8 threads |
 |---|---|
-| nothing | **4.5x** |
-| `qc=` | **3.3x** — rules are installed per reader but checked per column, and each column is read by one thread, so nothing is checked or warned twice |
-| `sample_fraction=` | **3.5x**, seeded or not — the table settles one seed at open and the draw rides inside the shared mask |
-| `filter=` | **3.0x** with one key column, **1.9x** with eight — the filter's own evaluation is done once, by the table's reader, and stays serial |
-| `sort=` | **2.2x** — one permutation, built once |
-| `filter=` + `sort=` | **1.8x** |
+| nothing | **several times** — the best case, and the one the others are measured against |
+| `sample_fraction=` | a little below the best case, seeded or not — the table settles one seed at open and the draw rides inside the shared mask |
+| `qc=` | a little below that — rules are installed per reader but checked per column, and each column is read by one thread, so nothing is checked or warned twice |
+| `filter=` | lower again, and it falls further as the filter gains key columns — the filter's own evaluation is done once, by the table's reader, and stays serial |
+| `sort=` | lower still — one permutation, built once |
+| `filter=` + `sort=` | the lowest of the six, for both reasons at once |
 
-The transformed cases fall short of 4.5x because the transform itself is still worked out serially,
-once, before the parallel read begins — not because any of it is repeated.
+Every one of them is faster than a serial read; they are ordered by how much serial work the
+transform leaves in front of the parallel part. The transformed cases fall short of the best case
+because that work is done once, before the parallel read begins — not because any of it is
+repeated. `tools/benchmark_table.sh` measures the ratios on your own machine (see CONTRIBUTING.md).
 
 **Qc warnings are not duplicated by this.** A `qc_soft=.true.` violation prints at most once per
 column per reader, and each column is read by exactly one thread, so the parallel read prints

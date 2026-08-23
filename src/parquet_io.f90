@@ -72,4 +72,5 @@ module parquet_io
     private :: parquet_valid_compressions, parquet_resolve_writer_compression
     private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
     private :: parquet_output_is_suppressed
+    private :: parquet_clamp_to_affinity
 end module parquet_io

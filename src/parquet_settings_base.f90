@@ -67,6 +67,8 @@ module parquet_settings_base
     public :: parquet_get_random_threads
     public :: parquet_get_random_parallel_min_elements
     public :: parquet_auto_thread_count
+    public :: parquet_clamp_to_affinity
+    public :: parquet_debug_set_affinity_procs, parquet_debug_reset_affinity_warning
     public :: parquet_nested_team_unsafe
     public :: verb_normal, verb_silent, verb_errors_only
     public :: verbosity_tokens, stream_tokens, stream_stdout, stream_stderr
@@ -159,6 +161,36 @@ module parquet_settings_base
     logical, save :: cfg_sort_radix_path = .true.
     !> Largest key value RANGE (not cardinality) the counting path will accept. `0` = built-in.
     integer(int64), save :: cfg_sort_counting_bucket_limit = 0
+    !> Nonzero once the affinity-clamp warning has been claimed, so it is said once per PROCESS
+    !! rather than once per operation or once per subsystem. Claimed by an `!$omp atomic capture`
+    !! in `parquet_clamp_to_affinity`, which is reached only by the call that is about to print.
+    !!
+    !! **One claim across every area, deliberately.** The message names the subsystem that noticed,
+    !! but what it asks the reader to fix is the process's `OMP_PLACES`/`OMP_PROC_BIND` setting --
+    !! one line of advice, not one per subsystem. A run whose sort, prefetch and string rebuilds are
+    !! all clamped has one environment problem, not three.
+    !!
+    !! **An integer rather than the obvious `logical`, and that is a portability constraint, not a
+    !! preference.** The natural test-and-set is `seen = flag; flag = .true.` inside an
+    !! `atomic capture`, and nagfor 7.2 rejects it -- *"Invalid form of expression in OpenMP ATOMIC
+    !! assignment"* -- while gfortran accepts it, so the shape compiles on the machine you wrote it
+    !! on and fails on the next one. A fetch-and-add over an integer is accepted by both, and the
+    !! claim is then "the caller that displaced a zero". Do not simplify it back to a logical.
+    !!
+    !! **A genuine runtime counter, so it is one of the very few module variables here that is not
+    !! a `cfg_*` knob.** `CLAUDE.md`'s NAG `-thread_safe` note enumerates them; keep that list
+    !! current if another appears.
+    integer(int64), save :: affinity_clamp_claims = 0_int64
+    !> Overrides what `parquet_clamp_to_affinity` treats as this process's processor count.
+    !! **Test-only**; `<= 0` restores the real `omp_get_num_procs()`.
+    !!
+    !! **Without it the clamp is untestable, and its tests are VACUOUS rather than absent** --
+    !! which is worse, because they pass. Reproducing the clamp needs a process bound to fewer
+    !! processors than `OMP_NUM_THREADS` asks for, and a process cannot bind itself after it has
+    !! started. On an ordinary machine `omp_get_max_threads()` and `omp_get_num_procs()` agree,
+    !! so every assertion about the clamp holds just as well with the clamp deleted: verified by
+    !! mutation, where removing the clamp entirely left the invariant test passing.
+    integer, save :: dbg_affinity_procs = 0
     !
     ! ---- Generic setters over both integer kinds ----
     !
@@ -226,20 +258,125 @@ contains
     !! **Never report more threads than can actually run.** `omp_get_max_threads` answers an ICV,
     !! which is what the environment ASKED for; `omp_get_num_procs` answers what this thread's
     !! affinity mask allows. They differ whenever the initial thread was bound before `main`.
-    integer function parquet_auto_thread_count(cap) result(n)
+    integer function parquet_auto_thread_count(cap, area) result(n)
 #ifdef _OPENMP
-        use omp_lib, only: omp_get_max_threads, omp_get_level, omp_get_num_procs
+        use omp_lib, only: omp_get_max_threads, omp_get_level
 #endif
-        integer, intent(in) :: cap                  !! caller's domain cap; `<= 0` means no cap
+        integer, intent(in) :: cap             !! caller's domain cap; `<= 0` means no cap
+        character(len=*), intent(in) :: area   !! subsystem name, for the affinity-clamp warning
         n = 1
 #ifdef _OPENMP
         if (omp_get_level() == 0) n = omp_get_max_threads()
 #endif
         if (cap > 0 .and. cap < n) n = cap
-#ifdef _OPENMP
-        if (n > omp_get_num_procs()) n = max(1, omp_get_num_procs())
-#endif
+        n = parquet_clamp_to_affinity(n, area)
     end function parquet_auto_thread_count
+    !
+    !> Lowers `n` to the number of processors this process's CPU affinity actually allows, and says
+    !> so **once per process** when that clamp bites.
+    !!
+    !! **This is the ONE place the affinity clamp lives.** Four resolvers reach it -- the sort's
+    !! `resolve_thread_count`, `pf_sort_threads` and the bulk random draws through
+    !! `parquet_auto_thread_count`, `prefetch_thread_count` (`src/parquet_tables_read.f90`) and
+    !! `parquet_string_threads` (`src/parquet_strings.f90`). It is here rather than in any of them
+    !! because three of the four live in tiers that cannot see each other, and a second copy of a
+    !! rule like this is how two subsystems come to disagree about the same machine.
+    !!
+    !! **`omp_get_max_threads` is what the environment ASKED for; `omp_get_num_procs` is what the
+    !! affinity mask allows.** They differ whenever the initial thread was bound before `main` --
+    !! `OMP_PROC_BIND` with `OMP_PLACES=cores` binds it to one core, after which a team asked for 64
+    !! lands on however few processors the mask holds and time-shares them, which is slower than not
+    !! threading at all. Clamping is therefore a performance decision, never a correctness one: the
+    !! answer is identical at every thread count.
+    !!
+    !! **The warning is the whole point, because nothing else reveals this.** No call fails, no
+    !! result changes, and the only symptom is wall-clock. `area` names the subsystem that noticed
+    !! so the reader knows which work was affected; the fix it recommends is the same either way.
+    !!
+    !! **Every resolver passes an `area`; there is no silent variant, deliberately.** The obvious
+    !! refinement -- let a QUERY such as `pf_sort_threads()` or `parquet_string_threads()` clamp
+    !! without printing, and leave the warning to the operation that follows -- was tried and is
+    !! wrong here, because `pf_sort_threads()` is exactly how the sort's own AUTOMATIC path resolves
+    !! its count. A silent query therefore hands `resolve_thread_count` an already-clamped number,
+    !! whose own clamp is then a no-op, and the warning becomes unreachable for the one job it
+    !! exists to catch: `OMP_NUM_THREADS=64` under `OMP_PLACES=cores`, no explicit `threads=`, and
+    !! nothing said. Warning from the shared clamp covers both paths and every subsystem at once.
+    integer function parquet_clamp_to_affinity(n, area) result(m)
+#ifdef _OPENMP
+        use omp_lib, only: omp_get_num_procs
+#endif
+        integer, intent(in) :: n             !! threads resolved before the clamp.
+        character(len=*), intent(in) :: area !! subsystem this count belongs to, for the message.
+        character(len=32) :: got, asked
+        integer(int64) :: seen !! the claim count this call observed; 0 means this call won it.
+        integer :: procs       !! processors the mask allows; 0 when this build has no OpenMP.
+        !
+        m = max(1, n)
+        procs = 0
+#ifdef _OPENMP
+        procs = omp_get_num_procs()
+#endif
+        if (dbg_affinity_procs > 0) procs = dbg_affinity_procs
+        if (procs < 1) return
+        if (m <= procs) return
+        m = max(1, procs)
+        ! Fast path first: in a process whose affinity really is clamped every resolver reaches here
+        ! on every operation, so this must cost one load once the line has been said. `atomic read`
+        ! is a plain load on every real target.
+        !$omp atomic read
+        seen = affinity_clamp_claims
+        if (seen /= 0_int64) return
+        ! Suppression is checked BEFORE the claim, deliberately: a run that silenced its output must
+        ! not consume the one warning, so a later call with output enabled still receives it.
+        !
+        ! **`parquet_output_is_suppressed` rather than `parquet_emit_warning`'s own threshold**, so
+        ! this one message goes quiet at verbosity `"silent"` while an ordinary warning survives to
+        ! `"errors_only"`. That is deliberate and is what `doc/pages/operating/performance.md`
+        ! documents: this is advice about the caller's ENVIRONMENT, not a report of anything the
+        ! library found wrong, so it belongs with the output a `"silent"` run is asking to be spared.
+        if (parquet_output_is_suppressed()) return
+        !$omp atomic capture
+        seen = affinity_clamp_claims
+        affinity_clamp_claims = affinity_clamp_claims + 1_int64
+        !$omp end atomic
+        if (seen /= 0_int64) return
+        write (got, '(i0)') m
+        ! **The count REQUESTED, not `omp_get_max_threads()`.** The clamp fires for an explicit
+        ! `threads=` too, and reporting the environment's ICV there names a number the caller never
+        ! asked for -- `threads=100` on a machine offering 8 used to print "although 8 were
+        ! requested". `n` is what the resolver actually settled on before this clamp touched it, so
+        ! it is right on both paths: the caller's own number when they named one, and the
+        ! environment's (already narrowed by any cap) when they did not.
+        write (asked, '(i0)') n
+        call parquet_emit_warning(trim(area) // " is limited to " // trim(got) // &
+            " thread(s) because this process's CPU affinity allows no more, although " // &
+            trim(asked) // " were requested. This usually means OMP_PROC_BIND is set with " // &
+            "OMP_PLACES=cores; OMP_PLACES=sockets avoids it.")
+    end function parquet_clamp_to_affinity
+    !
+    !> Overrides the processor count `parquet_clamp_to_affinity` clamps to. **Test-only**;
+    !! `<= 0` restores the real `omp_get_num_procs()`.
+    !!
+    !! **Public only because Fortran has no narrower visibility, and deliberately accepted** -- the
+    !! same trade `parquet_debug_set_string_min_bytes` makes next door. `CLAUDE.md` asks for a C++
+    !! hook in preference to a Fortran one, and this module is the Arrow-free leaf: it has no
+    !! `bind(C)` surface at all, so there is no C++ side to put it on. It is called by no library
+    !! code, and it is process-global saved state, so a suite that uses it must be excluded from
+    !! test-drive's per-test parallelism.
+    subroutine parquet_debug_set_affinity_procs(n)
+        integer, intent(in) :: n !! processors to pretend the affinity mask allows; `<= 0` restores.
+        dbg_affinity_procs = n
+    end subroutine parquet_debug_set_affinity_procs
+    !
+    !> Clears the once-per-process claim on the affinity-clamp warning. **Test-only.**
+    !!
+    !! The warning is said once per process by design, which makes it a single-shot observable: a
+    !! test that provokes it consumes it for every test after it in the same process. Resetting is
+    !! what lets a negative control ("this configuration says nothing") run after a positive one and
+    !! still mean something.
+    subroutine parquet_debug_reset_affinity_warning()
+        affinity_clamp_claims = 0_int64
+    end subroutine parquet_debug_reset_affinity_warning
     !
     !> Whether opening a thread team here would build the shape libgomp deadlocks on.
     !!

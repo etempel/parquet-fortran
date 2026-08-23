@@ -1411,7 +1411,7 @@ contains
             want = max(1_int64, int(threads, int64))
             if (parquet_nested_team_unsafe()) want = 1_int64
         else
-            want = int(parquet_auto_thread_count(parquet_get_random_threads()), int64)
+            want = int(parquet_auto_thread_count(parquet_get_random_threads(), "random draws"), int64)
         end if
         floor_per = parquet_get_random_parallel_min_elements()
         if (floor_per > 0_int64) then

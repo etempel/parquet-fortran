@@ -350,8 +350,13 @@ contains
     !!   each asking for `T` more is slower than not threading at all, and nesting is the caller's
     !!   business. Note `omp_get_max_threads()` reads an ICV rather than the current team size, so
     !!   inside an 8-thread region it answers 8 and a missing check means 8x8.
-    !! * **Otherwise, an explicit `parquet_set_string_threads` is HONOURED**, bounded only by what
-    !!   OpenMP offers. A caller who names a number has said what they want.
+    !! * **Otherwise, an explicit `parquet_set_string_threads` is HONOURED**, bounded by what OpenMP
+    !!   offers and by the CPU affinity this process actually has. A caller who names a number has
+    !!   said what they want -- but a number the affinity mask cannot run is not something they can
+    !!   have, and opening it would time-share the mask's processors rather than use more of them.
+    !!   That last bound is `parquet_clamp_to_affinity` (src/parquet_settings_base.f90), shared with
+    !!   sorting, table prefetching and the bulk random draws, and it warns once per process when it
+    !!   bites.
     !! * **With no explicit setting, the automatic answer is capped at
     !!   `STRING_MAX_AUTO_THREADS`**, not taken as `omp_get_max_threads()`. See that constant for the
     !!   measurement; in short, a very large machine's full thread count is past the point where
@@ -377,6 +382,7 @@ contains
             n = min(string_max_auto(), avail)
         end if
         if (n < 1) n = 1
+        n = parquet_clamp_to_affinity(n, "string operations")
     end function parquet_string_threads
     !
     !> Overrides the payload floor below which a bulk operation stays serial. **Test-only**; `<= 0`

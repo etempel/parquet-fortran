@@ -310,7 +310,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolved count is also clamped to the CPU affinity the process actually has, since threads cannot
   escape their mask, and a one-per-process warning says so when the clamp bites -- an
   `OMP_PROC_BIND` setting combined with `OMP_PLACES=cores` otherwise disables threading silently
-  (see [Performance](doc/pages/operating/performance.md#thread-placement-omp_places-and-omp_proc_bind)). The
+  (see [Performance](doc/pages/operating/performance.md#thread-placement-omp_places-and-omp_proc_bind)).
+  That clamp covers **every** thread count the library resolves, not only a sort's: table
+  prefetching, the string bulk paths and the bulk random draws are bounded by the same mask, and the
+  warning names whichever of them noticed first. It applies to an explicit `threads=` and to an
+  explicit `parquet_set_string_threads` too, because a count the mask cannot run is not one that can
+  be granted; it changes only how fast the work runs, never what it answers. The
   answer is bit-identical at every thread count, because the comparator is a total order under
   which no two rows compare equal, so `threads=` is purely a performance control. Threading is
   worth a substantial speedup over a serial sort, and the margin grows with the array size; the

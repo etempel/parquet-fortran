@@ -705,21 +705,22 @@ for turning the path off entirely.
 
 ### What it actually buys
 
-Measured on an 8-core arm64 laptop, `pf_argsort` over scattered `real(real64)`, best of several
-rounds:
+`pf_argsort` over scattered `real(real64)`, on a small machine, best of several rounds — the shape
+matters here rather than the absolute times, which are whatever your own hardware gives you.
+`tools/benchmark_sort_engine.sh` measures it there (see CONTRIBUTING.md):
 
-| rows | serial | 8 threads | speedup |
-|---|---|---|---|
-| 2 000 | 0.025 ms | 0.023 ms | threading declines — see below |
-| 32 000 | 0.40 ms | 0.40 ms | threading declines — see below |
-| 1 000 000 | 17.8 ms | 6.6 ms | 2.7x |
-| 20 000 000 | 0.42 s | 0.13 s | 3.2x |
+| rows | 8 threads against serial |
+|---|---|
+| 2 000 | threading declines — see below |
+| 32 000 | threading declines — see below |
+| 1 000 000 | a few times faster |
+| 20 000 000 | a few times faster, and gaining slowly with size |
 
 **The two smallest rows do not show threading losing; they show it declining.** Below the
-minimum-work threshold `threads=` is ignored, so both columns run the same serial sort and differ
-only by measurement noise. That is the threshold behaving correctly rather than a cost being paid —
-opening a team is worth roughly 180 microseconds on this machine, which is several times what
-sorting 32 000 elements costs in the first place.
+minimum-work threshold `threads=` is ignored, so both arms run the same serial sort and differ only
+by measurement noise. That is the threshold behaving correctly rather than a cost being paid —
+opening a thread team costs more than sorting a few tens of thousands of elements does in the first
+place, which is the comparison the threshold makes.
 
 **The speedup falls short of the thread count, and that is expected.** A radix sort makes one pass
 over the data per byte of key, so its cost is dominated by memory traffic rather than by

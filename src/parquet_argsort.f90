@@ -32,7 +32,8 @@ module parquet_argsort
     use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
     use iso_c_binding, only : c_ptr, c_loc, c_null_ptr, c_int8_t, c_char
     use, intrinsic :: ieee_arithmetic, only : ieee_is_nan
-    ! Every sorting knob this tier reads, plus the output pair, because `warn_thread_clamp` emits.
+    ! Every sorting knob this tier reads, plus the output pair, because the affinity clamp in
+    ! `parquet_clamp_to_affinity` emits through this tier's own resolvers.
     ! Taking them from the leaf rather than from `parquet_settings` is what keeps the graph clear of
     ! `parquet_bindings`; see that module's header for the rule.
     use parquet_settings_base
@@ -161,17 +162,6 @@ module parquet_argsort
     ! Both are process-global saved state, which is why the `sorting` and `sort` suites must stay
     ! excluded from test-drive's per-test parallelism (test/run_tester.f90) -- they already are.
     logical, save :: dbg_fortran_engine = .true. !! .true. routes `drive_engine` to the Fortran sort.
-    !> Nonzero once the affinity-clamp warning has been claimed, so it is said once per process
-    !! rather than once per sort. Claimed by an `!$omp atomic capture` in `warn_thread_clamp`, which
-    !! is where the reasoning lives.
-    !!
-    !! **An integer rather than the obvious `logical`, and that is a portability constraint, not a
-    !! preference.** The natural test-and-set is `seen = flag; flag = .true.` inside an
-    !! `atomic capture`, and nagfor 7.2 rejects it -- *"Invalid form of expression in OpenMP ATOMIC
-    !! assignment"* -- while gfortran accepts it, so the shape compiles on the machine you wrote it
-    !! on and fails on the next one. A fetch-and-add over an integer is accepted by both, and the
-    !! claim is then "the caller that displaced a zero". Do not simplify it back to a logical.
-    integer(int64), save :: thread_clamp_claims = 0_int64
     !> Overrides the introsort's depth limit; NEGATIVE restores the computed `2*floor(log2(n))`.
     !!
     !! Zero forces the heapsort fallback on the first partition, which is otherwise unreachable from

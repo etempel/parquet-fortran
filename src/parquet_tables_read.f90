@@ -937,7 +937,7 @@ contains
     !> per-thread reader array AND limits the team, and those two disagreeing is an out-of-bounds
     !> index rather than a slowdown.
     integer function prefetch_thread_count() result(n)
-        use parquet_settings, only : parquet_get_prefetch_threads
+        use parquet_settings, only : parquet_get_prefetch_threads, parquet_clamp_to_affinity
 #ifdef _OPENMP
         use omp_lib, only : omp_get_max_threads
 #endif
@@ -949,6 +949,13 @@ contains
 #endif
         cap = parquet_get_prefetch_threads()
         if (cap > 0 .and. cap < n) n = cap
+        ! **Clamped to the affinity mask, like every other thread count in this library.**
+        ! `omp_get_max_threads()` answers what the environment asked for; a process bound by
+        ! `OMP_PROC_BIND` with `OMP_PLACES=cores` may have far fewer processors than that, and a
+        ! team opened at the ICV then time-shares them -- measurably worse than not threading. The
+        ! rule and its one-per-process warning live in `parquet_clamp_to_affinity`
+        ! (src/parquet_settings_base.f90); this must not grow a second copy of either.
+        n = parquet_clamp_to_affinity(n, "table prefetching")
     end function prefetch_thread_count
 
     !> Records, for the test suite only, how many threads the last parallel prefetch was given.

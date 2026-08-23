@@ -48,6 +48,13 @@ module parquet_settings
     ! ---- Re-exported from parquet_settings_base, so this module's surface is unchanged ----
     public :: parquet_output_is_suppressed
     public :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
+    ! Re-exported for `parquet_tables_read`'s `prefetch_thread_count`, which is three tiers away
+    ! from the leaf and can only reach it through here. Both facades hide it again; Fortran has no
+    ! package scope, so this is the same shape the emit channels above already use.
+    public :: parquet_clamp_to_affinity
+    ! The affinity clamp's two test-only hooks. Public for the reason every Fortran-side debug
+    ! hook is (CLAUDE.md): this leaf has no `bind(C)` surface to put a C++ one on.
+    public :: parquet_debug_set_affinity_procs, parquet_debug_reset_affinity_warning
     public :: parquet_set_sort_threads, parquet_get_sort_threads
     public :: parquet_set_sort_radix_path, parquet_get_sort_radix_path
     public :: parquet_set_sort_counting_path, parquet_get_sort_counting_path

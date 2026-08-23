@@ -88,6 +88,7 @@ module parquet
     ! emits has to reach them, so parquet_settings makes them public, and the facade hides them.
     private :: parquet_emit_info, parquet_emit_warning, parquet_emit_error_context
     private :: parquet_output_is_suppressed
+    private :: parquet_clamp_to_affinity
     ! parquet_columns' typed per-cell accessor tier, hidden for the same reason again. These are
     ! how parquet_tables reaches a column's storage without a type-bound call -- which is what
     ! keeps ifx from building a runtime type descriptor in the caller's prologue on every access

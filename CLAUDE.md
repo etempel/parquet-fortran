@@ -496,6 +496,20 @@ Working rules:
   into cross-file `doc/pages/<page>.md#…` / `README.md#…` links — repoint them, and fix
   now-stale relative wording ("above", "below", "this README"). Re-run `tools/check_doc_anchors.py`
   afterward (see "Checking documentation links" below).
+- **A performance figure on a guide page is APPROXIMATE and MACHINE-FREE.** A reader cannot
+  reproduce a number quoted to three significant figures against a compiler and a machine they do
+  not have, so a page carrying one is stating something it cannot support. **No compiler names, no
+  machine descriptions, and no decimals on a ratio** — `"4.17x (gfortran) and 3.93x (ifx)"` becomes
+  `"several times"`. Name the tool that measures it instead (`tools/benchmark_table.sh`,
+  `tools/benchmark_random.sh`, `tools/benchmark_colindex.sh`, …) so a reader can get their own
+  number. **Two things are NOT covered**, and stripping them makes the page worse: a **contract
+  number** — a threshold, an acceptance rate, a documented bound, a growth factor, or a share with
+  real cross-machine provenance — stays exact; and a **parity claim** ("peak memory is the same at
+  every thread count") is the point of the sentence rather than a speed measurement. The test is
+  whether the number is *evidence for a design choice the reader has to make*, or *a snapshot of one
+  machine's throughput*. This applies to performance figures only: a compiler named in a
+  **correctness** or **build** context (a miscompilation to avoid, a flag to pass, a reproducibility
+  guarantee across compilers) is information the reader needs and stays.
 - **Optional arguments are shown in square brackets** when a signature is written out in prose or
   in a table — `call t%get_file_metadata(key, value, [found])`, `%ncols([resident_only])`. This
   applies to *descriptions* of a call, never to a runnable code example inside a ```fortran fence,
@@ -1880,6 +1894,31 @@ across the entire suite. These refuse nothing — they choose a default, and an 
 such decision, and reuse `pf_sort_threads` rather than writing a fourth copy of the rule:
 `omp_get_max_threads()` reads an ICV, not the current team size, so inside an 8-thread region it
 answers 8 and a missing check means 8x8 threads.
+
+**Every thread count the library resolves must also be clamped to `omp_get_num_procs()`, and that
+clamp has ONE home: `parquet_clamp_to_affinity` (`src/parquet_settings_base.f90`).** Four resolvers
+reach it — the sort's `resolve_thread_count`, `pf_sort_threads` and the bulk random draws through
+`parquet_auto_thread_count`, `prefetch_thread_count` and `parquet_string_threads` — and a fifth must
+call it rather than copy it. Three things make this worth a rule:
+
+- **`omp_get_max_threads()` is NOT reduced by `OMP_PROC_BIND` + `OMP_PLACES=cores`; `omp_get_num_procs()`
+  is.** A process bound before `main` reports 64 from the first and 2 from the second, so a resolver
+  reading only the ICV opens 64 threads on 2 processors and time-shares them, which is slower than
+  not threading at all. Prefetch and the string bulk paths shipped in exactly that state, unclamped
+  and unwarned, while sorting had clamped for months — because the clamp had been written where it
+  was needed rather than where it belonged.
+- **The warning must fire from the CLAMP, not from the operation.** It once lived in
+  `resolve_thread_count` alone, which the automatic path reaches *after* `pf_sort_threads` has
+  already clamped silently — so the warning was unreachable for the one job it existed to catch, a
+  program with `OMP_NUM_THREADS=64`, no explicit `threads=`, and nothing said. A clamp that is
+  silent in one place and loud in another cannot be reasoned about; make the clamp itself the only
+  thing that speaks.
+- **A clamp is untestable without an override, and its tests are then VACUOUS rather than absent.**
+  A process cannot narrow its own affinity after starting, and on an ordinary machine
+  `omp_get_max_threads()` and `omp_get_num_procs()` agree — so every assertion about the clamp holds
+  just as well with the clamp deleted. Confirmed by mutation. `parquet_debug_set_affinity_procs`
+  exists for this, with `parquet_debug_reset_affinity_warning` beside it because a once-per-process
+  message is a single-shot observable that a negative control has to be able to re-arm.
 
 ### `parquet_table` concurrency: one file owns the OpenMP plumbing, and guards key on OWNERSHIP
 
@@ -3483,8 +3522,10 @@ the message names, not the file:
   the `parquet_debug_*` overrides and counters (~40, which
   [have to be globals](#a-fortran-side-debug-hook-has-to-be-public-so-prefer-a-c-one)), and exactly
   **two genuine runtime counters**: `seed_call_counter` in `parquet_random` and
-  `thread_clamp_claims` in `parquet_argsort` (written by `warn_thread_clamp`, one tier below where
-  it used to live).
+  `affinity_clamp_claims` in `parquet_settings_base` (written by `parquet_clamp_to_affinity`). The
+  second was `thread_clamp_claims` in `parquet_argsort` until the affinity clamp became shared: four
+  resolvers across three tiers now reach it, and a once-per-PROCESS claim has to live where all four
+  can see it. Re-derive this list rather than trusting it — it has moved twice.
 
 **No amount of guarding silences it** — the check is static and has no notion of an atomic, a
 critical region or a lock, so it fires on a correctly-synchronised global exactly as loudly as on an

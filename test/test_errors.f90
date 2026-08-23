@@ -829,6 +829,13 @@ contains
                 test_table_reserve_columns_negative_aborts), &
             new_unittest("table: reserve_columns on a shared table in a region aborts", &
                 test_table_reserve_columns_shared_aborts), &
+            new_unittest("the size queries read no column data, and a re-read is free", &
+                test_size_queries_read_no_column_data), &
+            new_unittest("the affinity clamp warns, on the right stream, exactly once", &
+                test_affinity_clamp_warns), &
+            new_unittest("verbosity=silent suppresses the affinity-clamp warning", &
+                test_affinity_clamp_silent), &
+            new_unittest("no clamp, no affinity warning", test_affinity_clamp_absent), &
             new_unittest("table: parquet_write_table on a shared table in a region aborts", &
                 test_table_write_shared_aborts), &
             new_unittest("table: a first parquet_row_index read on a shared table names the caller", &
@@ -2338,6 +2345,87 @@ contains
             required_stderr="reserve_columns: cannot reserve -5 columns")
     end subroutine test_table_reserve_columns_negative_aborts
 
+    !> `doc/pages/operating/performance.md`'s two memory claims: the size queries read no column
+    !> data, and a column already read is served from the reader's cache.
+    !>
+    !> Out of process only because the observable is a C++-side counter the scenario compares
+    !> against itself and `error stop`s on; expected exit is 0, so a nonzero exit IS the failure.
+    !> No OpenMP is involved, so this needs no skip guard.
+    subroutine test_size_queries_read_no_column_data(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status(error, "size_queries_read_no_column_data", &
+            expect_abort=.false., &
+            failure_message="size queries must read no column data, and a cached re-read must be free")
+    end subroutine test_size_queries_read_no_column_data
+    !
+    !> `doc/pages/operating/performance.md`'s affinity-clamp warning: that it fires at all, that its
+    !> text is the one the page quotes, and that it fires **once per process**.
+    !>
+    !> **The once-per-process half is what `check_scenario_streams` buys here.** The scenario
+    !> provokes the clamp twice, sending the first to stderr and the second to stdout; a single
+    !> claimed warning therefore lands on stderr and is ABSENT from stdout, and that helper asserts
+    !> both directions. A warning that fired per operation would put the second line on stdout and
+    !> fail the absence half. No line counting is involved, and the assertion additionally pins that
+    !> `message_stream` reached this message at all.
+    !>
+    !> **The asserted text includes "although 97 were requested", deliberately.** That clause used to
+    !> report `omp_get_max_threads()` rather than what the caller asked for, so on a machine whose
+    !> thread count happens to equal the request the two are indistinguishable. 97 is a request no
+    !> machine's ICV will match by accident.
+    !>
+    !> **Skipped without OpenMP**, where the clamp in `resolve_thread_count` is compiled out
+    !> entirely: the scenario then sorts serially, says nothing, and the assertions below would hold
+    !> for a reason that has nothing to do with the clamp -- a vacuous pass, which is worse than a
+    !> failure because nothing prompts anyone to look.
+    subroutine test_affinity_clamp_warns(error)
+        type(error_type), allocatable, intent(out) :: error
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: resolve_thread_count's affinity clamp is inside " // &
+            "#ifdef _OPENMP, so the scenario sorts serially and emits nothing")
+        return
+#endif
+        call check_scenario_streams(error, "sort_affinity_clamp_warns", &
+            "sorting is limited to 2 thread(s) because this process's CPU affinity allows no " // &
+            "more, although 97 were requested", &
+            "stderr", "the affinity clamp must warn once, on the stream that was set when it bit")
+    end subroutine test_affinity_clamp_warns
+    !
+    !> Negative control 1 for the warning: `parquet_set_verbosity("silent")` suppresses it.
+    !>
+    !> The page says so, and without this the positive test above passes against a warning that
+    !> ignores verbosity entirely. The forbidden text is the message's own opening, so a warning
+    !> emitted on either stream fails.
+    subroutine test_affinity_clamp_silent(error)
+        type(error_type), allocatable, intent(out) :: error
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it the clamp never bites, so silencing it " // &
+            "would be asserted against a configuration that emits nothing anyway")
+        return
+#endif
+        call check_scenario_exit_status_and_no_output(error, "sort_affinity_clamp_silent", &
+            expect_abort=.false., &
+            failure_message="verbosity=silent must suppress the affinity-clamp warning", &
+            forbidden_text="is limited to")
+    end subroutine test_affinity_clamp_silent
+    !
+    !> Negative control 2, and the one that stops the warning being unconditional: with the clamp
+    !> NOT biting, the identical sort says nothing.
+    !>
+    !> The two scenarios differ in exactly one call -- `parquet_debug_set_affinity_procs(2)` against
+    !> `(0)` -- so a warning that fired on every threaded sort passes the positive test and fails
+    !> this one.
+    subroutine test_affinity_clamp_absent(error)
+        type(error_type), allocatable, intent(out) :: error
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the positive case this controls for cannot run either")
+        return
+#endif
+        call check_scenario_exit_status_and_no_output(error, "sort_affinity_clamp_absent", &
+            expect_abort=.false., &
+            failure_message="an unclamped sort must not emit the affinity warning", &
+            forbidden_text="is limited to")
+    end subroutine test_affinity_clamp_absent
+    !
     subroutine test_table_reserve_columns_shared_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         ! **Preconditions, declared rather than assumed.** The scenario opens a table OUTSIDE a

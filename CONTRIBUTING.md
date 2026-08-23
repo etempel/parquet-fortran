@@ -238,6 +238,8 @@ Error termination. Backtrace:
 ...
 ```
 
+**The `ERROR STOP` prefix and the exit status are your compiler's, not this library's**, and a test must not assert either: gfortran prints `ERROR STOP <message>` and exits 1, NAG prints `ERROR STOP: <message>` and exits **2**, flang prints `Fortran ERROR STOP: <message>` and exits 1. Assert the library's own message text, and — where the point is distinguishing a Fortran abort from a C++-level one — assert `/= 0` and `/= 134` rather than a particular value. The C++ side is exactly 134 on every compiler, because that path ends in an explicit `_Exit(134)`. See [Telling them apart](doc/pages/operating/error-handling.md#telling-them-apart).
+
 Running it with the `ok` scenario (or no argument at all) does not trigger any failure and exits with status 0:
 
 ```bash

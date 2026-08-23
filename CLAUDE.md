@@ -99,6 +99,7 @@ working rules).
   - [Verifying a change with mutation testing](#verifying-a-change-with-mutation-testing)
   - [A test that asserts a REFUSAL must say what to assert when the refusal lifts](#a-test-that-asserts-a-refusal-must-say-what-to-assert-when-the-refusal-lifts)
   - [A test that asserts THREADING must skip without OpenMP](#a-test-that-asserts-threading-must-skip-without-openmp)
+  - [A test must not assert a compiler's `ERROR STOP` spelling or exit status](#a-test-must-not-assert-a-compilers-error-stop-spelling-or-exit-status)
   - [A static check that enumerates names goes stale silently](#a-static-check-that-enumerates-names-goes-stale-silently)
   - [A `tools/*.sh` check must run under bash 3.2, and must never exit 0 having stopped early](#a-toolssh-check-must-run-under-bash-32-and-must-never-exit-0-having-stopped-early)
   - [Measuring test coverage](#measuring-test-coverage)
@@ -4820,6 +4821,38 @@ behaviour has a positive form worth asserting instead** (that one became "report
 than aborting", which is a stronger test than the refusal ever was), and **expect the widening to
 break tests far from the change** — six unrelated error scenarios had been using a `uint32` column
 precisely *because* it was unreadable. Run the whole suite, not the area's own.
+
+### A test must not assert a compiler's `ERROR STOP` spelling or exit status
+
+**Both are processor-dependent, and all three compilers in this fleet differ.** F2018 requires
+`ERROR STOP` to terminate with error; it fixes neither the wording nor the status. Measured with a
+three-line program on machine A:
+
+| compiler | exit status | first line on stderr |
+|---|---|---|
+| gfortran 15.2 | 1 | `ERROR STOP <msg>`, then a backtrace |
+| flang 22.1.8 | 1 | `Fortran ERROR STOP: <msg>` |
+| nagfor 7.2 | **2** | `ERROR STOP: <msg>` — note the colon |
+
+So a test searching stderr for `"ERROR STOP parquet_close_writer: ..."` passes only under gfortran,
+and one asserting `exitstat == 1` fails under NAG. Both shapes had shipped, both looked perfectly
+reasonable, and **both reported a correctly-behaving library as broken**.
+
+- **Assert the LIBRARY's own message text**, never the runtime's prefix in front of it. That is what
+  the assertion is about in every case this has come up.
+- **Assert `/= 0`, and `/= 134` where the point is telling a Fortran abort from a C++-level one.**
+  The C++ side really is exactly **134** everywhere, because `fatal_exit()` ends in an explicit
+  `std::_Exit(134)` — that one may be asserted by value. The Fortran side may not.
+- **The shared helpers already do this right** — `check_scenario_exit_status` computes
+  `aborted = (exitstat /= 0)` and `tools/run_error_scenarios.sh` tests `-ne 0` — so a scenario that
+  goes through them is portable and only a hand-written comparison is at risk. Grep for
+  `exitstat ==` before adding one.
+
+**The documentation half is the same defect and is easier to miss**, because a guide page stating
+"exit status 1" reads as a fact rather than as an observation of one compiler.
+`doc/pages/operating/error-handling.md` said exactly that and had been reviewed and closed, having
+been verified against gfortran alone. **A claim about processor-dependent behaviour cannot be
+verified on one compiler** — either check the fleet or state the property rather than the value.
 
 ### A test that asserts THREADING must skip without OpenMP
 

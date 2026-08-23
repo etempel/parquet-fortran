@@ -5995,12 +5995,18 @@ contains
         call run_error_scenario("read_before_open", exitstat, cmdstat, out_file, err_file)
         call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
         if (allocated(error)) return
-        call check(error, exitstat == 1, &
-            "a Fortran `error stop` must exit with status 1, as the error-handling page documents")
+        ! **Nonzero-and-not-134, not `== 1`.** The status a Fortran `error stop` produces is
+        ! processor-dependent -- gfortran and flang exit 1, NAG 2 -- so pinning 1 tested the
+        ! compiler rather than the library. What the error-handling page actually promises, and what
+        ! a script can rely on, is that the two failure classes are distinguishable: the C++ side is
+        ! always exactly 134 because `fatal_exit()` calls `std::_Exit(134)`, and the Fortran side is
+        ! never 134.
+        call check(error, exitstat /= 0, &
+            "a Fortran `error stop` must terminate with a nonzero status")
         if (allocated(error)) return
         call check(error, exitstat /= 134, &
             "a Fortran `error stop` must NOT exit 134 -- that is the C++ class, and the page tells " // &
-            "readers the two can be told apart by exit status alone")
+            "readers the two can be told apart by exit status")
         if (allocated(error)) return
 
         ! C++ side: a type mismatch detected inside parquet_wrapper.cpp, which reaches fatal_exit.
@@ -6044,8 +6050,14 @@ contains
             "the error-context filename must stay on stdout at verbosity=errors_only, message_stream=stderr")
         if (allocated(error)) return
 
+        ! **The library's own text, NOT the compiler's `ERROR STOP` prefix.** The assertion is that
+        ! the abort message goes to stderr whatever `message_stream` says; the prefix in front of it
+        ! is the Fortran runtime's and is processor-dependent -- gfortran writes
+        ! `ERROR STOP <msg>`, NAG `ERROR STOP: <msg>`, flang `Fortran ERROR STOP: <msg>`. Searching
+        ! for gfortran's spelling made this a gfortran-only test that failed on the other two while
+        ! the library was behaving correctly.
         call check_scenario_streams(error, "close_writer_missing_write_silenced", &
-            "ERROR STOP parquet_close_writer: missing write for enabled column", "stderr", &
+            "parquet_close_writer: missing write for enabled column", "stderr", &
             "the abort message itself belongs on stderr")
         if (allocated(error)) return
 

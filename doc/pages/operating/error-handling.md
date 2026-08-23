@@ -19,9 +19,11 @@ log** — it tells you which half of the library detected the problem, and the t
 
 ### Fortran `error stop`
 
-Prints `ERROR STOP <message>`, usually followed by a backtrace — whether you get one, and how
-readable it is, is a property of your compiler and build flags rather than a guarantee this library
-makes.
+Prints your compiler's `ERROR STOP` line carrying the library's message, usually followed by a
+backtrace. Both the exact prefix and whether you get a backtrace are properties of your compiler and
+build flags rather than guarantees this library makes — gfortran writes `ERROR STOP <message>`, NAG
+`ERROR STOP: <message>`, flang `Fortran ERROR STOP: <message>`. What is the same everywhere is the
+message after it, which is the library's.
 
 This is the class used for precondition and validation failures this library's own Fortran code
 detects directly: a missing file, invalid MAML, an unknown column name, calling a reader/writer
@@ -29,8 +31,9 @@ procedure before it's open, a declared vector column's size not matching what wa
 schema level, and so on.
 
 **Messages from the `parquet_table` layer carry a second prefix of their own**, so a real one reads
-`ERROR STOP parquet_table: <procedure>: <message>`. That is worth recognising: it tells you the
-failure came from the table container rather than from the reader or writer underneath it.
+`parquet_table: <procedure>: <message>` after whatever your compiler puts in front. That is worth
+recognising: it tells you the failure came from the table container rather than from the reader or
+writer underneath it.
 
 ### A C++-level process exit
 
@@ -59,9 +62,14 @@ Three things distinguish them, and the first is the one to reach for in a script
 
 | | Fortran `error stop` | C++-level exit |
 |---|---|---|
-| exit status | **1** | **134** |
-| first line | `ERROR STOP <message>` | `parquet-fortran: <procedure>: <message>` |
+| exit status | nonzero, and **never 134** | always exactly **134** |
+| first line | your compiler's `ERROR STOP` prefix, then `<message>` | `parquet-fortran: <procedure>: <message>` |
 | backtrace | usually | never |
+
+**Test for 134, not for the other one.** The C++ status is exact because that path ends in an
+explicit `_Exit(134)`; the Fortran one is whatever your compiler chose for `ERROR STOP` — 1 with
+gfortran and flang, 2 with NAG — and the Fortran standard leaves it processor-dependent, so a script
+that keys on a particular value is testing its compiler rather than this library.
 
 **134 is also what a shell reports for a process killed by `SIGABRT`**, so a wrapper that inspects
 only the exit code cannot tell a deliberate C++-side failure from a genuine crash. Read the stderr
@@ -102,8 +110,8 @@ presence of file/schema context, where available, is intended to be relied on.
 
 **Some context arrives on a second stream instead, and this catches people out.** Where naming the
 file would make the abort message unreasonably long, the library prints it as its own line *before*
-aborting — and those lines go to **standard output**, while the `ERROR STOP` itself goes to standard
-error. Closing a writer with a declared column left unwritten is the case you are most likely to
+aborting — and those lines go to **standard output**, while the abort message itself goes to
+standard error. Closing a writer with a declared column left unwritten is the case you are most likely to
 meet:
 
 ```
@@ -111,6 +119,8 @@ stdout:  parquet_close_writer: output file: catalogue.parquet
 stdout:  parquet_close_writer: schema: internal:demo
 stderr:  ERROR STOP parquet_close_writer: missing write for enabled column: col_c
 ```
+
+(the `ERROR STOP` prefix there is gfortran's; see [Telling them apart](#telling-them-apart))
 
 **These lines are never suppressed and never redirected**, deliberately: not even
 `verbosity="errors_only"`, the strictest setting, removes them, and `message_stream` does not move

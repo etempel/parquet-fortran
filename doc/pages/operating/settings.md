@@ -17,6 +17,41 @@ than convenience: `parquet_settings` owns this library's C++ boundary, so import
 Arrow stack back into a build that was deliberately staying clear of it. See
 [Choosing a module](choosing-a-module.html) for which module carries which knob.
 
+## A startup block, end to end
+
+The whole of this page's machinery in one runnable program: take whatever the environment says,
+override it with what this program wants, and check what the library will actually do.
+
+```fortran
+program configure_at_startup
+    use parquet
+    implicit none
+
+    ! Whatever the environment set, applied first so the calls below can override it.
+    call parquet_settings_from_env()
+
+    ! Give the library four threads and no more, then keep sorting serial.
+    call parquet_set_threads(4)
+    call parquet_set_sort_threads(1)
+
+    ! Quieter output, and a codec chosen for this program's data.
+    call parquet_set_verbosity("errors_only")
+    call parquet_set_default_compression("zstd")
+    call parquet_set_default_compression_level(6)
+
+    print *, "Arrow thread pool:", parquet_get_arrow_threads()   ! 4
+    print *, "a sort would use:", pf_sort_threads()              ! 1
+
+    ! Prints in full, even at errors_only -- a silenced program can always say why it is silent.
+    call parquet_print_settings()
+
+    call parquet_reset_settings()
+end program configure_at_startup
+```
+
+Every later example on this page is a fragment of this shape: the `use parquet`, the declarations
+and the `program` wrapper are not repeated.
+
 ## What is a setting, and what is not
 
 **A setting may change how fast, how large or how loud the library runs. It may never change what
@@ -37,7 +72,9 @@ Two consequences worth knowing:
 
 **One procedure in this module is not a setting.** `parquet_get_arrow_version` reports which Arrow
 and Parquet C++ libraries your program is actually linked against — `parquet_get_arrow_version(v)`
-for Arrow's runtime version, `parquet_get_arrow_version(v, mode="parquet")` for the Parquet C++ one.
+for the **runtime** version of the Arrow library now loaded, `parquet_get_arrow_version(v,
+mode="parquet")` for the version of Parquet C++ the wrapper was **compiled against**. Those two can
+differ, and telling them apart is usually the point of asking.
 It lives here because reading it means calling into the C++ half, which is the boundary this module
 already owns, and because `parquet_get_arrow_threads` is its neighbour in every practical sense. The
 library's *own* version is a separate question with a separate answer: `parquet_get_version`, in the
@@ -159,7 +196,7 @@ reports the raw setting (`0` when automatic).
 
 **Every thread count in this library is additionally bounded by the CPU affinity of the process**,
 which under one common `OMP_PLACES` setting is far smaller than the machine. It applies to this cap,
-to the three below, and to an explicit `threads=`; it warns once per process when it bites; and it is
+to the four below, and to an explicit `threads=`; it warns once per process when it bites; and it is
 the first thing to check when threading does nothing on a large machine. See [Thread
 placement](performance.html#thread-placement-omp_places-and-omp_proc_bind).
 
@@ -319,20 +356,16 @@ because you changed the codec.
 
 ## Tuning the sort
 
-Three knobs govern the sort engine. All three are read at each sort, so they take effect
-immediately, and all three are process-global — a sort anywhere in your program sees the same
-values.
+Three knobs govern the sort engine — two for the counting path and one for the radix path. All
+three are read at each sort, so they take effect immediately, and all three are process-global: a
+sort anywhere in your program sees the same values. Each governs *which implementation* runs, never
+what it answers; every path produces the same permutation.
 
 ```fortran
 call parquet_set_sort_counting_bucket_limit(0)   ! 0 restores the built-in value
 ```
 
-**There is no knob for the row count below which a sort refuses to thread.** That floor is
-internal and scales with the team size, because the right value depends on how many threads are
-being opened rather than on the data — a floor correct for four threads is far too low for
-sixty-four. Threading a small array costs more than the sort saves, so the engine declines rather
-than obeying a `threads=` it cannot use profitably; a sort that reports one thread on a small array
-is behaving correctly.
+### The integer counting path
 
 `parquet_set_sort_counting_path(flag)` and `parquet_set_sort_counting_bucket_limit(n)` control the
 integer counting fast path — a second sort implementation that a single integer key with a narrow
@@ -358,6 +391,8 @@ Turning the counting path off has no performance case — it exists so the two i
 compared against each other on the same data, which is how the library tests that they agree.
 
 The limit accepts `0`, meaning "restore the built-in value", and takes either integer kind.
+
+### The radix path
 
 `parquet_set_sort_radix_path(flag)` controls the radix fast path — a stable
 least-significant-digit radix sort that orders a column by bucketing its bytes rather than by
@@ -403,6 +438,15 @@ comparison sort finishes the job, which needs no scratch and gives the identical
 worth knowing — on Linux's default memory-overcommit policy a large allocation usually succeeds and
 the kernel kills the process on first touch instead, so this safety net cannot engage there. If you
 know you are memory-bound, turn the setting off rather than relying on it.
+
+### There is no knob for the threading floor
+
+**There is no knob for the row count below which a sort refuses to thread.** That floor is
+internal and scales with the team size, because the right value depends on how many threads are
+being opened rather than on the data — a floor correct for four threads is far too low for
+sixty-four. Threading a small array costs more than the sort saves, so the engine declines rather
+than obeying a `threads=` it cannot use profitably; a sort that reports one thread on a small array
+is behaving correctly.
 
 ## Row-group size when writing
 
@@ -478,11 +522,19 @@ call parquet_set_message_stream("stderr")   ! keep stdout clean for piped data
 ```
 
 **Only those two values are accepted, and that is a constraint rather than a preference.** A Fortran
-unit number means nothing to this library's C++ half, which prints several of the warnings and one
+unit number means nothing to this library's C++ half, which prints three of the warnings and one
 of the reports itself — so a setting holding an arbitrary unit could be honoured by the Fortran half
 and silently ignored by the other. Sending messages to a log file is therefore not supported; a
 shell redirect covers it. The explicitly-called print procedures are unaffected either way: they
 keep their own `unit=` argument.
+
+**The error path does not follow this setting, in either direction, and that catches people out.**
+An `error stop` and the C++ layer's fatal-error report always go to **stderr**; the context lines a
+failing close prints just before aborting — the output filename, the schema name — always go to
+**stdout**. So a program that sets `"stderr"` precisely to keep stdout clean still gets those
+context lines on stdout, and one that leaves the default still gets the abort message on stderr.
+Neither can be moved, because an abort that names no file is not diagnosable. See [Contextual error
+messages](error-handling.html#contextual-error-messages).
 
 ## Setting from the environment
 
@@ -626,11 +678,3 @@ ceilings on a vector column's `col_size` and on a file's column count. Those are
 layer, which reports them clearly when they are hit, and mirroring them into Fortran would create a
 second copy of a number that has exactly one correct value. See
 [Limitations](../../index.html) in the README for what those ceilings are.
-
-## A note on `parquet_core`
-
-`parquet_set_arrow_threads` used to live in the internal `parquet_core` module. It moved here without
-changing its name or behaviour, so `use parquet` code is unaffected. Only code that imported it
-narrowly from the internal module (`use parquet_core, only: parquet_set_arrow_threads`) would need to
-change — and `parquet_core` is documented as internal and outside the library's API-stability
-promise precisely so that this kind of tidying is possible. `use parquet` is the supported spelling.

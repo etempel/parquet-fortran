@@ -399,7 +399,7 @@ contains
         integer, intent(in) :: n !! thread count for all six; must be >= 1.
 
         if (n < 1) error stop "parquet_set_threads: n must be >= 1 " // &
-            "(0 means automatic to the sort, prefetch, table and string caps, but Arrow's pool " // &
+            "(0 means automatic to the five per-area caps, but Arrow's pool " // &
             "has no automatic value; set them individually if that is what you want)"
         call parquet_set_arrow_threads(n)
         call parquet_set_sort_threads(n)

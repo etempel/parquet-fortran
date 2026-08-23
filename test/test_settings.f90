@@ -87,6 +87,13 @@ contains
             new_unittest("sort_threads caps the automatic thread count", test_sort_threads_effect), &
             new_unittest("sort_threads never lifts the in-parallel serial answer", test_sort_threads_respects_region), &
             new_unittest("pf_sort_threads never exceeds the CPU affinity mask", test_sort_threads_affinity_clamp), &
+            new_unittest("the affinity clamp reaches the string and random resolvers too", &
+                test_affinity_clamp_other_resolvers), &
+            new_unittest("the affinity clamp reaches a table's per-column rewrite", &
+                test_affinity_clamp_table_rewrite), &
+            new_unittest("print_settings prints at every verbosity level", test_print_settings_never_silenced), &
+            new_unittest("doc/pages/operating/settings.md configure_at_startup example", &
+                test_configure_at_startup_example), &
             new_unittest("prefetch_threads caps the parallel prefetch", test_prefetch_threads_effect), &
             new_unittest("table_threads caps the parallel per-column rewrite", test_table_threads_effect), &
             new_unittest("string_threads caps what one string column resolves to", &
@@ -95,6 +102,8 @@ contains
                 test_random_threads_effect), &
             new_unittest("random_parallel_min_elements decides whether a bulk permutation threads", &
                 test_random_parallel_min_effect), &
+            new_unittest("the random work floor lowers the thread count before it forces serial", &
+                test_random_work_floor_is_gradual), &
             new_unittest("the string work floor is a payload floor, overridable for tests", &
                 test_string_work_floor), &
             new_unittest("a string operation stands down inside a parallel region", &
@@ -132,7 +141,7 @@ contains
             new_unittest("a variable overrides an earlier explicit set", test_env_overrides_explicit), &
             new_unittest("integers accept blanks and a sign, booleans fold case", test_env_value_forms), &
             new_unittest("a codec and its level both arrive", test_env_codec_and_level), &
-            new_unittest("set_threads moves all five thread counts", test_set_threads), &
+            new_unittest("set_threads moves all six thread counts", test_set_threads), &
             new_unittest("PARQUET_FORTRAN_THREADS is overridden by the specific variables", &
                 test_env_threads_then_specific) &
             ]
@@ -460,6 +469,342 @@ contains
         call parquet_debug_reset_affinity_warning()
         call parquet_reset_settings()
     end subroutine test_sort_threads_affinity_clamp
+
+    !> Mirrors `doc/pages/operating/settings.md`'s `configure_at_startup` example, the page's one
+    !> complete runnable program. Both sides move together or neither does (feature_doc.md §6.6).
+    !>
+    !> **It lives here rather than in `test/test_examples.f90`, where every other mirrored example
+    !> sits, and the reason is concurrency.** The example's whole subject is process-global state --
+    !> it sets six thread counts, a verbosity and a codec. `examples` runs its tests concurrently;
+    !> `settings` is one of the suites `suite_is_safe_to_parallelize` excludes precisely so a test
+    !> may write a global without a sibling observing it. Putting it there would have meant
+    !> excluding `examples` too, which would cost twenty other example tests the concurrency
+    !> regression check they currently get for free.
+    !>
+    !> **The two printed values are what the page's own comments claim**, and they are stable
+    !> whatever the environment holds: `parquet_settings_from_env` runs FIRST in the example, so the
+    !> explicit setters after it win. That ordering is itself one of the things the page teaches.
+    subroutine test_configure_at_startup_example(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: u, ios, nlines
+        logical :: seen_codec
+        character(len=256) :: line
+        character(len=:), allocatable :: codec
+        character(len=*), parameter :: dump_file = "test_run/settings_example_dump.txt"
+        !
+        call parquet_reset_settings()
+        call parquet_settings_from_env()
+        call parquet_set_threads(4)
+        call parquet_set_sort_threads(1)
+        call parquet_set_verbosity("errors_only")
+        call parquet_set_default_compression("zstd")
+        call parquet_set_default_compression_level(6)
+        !
+        call check(error, parquet_get_arrow_threads() == 4, &
+            "configure_at_startup: the page prints 4 for the Arrow thread pool")
+        if (allocated(error)) goto 900
+        call check(error, pf_sort_threads() == 1, &
+            "configure_at_startup: the page prints 1 for what a sort would use")
+        if (allocated(error)) goto 900
+        !
+        ! parquet_set_threads(4) reached all five per-area caps, not just the two named above --
+        ! the claim the page's *All six thread counts at once* section makes, observed here rather
+        ! than argued.
+        call check(error, parquet_get_prefetch_threads() == 4 .and. parquet_get_table_threads() == 4 &
+            .and. parquet_get_string_threads() == 4 .and. parquet_get_random_threads() == 4, &
+            "configure_at_startup: set_threads(4) must reach the prefetch, table, string and random caps")
+        if (allocated(error)) goto 900
+        !
+        call parquet_get_default_compression(codec)
+        call check(error, codec == "zstd" .and. parquet_get_default_compression_level() == 6, &
+            "configure_at_startup: the codec and level the example chooses must stick")
+        if (allocated(error)) goto 900
+        !
+        ! The last line of the example: the dump prints in full at errors_only.
+        open(newunit=u, file=dump_file, status="replace", action="write")
+        call parquet_print_settings(u)
+        close(u)
+        nlines = 0
+        seen_codec = .false.
+        open(newunit=u, file=dump_file, status="old", action="read")
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            nlines = nlines + 1
+            if (index(line, "default_compression ") > 0 .and. index(line, "zstd") > 0) seen_codec = .true.
+        end do
+        close(u, status="delete")
+        call check(error, nlines > 20 .and. seen_codec, &
+            "configure_at_startup: the dump must print in full at errors_only, showing what was set")
+        !
+900     continue
+        call parquet_reset_settings()
+    end subroutine test_configure_at_startup_example
+
+    !> **T4: the affinity clamp reaches the string and the random resolvers, not only the sort's.**
+    !>
+    !> All four resolvers call the one shared `parquet_clamp_to_affinity`, and until this test
+    !> existed only `pf_sort_threads` asserted that it does -- so deleting the call from
+    !> `parquet_string_threads` or from `parquet_auto_thread_count` left the suite green. They are
+    !> in separate tiers that cannot see each other, which is exactly why the clamp is shared and
+    !> exactly why one test of one caller proves nothing about the other three.
+    !>
+    !> **`parquet_debug_set_affinity_procs` is what makes this testable at all.** A process cannot
+    !> narrow its own affinity after starting, and on an ordinary machine `omp_get_max_threads()`
+    !> and `omp_get_num_procs()` agree -- so every assertion here would hold just as well with the
+    !> clamp deleted. That is the vacuity CLAUDE.md's auto-threading note records.
+    subroutine test_affinity_clamp_other_resolvers(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_string_column) :: col
+        integer :: unbound_str, unbound_rnd, clamped_str, clamped_rnd, avail
+        integer(int64), parameter :: BIG_N = 1000000_int64
+        integer :: i
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        call parquet_reset_settings()
+        call parquet_set_verbosity("silent")     ! the clamp warns; this test is about the number
+        call parquet_debug_set_affinity_procs(0)
+        !
+        ! A payload the string work floor cannot decline, so `bulk_threads` reaches the resolver.
+        ! Lowering the floor is what the hook is for -- a genuinely 256 KiB column would make this
+        ! test slow for no gain.
+        call parquet_debug_set_string_min_bytes(1_int64)
+        do i = 1, 64
+            call col%append_string("abcdefgh")
+        end do
+        !
+        unbound_str = parquet_debug_string_bulk_threads(col)
+        unbound_rnd = parquet_debug_random_bulk_threads(BIG_N)
+        !
+        ! The clamp made to BITE, one processor. Both resolvers must report 1.
+        call parquet_debug_set_affinity_procs(1)
+        clamped_str = parquet_debug_string_bulk_threads(col)
+        clamped_rnd = parquet_debug_random_bulk_threads(BIG_N)
+        call check(error, clamped_str == 1, &
+            "a one-processor mask must make one string column's bulk work serial")
+        if (allocated(error)) goto 900
+        call check(error, clamped_rnd == 1, &
+            "a one-processor mask must make a bulk random draw serial")
+        if (allocated(error)) goto 900
+        !
+        ! Negative control, in two halves. First: on a machine with threads to give, the unclamped
+        ! answers must have EXCEEDED 1, or the two assertions above hold for a reason that has
+        ! nothing to do with the clamp.
+        if (avail > 1) then
+            call check(error, unbound_str > 1, &
+                "negative control: with threads available the string resolver must exceed 1 unclamped")
+            if (allocated(error)) goto 900
+            call check(error, unbound_rnd > 1, &
+                "negative control: with threads available the random resolver must exceed 1 unclamped")
+            if (allocated(error)) goto 900
+        end if
+        !
+        ! Second: a mask WIDER than what OpenMP offers must change nothing, so the clamp is shown to
+        ! lower only. A clamp that fired unconditionally passes the first half and fails here.
+        call parquet_debug_set_affinity_procs(unbound_str + 16)
+        call check(error, parquet_debug_string_bulk_threads(col) == unbound_str, &
+            "a mask wider than the OpenMP thread count must not raise the string resolver")
+        if (allocated(error)) goto 900
+        call parquet_debug_set_affinity_procs(unbound_rnd + 16)
+        call check(error, parquet_debug_random_bulk_threads(BIG_N) == unbound_rnd, &
+            "a mask wider than the OpenMP thread count must not raise the random resolver")
+        !
+900     continue
+        call parquet_debug_set_affinity_procs(0)
+        call parquet_debug_set_string_min_bytes(0_int64)
+        call parquet_debug_reset_affinity_warning()
+        call parquet_reset_settings()
+    end subroutine test_affinity_clamp_other_resolvers
+
+    !> **T3: a table's per-column rewrite is bounded by the affinity mask like everything else.**
+    !>
+    !> `colwork_threads` was the last resolver to get the clamp, and the gap mattered more here than
+    !> anywhere else: the clamp is also where the once-per-process warning lives, so a table rewrite
+    !> was the one subsystem that could be silently oversubscribed *without even the warning
+    !> firing*. Every other resolver would have reported it.
+    !>
+    !> Observed through `parquet_debug_get_table_threads_used`, which `colwork_threads`' caller
+    !> writes on every mutation including a serial one -- so a 1 here is a real resolved 1 and not a
+    !> mutation that never reached the loop.
+    subroutine test_affinity_clamp_table_rewrite(error)
+        type(error_type), allocatable, intent(out) :: error
+        ! Above colwork_min_elements (131072) with room to spare, matching test_table_threads_effect.
+        integer, parameter :: BIG = 150000
+        integer(int32), allocatable :: k(:), a(:), b(:), c(:)
+        integer :: i, unbound, clamped, avail
+        !
+        avail = 1
+#ifdef _OPENMP
+        avail = omp_get_max_threads()
+#endif
+        allocate(k(BIG), a(BIG), b(BIG), c(BIG))
+        do i = 1, BIG
+            ! Scattered, so %sort_by really moves rows -- an already-sorted table returns early
+            ! without touching a column, leaving the counter reporting the previous call.
+            k(i) = mod(i * 7919, BIG)
+            a(i) = i
+            b(i) = 2*i
+            c(i) = 3*i
+        end do
+        !
+        call parquet_reset_settings()
+        call parquet_set_verbosity("silent")     ! the clamp warns; this test is about the number
+        call parquet_debug_set_affinity_procs(0)
+        call parquet_debug_reset_table_threads()
+        call sort_four_columns(k, a, b, c)
+        unbound = parquet_debug_table_threads()
+        !
+        ! The clamp made to bite.
+        call parquet_debug_set_affinity_procs(1)
+        call parquet_debug_reset_table_threads()
+        call sort_four_columns(k, a, b, c)
+        clamped = parquet_debug_table_threads()
+        call check(error, clamped == 1, &
+            "a one-processor mask must make a table's per-column rewrite serial")
+        if (allocated(error)) goto 900
+        !
+        ! Negative control: unclamped, on a machine with threads to give, the same fixture must have
+        ! used more than one -- otherwise the assertion above says nothing about the clamp.
+        if (avail > 1) then
+            call check(error, unbound > 1, &
+                "negative control: unclamped, four large columns must be rewritten in parallel")
+            if (allocated(error)) goto 900
+            !
+            ! ...and a mask wider than the ICV must not raise it, so the clamp only ever lowers.
+            call parquet_debug_set_affinity_procs(unbound + 16)
+            call parquet_debug_reset_table_threads()
+            call sort_four_columns(k, a, b, c)
+            call check(error, parquet_debug_table_threads() == unbound, &
+                "a mask wider than the OpenMP thread count must not raise the rewrite's team")
+        end if
+        !
+900     continue
+        call parquet_debug_set_affinity_procs(0)
+        call parquet_debug_reset_affinity_warning()
+        call parquet_reset_settings()
+    end subroutine test_affinity_clamp_table_rewrite
+
+    !> **T2: `parquet_print_settings` prints at every verbosity level, including "errors_only".**
+    !>
+    !> A settings dump that could itself be suppressed would leave a quiet program with no way to be
+    !> asked why it is quiet, which is why the exemption exists. It holds **by construction** --
+    !> `parquet_print_settings` consults no verbosity state at all -- so the mutation that breaks it
+    !> is *adding* a `parquet_output_is_suppressed()` guard, and nothing else in the suite would
+    !> notice. That is what this test is for.
+    !>
+    !> The negative control is in the same test and at the same verbosity: `%print_schema_info` must
+    !> produce nothing. Without it, an assertion that the dump appeared passes just as happily
+    !> against a run where the verbosity was never actually in force.
+    subroutine test_print_settings_never_silenced(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: sch
+        integer :: u, ios, nlines_dump, nlines_schema
+        logical :: seen
+        character(len=256) :: line
+        ! Its own filenames: tests in a suite run concurrently.
+        character(len=*), parameter :: dump_file = "test_run/settings_dump_errors_only.txt"
+        character(len=*), parameter :: schema_file = "test_run/settings_schema_errors_only.txt"
+        !
+        call parquet_reset_settings()
+        call parquet_set_verbosity("errors_only")
+        !
+        open(newunit=u, file=dump_file, status="replace", action="write")
+        call parquet_print_settings(u)
+        close(u)
+        !
+        call sch%init("silence_probe")
+        call sch%add_field("a", "int32")
+        call parquet_parse_maml(sch)
+        open(newunit=u, file=schema_file, status="replace", action="write")
+        call sch%print_schema_info(u)
+        close(u)
+        call parquet_reset_settings()
+        !
+        ! The dump survived: non-empty, and carrying a row only a real dump has.
+        seen = .false.
+        nlines_dump = 0
+        open(newunit=u, file=dump_file, status="old", action="read")
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            nlines_dump = nlines_dump + 1
+            if (index(line, "arrow_threads") > 0) seen = .true.
+        end do
+        close(u, status="delete")
+        call check(error, seen, &
+            "parquet_print_settings must still print at verbosity=errors_only, the strictest level")
+        if (allocated(error)) goto 900
+        call check(error, nlines_dump > 20, &
+            "the dump printed at errors_only must be the whole dump, not a truncated one")
+        if (allocated(error)) goto 900
+        !
+        ! Negative control: the same level really was in force, so a solicited printer wrote nothing.
+        nlines_schema = 0
+        open(newunit=u, file=schema_file, status="old", action="read")
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            nlines_schema = nlines_schema + 1
+        end do
+        close(u, status="delete")
+        call check(error, nlines_schema == 0, &
+            "negative control: at errors_only %print_schema_info must be a no-op, proving the level was in force")
+        return
+        !
+900     continue
+        open(newunit=u, file=schema_file, status="old", action="read", iostat=ios)
+        if (ios == 0) close(u, status="delete")
+    end subroutine test_print_settings_never_silenced
+
+    !> **T5: the random work floor LOWERS the thread count; it does not simply force serial.**
+    !>
+    !> `random_threads` computes `by_work = n / floor` and takes the smaller of that and the
+    !> requested count, so eight threads over 4000 elements at a floor of 1000 is **four** threads,
+    !> not one and not eight. The guide described it as a hard cut for as long as it did precisely
+    !> because the existing floor test asserts only the serial/threaded boundary -- the intermediate
+    !> value is the one place the two descriptions differ.
+    !>
+    !> Note this differs from the STRING work floor, which really is a hard cut
+    !> (`bulk_threads` returns 1 outright below its payload floor). Two floors, two shapes; do not
+    !> harmonise the tests.
+    subroutine test_random_work_floor_is_gradual(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: full, partial, serial, no_floor
+        !
+        call parquet_reset_settings()
+        call parquet_set_verbosity("silent")
+        call parquet_debug_set_affinity_procs(1024)   ! keep the mask out of this test's answer
+        call parquet_set_random_parallel_min_elements(1000)
+        !
+        full    = parquet_debug_random_bulk_threads(8000_int64, threads=8)
+        partial = parquet_debug_random_bulk_threads(4000_int64, threads=8)
+        serial  = parquet_debug_random_bulk_threads(1500_int64, threads=8)
+        !
+        call check(error, full == 8, &
+            "enough work for eight threads at the floor must give all eight")
+        if (allocated(error)) goto 900
+        call check(error, partial == 4, &
+            "4000 elements at a floor of 1000 must give FOUR threads, not one and not eight")
+        if (allocated(error)) goto 900
+        call check(error, serial == 1, &
+            "below two floors' worth of work the call is serial")
+        if (allocated(error)) goto 900
+        !
+        ! Negative control: with the floor disabled the same 4000 elements take the full team, so
+        ! the 4 above is the floor's doing and not some other clamp's.
+        call parquet_set_random_parallel_min_elements(0)
+        no_floor = parquet_debug_random_bulk_threads(4000_int64, threads=8)
+        call check(error, no_floor == 8, &
+            "negative control: with the floor disabled 4000 elements must take the full team")
+        !
+900     continue
+        call parquet_debug_set_affinity_procs(0)
+        call parquet_debug_reset_affinity_warning()
+        call parquet_reset_settings()
+    end subroutine test_random_work_floor_is_gradual
 
     !> Risk-40: an unqualified sort inside an OpenMP parallel region runs SERIALLY, and a setting
     !> must not lift that back up -- eight threads each asking for eight more is the oversubscription
@@ -973,9 +1318,11 @@ contains
             "set_threads must set the random cap")
         if (.not. allocated(error)) call check(error, parquet_get_prefetch_threads() == 3, &
             "set_threads must set the prefetch cap")
-        ! The fourth and fifth knobs. A forgotten call is invisible without its own assertion, since
+        ! The fifth and sixth knobs. A forgotten call is invisible without its own assertion, since
         ! the others still work and the name says nothing about how many "all" is -- which is exactly
-        ! how this test came to say "all four" while a fifth cap existed and was never set.
+        ! how this test came to say "all four" while a fifth cap existed and was never set, and then
+        ! "all five" while a sixth did. `parquet_set_threads`' own doc-comment names this test as the
+        ! other place a seventh cap has to be added.
         if (.not. allocated(error)) call check(error, parquet_get_table_threads() == 3, &
             "set_threads must set the table mutation cap")
         if (.not. allocated(error)) call check(error, parquet_get_string_threads() == 3, &
@@ -991,7 +1338,7 @@ contains
     end subroutine test_set_threads
 
     !> **The one place the environment sequence's ORDER is load-bearing.** PARQUET_FORTRAN_THREADS
-    !> sets all three, so it has to be applied before the three specific variables or they could
+    !> sets all six, so it has to be applied before the six specific variables or they could
     !> never override it -- and a reversed order would still pass a test that set only the combined
     !> variable. Both are set here, and the specific one must win.
     subroutine test_env_threads_then_specific(error)

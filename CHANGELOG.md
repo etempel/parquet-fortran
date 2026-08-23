@@ -219,7 +219,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because a string operation reached from inside the table's own parallel region stands down. Like
   the other caps it is read per operation, `0` means automatic, `1` forces serial, and it never
   overrides the rule that work inside an OpenMP parallel region runs serially.
-  `parquet_set_threads(n)` now sets five subsystems rather than four, and
+  `parquet_set_threads(n)` sets six subsystems -- Arrow's pool and the five per-area caps -- and
   `PARQUET_FORTRAN_STRING_THREADS` reaches it from the environment. **What currently uses it:**
   `%reindex`/`%reindex_trusted` — and so `parquet_column`'s string reindex and
   `parquet_table%sort_by` on a string column — plus `%to_character`, `%build_from`, `%gather`,
@@ -312,8 +312,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OMP_PROC_BIND` setting combined with `OMP_PLACES=cores` otherwise disables threading silently
   (see [Performance](doc/pages/operating/performance.md#thread-placement-omp_places-and-omp_proc_bind)).
   That clamp covers **every** thread count the library resolves, not only a sort's: table
-  prefetching, the string bulk paths and the bulk random draws are bounded by the same mask, and the
-  warning names whichever of them noticed first. It applies to an explicit `threads=` and to an
+  prefetching, a table's per-column rewrite, the string bulk paths and the bulk random draws are all
+  bounded by the same mask, and the warning names whichever of them noticed first. It applies to an explicit `threads=` and to an
   explicit `parquet_set_string_threads` too, because a count the mask cannot run is not one that can
   be granted; it changes only how fast the work runs, never what it answers. The
   answer is bit-identical at every thread count, because the comparator is a total order under

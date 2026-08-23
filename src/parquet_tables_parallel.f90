@@ -360,7 +360,7 @@ contains
     !! and nobody else can reach. Do not "unify" these into one sentence: a future caller that
     !! mutated a possibly-shared source would satisfy the second argument while breaking the first.
     integer function colwork_threads(cache, slots) result(n)
-        use parquet_settings, only : parquet_get_table_threads
+        use parquet_settings, only : parquet_get_table_threads, parquet_clamp_to_affinity
 #ifdef _OPENMP
         use omp_lib, only : omp_get_max_threads, omp_in_parallel
 #endif
@@ -381,6 +381,21 @@ contains
         if (cap > 0 .and. cap < n) n = cap
         if (n > size(slots)) n = size(slots)
         if (n < 1) n = 1
+        ! **Clamped to the affinity mask, like every other thread count this library resolves.**
+        ! `omp_get_max_threads()` answers what the environment asked for; a process bound by
+        ! `OMP_PROC_BIND` with `OMP_PLACES=cores` may hold far fewer processors than that, and a
+        ! team opened at the ICV then time-shares them -- measurably worse than not threading.
+        !
+        ! **This was the LAST resolver to get it, and the gap was worse here than anywhere else.**
+        ! The clamp is also where the once-per-process warning lives, so until this line existed a
+        ! table rewrite was the one subsystem that could be silently oversubscribed *without even
+        ! the warning firing* -- the other four resolvers would each have reported it. The rule and
+        ! the warning live in `parquet_clamp_to_affinity` (src/parquet_settings_base.f90); this must
+        ! not grow a second copy of either.
+        !
+        ! **After the cap, deliberately**, so the helper receives the PRE-clamp count and the
+        ! message names what this rewrite actually asked for rather than the environment's ICV.
+        n = parquet_clamp_to_affinity(n, "table rewriting")
 #endif
     end function colwork_threads
     !

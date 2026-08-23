@@ -4940,6 +4940,30 @@ one place: the documentation and environment-coverage checks both take their kno
 `parquet_print_settings`' own printed rows, so a new knob fails both together instead of needing two
 separate lists updated.
 
+**Two checks over the same SOURCE list can both be green while the DOCUMENTATION of that list is
+wrong, and that gap is invisible by construction.** `check_env_covers_every_setting` proves every
+printed knob has an environment variable, and `check_print_settings_documented` proves the guide's
+sample dump names every printed row; neither compares the guide's *`PARQUET_FORTRAN_*` table*
+against the variables `parquet_settings_from_env` actually reads. Two variables therefore shipped
+applied by the code, printed by the dump, covered by a test — and absent from the table a user reads
+to discover they exist. **When a documentation table mirrors a list the source owns, check the two
+against each other directly**, in both directions (a row the source does not read is a documented
+knob that silently does nothing), and read the table's own rows rather than scanning the page —
+surrounding prose usually names two or three of the entries in examples, so a page-wide search
+accepts a table missing everything else. `check_env_table_matches_the_source` is the worked example.
+
+**A COUNT written out in prose is the same hazard in its cheapest form, and it interlocks across
+files.** `parquet_set_threads` grew from three callees to six, and the number was wrong in *nine*
+places at once: a guide heading ("All three thread counts at once"), that page's environment table
+("sets the five below"), the doc-comment's opening line ("all four"), two further sentences in the
+same doc-comment ("the five"), the dummy argument's `!!` tag, the `error stop` message, the test's
+own name ("all five thread counts") and a `CHANGELOG` bullet. Every one was written correctly at the
+time. Nothing can check a number in prose, so the defences are to **avoid writing one where the list
+is the point** — "the five per-area caps" needs no edit when a sixth arrives, and neither does an
+error message that stops enumerating — and, where a count must be written, to have the two places
+that carry it **name each other**, which is what `parquet_set_threads`' doc-comment and
+`test_set_threads`' body now do.
+
 **The same blindness applies to a one-off AUDIT, where nothing reports `[ok]` and there is no second
 chance to notice.** A hand-written search pattern used to answer "how many places do this?" is itself
 untested, and its answer is quoted afterwards as though it were a count. A grep over `src/` for a

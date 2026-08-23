@@ -876,6 +876,64 @@ def check_env_covers_every_setting():
     return problems
 
 
+def check_env_table_matches_the_source():
+    """The guide's environment-variable table and `parquet_settings_from_env` must name the same set.
+
+    `check_env_covers_every_setting` keeps the SOURCE self-consistent -- every printed knob has a
+    variable -- and `check_print_settings_documented` keeps the sample dump and the limits table in
+    step with the SOURCE. Between them they leave one gap, and it is the one that actually shipped:
+    nothing compared the guide's `PARQUET_FORTRAN_*` **table** against the variables the code
+    reads. `PARQUET_FORTRAN_RANDOM_THREADS` and `PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS` were
+    both applied by `parquet_settings_from_env`, both printed by `parquet_print_settings`, both
+    covered by `test_env_every_variable` -- and absent from the table a user reads to find out that
+    they exist. Every check passed throughout.
+
+    Both directions are checked. A variable in the source and not in the table is undiscoverable; a
+    variable in the table and not in the source is a documented knob that silently does nothing,
+    which is the same failure `check_env_covers_every_setting` exists to prevent one layer down.
+
+    Read as SETS from the table's own rows, not from the whole page: the prose around it names
+    `PARQUET_FORTRAN_THREADS` and `PARQUET_FORTRAN_SORT_THREADS` in a worked example and in a shell
+    block, so scanning the page as a whole would accept a table missing every other row.
+    """
+    problems = []
+    src = SRC / "parquet_settings.f90"
+    doc = REPO_ROOT / "doc" / "pages" / "operating" / "settings.md"
+    text = src.read_text()
+    body = re.search(r"subroutine parquet_settings_from_env\b(.*?)end subroutine parquet_settings_from_env",
+                     text, re.S)
+    if body is None:
+        return ["src/parquet_settings.f90: could not find parquet_settings_from_env -- this check "
+                "needs updating"]
+    # The variable each `call env_value("NAME", ...)` applies. Matching the call rather than every
+    # occurrence of the name keeps the abort-message mentions inside env_int64/env_require_token
+    # out of the set.
+    in_source = set(re.findall(r'call\s+env_value\s*\(\s*"(PARQUET_FORTRAN_\w+)"', body.group(1)))
+    if not in_source:
+        return ["src/parquet_settings.f90: found no `call env_value(\"PARQUET_FORTRAN_...\"` in "
+                "parquet_settings_from_env -- this check needs updating"]
+    doc_text = doc.read_text()
+    # Only rows of a Markdown table: a line starting with `|` whose first cell is a code span
+    # holding the variable name.
+    in_doc = set()
+    for line in doc_text.split("\n"):
+        row = re.match(r"\|\s*`(PARQUET_FORTRAN_\w+)`\s*\|", line.strip())
+        if row:
+            in_doc.add(row.group(1))
+    if not in_doc:
+        return ["doc/pages/operating/settings.md: found no `| `PARQUET_FORTRAN_...` |` table row -- "
+                "either the environment table was reshaped or it is gone; this check needs updating"]
+    for var in sorted(in_source - in_doc):
+        problems.append(
+            "doc/pages/operating/settings.md: parquet_settings_from_env applies `%s` but the "
+            "environment-variable table does not list it -- a user has no way to discover it" % var)
+    for var in sorted(in_doc - in_source):
+        problems.append(
+            "doc/pages/operating/settings.md: the environment-variable table lists `%s` but "
+            "parquet_settings_from_env never reads it -- the variable would silently do nothing" % var)
+    return problems
+
+
 def check_one_random_number_generator():
     """The library draws every random number from parquet_random -- src/parquet_wrapper.cpp may not
     reach for C++'s own generators.
@@ -2681,6 +2739,7 @@ CHECKS = (
     ("src/ is a single C++ translation unit", check_single_cpp_translation_unit),
     ("the C++ side draws no random numbers of its own", check_one_random_number_generator),
     ("every setting has an environment variable", check_env_covers_every_setting),
+    ("the guide's environment table matches the source", check_env_table_matches_the_source),
     ("parquet_strings does not reach parquet_bindings", check_parquet_strings_stays_leaf),
     ("parquet_argsort stays Arrow-free", check_parquet_argsort_stays_arrow_free),
     ("parquet_sorting stays Arrow-free", check_parquet_sorting_stays_arrow_free),

@@ -251,17 +251,24 @@ module parquet_argsort
     !! point. Set it to 0 to force Design B onto every key, or to `huge` to force Design A.
     integer(int64), save :: dbg_sort_split_min_card = -1_int64
     !> Which of the radix path's scratch allocations should report failure: 0 none, 1 the main
-    !! buffers, 2 the deep string refine's.
+    !! buffers, 2 the deep string refine's, 3 the threaded tier split's per-thread counters, 4
+    !! Design B's task arrays, and 5 to 8 the four allocations `grow_run_list` makes in turn.
     !!
-    !! Those fallbacks -- decline and let the comparison sort finish the job -- are otherwise
-    !! unreachable from any fixture a test can build: provoking a real `allocate` failure needs a
-    !! machine-sized array, and on Linux's default overcommit policy it would not report one anyway.
+    !! Those fallbacks -- decline and do the work some slower way -- are otherwise unreachable from
+    !! any fixture a test can build: provoking a real `allocate` failure needs a machine-sized array,
+    !! and on Linux's default overcommit policy it would not report one anyway.
     !! Without this they would ship untested and every mutation to them would survive, which is the
     !! same argument `dbg_sort_depth_limit` carries for the heapsort arm.
     !!
-    !! **It selects rather than switches, and it has to.** The two allocations are in series: with a
-    !! single flag, failing the main one returns before the refine's is ever reached, so the refine's
-    !! fallback would stay untested however the flag was set.
+    !! **It selects rather than switches, and it has to.** The allocations are in series: with a
+    !! single flag, failing the first returns before any later one is reached, so every fallback but
+    !! the first would stay untested however the flag was set. That is why `grow_run_list`'s four
+    !! consecutive allocations need four selectors between them rather than one.
+    !!
+    !! **Only 1 and 2 decline to the comparison sort; 3 to 8 decline to a slower path inside the
+    !! radix** -- the serial tier split, Design A, and a serial string refine respectively. So the
+    !! insertion-shift tracker that separates 1 and 2 from a run that never engaged says nothing
+    !! about 3 to 8, whose only guarantee is that the permutation is unchanged.
     integer, save :: dbg_sort_radix_fail_alloc = 0
     !> Radix scatter passes actually EXECUTED since the counter was last reset.
     !!
@@ -1198,13 +1205,14 @@ module parquet_argsort
         end subroutine parquet_debug_set_sort_split_min_card
         !> Test-only forcing of an allocation failure in the radix path, to reach its fallbacks.
         !!
-        !! Selects WHICH allocation fails, because the two are in series and a single flag
-        !! would make the first mask the second: 0 none, 1 the main scratch, 2 the deep
-        !! string refine's. The fallback answers identically -- it is the comparison sort --
-        !! so no assertion on a permutation can tell it apart from the radix path. Pair this
-        !! with the insertion-shift tracker, which can.
+        !! Selects WHICH allocation fails, because they are in series and a single flag
+        !! would make the first mask every later one: 0 none, 1 the main scratch, 2 the deep
+        !! string refine's, 3 the threaded tier split's counters, 4 Design B's task arrays,
+        !! and 5 to 8 the four `grow_run_list` makes in turn. Every fallback answers
+        !! identically, so no assertion on a permutation can tell one apart from the ordinary
+        !! path -- pair 1 and 2 with the insertion-shift tracker, which can.
         module subroutine parquet_debug_set_sort_radix_fail_alloc(which)
-            integer, intent(in) :: which !! 0 none, 1 the main scratch, 2 the refine's.
+            integer, intent(in) :: which !! which allocation reports failure; 0 none.
         end subroutine parquet_debug_set_sort_radix_fail_alloc
         !> Test-only zeroing of the executed-radix-pass counter, before the sort under test.
         module subroutine parquet_debug_reset_sort_radix_passes()

@@ -42,6 +42,8 @@ contains
                 "silently ignored (no declared nested schema)", test_validate_maml_unmatched_nested_ok), &
             new_unittest("keyarray:/DOIs:/depends: entries parse correctly with a bare dash and first-key " // &
                 "variations", test_keyarray_dois_depends_key_variations), &
+            new_unittest("a fields: header carrying trailing text still opens the field list", &
+                test_fields_header_with_trailing_text), &
             new_unittest("a keyarray: key gets no .datatype companion (a MAML value is a string by design)", &
                 test_maml_keyarray_key_gets_no_datatype), &
             new_unittest("a generic (non-comments/coauthors/keywords) top-level list section parses, " // &
@@ -269,10 +271,15 @@ contains
     !> with "survey:" itself then appearing as a later indented continuation
     !> line, and a depends: entry whose first (dash-line) key is "version:".
     !> This test is the only one exercising those variations. It also
-    !> spells the fields: header "Fields:" -- the fast-path literal check
-    !> for "fields:" is case-sensitive, but the fallback generic key/value
-    !> path (reached because none of keyarray:/DOIs:/depends:/extra: match
-    !> either) lowercases the key first, so "Fields:" still works; no other
+    !> spells the fields: header "Fields:", which parquet_maml_key_matches
+    !> accepts directly -- that helper lowercases each character before
+    !> comparing, so the "fields:" test at the top of parquet_parse_maml_lines'
+    !> non-field branch is case-INSENSITIVE. (It was a case-sensitive literal
+    !> comparison once, and this comment used to say that "Fields:" therefore
+    !> reached the generic key/value fallback below it. It does not, and has
+    !> not since that helper took over; the fallback's own "fields" arm is
+    !> reached by a header whose TRIMMED LENGTH differs from "fields:" instead,
+    !> which is what test_fields_header_with_trailing_text covers.) No other
     !> fixture in this repo uses anything but lowercase "fields:".
     subroutine test_keyarray_dois_depends_key_variations(error)
         type(error_type), allocatable, intent(out) :: error
@@ -351,6 +358,70 @@ contains
         if (allocated(error)) return
         call check(error, found_depends3, "expected depends: entry 'depends_3' not found")
     end subroutine test_keyarray_dois_depends_key_variations
+    !
+    !> A `fields:` header with anything after the colon must still open the field list.
+    !!
+    !! **Two tests for "fields:" exist because the parser answers it in two places, and only one of
+    !! them was reachable.** `parquet_maml_key_matches` demands the trimmed line be exactly as long
+    !! as `"fields:"`, so it recognises `fields:` and `Fields:` and nothing else; a header carrying
+    !! a trailing comment falls past it to the generic key/value branch further down, which splits
+    !! on the colon, lowercases the key and tests it against `"fields"` there. That second arm had
+    !! no fixture at all -- `test_keyarray_dois_depends_key_variations`'s doc-comment claimed its
+    !! `Fields:` reached it, which stopped being true when the literal comparison became the
+    !! case-insensitive helper, and nothing failed when it did.
+    !!
+    !! **The assertion is an equality against the bare form**, not merely "some fields parsed": the
+    !! branch's whole job is to be indistinguishable from the header it tolerates, and a parse that
+    !! produced the fields with, say, the comment text attached somewhere would satisfy a weaker
+    !! check. The bare arm is the negative control -- if it ever stopped parsing, the equality would
+    !! hold for the wrong reason, so its field count is asserted first.
+    subroutine test_fields_header_with_trailing_text(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: bare, trailing
+        integer :: i
+
+        bare%maml%name = "fields_header_bare.maml"
+        bare%maml%lines = [character(len=40) :: &
+            "table: fields_header_table", &
+            "fields:", &
+            "- name: id0", &
+            "  data_type: int32", &
+            "- name: ra", &
+            "  data_type: float64" ]
+        call parquet_parse_maml(bare)
+
+        trailing%maml%name = "fields_header_trailing.maml"
+        trailing%maml%lines = [character(len=40) :: &
+            "table: fields_header_table", &
+            "fields: # the column list", &
+            "- name: id0", &
+            "  data_type: int32", &
+            "- name: ra", &
+            "  data_type: float64" ]
+        call parquet_parse_maml(trailing)
+
+        call check(error, bare%get_num_fields() == 2, &
+            "the bare fields: control did not parse two fields, so the equality below would be vacuous")
+        if (allocated(error)) return
+        call check(error, trailing%get_num_fields() == bare%get_num_fields(), &
+            "a fields: header with a trailing comment did not open the field list -- the generic " // &
+            "key/value branch's own fields arm is what has to catch it")
+        if (allocated(error)) return
+        do i = 1, bare%get_num_fields()
+            call check(error, trim(trailing%cinfo%col(i)%name) == trim(bare%cinfo%col(i)%name) .and. &
+                trim(trailing%cinfo%col(i)%data_type) == trim(bare%cinfo%col(i)%data_type), &
+                "a fields: header with a trailing comment parsed a different field list than the bare form")
+            if (allocated(error)) return
+        end do
+        ! The trailing text itself must be discarded rather than becoming a table-metadata entry:
+        ! the branch sets in_fields and cycles, so nothing after the colon is ever stored.
+        do i = 1, size(trailing%metadata%items)
+            call check(error, trim(trailing%metadata%items(i)%key) /= "fields", &
+                "the fields: header was stored as a metadata entry instead of opening the field list")
+            if (allocated(error)) return
+        end do
+    end subroutine test_fields_header_with_trailing_text
+    !
 
     !> Any top-level plain-string list section other than comments:/coauthors:/
     !> keywords: falls through to the generic per-item

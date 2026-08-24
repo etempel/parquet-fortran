@@ -739,6 +739,8 @@ contains
                 test_validate_qc_min_non_integral_for_int32_aborts), &
             new_unittest("qc: min value out of int32 range aborts", &
                 test_validate_qc_min_out_of_int32_range_aborts), &
+            new_unittest("qc: min value too large for int64 aborts rather than reading back garbage", &
+                test_validate_qc_min_overflows_int64_aborts), &
             new_unittest("qc: min value with a reversed (</<=) operator aborts", &
                 test_validate_qc_min_wrong_operator_aborts), &
             new_unittest("qc: max value with a reversed (>/>=) operator aborts", &
@@ -6488,6 +6490,27 @@ contains
         call check_scenario_exit_status(error, "validate_qc_min_out_of_int32_range", expect_abort=.true., &
             failure_message="qc: min: value out of int32 range was expected to error stop")
     end subroutine test_validate_qc_min_out_of_int32_range_aborts
+
+    !> The abort must NAME the offending bound, not merely happen: a helper that answered .true.
+    !! with the failed read's garbage left in `value` would abort here too -- the garbage is far
+    !! outside int64 range as well -- so the message text is what separates the two outcomes.
+    subroutine test_validate_qc_min_overflows_int64_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+
+        call run_error_scenario("validate_qc_min_overflows_int64", exitstat, cmdstat, out_file, err_file)
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "a qc: min: of huge(int64)+1 on an int64 field was expected to error stop")
+        if (allocated(error)) return
+        call scenario_capture_contains(out_file, err_file, &
+            "invalid qc: min value '9223372036854775808' for data_type int64", found)
+        call check(error, found, &
+            "the abort should name the bound that does not fit rather than blaming something else")
+    end subroutine test_validate_qc_min_overflows_int64_aborts
 
     subroutine test_validate_qc_min_wrong_operator_aborts(error)
         type(error_type), allocatable, intent(out) :: error

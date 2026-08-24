@@ -125,6 +125,8 @@ contains
                 test_add_metadata_interleaved_with_add_field), &
             new_unittest("add_field applies the per-field rules parquet_validate_maml would", &
                 test_add_field_validates_field_rules), &
+            new_unittest("an integer field's qc bound may be written in exponent notation", &
+                test_qc_bound_exponent_notation), &
             new_unittest("clear_metadata keeps base (parsed) entries, discards user-added ones", &
                 test_clear_metadata_keeps_base_entries), &
             new_unittest("clear_metadata with no user-added entries is a no-op", &
@@ -1411,6 +1413,64 @@ contains
         call check(error, found, &
             "a valid field should still be accepted, with no whole-document validation applied to it")
     end subroutine test_add_field_validates_field_rules
+    !
+    !> An `int32`/`int64` qc bound written in exponent notation must be accepted, and must mean the
+    !! number it spells.
+    !!
+    !! **`parquet_qc_numeric_bound` judges an integer field's bound two ways, and only one of them
+    !! had a fixture.** Text that is a plain run of digits is parsed as int64 and compared exactly,
+    !! which is what lets a bound past 2**53 -- `huge(int64)` included -- validate without being
+    !! rounded first. Anything else falls through to a real64 read followed by an integrality test
+    !! and a range test, and every existing test of that second route supplies a bound that FAILS
+    !! it (`1.5`, `not_a_number`) or never reaches it at all (`5000000000` is plain digits, so the
+    !! int64 route rejects it before the real64 one is consulted). So the accepting side of the
+    !! real64 route -- the int32 range test, and the whole int64 arm -- ran nowhere.
+    !!
+    !! **The values are chosen so neither route can be mistaken for the other**: `1.0e1` and `1.0e3`
+    !! are not digit runs, so the int64 route declines them by shape, and both are integral and
+    !! comfortably inside their type's range, so the real64 route must accept them. Asserting the
+    !! bound's raw text survives is what makes this more than "add_field did not abort": the bound
+    !! is stored as written and re-parsed at write time, so a route that accepted the field while
+    !! mangling the text would still be a defect.
+    subroutine test_qc_bound_exponent_notation(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_schema) :: schema
+        integer :: i32, i64
+
+        call schema%init(table="qc_exponent_table")
+        ! Both bounds on both fields, so the min and max checks -- separate calls into
+        ! parquet_qc_numeric_bound, with their own error text -- are each exercised.
+        call schema%add_field("small", "int32", qc_min="1.0e1", qc_max="2.0e2")
+        call schema%add_field("big", "int64", qc_min="-1.0e3", qc_max="1.0e3")
+        call parquet_parse_maml(schema)
+
+        ! Positional, then checked by name: %add_field appends in call order, and asserting the
+        ! names here is what stops a reordering turning every check below into a check of the
+        ! other field.
+        i32 = 1
+        i64 = 2
+        call check(error, schema%get_num_fields() == 2, &
+            "both fields should have survived %add_field and the parse")
+        if (allocated(error)) return
+        call check(error, trim(schema%cinfo%col(i32)%name) == "small" .and. &
+            trim(schema%cinfo%col(i64)%name) == "big", &
+            "the two fields are not in call order, so the bound checks below name the wrong field")
+        if (allocated(error)) return
+        call check(error, schema%cinfo%col(i32)%has_qc_min .and. schema%cinfo%col(i32)%has_qc_max, &
+            "the int32 field's exponent-notation bounds were accepted but not recorded")
+        if (allocated(error)) return
+        call check(error, trim(schema%cinfo%col(i32)%qc_min_raw) == "1.0e1" .and. &
+            trim(schema%cinfo%col(i32)%qc_max_raw) == "2.0e2", &
+            "the int32 field's bounds must be stored as written -- they are re-parsed at write time")
+        if (allocated(error)) return
+        call check(error, schema%cinfo%col(i64)%has_qc_min .and. schema%cinfo%col(i64)%has_qc_max, &
+            "the int64 field's exponent-notation bounds were accepted but not recorded")
+        if (allocated(error)) return
+        call check(error, trim(schema%cinfo%col(i64)%qc_min_raw) == "-1.0e3" .and. &
+            trim(schema%cinfo%col(i64)%qc_max_raw) == "1.0e3", &
+            "the int64 field's bounds must be stored as written -- they are re-parsed at write time")
+    end subroutine test_qc_bound_exponent_notation
+    !
 
     !> First %items entry whose key is `key` (parquet_get_metadata answers from a reader, not
     !! from a schema still being built).

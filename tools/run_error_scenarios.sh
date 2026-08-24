@@ -223,6 +223,8 @@ scenarios=(
     "validate_qc_max_not_numeric:1"
     "validate_qc_min_non_integral_for_int32:1"
     "validate_qc_min_out_of_int32_range:1"
+    "validate_qc_min_overflows_int64:1"
+    "validate_qc_min_overflows_int64:1"
     "validate_qc_min_wrong_operator:1"
     "validate_qc_max_wrong_operator:1"
     "validate_qc_miss_bad_value:1"

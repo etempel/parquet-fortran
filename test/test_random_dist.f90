@@ -88,12 +88,21 @@ contains
 
     !> Every row of the exponential golden table, against the oracle appropriate to each column.
     !!
-    !! **Three assertions per row, and they are three different claims.** `exp_u_bits` pins which
+    !! **Four assertions per row, and they are four different claims.** `exp_u_bits` pins which
     !! UNIFORM the coordinate names -- without it the exponential table and the scalar table could
     !! drift onto different draw mappings and each stay self-consistent. `exp_portable_bits` pins
     !! the frozen transform exactly. `exp_ref_bits` pins the libm-backed form to an
     !! arbitrary-precision logarithm within a few ulp, which is the strongest statement available
     !! about a value whose last bit belongs to whichever libm is linked.
+    !!
+    !! **And `parquet_debug_exp_key` must BE that frozen transform, applied to `1 - u`.** It is the
+    !! only public name `parquet_expkey` exposes for `exp_key`, it exists because that module reaches
+    !! no `bind(C)` surface and so cannot use the C++-side debug-hook convention, and until this the
+    !! only caller anywhere was `tools/check_exp_key.f90` -- a standalone driver a bare compiler
+    !! builds, which `fpm test` never runs. So the hook the sweeps depend on was itself unexercised
+    !! by the suite. Asserting the identity rather than re-deriving a value is what makes this a test
+    !! of the hook: a wrapper that had drifted onto some other logarithm would satisfy any
+    !! self-consistent check of its own output and fails this one.
     subroutine test_exp_golden(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer :: k
@@ -117,6 +126,11 @@ contains
             call check(error, transfer(port, 0_int64) == exp_portable_bits(k), &
                 "pf_random_exp_portable_at does not match its golden bit pattern -- the frozen transform is " // &
                 "exact contract, so this is a value change, not a rounding difference")
+            if (allocated(error)) return
+
+            call check(error, transfer(parquet_debug_exp_key(1.0_real64 - u), 0_int64) == exp_portable_bits(k), &
+                "parquet_debug_exp_key(1 - u) is not bit-for-bit pf_random_exp_portable_at, so the public hook " // &
+                "the tools/check_exp_key.sh sweeps drive is no longer the transform the library itself uses")
             if (allocated(error)) return
 
             fast = pf_random_exp_at(exp_seed(k), exp_stream(k), exp_draw(k))
@@ -143,6 +157,14 @@ contains
         call check(error, worst_fast > 0.0_real64 .or. worst_port > 0.0_real64, &
             "not one of the golden rows differs from the arbitrary-precision reference by even an ulp, which is " // &
             "what a table generated FROM the implementation would look like rather than one generated for it")
+        if (allocated(error)) return
+
+        ! The one input whose answer is a whole number rather than a bit pattern, and the top of the
+        ! documented domain: `exp_key`'s doc-comment states `u = 1` gives exactly 0, and no golden row
+        ! can reach it because a uniform draw is in `[0, 1)` and `1 - u` is therefore never 1.
+        call check(error, parquet_debug_exp_key(1.0_real64) == 0.0_real64, &
+            "parquet_debug_exp_key(1) is not exactly 0, so -log(1) has stopped being exact at the top of the " // &
+            "transform's documented domain")
     end subroutine test_exp_golden
 
     !> Tier 0, the bulk fill and the stream walk, on both realisations and every awkward shape.

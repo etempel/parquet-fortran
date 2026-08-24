@@ -751,13 +751,24 @@ contains
         integer :: team
         !
         team = tail_team(nthreads, n)
+        ! **The threaded arm is currently UNREACHABLE, and is kept rather than deleted.** The one
+        ! caller in the library is `drive_engine`, which fills the identity only when `nrows < 2` --
+        ! every engine path establishes `perm` itself -- and `resolve_thread_count` clamps its count
+        ! to `max(nrows, 1)`, so `nthreads` is always 1 here and `tail_team` declines. No fixture and
+        ! no debug override can change that: `dbg_sort_tail_min_rows` lowers the element floor, not
+        ! the thread count. It stays because this is a PUBLIC procedure of the argsort tier whose
+        ! documented contract is "threaded when `nthreads` and `n` justify it", and because a future
+        ! engine path that reinstates a whole-column fill would want it back -- at which point the
+        ! markers below come off and `tools/coverage.sh` reports the exclusion as stale.
         if (team > 1) then
+            ! GCOVR_EXCL_START
             !$omp parallel do num_threads(team) default(shared) private(ik) schedule(static)
             do ik = 1_int64, n
                 perm(ik) = ik
             end do
             !$omp end parallel do
             return
+            ! GCOVR_EXCL_STOP
         end if
         do ik = 1_int64, n
             perm(ik) = ik

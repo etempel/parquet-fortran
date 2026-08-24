@@ -284,7 +284,13 @@ contains
             new_unittest("engine: the multi-key chain threads a STRING key's radix", &
                 test_multi_string_threads), &
             new_unittest("engine: the string refine threads, at both of its two levels", &
-                test_refine_threads) &
+                test_refine_threads), &
+            new_unittest("engine: every team-only allocation fallback declines without changing " // &
+                "the answer", test_radix_alloc_fallback_selectors), &
+            new_unittest("engine: Design B refines a sub-bucket that is itself oversized", &
+                test_engine_refine_two_levels), &
+            new_unittest("the threaded real32 and logical extractions agree with the serial ones", &
+                test_tail_extraction_real32_logical) &
             ]
     end subroutine collect_tests_parquet_sorting
     !
@@ -8497,13 +8503,22 @@ contains
     !!
     !! Both directions are asserted, because a counter that only ever went up would satisfy the
     !! forced half on its own.
+    !!
+    !! **`sort_nth_index` has its own copy of the fallback and needs its own arm.** Quickselect
+    !! narrows to one side of each partition instead of recursing into both, so it is a separate
+    !! `do while` loop with a separate `depth == 0` test calling the same `sort_heapsort` -- and
+    !! `pf_argsort` cannot reach it. Its answer is a VALUE rather than a permutation, which is the
+    !! sharper assertion of the two: the introsort's own fallback is followed by a full insertion
+    !! pass that would repair a broken heapsort, whereas here the surviving range is insertion-sorted
+    !! only after the heapsort has decided which rows are in it.
     subroutine test_fortran_engine_depth_limit_bites(error)
         type(error_type), allocatable, intent(out) :: error !! set on failure.
         integer(int64), parameter :: n = 300_int64
         real(real64) :: v(n)
         type(pf_sort_keys) :: keys
         integer(int64), allocatable :: perm(:)
-        integer(int64) :: k, heap_normal, heap_forced
+        integer(int64) :: k, heap_normal, heap_forced, heap_nth_normal, heap_nth_forced
+        real(real64) :: nth_normal, nth_forced
         !
         ! **A REAL key, and that is load-bearing.** The counting fast path accepts integer keys only,
         ! so a real one cannot reach it whatever `parquet_set_sort_counting_path` says — which keeps
@@ -8527,6 +8542,16 @@ contains
         call parquet_debug_set_sort_depth_limit(0)
         call pf_argsort(keys, perm)
         heap_forced = parquet_debug_sort_heapsort_calls()
+        !
+        ! The quickselect arm. Rank 137 of 300 is well inside the array, so the range stays above
+        ! the insertion cutoff for several partitions and the forced limit bites on the first one.
+        call parquet_debug_set_sort_depth_limit(-1)
+        call pf_nth_element(v, 137_int64, nth_normal)
+        heap_nth_normal = parquet_debug_sort_heapsort_calls()
+        call parquet_debug_set_sort_depth_limit(0)
+        call pf_nth_element(v, 137_int64, nth_forced)
+        heap_nth_forced = parquet_debug_sort_heapsort_calls()
+        !
         call parquet_debug_set_sort_depth_limit(-1)
         call engine_only_introsort(.false.)
         call restore_engine_default()
@@ -8536,6 +8561,15 @@ contains
         if (allocated(error)) return
         call check(error, heap_forced > 0_int64, &
             "forcing the depth limit to zero did not reach the heapsort fallback")
+        if (allocated(error)) return
+        call check(error, heap_nth_normal == 0_int64, &
+            "quickselect entered the heapsort fallback unforced, so its depth limit is far too small")
+        if (allocated(error)) return
+        call check(error, heap_nth_forced > 0_int64, &
+            "forcing the depth limit to zero did not reach quickselect's own heapsort fallback")
+        if (allocated(error)) return
+        call check(error, nth_forced == nth_normal, &
+            "quickselect's heapsort fallback answered a different element than its partition loop")
     end subroutine test_fortran_engine_depth_limit_bites
     !
     ! ---- C++-engine pins ------------------------------------------------------------------
@@ -8765,4 +8799,308 @@ contains
         call check(error, q_par == q_ser .and. nnull_par == nnull_ser, &
             "a threaded extraction must give pf_nth_quantile's serial value and null count")
     end subroutine test_selection_threads_extraction
+    !> Every allocation the radix path can fail must decline to a slower route, never abort, and
+    !! must still answer identically.
+    !!
+    !! **Six of `parquet_debug_set_sort_radix_fail_alloc`'s eight selectors are only reachable with a
+    !! TEAM**, which is why they live here rather than beside selector 1 in
+    !! `test_radix_path_alloc_fallback`: the threaded tier split (3), Design B's task arrays (4) and
+    !! the four allocations `grow_run_list` makes in turn (5 to 8) all sit inside `#ifdef _OPENMP`
+    !! behind an `nt > 1` test, and selector 2's run-level arm needs `nrun >= 2 * nt` runs on top of
+    !! that -- which `str_prefix_column`'s single run can never supply.
+    !!
+    !! **What each forced arm is asserted on, because "the answer is unchanged" is most of what a
+    !! fallback guarantees and is therefore nearly vacuous on its own:**
+    !!
+    !! * **4** declines Design B, so `parquet_debug_sort_design()` must report 1 (Design A) where the
+    !!   control reports 2. That is a sharp negative control: a selector that did nothing would leave
+    !!   it at 2.
+    !! * **2, 5, 6, 7 and 8** all end with the string runs refined one at a time rather than by the
+    !!   team, so `parquet_debug_sort_refine_runs()` must be 0 where the control is positive. For 2
+    !!   that counter is doubly pinned -- the run-level dispatch is skipped AND every run's own
+    !!   sub-bucket loop declines, because selector 2 also fails the buffer `sort_radix_refine_run`
+    !!   allocates lazily.
+    !! * **3** has no observable at all, and this says so rather than implying otherwise: the
+    !!   threaded tier split and the serial one produce the same `ra`, `nv`, `nnan`, `nnull` and
+    !!   value range by construction, and nothing counts which ran. Its arm asserts the permutation
+    !!   and is kept because the fallback would otherwise ship with every mutation to it surviving.
+    subroutine test_radix_alloc_fallback_selectors(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer(int64), parameter :: n = 16384_int64  !! integer rows, enough to reach Design B.
+        integer(int64), parameter :: ns = 40000_int64 !! string rows, enough for many refine runs.
+        integer, parameter :: str_sel(5) = [2, 5, 6, 7, 8] !! the selectors a string fixture reaches.
+        integer(int64) :: v(n)
+        character(len=11) :: sv(ns)
+        integer(int64), allocatable :: ref(:), got(:), sref(:), sgot(:)
+        integer(int64) :: i, g, q, design_ctl, design_4, runs_ctl
+        integer(int64) :: runs_forced(size(str_sel))
+        logical :: same_int(3:4), same_str(size(str_sel))
+        integer :: k
+        ! **Preconditions, declared rather than assumed.** Every selector below guards an allocation
+        ! made only when a team exists, so without one the forced arms run exactly the code the
+        ! control arm runs and every equality holds for the wrong reason -- the vacuous pass this
+        ! file's other threading tests skip for.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the threaded tier split, Design B and the " // &
+            "run-level string refine all sit inside #ifdef _OPENMP in " // &
+            "src/parquet_argsort_engine.f90, so none of the allocations these selectors " // &
+            "fail is ever made and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and no " // &
+                "threaded design is entered")
+            return
+        end if
+#endif
+        !
+        ! The integer fixture is `test_engine_refine_floor`'s, which is known to reach Design B: a
+        ! heavily skewed top byte with a second varying byte below it.
+        do i = 1_int64, n
+            if (i <= 6000_int64) then
+                g = 0_int64
+            else
+                g = 1_int64 + mod(i, 2_int64)
+            end if
+            v(i) = ishft(g, 56) + ishft(mod(i, 13_int64), 48)
+        end do
+        ! The string fixture shares four leading characters, so the eight-byte radix window still
+        ! splits the column into ~100 runs -- enough to clear the run-level loop's `2 * nt` floor --
+        ! and every value outruns the window, so every run really does need refining.
+        do i = 1_int64, ns
+            q = mod(i * 2654435761_int64, 100000_int64)
+            write (sv(i), '(a,i7.7)') "aaaa", q
+        end do
+        !
+        ! Every piece of global state is restored BEFORE the first assertion: each `check` can
+        ! return early, and a leaked forced-failure selector would silently disable the radix path
+        ! for every later test in this suite.
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call force_parallel_threshold(1_int64)
+        !
+        call pf_argsort(v, ref, threads=4)
+        design_ctl = parquet_debug_sort_design()
+        do k = 3, 4
+            call parquet_debug_set_sort_radix_fail_alloc(k)
+            call pf_argsort(v, got, threads=4)
+            if (k == 4) design_4 = parquet_debug_sort_design()
+            same_int(k) = (size(got) == size(ref))
+            if (same_int(k)) same_int(k) = all(got == ref)
+        end do
+        call parquet_debug_set_sort_radix_fail_alloc(0)
+        !
+        call pf_argsort(sv, sref, threads=4)
+        runs_ctl = parquet_debug_sort_refine_runs()
+        do k = 1, size(str_sel)
+            call parquet_debug_set_sort_radix_fail_alloc(str_sel(k))
+            call pf_argsort(sv, sgot, threads=4)
+            runs_forced(k) = parquet_debug_sort_refine_runs()
+            same_str(k) = (size(sgot) == size(sref))
+            if (same_str(k)) same_str(k) = all(sgot == sref)
+        end do
+        call parquet_debug_set_sort_radix_fail_alloc(0)
+        !
+        call force_parallel_threshold(0_int64)
+        call restore_engine_default()
+        !
+        call check(error, design_ctl == 2_int64, &
+            "the integer fixture must reach Design B, or selector 4's decline proves nothing")
+        if (allocated(error)) return
+        call check(error, runs_ctl > 0_int64, &
+            "the string fixture must reach the run-level refine dispatch, or selectors 2 and 5-8 " // &
+            "have nothing to decline")
+        if (allocated(error)) return
+        call check(error, same_int(3), &
+            "failing the threaded tier split's counters must give the serial permutation exactly")
+        if (allocated(error)) return
+        call check(error, same_int(4), &
+            "failing Design B's task arrays must give the same permutation as Design B")
+        if (allocated(error)) return
+        call check(error, design_4 == 1_int64, &
+            "failing Design B's task arrays must fall through to Design A, not run Design B anyway")
+        if (allocated(error)) return
+        do k = 1, size(str_sel)
+            call check(error, same_str(k), &
+                "a forced allocation failure changed the string permutation, selector " // &
+                itoa(str_sel(k)))
+            if (allocated(error)) return
+            call check(error, runs_forced(k) == 0_int64, &
+                "the forced arm still dispatched runs to the team, so the failure was not " // &
+                "engaged, selector " // itoa(str_sel(k)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_radix_alloc_fallback_selectors
+    !
+    !> Design B must refine a SUB-bucket that is itself oversized, not only a top-level one.
+    !!
+    !! **The second level is what the ping-pong buffer choice exists for and nothing else reaches
+    !! it.** Every initial task sits in the split's output buffer, so a first refinement always
+    !! scatters that buffer back into the other one; its children then sit in the opposite buffer,
+    !! and refining one of THOSE takes the other arm of the same test. `test_engine_refine_floor`'s
+    !! fixture refines once and stops -- its sub-buckets are ~460 rows against a 4096 target -- so
+    !! that arm had never run, and a mutation swapping its source and destination would have been
+    !! invisible: the answer only changes when a task is refined twice.
+    !!
+    !! **The fixture is a skew at each of three digits, which is the only shape that gets there.**
+    !! A task is refinable only while it owes at least one digit below the one it was split on
+    !! (`tdmax >= 1`), so two rounds need three varying bytes: byte 7 splits, byte 6 refines, byte 5
+    !! refines again. At four threads the target is `nv / 4` = 4096, so byte 7 must leave a bucket
+    !! above that whose byte-6 majority is also above it.
+    !!
+    !! **The bucket count is what pins the two rounds**, since the permutation is identical either
+    !! way: three initial buckets, plus two from the first refinement, plus eleven from the second.
+    !! Five is what one round alone would leave -- and the negative control is exactly that, a task
+    !! floor set between the two sub-bucket sizes so the walk refines once and stops. Without it,
+    !! "more than five buckets" would be satisfied by any split at all.
+    subroutine test_engine_refine_two_levels(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        integer(int64), parameter :: n = 16384_int64
+        integer(int64), parameter :: one_round_floor = 13000_int64
+        !! Above the 12000-row sub-bucket and below the 14000-row bucket that produced it, so the
+        !! first refinement happens and the second cannot.
+        integer(int64) :: v(n)
+        integer(int64), allocatable :: ref(:), got_one(:), got_two(:)
+        integer(int64) :: one_buckets, two_buckets, two_design
+        integer(int64) :: i, g, h
+        ! **Preconditions, declared rather than assumed.** Design B is compiled out without OpenMP
+        ! and declines without a team, so both arms would be the serial LSD loop and the bucket
+        ! counts below would both be zero -- passing against an engine that never split anything.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: the Design A/B dispatch in " // &
+            "src/parquet_argsort_engine.f90 sits inside #ifdef _OPENMP, so no split happens " // &
+            "and every assertion below would be vacuous")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and " // &
+                "Design B is never entered")
+            return
+        end if
+#endif
+        !
+        ! Byte 7 leaves 14000 rows in one bucket, byte 6 leaves 12000 of those in one sub-bucket,
+        ! and byte 5 finally spreads them over eleven. Both of the first two are above the 4096
+        ! target, which is what makes the walk refine twice.
+        do i = 1_int64, n
+            if (i <= 14000_int64) then
+                g = 0_int64
+            else
+                g = 1_int64 + mod(i, 2_int64)
+            end if
+            if (i <= 12000_int64) then
+                h = 0_int64
+            else
+                h = 1_int64
+            end if
+            v(i) = ishft(g, 56) + ishft(h, 48) + ishft(mod(i, 11_int64), 40)
+        end do
+        !
+        ! Restored before the first assertion, for the reason `test_engine_refine_floor` gives: a
+        ! leaked task floor or engine selection breaks tests that never mention sorting designs.
+        call parquet_debug_use_fortran_sort_engine(.true.)
+        call force_parallel_threshold(1_int64)
+        call pf_argsort(v, ref, threads=1)
+        !
+        call parquet_debug_set_sort_task_floor(one_round_floor)
+        call pf_argsort(v, got_one, threads=4)
+        one_buckets = parquet_debug_sort_split_buckets()
+        !
+        call parquet_debug_set_sort_task_floor(1_int64)
+        call pf_argsort(v, got_two, threads=4)
+        two_buckets = parquet_debug_sort_split_buckets()
+        two_design = parquet_debug_sort_design()
+        !
+        call parquet_debug_set_sort_task_floor(-1_int64)
+        call force_parallel_threshold(0_int64)
+        call restore_engine_default()
+        !
+        call check(error, two_design == 2_int64, &
+            "the fixture must reach Design B, or this test says nothing about its refinement")
+        if (allocated(error)) return
+        call check(error, all(got_one == ref), "one refinement round must not change the answer")
+        if (allocated(error)) return
+        call check(error, all(got_two == ref), "refining twice must not change the answer either")
+        if (allocated(error)) return
+        call check(error, one_buckets == 5_int64, &
+            "the control must refine exactly once: 3 top-byte buckets, one of them replaced by 2")
+        if (allocated(error)) return
+        call check(error, two_buckets > one_buckets, &
+            "only one refinement round ran, so a sub-bucket was never itself refined and the " // &
+            "second-level scatter -- the one that reads the OTHER buffer pair -- never executed")
+    end subroutine test_engine_refine_two_levels
+    !
+    !> The threaded key extraction must agree with the serial one for `real32` and `logical` too.
+    !!
+    !! **One extraction per element family, and three of the six were covered by nothing.** Each
+    !! `extract_*` has its own threaded twin -- a separate subroutine, deliberately, because writing
+    !! the `!$omp parallel do` inline measured the SERIAL arm 2.4x slower -- so a plumbing error in
+    !! one says nothing about the others. `test_partial_argsort_threads_tail` and
+    !! `test_selection_threads_extraction` both drive `int32` only.
+    !!
+    !! **Forcing the floor is the whole point**, exactly as in those two: `tail_team` declines a team
+    !! below `max(32768, 1024*nt)` elements, which no fixture here reaches, so without
+    !! `parquet_debug_set_sort_tail_min_rows` both arms would run the same serial code.
+    !!
+    !! The masked arm is the sharp one for `logical`: values and mask travel through the same
+    !! threaded pre-fill-and-extract pair, so a null placed by the wrong thread's chunk is a wrong
+    !! answer that only a null-carrying fixture can see.
+    subroutine test_tail_extraction_real32_logical(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        integer, parameter :: n = 4096
+        real(real32) :: v32(n)
+        logical :: lv(n), mask(n)
+        integer(int64), allocatable :: ref32(:), got32(:), refl(:), gotl(:)
+        integer(int64), allocatable :: refn(:), gotn(:)
+        integer :: i
+        ! **Preconditions, declared rather than assumed.** With the threaded branches preprocessed
+        ! out, or on a machine where an explicit threads= clamps back to 1, both arms below are the
+        ! same serial code and every assertion passes without testing anything.
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: extract_f32_par and extract_bool_par " // &
+            "(src/parquet_argsort_kernel.f90) sit inside #ifdef _OPENMP, so both arms below " // &
+            "would run the same serial code and the equality would hold for the wrong reason")
+        return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: resolve_thread_count clamps " // &
+                "an explicit threads= to omp_get_num_procs(), so threads=4 resolves to 1 here " // &
+                "and no tail pass is threaded")
+            return
+        end if
+#endif
+        !
+        ! Neither sorted nor reverse-sorted, and carrying ties, so an extraction that dropped or
+        ! misplaced a chunk cannot coincide with the right answer.
+        do i = 1, n
+            v32(i) = real(mod(i * 7919, 1021), real32) * 0.5_real32
+            lv(i) = (mod(i, 3) == 0)
+            mask(i) = (mod(i, 17) /= 0)
+        end do
+        !
+        ! Restored BEFORE the first assertion: every `check` can return early, and a leaked floor
+        ! would silently rethread every later test in this suite.
+        call parquet_debug_set_sort_tail_min_rows(1_int64)
+        call pf_argsort(v32, got32, threads=4)
+        call pf_argsort(lv, gotl, threads=4)
+        call pf_argsort(lv, gotn, is_valid=mask, threads=4)
+        call parquet_debug_set_sort_tail_min_rows(-1_int64)
+        !
+        call pf_argsort(v32, ref32, threads=1)
+        call pf_argsort(lv, refl, threads=1)
+        call pf_argsort(lv, refn, is_valid=mask, threads=1)
+        !
+        call check(error, size(got32) == n, "the forced-floor run must still return n indices")
+        if (allocated(error)) return
+        call check(error, all(got32 == ref32), &
+            "a threaded real32 extraction must give the serial permutation exactly")
+        if (allocated(error)) return
+        call check(error, all(gotl == refl), &
+            "a threaded logical extraction must give the serial permutation exactly")
+        if (allocated(error)) return
+        call check(error, all(gotn == refn), &
+            "a threaded logical extraction must place the nulls exactly as the serial one does")
+    end subroutine test_tail_extraction_real32_logical
+    !
 end module test_sorting

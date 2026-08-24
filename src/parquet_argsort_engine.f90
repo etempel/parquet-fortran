@@ -1009,20 +1009,6 @@ contains
         end select
     end subroutine sort_radix_images_range
 
-    !> The whole image build over `rows(1:m)`, unchanged for every existing caller.
-    !!
-    !! A one-line forwarder onto the range form so the body exists once. Kept as a separate entry
-    !! point because three of the four call sites have no team to offer and no reason to acquire one.
-    subroutine sort_radix_images(key, rows, m, out, bias)
-        type(sort_key_buf), intent(in) :: key  !! the bound key.
-        integer(int64), intent(in) :: rows(:)  !! the rows to image, 1-based; `1..m` are read.
-        integer(int64), intent(in) :: m        !! how many of `rows` to image.
-        integer(int64), intent(inout) :: out(:) !! receives `m` images, to be compared as UNSIGNED.
-        integer(int64), intent(in), optional :: bias !! see `sort_radix_images_range`.
-        !
-        call sort_radix_images_range(key, rows, 1_int64, m, out, bias)
-    end subroutine sort_radix_images
-
     !> The image build split across a team of `nt` — Stage 4, `feature_sort_parallel.md` §11 step 1.
     !!
     !! Embarrassingly parallel and the easiest phase in the engine to thread: every row's image
@@ -1365,7 +1351,7 @@ contains
         vmin = huge(0_int64)
         vmax = -huge(0_int64) - 1_int64
         allocate(cv(0:nt - 1), cn(0:nt - 1), cu(0:nt - 1), lo_t(0:nt - 1), hi_t(0:nt - 1), stat=ios)
-        if (ios /= 0) then
+        if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 3) then
             nv = -1_int64   ! the caller's signal to take the serial path
             return
         end if
@@ -1839,7 +1825,7 @@ contains
         if (ios /= 0) return
         allocate(tlo(0:maxtask - 1), thi(0:maxtask - 1), &
                  tdmax(0:maxtask - 1), tsrcb(0:maxtask - 1), stat=ios)
-        if (ios /= 0) then
+        if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 4) then
             deallocate(scnt)
             return
         end if
@@ -2130,8 +2116,8 @@ contains
         ! immediately; seed the scan at zero and only the far-from-zero fixture notices.
         narrow = .false.
         if (is_int .and. nv > 1_int64) narrow = sort_span_under_2p32(vmin, vmax)
-        ! The images, in one bulk call rather than one call per row -- see `sort_radix_images`. This
-        ! costs one extra sequential read of `ra` and removes `nv` calls, each of which carried a
+        ! The images, in one bulk call rather than one call per row -- see `sort_radix_images_range`.
+        ! This costs one extra sequential read of `ra` and removes `nv` calls, each of which carried a
         ! family dispatch. Every row handed over is a value-tier row by construction.
         if (narrow) then
             call sort_radix_images_threaded(keys(1), ra, nv, ka, nt, vmin)
@@ -2371,7 +2357,7 @@ contains
             ! Every row is imaged and the non-value ones are then overwritten, rather than each row
             ! being tested before it is imaged: that is what lets the image build be one bulk call
             ! with its family dispatch hoisted out. Imaging a null row is harmless -- see
-            ! `sort_radix_images` -- and the result never survives this loop.
+            ! `sort_radix_images_range` -- and the result never survives this loop.
             !
             ! Both hoisted out of the row loop: `key_has_tiers` is a property of the KEY, and the
             ! value rank is loop-invariant too. A key with neither a validity array nor a NaN tier
@@ -2847,6 +2833,13 @@ contains
     end subroutine sort_radix_refine_strings
 
     !> Doubles the refine work-list, or reports failure by leaving `cap` at zero.
+    !!
+    !! **Four allocations in series, so `dbg_sort_radix_fail_alloc` gives each its own selector**
+    !! (5, 6, 7, 8, in the order they appear below) for the reason that hook's own doc-comment
+    !! records: with one flag the first failure returns before the later ones are reached, so
+    !! three of the four fallbacks would ship untested. Failing any of them leaves `cap` at zero,
+    !! whereupon the caller refines that run serially and carries on -- the answer is unchanged,
+    !! which is why a permutation assertion alone cannot tell this path apart from the ordinary one.
     subroutine grow_run_list(rlo, rhi, rmin, rmax, cap)
         integer(int64), allocatable, intent(inout) :: rlo(:), rhi(:), rmin(:), rmax(:)
         integer(int64), intent(inout) :: cap !! capacity in, new capacity out; 0 means it could not grow.
@@ -2856,28 +2849,28 @@ contains
         !
         newcap = max(1024_int64, 2_int64 * cap)
         allocate(t(newcap), stat=ios)
-        if (ios /= 0) then
+        if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 5) then
             cap = 0_int64
             return
         end if
         if (cap > 0_int64) t(1:cap) = rlo(1:cap)
         call move_alloc(t, rlo)
         allocate(t(newcap), stat=ios)
-        if (ios /= 0) then
+        if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 6) then
             cap = 0_int64
             return
         end if
         if (cap > 0_int64) t(1:cap) = rhi(1:cap)
         call move_alloc(t, rhi)
         allocate(t(newcap), stat=ios)
-        if (ios /= 0) then
+        if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 7) then
             cap = 0_int64
             return
         end if
         if (cap > 0_int64) t(1:cap) = rmin(1:cap)
         call move_alloc(t, rmin)
         allocate(t(newcap), stat=ios)
-        if (ios /= 0) then
+        if (ios /= 0 .or. dbg_sort_radix_fail_alloc == 8) then
             cap = 0_int64
             return
         end if
@@ -3123,7 +3116,7 @@ contains
     !> Byte `at` of one string row, 0-based, as an unsigned 0..255 -- or the PAD when the row has
     !! ended, which is what makes a shorter string sort before a longer one that extends it.
     !!
-    !! `descending` complements the byte, exactly as `sort_radix_images` complements the whole
+    !! `descending` complements the byte, exactly as `sort_radix_images_range` complements the whole
     !! 64-bit image and for the same reason: complementing reverses the value order while leaving
     !! stability intact, where reversing the output would put ties backwards.
     function sort_radix_byte_at(key, i, at) result(b)

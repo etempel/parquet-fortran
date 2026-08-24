@@ -430,17 +430,18 @@ work through this list in full for every release:
 `"v1.0.0 (2026-07-27)"`), used as `parquet_get_version`'s `mode="internal"` value. Update both the
 version and the date. `parquet_get_version` compares the fpm-injected `RELEASE_VERSION` macro
 against this string and prints a runtime warning if they disagree — the one part of this sequence
-that is actually checked, but only after the fact (at a user's next run), not at release time. 3.
-**`CHANGELOG.md`** — add a new `## [X.Y.Z] - YYYY-MM-DD` section (Keep-a-Changelog format, `###
-Added`/`### Changed`/`### Fixed`/etc. grouping, matching the existing `[1.0.0]` section). If
-`[Unreleased]` entries have accumulated since the last release (see `CLAUDE.md`'s changelog
-guidance), retitle that section rather than starting a new one. 4. **A git tag** matching the
-version (e.g. `v1.0.1`), on the commit that bumped `VERSION.txt`. 5. **`README.md`'s status line**
-(`**Status: 1.0 — first stable release.**`, near the top) — only needs touching on a **major**
-version bump (it deliberately names the series, not the patch level, specifically so routine `1.0.x`
-releases don't need this step at all). 6. **`fpm publish`** — see "Publishing to the fpm registry"
-below; this is a separate, deliberate step with its own prep script, not part of the version bump
-itself.
+that is actually checked, but only after the fact (at a user's next run), not at release time.
+3. **`CHANGELOG.md`** — add a new `## [X.Y.Z] - YYYY-MM-DD` section (Keep-a-Changelog format, `###
+Added`/`### Changed`/`### Fixed` grouping, matching the existing `[1.0.0]` section, including its
+**Toolchain floor** / **SemVer scope** / **Compatibility** notice). If `[Unreleased]` entries have
+accumulated since the last release (see `CLAUDE.md`'s changelog guidance), retitle that section
+rather than starting a new one, and add its `[X.Y.Z]:` link reference at the foot of the file.
+4. **A git tag** matching the version (e.g. `v1.0.1`), on the commit that bumped `VERSION.txt`.
+5. **`README.md`'s status line** (`**Status: 2.0 — stable.**`, near the top) — only needs touching
+on a **major** version bump (it deliberately names the series, not the patch level, specifically so
+routine `2.0.x` releases don't need this step at all).
+6. **`fpm publish`** — see "Publishing to the fpm registry" below; this is a separate, deliberate
+step with its own prep script, not part of the version bump itself.
 
 None of this is automated or enforced by CI today — a future release-checklist script (comparing
 `VERSION.txt` against `cversion` and the latest `CHANGELOG.md` heading, say) would close that gap,

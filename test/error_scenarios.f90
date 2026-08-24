@@ -786,6 +786,8 @@ program error_scenarios
         call scenario_validate_qc_min_non_integral_for_int32()
     case ("validate_qc_min_out_of_int32_range")
         call scenario_validate_qc_min_out_of_int32_range()
+    case ("validate_qc_min_overflows_int64")
+        call scenario_validate_qc_min_overflows_int64()
     case ("validate_qc_min_wrong_operator")
         call scenario_validate_qc_min_wrong_operator()
     case ("validate_qc_max_wrong_operator")
@@ -8483,6 +8485,41 @@ contains
 
         call parquet_validate_maml(maml)
     end subroutine scenario_validate_qc_min_out_of_int32_range
+
+    !> A qc: min: that is a plain run of digits too large for int64 must be REJECTED, not accepted
+    !> with whatever the failed read left behind.
+    !>
+    !> This is the one input that reaches parquet_qc_bound_as_int64_text's own failure arm. That
+    !> helper checks the text's SHAPE by hand first -- an optional sign then nothing but digits --
+    !> so by the time it runs its list-directed read, a nonzero iostat can mean one thing only: the
+    !> value does not fit in int64. Every other rejected bound in this file is turned away earlier,
+    !> by the shape test (not_a_number) or by the real64 route that follows (1.5, 5000000000 --
+    !> which is digits, fits int64 easily, and is rejected for being outside int32).
+    !>
+    !> huge(int64) + 1 rather than a longer run of nines, because it is exactly the first value
+    !> that does not fit: a fixture one digit wider would pass just as well against a helper whose
+    !> ceiling had moved. gfortran reports iostat 5010 here and leaves a GARBAGE value in the
+    !> integer, which is what makes the arm's `value = 0` load-bearing rather than tidy -- the
+    !> caller reads that variable when the function answers .true.
+    !>
+    !> The column is int64 deliberately: on an int32 column the real64 route that follows would
+    !> reject the value for being outside int32 whatever the int64 helper had answered, so the
+    !> abort would not be evidence about this arm at all.
+    subroutine scenario_validate_qc_min_overflows_int64()
+        type(parquet_maml_file) :: maml
+
+        maml%name = "qc_min_overflows_int64.maml"
+        maml%lines = [character(len=40) :: &
+            "table: qc_table", &
+            "fields:", &
+            "- name: a", &
+            "  data_type: int64", &
+            "  qc:", &
+            "    min: 9223372036854775808" ]
+
+        call parquet_validate_maml(maml)
+        print '(a)', "unexpectedly accepted a qc: min: that does not fit in int64"
+    end subroutine scenario_validate_qc_min_overflows_int64
 
     !> qc: min: must be a lower bound: a '<'/'<=' operator on min: is a
     !> reversed, nonsensical bound and is rejected by parquet_validate_maml.

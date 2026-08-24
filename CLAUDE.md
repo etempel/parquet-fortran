@@ -405,8 +405,8 @@ Whenever asked to implement a new feature in this repository, always:
    goes where. In brief: every new public procedure/type gets its own `!>`(leading)/`!!`(trailing) doc-comment
    (picked up automatically by the FORD-generated API reference — no hand-maintained table to
    update); user-facing behavior/how-to goes in the relevant `doc/pages/*.md` guide page; touch
-   README.md only if the landing-page story changes (a new entry in its compact "API overview"
-   index, a new limitation, a setup change); update CONTRIBUTING.md if it affects contributor
+   README.md only if the landing-page story changes (a new feature bullet, a new limitation, a
+   setup change); update CONTRIBUTING.md if it affects contributor
    workflow.
 
 Do this without being asked separately each time — it applies by default to any
@@ -489,9 +489,13 @@ User- and contributor-facing docs are split across three layers — keep new con
 
 Working rules:
 
-- A new public procedure gets a `!>`(leading)/`!!`(trailing) doc-comment (see "FORD doc-comment conventions"
-  below) **and**
-  its name in **README.md**'s "API overview" index; keep the two in sync on any rename/removal.
+- A new public procedure gets a `!>`(leading)/`!!`(trailing) doc-comment (see "FORD doc-comment
+  conventions" below), and that is the whole obligation. The FORD-generated reference is the only
+  complete enumeration of the public surface, and it is derived from source rather than maintained
+  by hand. **README.md carries no per-procedure index** — it lists features and points at the guide.
+  Do not reintroduce one: the hand-maintained "API overview" it used to carry had drifted to 14
+  missing names before a lint check was written for it, and that check was retired together with
+  the section.
 - Every section heading must appear in that file's own **Contents** ToC (README.md/CONTRIBUTING.md/CLAUDE.md);
   `doc/pages/*.md` pages don't need one — FORD generates in-page navigation from headings itself.
 - Moving content between README.md and a `doc/pages/*.md` page turns in-page `#anchor` links
@@ -5415,8 +5419,8 @@ Rules for a future one:
 - **Reach for the C++ side first.** If the state can be forced from `parquet_wrapper.cpp`, do it
   there and keep the hook invisible to Fortran users. Only when the state is Fortran-side and behind
   private components does a public procedure become the only option.
-- **A public debug hook is excluded from README.md's API overview**, carries a doc-comment saying it
-  is test-only and why it has to be public, and is called by no library code. Follow
+- **A public debug hook carries a doc-comment saying it is test-only** and why it has to be public,
+  and is called by no library code. Follow
   `parquet_debug_table_set_inflight`'s shape rather than inventing a second convention.
 - **Do not put a hook in the hot path to avoid making it public.** Having
   `table_check_no_append` consult a C++ flag would work and would keep the hook private — and would

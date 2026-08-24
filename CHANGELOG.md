@@ -1533,7 +1533,7 @@ and Arrow/Parquet C++ ≥ 24.0.0 (validated locally against 25.0.0). See
 [Prerequisites](README.md#prerequisites) for the full detail.
 
 **SemVer scope:** the stability promise covers the whole `use parquet` surface documented under
-README's [API overview](README.md#api-overview) — every public type/procedure/constant reachable
+README's [API stability](README.md#important-behavior) — every public type/procedure/constant reachable
 that way, including a public type's own type-bound procedures and operators; anything not
 reachable via `use parquet` (private module internals, the C++ surface, file/module layout) can
 change in a minor or patch release.

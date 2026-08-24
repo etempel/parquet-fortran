@@ -483,7 +483,12 @@ contains
             new_unittest("%next on an uninitialised sampler aborts", test_weighted_uninit_aborts), &
             new_unittest("a second %init aborts", test_weighted_init_twice_aborts), &
             new_unittest("a WEIGHTED subset larger than its population aborts", test_weighted_subset_big_aborts), &
-            new_unittest("a mismatched permutation array aborts", test_weighted_perm_size_aborts) &
+            new_unittest("a mismatched permutation array aborts", test_weighted_perm_size_aborts), &
+            new_unittest("an infinite weight aborts", test_weighted_infinite_aborts), &
+            new_unittest("the RACE validates its own weights, on all four of its guards", &
+                test_weighted_race_weight_guards), &
+            new_unittest("a population too large for an int32 item index aborts, on all three guards", &
+                test_weighted_int32_population_guards) &
             ]
         p3 = [ &
             new_unittest("an environment value longer than the buffer aborts", &
@@ -4984,6 +4989,82 @@ contains
             failure_message="a mismatched permutation array was expected to abort", &
             required_stderr="must have the same size")
     end subroutine test_weighted_perm_size_aborts
+
+    !> `%init`'s third value guard: an infinite weight makes every draw degenerate.
+    subroutine test_weighted_infinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_infinite_weight", expect_abort=.true., &
+            failure_message="an infinite weight was expected to abort", &
+            required_stderr="a weight is infinite")
+    end subroutine test_weighted_infinite_aborts
+
+    !> `pf_weighted_permutation` carries its OWN four weight guards, not `pf_weighted_draw%init`'s.
+    !!
+    !! The race never builds a sampler, so the two families validate independently -- and each
+    !! message names the failure that family would suffer, which is why the assertions below check
+    !! the RACE's wording rather than only that something aborted. Every existing weight-validation
+    !! scenario goes through `%init`, so all four of these were unreached.
+    subroutine test_weighted_race_weight_guards(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "weighted_race_nan_weight", expect_abort=.true., &
+            failure_message="a NaN weight in the race was expected to abort", &
+            required_stderr="pf_weighted_permutation: a weight is NaN")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "weighted_race_infinite_weight", expect_abort=.true., &
+            failure_message="an infinite weight in the race was expected to abort", &
+            required_stderr="pf_weighted_permutation: a weight is infinite")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "weighted_race_negative_weight", expect_abort=.true., &
+            failure_message="a negative weight in the race was expected to abort", &
+            required_stderr="pf_weighted_permutation: a weight is negative")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "weighted_race_all_zero", expect_abort=.true., &
+            failure_message="an all-zero weight vector in the race was expected to abort", &
+            required_stderr="pf_weighted_permutation: every weight is zero")
+    end subroutine test_weighted_race_weight_guards
+
+    !> The three "this population cannot be named by an int32 item index" refusals.
+    !!
+    !! Each scenario makes the same call twice -- once under the real ceiling, which must succeed
+    !! and prints a control line, and once under a forced one, which must abort. Asserting the
+    !! control line as well as the abort is what separates a working guard from one that fires
+    !! unconditionally; the abort alone would pass against either.
+    subroutine test_weighted_int32_population_guards(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat
+        logical :: found
+        integer :: k
+        character(len=40) :: names(3)
+        character(len=60) :: wanted(3)
+
+        names(1) = "weighted_next_population_too_big"
+        names(2) = "weighted_subset_population_too_big"
+        names(3) = "weighted_perm_population_too_big"
+        wanted(1) = "pf_weighted_draw%next: the population exceeds"
+        wanted(2) = "pf_weighted_subset: the population exceeds"
+        wanted(3) = "pf_weighted_permutation: the population exceeds"
+
+        do k = 1, 3
+            call run_error_scenario(trim(names(k)), exitstat, cmdstat, out_file, err_file)
+            call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+            if (allocated(error)) return
+            call check(error, exitstat /= 0, &
+                "a population above the forced int32 ceiling was expected to abort: " // trim(names(k)))
+            if (allocated(error)) return
+            call scenario_capture_contains(out_file, err_file, "control ", found)
+            call check(error, found, &
+                "the same call under the REAL ceiling must succeed first, or the guard fires " // &
+                "unconditionally and the abort proves nothing: " // trim(names(k)))
+            if (allocated(error)) return
+            call scenario_capture_contains(out_file, err_file, trim(wanted(k)), found)
+            call check(error, found, &
+                "the abort must come from this guard and name its own procedure: " // trim(names(k)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_weighted_int32_population_guards
 
     subroutine test_settings_env_two_numbers_aborts(error)
         type(error_type), allocatable, intent(out) :: error

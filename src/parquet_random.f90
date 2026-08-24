@@ -2068,8 +2068,14 @@ contains
         if (slot /= 0) then
             call random_block(seed, stream, ior(DOM_REAL32, blk), c0, c1, c2, c3)
             if (slot <= 0 .and. k < m) then
+                ! Unreachable by construction -- the head runs only for `slot /= 0`, and `slot` is
+                ! `modulo(position, 4)`, so it is never negative. Kept, and excluded rather than
+                ! deleted, because the four arms are written as one aligned pattern; see this
+                ! subroutine's own doc-comment, which says so at the design level.
+                ! GCOVR_EXCL_START
                 k = k + 1_int64
                 v(k) = to_real32(c0)
+                ! GCOVR_EXCL_STOP
             end if
             if (slot <= 1 .and. k < m) then
                 k = k + 1_int64
@@ -2836,6 +2842,7 @@ contains
     !! describes. Neither is dead code; do not delete either on the strength of a coverage report.
     !! What asserts them is the suite's cross-implementation agreement sweep, run by a compiler that
     !! takes this arm.
+    ! GCOVR_EXCL_START
     pure function sub64(a, b) result(r)
         integer(int64), intent(in) :: a             !! left operand, read as a bit pattern
         integer(int64), intent(in) :: b             !! right operand, read as a bit pattern
@@ -2849,11 +2856,13 @@ contains
         end if
         r = ior(ishft(iand(high, M32), 32), low)
     end function sub64
+    ! GCOVR_EXCL_STOP
 
     !> `a + b` as a 64-bit pattern, computed on 32-bit halves so that nothing overflows.
     !!
     !! Reached only from the fork's `#else` arm, exactly as `sub64` is -- see its note on why this
     !! reports as uncovered on every compiler this project measures coverage with.
+    ! GCOVR_EXCL_START
     pure function add64(a, b) result(r)
         integer(int64), intent(in) :: a             !! left operand, read as a bit pattern
         integer(int64), intent(in) :: b             !! right operand, read as a bit pattern
@@ -2863,6 +2872,7 @@ contains
         high = ishft(a, -32) + ishft(b, -32) + ishft(low, -32)   ! below 2**33 + 1
         r = ior(ishft(iand(high, M32), 32), iand(low, M32))
     end function add64
+    ! GCOVR_EXCL_STOP
 
     !> `hi - lo + 1` as an unsigned 64-bit pattern; 0 means the full `int64` range.
     !!
@@ -3747,4 +3757,4 @@ contains
     end subroutine word_at
 
 
-end module parquet_random
+end module parquet_random ! GCOVR_EXCL_LINE

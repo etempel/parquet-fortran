@@ -492,6 +492,15 @@ contains
                 "an int32 first-stream index does not agree with the int64 one")
             if (allocated(error)) return
         end do
+        ! Both VALUE kinds against an int32 index, not just `real32`: the generic has four
+        ! specifics over (value kind x index kind), and the `real64` x `int32` one is a separate
+        ! procedure that the line above cannot reach.
+        call pf_random_fill_streams(12345_int64, 1_int32, v)
+        do k = 1, 7
+            call check(error, v(k) == pf_random_at(12345_int64, int(k, int64)), &
+                "a real64 stream-axis fill from an int32 first-stream index disagrees with the int64 one")
+            if (allocated(error)) return
+        end do
 
         ! Negative first stream index: the walk is upwards from it, through zero.
         call pf_random_fill_streams(12345_int64, -3_int64, v, 2_int64)
@@ -687,6 +696,19 @@ contains
             call check(error, v(k) == pf_random_int_at(4242_int64, 5_int64, 1_int64, mm, k), trim(msg))
             if (allocated(error)) return
         end do
+        ! **An EVEN starting draw, because the wide draw-axis worker has a head the narrow one does
+        ! not.** It packs two values per block, so `draw` even leaves `position` odd and one value is
+        ! emitted from the previous block before the two-at-a-time loop can start. At `draw = 1` that
+        ! head is skipped entirely, and every other integer-fill assertion in this file starts there
+        ! -- so the head ran nowhere, on either value kind, and an off-by-one in it would have been
+        ! invisible. The narrow side takes a different worker and simply re-confirms the identity.
+        call pf_random_fill_draws(4242_int64, 5_int64, v, 1_int64, mm, 2_int64)
+        do k = 1_int64, 9_int64
+            write (msg, '(a,i0,a)') "the draw-axis integer fill from an even draw disagrees with the scalar " // &
+                "draw at m = ", mm, " -- the unaligned head emits the wrong word"
+            call check(error, v(k) == pf_random_int_at(4242_int64, 5_int64, 1_int64, mm, k + 1_int64), trim(msg))
+            if (allocated(error)) return
+        end do
         call pf_random_fill_streams(4242_int64, 5_int64, v, 1_int64, mm, 3_int64)
         do k = 1_int64, 9_int64
             write (msg, '(a,i0)') "the stream-axis integer fill disagrees with the scalar draw at m = ", mm
@@ -702,6 +724,28 @@ contains
             do k = 1_int64, 9_int64
                 write (msg, '(a,i0)') "the int32 integer fill disagrees with the int64 one at m = ", mm
                 call check(error, int(v32(k), int64) == v(k), trim(msg))
+                if (allocated(error)) return
+            end do
+            ! The int32 worker has the same unaligned head as its int64 twin and needs the same
+            ! even-draw arm; the loop above starts at draw 1 and skips it.
+            call pf_random_fill_draws(4242_int64, 5_int64, v32, 1_int32, int(mm, int32), 2_int64)
+            do k = 1_int64, 9_int64
+                write (msg, '(a,i0)') "the int32 integer fill from an even draw disagrees with the scalar draw " // &
+                    "at m = ", mm
+                call check(error, int(v32(k), int64) == &
+                    pf_random_int_at(4242_int64, 5_int64, 1_int64, mm, k + 1_int64), trim(msg))
+                if (allocated(error)) return
+            end do
+            ! **The int32 STREAM-axis worker, on both sides of the boundary and at the DEFAULT
+            ! draw.** It is its own procedure with its own narrow/wide fork, and the only calls to it
+            ! anywhere in this suite pass `draw = 2` or `3` -- so its narrow arm's `draw = 1` word
+            ! selection and its whole wide arm ran nowhere.
+            call pf_random_fill_streams(4242_int64, 5_int64, v32, 1_int32, int(mm, int32))
+            do k = 1_int64, 9_int64
+                write (msg, '(a,i0)') "the int32 stream-axis fill at the default draw disagrees with the " // &
+                    "scalar draw at m = ", mm
+                call check(error, int(v32(k), int64) == &
+                    pf_random_int_at(4242_int64, 4_int64 + k, 1_int64, mm, 1_int64), trim(msg))
                 if (allocated(error)) return
             end do
         end if
@@ -1538,7 +1582,102 @@ contains
             call pf_random_resample(empty32, 5000000000_int64, SD)
             call check(error, .true., "a zero-sized resample is a defined no-op")
         end block
+        if (allocated(error)) return
+
+        ! (9) All TWELVE specifics, named by literal kinds. The generic is (idx kind) x (m kind) x
+        !     (stream absent / int32 / int64), and the arms above resolve to whichever specific their
+        !     literals happen to pick -- five of the twelve were reached by none of them. Twelve
+        !     near-identical one-line forwarders differing only in kind tokens is exactly the shape a
+        !     copy-paste defect hides in, and the failure it produces is a silently wrong replicate
+        !     rather than a compile error. Each is checked against the same int64 reference, so a
+        !     specific wired to the wrong stream or the wrong worker cannot agree.
+        call check_resample_specifics(error, SD)
     end subroutine test_resample_identity
+    !
+    !> Calls each of `pf_random_resample`'s twelve specifics and checks it against the scalar draw.
+    !!
+    !! Separate from `test_resample_identity`'s body only because it is mechanical: the point is
+    !! exhaustive reach over the generic's specifics, the same shape `check_specifics` has for the
+    !! integer fills.
+    subroutine check_resample_specifics(error, sd)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), intent(in) :: sd            !! the seed every arm shares
+        integer(int64), parameter :: M = 97_int64   !! population; fits int32, so all four kind pairs apply
+        integer(int64), parameter :: ST = 6_int64   !! the stream every stream-carrying arm asks for
+        integer(int64) :: want0(8), wantS(8), a64(8)
+        integer(int32) :: a32(8)
+        integer(int64) :: k
+
+        ! The two references: stream 1 (what an absent `stream` means here) and stream ST.
+        do k = 1_int64, 8_int64
+            want0(k) = pf_random_int_at(sd, 1_int64, 1_int64, M, k)
+            wantS(k) = pf_random_int_at(sd, ST, 1_int64, M, k)
+        end do
+        ! A stream-carrying arm must not coincide with the default one, or every check below would
+        ! pass against a specific that dropped its `stream` argument on the floor.
+        call check(error, .not. all(want0 == wantS), &
+            "the default stream and stream 6 agree on this fixture, so a specific ignoring its stream= " // &
+            "would be invisible")
+        if (allocated(error)) return
+
+        ! ---- no stream: the four base specifics ----
+        call pf_random_resample(a32, int(M, int32), sd)
+        call expect_resample(error, int(a32, int64), want0, "resample i32_i32")
+        if (allocated(error)) return
+        call pf_random_resample(a32, M, sd)
+        call expect_resample(error, int(a32, int64), want0, "resample i32_i64")
+        if (allocated(error)) return
+        call pf_random_resample(a64, int(M, int32), sd)
+        call expect_resample(error, a64, want0, "resample i64_i32")
+        if (allocated(error)) return
+        call pf_random_resample(a64, M, sd)
+        call expect_resample(error, a64, want0, "resample i64_i64")
+        if (allocated(error)) return
+
+        ! ---- integer(int32) stream ----
+        call pf_random_resample(a32, int(M, int32), sd, int(ST, int32))
+        call expect_resample(error, int(a32, int64), wantS, "resample i32_i32_s32")
+        if (allocated(error)) return
+        call pf_random_resample(a32, M, sd, int(ST, int32))
+        call expect_resample(error, int(a32, int64), wantS, "resample i32_i64_s32")
+        if (allocated(error)) return
+        call pf_random_resample(a64, int(M, int32), sd, int(ST, int32))
+        call expect_resample(error, a64, wantS, "resample i64_i32_s32")
+        if (allocated(error)) return
+        call pf_random_resample(a64, M, sd, int(ST, int32))
+        call expect_resample(error, a64, wantS, "resample i64_i64_s32")
+        if (allocated(error)) return
+
+        ! ---- integer(int64) stream ----
+        call pf_random_resample(a32, int(M, int32), sd, ST)
+        call expect_resample(error, int(a32, int64), wantS, "resample i32_i32_s64")
+        if (allocated(error)) return
+        call pf_random_resample(a32, M, sd, ST)
+        call expect_resample(error, int(a32, int64), wantS, "resample i32_i64_s64")
+        if (allocated(error)) return
+        call pf_random_resample(a64, int(M, int32), sd, ST)
+        call expect_resample(error, a64, wantS, "resample i64_i32_s64")
+        if (allocated(error)) return
+        call pf_random_resample(a64, M, sd, ST)
+        call expect_resample(error, a64, wantS, "resample i64_i64_s64")
+    end subroutine check_resample_specifics
+    !
+    !> Reports which resample specific disagreed with the scalar draw, and where.
+    subroutine expect_resample(error, got, want, what)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), intent(in) :: got(:)        !! what the specific produced
+        integer(int64), intent(in) :: want(:)       !! the scalar draws at the same coordinates
+        character(len=*), intent(in) :: what        !! the specific's name, for the message
+        integer(int64) :: k
+        character(len=120) :: msg
+        do k = 1_int64, size(got, kind=int64)
+            if (got(k) /= want(k)) then
+                write (msg, '(a,a,i0)') trim(what), " disagrees with the scalar draw at k=", k
+                call check(error, .false., trim(msg))
+                return
+            end if
+        end do
+    end subroutine expect_resample
 
     !> `pf_random_resample` draws WITH replacement, and the distinction is measurable.
     !!
@@ -2980,6 +3119,24 @@ contains
         call check(error, parquet_debug_random_uses_int128() .eqv. (selected_int_kind(38) > 0), &
             "the compiled multiply path disagrees with this compiler's 128-bit capability: either a capable compiler " // &
             "is silently shipping the wrapping kernel, or the fork was selected on a target that cannot support it")
+        if (allocated(error)) return
+
+        ! **The fork has THREE arms and two reporters, so both have to be asserted.** `PF_SAFE64` and
+        ! the wrapping arm both answer `.false.` to the question above, which is exactly why
+        ! `parquet_debug_random_uses_safe64` exists: without it `tools/check_random_kernels.sh` would
+        ! label a NAG build "wrapping" and its vacuity guard would then compare one arm against
+        ! itself while reporting that it had exercised two. That script is the only caller anywhere,
+        ! and it is a standalone driver a bare compiler builds -- `fpm test` never runs it, so the
+        ! reporter the whole sweep is steered by had no assertion of its own.
+        call check(error, .not. (parquet_debug_random_uses_int128() .and. parquet_debug_random_uses_safe64()), &
+            "both arm reporters answer .true., which the #elif fork makes impossible -- it has been edited into " // &
+            "overlapping conditions, and every kernel sweep steered by them is now mis-labelled")
+        if (allocated(error)) return
+        if (selected_int_kind(38) > 0) then
+            call check(error, .not. parquet_debug_random_uses_safe64(), &
+                "this compiler has a 128-bit kind and took the int128 arm, so the overflow-free 64-bit arm cannot " // &
+                "also be compiled")
+        end if
     end subroutine test_fork_selection
 
     !> Scalar draws against the strict, overflow-free reference.

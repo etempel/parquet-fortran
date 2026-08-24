@@ -247,6 +247,20 @@ contains
             "the int32 and int64 specifics of pf_random_exp_portable_at disagree")
         if (allocated(error)) return
 
+        ! **The same two-way reach for the BULK fills**, which are their own specifics rather than
+        ! the elemental scalar under another name: `pf_random_fill_exp` and its portable twin each
+        ! have an int32-index forwarder that nothing above can reach, and a forwarder wired to the
+        ! wrong worker or losing the sign extension is a silently different stream, not a build
+        ! failure. Compared against the int64-index fills taken at the top of this test.
+        call pf_random_fill_exp(dist_seed, i32, part(1:3))
+        call check(error, all(part(1:3) == v(1:3)), &
+            "pf_random_fill_exp from an int32 stream index disagrees with the int64 one")
+        if (allocated(error)) return
+        call pf_random_fill_exp_portable(dist_seed, i32, part(1:3))
+        call check(error, all(part(1:3) == w(1:3)), &
+            "pf_random_fill_exp_portable from an int32 stream index disagrees with the int64 one")
+        if (allocated(error)) return
+
         ! Elemental use equals a loop of scalar calls, on both realisations.
         call check(error, all(pf_random_exp_at(dist_seed, [(k, k=1_int64,16_int64)]) == &
                               [(pf_random_exp_at(dist_seed, k), k=1_int64,16_int64)]), &
@@ -562,6 +576,17 @@ contains
         if (allocated(error)) return
         call check(error, pf_random_normal_portable_at(dist_seed, i32) == pf_random_normal_portable_at(dist_seed, i64), &
             "the int32 and int64 specifics of pf_random_normal_portable_at disagree")
+        if (allocated(error)) return
+
+        ! The bulk fills' own int32-index forwarders, for the reason `test_exp_cross_form` gives at
+        ! the same point: they are separate procedures from the elemental scalars checked above.
+        call pf_random_fill_normal(dist_seed, i32, v3)
+        call check(error, all(v3 == v(1:3)), &
+            "pf_random_fill_normal from an int32 stream index disagrees with the int64 one")
+        if (allocated(error)) return
+        call pf_random_fill_normal_portable(dist_seed, i32, v3)
+        call check(error, all(v3 == w(1:3)), &
+            "pf_random_fill_normal_portable from an int32 stream index disagrees with the int64 one")
         if (allocated(error)) return
 
         call check(error, all(pf_random_normal_at(dist_seed, [(k, k=1_int64,16_int64)]) == &

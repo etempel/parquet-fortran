@@ -380,6 +380,22 @@ program error_scenarios
         call scenario_weighted_subset_too_large()
     case ("weighted_perm_size_mismatch")
         call scenario_weighted_perm_size_mismatch()
+    case ("weighted_infinite_weight")
+        call scenario_weighted_infinite_weight()
+    case ("weighted_race_nan_weight")
+        call scenario_weighted_race_nan_weight()
+    case ("weighted_race_infinite_weight")
+        call scenario_weighted_race_infinite_weight()
+    case ("weighted_race_negative_weight")
+        call scenario_weighted_race_negative_weight()
+    case ("weighted_race_all_zero")
+        call scenario_weighted_race_all_zero()
+    case ("weighted_next_population_too_big")
+        call scenario_weighted_next_population_too_big()
+    case ("weighted_subset_population_too_big")
+        call scenario_weighted_subset_population_too_big()
+    case ("weighted_perm_population_too_big")
+        call scenario_weighted_perm_population_too_big()
     case ("settings_env_two_numbers")
         call scenario_settings_env_two_numbers()
     case ("settings_env_out_of_range")
@@ -4469,6 +4485,134 @@ contains
         call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (4 slots for 6 items)
         print '(a,i0)', "unexpectedly returned a short permutation: ", perm(1)
     end subroutine scenario_weighted_perm_size_mismatch
+
+    !> An infinite weight is refused: the total weight would be infinite and every draw degenerate.
+    !!
+    !! The third of `%init`'s three value guards, and the one no scenario reached. It is separate
+    !! from the NaN guard rather than folded into it because the two fail differently -- a NaN
+    !! compares false against every bound and would be filed as zero-weight, while an infinity
+    !! compares TRUE against every bound and would take every draw.
+    subroutine scenario_weighted_infinite_weight()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        type(pf_weighted_draw) :: d
+        real(real64) :: w(3)
+
+        w = [1.0_real64, ieee_value(1.0_real64, ieee_positive_inf), 1.0_real64]
+        call d%init(w, 1_int64)            ! -> aborts (a weight is infinite)
+        print '(a)', "unexpectedly accepted an infinite weight"
+    end subroutine scenario_weighted_infinite_weight
+
+    !> The RACE validates its own weights, and its four guards are not `%init`'s.
+    !!
+    !! `pf_weighted_permutation` does not build a `pf_weighted_draw` -- it runs the exponential race
+    !! -- so it carries its own copy of the NaN / infinite / negative / all-zero tests, with its own
+    !! messages naming the different failure each one causes in a race rather than in a tree. All
+    !! four were unreached: every existing weight-validation scenario goes through `%init`.
+    subroutine scenario_weighted_race_nan_weight()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        real(real64) :: w(3)
+        integer(int64) :: perm(3)
+
+        w = [1.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), 1.0_real64]
+        call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (a weight is NaN)
+        print '(a)', "unexpectedly raced a NaN weight"
+    end subroutine scenario_weighted_race_nan_weight
+
+    !> The race's infinite-weight guard; see `scenario_weighted_race_nan_weight`.
+    subroutine scenario_weighted_race_infinite_weight()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        real(real64) :: w(3)
+        integer(int64) :: perm(3)
+
+        w = [1.0_real64, ieee_value(1.0_real64, ieee_positive_inf), 1.0_real64]
+        call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (a weight is infinite)
+        print '(a)', "unexpectedly raced an infinite weight"
+    end subroutine scenario_weighted_race_infinite_weight
+
+    !> The race's negative-weight guard; see `scenario_weighted_race_nan_weight`.
+    subroutine scenario_weighted_race_negative_weight()
+        real(real64) :: w(4)
+        integer(int64) :: perm(4)
+
+        w = [1.0_real64, 2.0_real64, -0.5_real64, 1.0_real64]
+        call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (a weight is negative)
+        print '(a)', "unexpectedly raced a negative weight"
+    end subroutine scenario_weighted_race_negative_weight
+
+    !> The race's all-zero guard; see `scenario_weighted_race_nan_weight`.
+    subroutine scenario_weighted_race_all_zero()
+        real(real64) :: w(4)
+        integer(int64) :: perm(4)
+
+        w = 0.0_real64
+        call pf_weighted_permutation(perm, w, 1_int64)   ! -> aborts (every weight is zero)
+        print '(a)', "unexpectedly raced an all-zero weight vector"
+    end subroutine scenario_weighted_race_all_zero
+
+    !> A population that cannot be named by an `integer(int32)` item index is refused.
+    !!
+    !! **Three separate guards ask this, and none could be reached from a test.** The real ceiling
+    !! is `huge(int32)` items -- 17 GB of `real64` weights before anything is drawn -- so all three
+    !! would ship with every mutation to them surviving. `parquet_debug_set_weighted_int32_limit`
+    !! lowers the ceiling so a four-element fixture reaches them, which is the shape CLAUDE.md's
+    !! "Guarding a hard Arrow int32-only ceiling" prescribes.
+    !!
+    !! **The negative control comes first in every one of the three**: the same call is made under
+    !! the real ceiling and must succeed. Without it a guard that fired unconditionally would pass
+    !! all three scenarios while breaking every ordinary caller.
+    !!
+    !! **The control is taken after a set-then-RESTORE round trip, not from the untouched default.**
+    !! Restoring is the half of the hook that a scenario ending in an abort never reaches, and it is
+    !! also the stronger control: a hook whose restore arm did nothing would leave the ceiling at 3
+    !! and the control call would fail here rather than at some later, unrelated point.
+    subroutine scenario_weighted_next_population_too_big()
+        type(pf_weighted_draw) :: d
+        real(real64) :: w(4)
+        integer(int32) :: item
+
+        w = 1.0_real64
+        call d%init(w, 1_int64)
+        call parquet_debug_set_weighted_int32_limit(3_int64)
+        call parquet_debug_set_weighted_int32_limit(-1_int64)   ! and back to the real ceiling
+        call d%next(item)                                   ! control: the real ceiling admits 4 items
+        print '(a,i0)', "control drew item ", item
+        call parquet_debug_set_weighted_int32_limit(3_int64)
+        call d%next(item)                                   ! -> aborts (population 4 exceeds the forced 3)
+        call parquet_debug_set_weighted_int32_limit(-1_int64)
+        print '(a)', "unexpectedly drew into an int32 item from an over-large population"
+    end subroutine scenario_weighted_next_population_too_big
+
+    !> `pf_weighted_subset`'s own int32-index ceiling; see `scenario_weighted_next_population_too_big`.
+    subroutine scenario_weighted_subset_population_too_big()
+        real(real64) :: w(4)
+        integer(int32) :: idx(2)
+
+        w = 1.0_real64
+        call parquet_debug_set_weighted_int32_limit(3_int64)
+        call parquet_debug_set_weighted_int32_limit(-1_int64)   ! and back to the real ceiling
+        call pf_weighted_subset(idx, w, 1_int64)            ! control: the real ceiling admits 4 items
+        print '(a,i0)', "control drew item ", idx(1)
+        call parquet_debug_set_weighted_int32_limit(3_int64)
+        call pf_weighted_subset(idx, w, 1_int64)            ! -> aborts (population 4 exceeds the forced 3)
+        call parquet_debug_set_weighted_int32_limit(-1_int64)
+        print '(a)', "unexpectedly filled an int32 subset from an over-large population"
+    end subroutine scenario_weighted_subset_population_too_big
+
+    !> `pf_weighted_permutation`'s int32-index ceiling; see `scenario_weighted_next_population_too_big`.
+    subroutine scenario_weighted_perm_population_too_big()
+        real(real64) :: w(4)
+        integer(int32) :: perm(4)
+
+        w = 1.0_real64
+        call parquet_debug_set_weighted_int32_limit(3_int64)
+        call parquet_debug_set_weighted_int32_limit(-1_int64)   ! and back to the real ceiling
+        call pf_weighted_permutation(perm, w, 1_int64)      ! control: the real ceiling admits 4 items
+        print '(a,i0)', "control placed item ", perm(1)
+        call parquet_debug_set_weighted_int32_limit(3_int64)
+        call pf_weighted_permutation(perm, w, 1_int64)      ! -> aborts (population 4 exceeds the forced 3)
+        call parquet_debug_set_weighted_int32_limit(-1_int64)
+        print '(a)', "unexpectedly raced into an int32 permutation from an over-large population"
+    end subroutine scenario_weighted_perm_population_too_big
 
     !> An environment variable longer than the fixed buffer the reader uses is refused rather than
     !> applied truncated -- a truncated number is a plausible-looking wrong value, which is exactly

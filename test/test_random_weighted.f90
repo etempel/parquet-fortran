@@ -74,7 +74,9 @@ contains
             new_unittest("the two families are independent at one coordinate", &
                          test_families_independent), &
             new_unittest("an unorderably small weight is treated as zero-weight", &
-                         test_subnormal_weight_is_zero) &
+                         test_subnormal_weight_is_zero), &
+            new_unittest("every subset and permutation specific reaches the same worker", &
+                         test_weighted_specifics) &
             ]
     end subroutine collect_tests_parquet_random_weighted
 
@@ -936,5 +938,78 @@ contains
         call check(error, item == 1 .or. item == 4, &
                    "the sequential family must exhaust the real weights before the tail")
     end subroutine test_subnormal_weight_is_zero
+
+    !> Every specific of `pf_weighted_subset` and `pf_weighted_permutation`, called by name.
+    !!
+    !! **Ten one-line forwarders, five of which were reached by nothing.** Between them the two
+    !! generics cover (result kind) x (stream absent / `int32` / `int64`), and the tests above resolve
+    !! to whichever specific their literals happen to select -- which turned out to be the `int32`
+    !! result for the subset's base form and for both permutation forms, so the `int64` twins of all
+    !! three, and the subset's `int64`-stream arm, ran nowhere. A forwarder that dropped its stream,
+    !! or handed the worker the wrong one, produces a different but perfectly plausible answer rather
+    !! than a compile error.
+    !!
+    !! **The base forms are the sharp half.** Each is documented as "stream 0", and the only thing
+    !! that can show it is a comparison against an explicit `stream = 0` -- with a different stream
+    !! asserted to disagree, or a forwarder ignoring the argument entirely would satisfy both.
+    subroutine test_weighted_specifics(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        integer(int64), parameter :: sd = 20260824_int64
+        integer(int64), parameter :: other = 9_int64   !! a stream the default must not coincide with
+        real(real64) :: w(6)
+        integer(int32) :: s32(4), p32(6)
+        integer(int64) :: s64(4), p64(6), want_sub(4), want_perm(6), alt(6)
+        integer :: i
+
+        do i = 1, 6
+            w(i) = real(i, real64)
+        end do
+
+        ! The references, taken through the int64/int64-stream specifics, which the tests above do
+        ! exercise. Everything below must reproduce them exactly.
+        call pf_weighted_subset(want_sub, w, sd, 0_int64)
+        call pf_weighted_permutation(want_perm, w, sd, 0_int64)
+
+        ! Vacuity control: stream 0 and stream `other` must differ, or a forwarder that discarded
+        ! its stream would satisfy every equality below.
+        call pf_weighted_permutation(alt, w, sd, other)
+        call check(error, .not. all(alt == want_perm), &
+            "stream 0 and stream 9 give the same permutation on this fixture, so a specific ignoring " // &
+            "its stream= would be invisible here")
+        if (allocated(error)) return
+
+        ! ---- pf_weighted_subset: two result kinds x three stream forms ----
+        call pf_weighted_subset(s32, w, sd)
+        call check(error, all(int(s32, int64) == want_sub), "wsub_i32_base is not stream 0")
+        if (allocated(error)) return
+        call pf_weighted_subset(s32, w, sd, 0_int32)
+        call check(error, all(int(s32, int64) == want_sub), "wsub_i32_s32 disagrees with the int64 worker")
+        if (allocated(error)) return
+        call pf_weighted_subset(s32, w, sd, 0_int64)
+        call check(error, all(int(s32, int64) == want_sub), "wsub_i32_s64 disagrees with the int64 worker")
+        if (allocated(error)) return
+        call pf_weighted_subset(s64, w, sd)
+        call check(error, all(s64 == want_sub), "wsub_i64_base is not stream 0")
+        if (allocated(error)) return
+        call pf_weighted_subset(s64, w, sd, 0_int32)
+        call check(error, all(s64 == want_sub), "wsub_i64_s32 disagrees with the int64 worker")
+        if (allocated(error)) return
+        call pf_weighted_subset(s64, w, sd, 0_int64)
+        call check(error, all(s64 == want_sub), "wsub_i64_s64 disagrees with the int64 worker")
+        if (allocated(error)) return
+
+        ! ---- pf_weighted_permutation: two result kinds x stream absent / int64 ----
+        call pf_weighted_permutation(p32, w, sd)
+        call check(error, all(int(p32, int64) == want_perm), "wperm_i32_base is not stream 0")
+        if (allocated(error)) return
+        call pf_weighted_permutation(p32, w, sd, 0_int64)
+        call check(error, all(int(p32, int64) == want_perm), "wperm_i32_s64 disagrees with the int64 worker")
+        if (allocated(error)) return
+        call pf_weighted_permutation(p64, w, sd)
+        call check(error, all(p64 == want_perm), "wperm_i64_base is not stream 0")
+        if (allocated(error)) return
+        call pf_weighted_permutation(p64, w, sd, 0_int64)
+        call check(error, all(p64 == want_perm), "wperm_i64_s64 disagrees with the int64 worker")
+    end subroutine test_weighted_specifics
 
 end module test_random_weighted

@@ -91,6 +91,7 @@ module parquet_sampling
     public :: parquet_debug_set_perm_parity
     public :: parquet_debug_set_perm_force_feistel
     public :: parquet_debug_perm_config
+    public :: parquet_debug_set_weighted_int32_limit
     public :: pf_random_perm_algorithm
     public :: pf_random_perm_at
     public :: pf_random_permutation
@@ -238,6 +239,19 @@ module parquet_sampling
     logical, save :: perm_dbg_no_parity = .false.
     !> `.true.` sends `m <= perm_exact_max` through the Feistel instead of the exact path.
     logical, save :: perm_dbg_force_feistel = .false.
+    !> Forced ceiling for the three "population must fit in an int32 index" refusals; `< 0` means
+    !! the real one, `huge(int32)`.
+    !!
+    !! Those guards cannot otherwise be reached from a test: entering one needs 2**31 weights, which
+    !! is 17 GB of `real64` before anything is drawn -- a fixture this repository cannot build, so
+    !! all three would ship with every mutation to them surviving. This is the shape CLAUDE.md's
+    !! "Guarding a hard Arrow int32-only ceiling" prescribes, with the override on the Fortran side
+    !! rather than in C++ because this module reaches no `bind(C)` surface (see
+    !! "A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one").
+    !!
+    !! ONE knob for all three, deliberately: they answer the same question about the same quantity,
+    !! and three separate overrides would let a test lower one while asserting against another.
+    integer(int64), save :: wd_dbg_int32_limit = -1_int64
 
     !> Element `k` of a uniform-looking permutation of `1 .. m`, addressed by its coordinates.
     !!
@@ -926,8 +940,16 @@ contains
         do while (a < perm_a_max .and. a * a < m)
             a = a + 1_int64
         end do
+        ! **The shrink loop cannot fire with an IEEE `sqrt`, and is kept anyway.** Reaching it needs
+        ! `sqrt(real(m))` to overshoot the true square root by a whole integer, i.e. a relative error
+        ! of `1 / sqrt(m)` -- about 2**-31 at the largest `m` this walks, where real64 gives 2**-53.
+        ! Correctness here is contract rather than tuning (the factors decide the orbit and therefore
+        ! every value), so the rule is written to be exact for ANY `sqrt` rather than for the one
+        ! this machine has, and the loop is what makes the grow loop above safe to start below the
+        ! answer. Excluded rather than deleted: no fixture can enter it, so it would otherwise report
+        ! as uncovered for good.
         do while (a > 1_int64 .and. (a - 1_int64) * (a - 1_int64) >= m)
-            a = a - 1_int64
+            a = a - 1_int64 ! GCOVR_EXCL_LINE
         end do
         b = (m + a - 1_int64) / a
     end subroutine perm_factors
@@ -1474,6 +1496,27 @@ contains
         logical, intent(in) :: on                   !! `.false.` suppresses the correction
         perm_dbg_no_parity = .not. on
     end subroutine parquet_debug_set_perm_parity
+
+    !> Lowers the population ceiling the three int32-index refusals test against. **Test-only.**
+    !!
+    !! Public for the reason `parquet_debug_set_perm_rounds` gives, and it exists because the real
+    !! ceiling is `huge(int32)` items -- see `wd_dbg_int32_limit`, which records why no fixture can
+    !! reach it. `n < 1` restores the real one.
+    subroutine parquet_debug_set_weighted_int32_limit(n)
+        integer(int64), intent(in) :: n             !! forced ceiling in items; `< 1` restores the real one
+        if (n < 1_int64) then
+            wd_dbg_int32_limit = -1_int64
+        else
+            wd_dbg_int32_limit = n
+        end if
+    end subroutine parquet_debug_set_weighted_int32_limit
+
+    !> The population ceiling an `integer(int32)` item index imposes, after any debug override.
+    pure function wd_int32_limit() result(n)
+        integer(int64) :: n                         !! largest population an int32 index can name
+        n = int(huge(1_int32), int64)
+        if (wd_dbg_int32_limit >= 1_int64) n = wd_dbg_int32_limit
+    end function wd_int32_limit
 
     !> Sends `m <= perm_exact_max` through the Feistel. **Test-only**; see the two hooks above.
     subroutine parquet_debug_set_perm_force_feistel(on)
@@ -2051,7 +2094,7 @@ contains
         logical :: got
 
         call wd_require_ready(self, "next")
-        if (self%npos + self%nzero > int(huge(1_int32), int64)) &
+        if (self%npos + self%nzero > wd_int32_limit()) &
             error stop "pf_weighted_draw%next: the population exceeds huge(int32) and cannot be " // &
                        "reported into an integer(int32) item; declare it integer(int64)"
         call wd_draw(self, item64, got)
@@ -2150,7 +2193,7 @@ contains
     subroutine wsub_check_i32(weights)
         real(real64), intent(in) :: weights(:)  !! the weights, whose size bounds every item index
 
-        if (size(weights, kind=int64) > int(huge(1_int32), int64)) &
+        if (size(weights, kind=int64) > wd_int32_limit()) &
             error stop "pf_weighted_subset: the population exceeds huge(int32) and an item index " // &
                        "has nowhere to go; declare idx as integer(int64)"
     end subroutine wsub_check_i32
@@ -2332,7 +2375,7 @@ contains
     subroutine wperm_check_i32(weights)
         real(real64), intent(in) :: weights(:)  !! the weights, whose size bounds every item index
 
-        if (size(weights, kind=int64) > int(huge(1_int32), int64)) &
+        if (size(weights, kind=int64) > wd_int32_limit()) &
             error stop "pf_weighted_permutation: the population exceeds huge(int32) and an item " // &
                        "index has nowhere to go; declare perm as integer(int64)"
     end subroutine wperm_check_i32
@@ -2384,4 +2427,4 @@ contains
         call wperm_impl(perm, weights, seed, stream, threads)
     end subroutine wperm_i64_s64
 
-end module parquet_sampling
+end module parquet_sampling ! GCOVR_EXCL_LINE

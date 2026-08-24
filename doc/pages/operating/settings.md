@@ -290,8 +290,8 @@ permutation. That is what makes threading admissible here as a setting at all. T
 covers `pf_random_resample`, whose element `k` is a pure function of `(seed, stream, k)`; it splits
 the draw axis rather than the element axis, and is equally bit-identical.
 
-How it scales, measured on a large many-core machine with `bench/benchmark_perm_rounds.sh` (see
-CONTRIBUTING.md), as a factor over the one-thread cost:
+How it scales, measured on a large many-core machine (`bench/probe_random_perm.f90 --mode=floor`
+reports the same figures on yours; see CONTRIBUTING.md), as a factor over the one-thread cost:
 
 | threads | 2 | 4 | 8 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|

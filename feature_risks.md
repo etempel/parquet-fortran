@@ -5134,7 +5134,7 @@ too, but as a **hang** rather than a failure, since removing it destroys the rou
 the cycle-walk orbit never re-enters range.
 
 `test_perm_structural` (same file) is the second, and it is the **structural distinguisher this entry
-describes**, ported from `bench/probe_random_feistel.f90 --mode=struct`. It reaches the shipped
+describes**, ported from the Feistel design probe's `--mode=struct`. It reaches the shipped
 permutation through the public API at **m = 1024**, where `a = b = 32` so `a*b = m` exactly and the
 cycle-walk never runs — which is what makes the public output the raw bijection on `Z_32 x Z_32` with
 no debug hook. Measured: shipped **1.82**, mutated to three rounds **8.74** (and the elevated relation
@@ -5157,7 +5157,7 @@ arm validates the four relations and their orientation. Without it, a test that 
 transposed the relations would pass on the shipped arm and mean nothing.
 
 **The round function's constants are analysed, and the analysis says the round count is what
-matters.** `bench/probe_random_mix2.f90` sweeps five conventional multiplier pairs through the same
+matters.** The multiplier probe swept five conventional pairs through the same
 distinguisher: all are clean at 4 rounds (|z| 0.79–1.85) and four of five are detected at 3. It also
 shows `perm_mix2`'s avalanche is at the sampling floor on every bit it reads, that it discards input
 bit 31 by the very mask this entry says is load-bearing (harmless while `m <= 2**62`), and — from

@@ -24,7 +24,7 @@
 #      and every other file found in those directories is appended to REMOVE_PATHS. So a *new* file
 #      dropped into either one is excluded by default, without needing a REMOVE_PATHS edit. Both
 #      replaced strip-lists, where a forgotten entry silently shipped in the tarball -- exactly what
-#      happened to bench/playground.f90 and bench/demo_print_schema_info.f90 before this script tracked
+#      happened to bench/playground.f90 and a sibling demo program before this script tracked
 #      them, and the same hazard tools/ carried for its 36 maintainer-only scripts until the
 #      inversion. The residual risk moves to the allow-lists themselves, where a *renamed* entry
 #      would silently stop matching and be stripped, so both are validated to exist up front.

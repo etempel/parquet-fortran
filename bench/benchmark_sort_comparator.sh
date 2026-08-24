@@ -80,7 +80,7 @@ for arg in "$@"; do
 done
 
 # One build tree per compiler. The compiler goes in the NAME, not just the configuration:
-# bench/benchmark_stage7.sh names its trees for the configuration alone, and running it under a
+# A wrapper that names its trees for the configuration alone, run under a
 # second FPM_FC drops that compiler's binary into the same tree, after which a `find ... | head -1`
 # lookup picks between them arbitrarily. Machine B runs two toolchains, so that trap is live here.
 FC_TAG="$(basename "${FPM_FC:-gfortran}")"

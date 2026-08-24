@@ -202,7 +202,7 @@ fi
 
 # --- one build tree per (variant, compiler) -----------------------------------------------------
 #
-# The compiler goes in the name, not just the variant. bench/benchmark_stage7.sh names its trees
+# The compiler goes in the name, not just the variant. A wrapper that names its trees
 # for the configuration alone, so running it under a second FPM_FC drops that compiler's binary
 # into the same tree and `find ... | head -n 1` then picks between them arbitrarily. Machine B
 # runs two toolchains in this campaign, so that trap is live here.

@@ -182,8 +182,11 @@ def join_continuations(text):
 # third spelling this file has to know about, alongside the two `result(...)` positions below.
 # It carries the result type in the header rather than in a declaration inside the body, so
 # without it such a function's result is unresolvable and gets reported as a mismatch that is
-# not one. Two hooks in bench/benchmark_stage7.f90 are written that way, and they were invisible
-# until this checker started finding its sources by shape instead of from a hand-kept list.
+# not one. No file uses that spelling today -- the two hooks that did were in a benchmark program
+# since deleted -- so this clause is DEFENSIVE and nothing would fail if it were removed. Keep it:
+# it is legal Fortran, a future hook may well be written that way, and the failure it prevents is a
+# false mismatch report rather than a missed one. Those hooks were also invisible to this checker
+# until it started finding its sources by shape instead of from a hand-kept list.
 FORTRAN_BINDC_RE = re.compile(
     r"(?:(\w+\s*\([^)]*\))\s+)?"
     r"\b(subroutine|function)\s+(\w+)\s*\(([^)]*)\)\s*"

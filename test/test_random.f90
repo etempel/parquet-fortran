@@ -1711,7 +1711,7 @@ contains
         deallocate (s64, s32)
     end subroutine test_perm_bulk
 
-    !> The modular-domain structural distinguisher, ported from `bench/probe_random_feistel.f90
+    !> The modular-domain structural distinguisher, ported from the Feistel design probe
     !! --mode=struct`. **The only oracle that can see a round-count regression statistically.**
     !!
     !! `pf_random_perm_at` is a 4-round Feistel network over `Z_a x Z_b`. Every marginal statistic

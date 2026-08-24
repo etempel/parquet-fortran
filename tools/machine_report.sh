@@ -216,7 +216,7 @@ extern "C" int cxx_add(int a, int b) {
 }
 EOF
     # Pick the archiver the REAL build would use for this compiler family, so the probe's archive is
-    # built the same way bench/benchmark_stage7.sh builds the library's. Plain `ar` is the fallback
+    # built the same way an LTO build of the library is archived. Plain `ar` is the fallback
     # and is itself informative: on macOS it is Apple cctools ar, which has no LTO plugin, so a probe
     # that passes with it has demonstrated linking and NOT interprocedural optimisation.
     probe_archiver() {  # $1 = fortran compiler

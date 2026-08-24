@@ -100,7 +100,7 @@ say so explicitly in §1 when you do.)
 |---|---|
 | **Question being answered** | *e.g. "does splitting the range check out of the conversion loop pay on this target?"* |
 | **Commit(s) to measure** | *e.g. `abc1234` (baseline) and `def5678` (change) — both pushed* |
-| **Command to run** | *e.g. `bench/benchmark_stage7.sh --both --test`* |
+| **Command to run** | *e.g. `bench/benchmark_table.sh --mode=access`* |
 | **Roughly how long** | *e.g. a few minutes per build configuration; `--test` adds the suite twice* |
 | **What decides the outcome** | *e.g. "if the fused column wins at every size, the item is dropped"* |
 

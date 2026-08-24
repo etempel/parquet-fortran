@@ -3165,7 +3165,7 @@ contains
     !>
     !> Why this exists as its own test: the integrality check is `src(i) /= anint(src(i))`, and
     !> replacing it is an open proposal (S7-9 -- `anint` costs a libm call per element on x86-64,
-    !> which `bench/benchmark_stage7.f90 --only=s7-9` measures). Every candidate replacement is built
+    !> measured during the S7-9 investigation). Every candidate replacement is built
     !> from a magnitude test and some form of round trip, i.e. several places a boundary can be got
     !> wrong by one. Every value below is a whole number that MUST be accepted, so a mistake shows
     !> up as a spurious "non-integral" abort rather than as a wrong value -- which no round-trip

@@ -3062,8 +3062,8 @@ def check_contributing_is_an_index():
     Three clauses, and the first two keep the index honest in both directions:
 
     1. Every executable script under tools/ and bench/ has exactly one row in the index. Without
-       this a new tool is simply absent and nobody finds out -- bench/check_s7_9.sh was
-       undocumented for exactly that reason.
+       this a new tool is simply absent and nobody finds out, which is how one benchmark wrapper
+       stayed undocumented until this check existed.
     2. Every index row resolves to a file that exists in one of the two directories, so a deleted
        or renamed tool cannot leave a row behind.
     3. Inside the section every tools/ or bench/ mention is a table row, the section stays at most

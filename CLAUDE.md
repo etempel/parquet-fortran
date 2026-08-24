@@ -2562,7 +2562,7 @@ treating it as one.
   ifx are indifferent and nothing will warn if it is renamed back. Any *future* special binding on a
   large type — another defined assignment, a defined operator — needs an early-sorting name too.
 - **An unguarded `use omp_lib` is a compile failure, not a graceful fallback to serial.**
-  `bench/probe_radix_parallel.f90` and `bench/benchmark_sort_tail.f90` both had one. Both now guard the
+  `bench/benchmark_sort_tail.f90` had one, as did a since-deleted radix probe. Both guarded the
   `use` with `#ifdef _OPENMP` and supply serial shims for the `omp_*` functions they call under
   `#ifndef _OPENMP` (`omp_get_wtime` via `system_clock`, the rest returning 1/0). The `!$omp`
   directives themselves need no guarding — the preprocessor removes them. This is the same defect
@@ -2609,8 +2609,8 @@ still halved the temporal-validity figure, i.e. real interprocedural optimisatio
 is what `-ipo` needs; the archiver choice is a refinement. **A tooling warning is a claim like any
 other**: B spent two extra probe runs falsifying this one rather than letting it qualify a whole
 campaign's numbers, which was the right call and is the pattern to copy.
-`bench/benchmark_stage7.sh` selects the archiver for both compiler families and warns when it cannot
-find one; `tools/machine_report.sh` reports which archivers exist. **Check the archiver before
+`tools/fpm_lto.sh` selects the archiver for both compiler families and refuses to build when it
+cannot find one; `tools/machine_report.sh` reports which archivers exist. **Check the archiver before
 reporting any LTO result, in either direction** — "LTO changes nothing here" is exactly what a
 disabled LTO build looks like.
 
@@ -2724,9 +2724,9 @@ configurations must give each its own `FPM_BUILD_DIR` **outside** `build/`, or
 binary and report a false green.
 
 **That build-tree name must vary by COMPILER as well as by configuration, and an existing wrapper
-probably gets this wrong.** `bench/benchmark_stage7.sh` names its trees for the configuration alone
+probably gets this wrong.** A since-deleted LTO wrapper named its trees for the configuration alone
 (`test_run/s7-plain`, `test_run/s7-lto`) regardless of `FPM_FC`, so running it a second time under a
-different Fortran compiler drops that compiler's `error_scenarios` binary into the *same* tree —
+different Fortran compiler dropped that compiler's `error_scenarios` binary into the *same* tree —
 fpm keeps the objects apart in its own per-compiler subdirectory, but the `find … | head -n 1`
 lookup does not, and one of the two binaries is then chosen arbitrarily. The trap is the same one
 the separate trees exist to close, re-opened along an axis nobody was thinking about. Until a
@@ -2746,10 +2746,11 @@ probe, ask what the real build does that the probe does not — an archive, a mi
 particular linker — and either reproduce it or say plainly what the probe does not cover.
 
 **A wrapper must FAIL rather than degrade when it cannot engage the configuration it was asked
-for.** `bench/benchmark_stage7.sh` gates `-fuse-ld=lld` on `command -v ld.lld`, warns when it is
-absent, and continues — so on machine B, where the documented activation script does not put it on
+for.** A since-deleted LTO wrapper gated `-fuse-ld=lld` on `command -v ld.lld`, warned when it was
+absent, and continued — so on machine B, where the documented activation script does not put it on
 `PATH` (see the machine table above), the campaign's headline fix silently did nothing and the run
-reproduced the exact failure the fix existed to remove. A warning on stderr, hundreds of lines above
+reproduced the exact failure the fix existed to remove. `tools/fpm_lto.sh` refuses instead, which is
+the behaviour to copy. A warning on stderr, hundreds of lines above
 the eventual error, is not a defence. **Two rules follow:** resolve a companion tool relative to the
 compiler that owns it (`"$(dirname "$(command -v ifx)")/compiler/ld.lld"`) rather than trusting
 `PATH`, and when a requested configuration cannot be assembled, exit nonzero — a run that could not
@@ -4464,8 +4465,8 @@ before being noticed:**
   the second arm a machine that has not settled — the test suite and the error scenarios are hundreds
   of subprocesses — so the second arm is systematically penalised by whatever is still draining. This
   is not the same hazard as "the machine is busy": it is *ordered*, so it biases one arm rather than
-  adding symmetric noise, and best-of-N rounds does **not** remove it. Measured with
-  `bench/benchmark_stage7.sh --both --test`, which reported LTO **22–30% slower**
+  adding symmetric noise, and best-of-N rounds does **not** remove it. Measured by a wrapper that
+  built and tested each configuration in turn, which reported LTO **22–30% slower**
   than plain (S7-5 85.59 → 111.00 ms); re-measuring the two arms alone, with no suite in between, put
   them within **0.5%** (85.10 vs 85.43). The first result would have been written up as a real
   regression. **Re-run any delta that would change a decision, with the arms measured back to back

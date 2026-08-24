@@ -5,12 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-
-- Many other minor fixes and improvements.
-
 ## [2.0.0] - 2026-08-24
 
 **Toolchain floor:** gfortran ≥ 13 (13 on CI; 15.2.0 the primary development target), and —
@@ -61,6 +55,10 @@ allowed". Parquet files written by 1.0.0 are read unchanged.
   counting fast path, target row-group size and the statistics prescreen — with
   `parquet_print_settings`, `parquet_reset_settings` and one `PARQUET_FORTRAN_*` environment
   variable per knob.
+- **Reproducible file output**: `parquet_set_file_date`/`parquet_get_file_date`, and
+  `PARQUET_FORTRAN_FILE_DATE`, pin the `DATE` metadata key to a given `YYYY-MM-DDTHH:MM:SS` instead
+  of reading the clock, so the same data written twice produces byte-identical files. An empty
+  value, the default, reads the clock as before.
 - **Every layer of the library is now an entry module in its own right**, each covered by the
   version promise and each far cheaper to compile against than `use parquet`: `parquet_io`,
   `parquet_tables`, `parquet_columns`, `parquet_sorting`, `parquet_argsort`, `parquet_sampling`,

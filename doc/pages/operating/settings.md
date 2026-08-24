@@ -485,6 +485,46 @@ The one real-world case for disabling it is a file whose statistics are known to
 written by a tool that recorded them incorrectly. The screen declines on its own whenever it is
 merely *uncertain*; it cannot detect statistics that are confidently wrong.
 
+## Reproducible output: pinning the file date
+
+Every file this library writes carries a creation timestamp, and it is **the only thing that
+differs between two writes of the same data**. Write one file twice and the two differ in nine
+bytes, every one of them a digit of that timestamp; write it twice inside the same wall-clock
+second and the two are bit-identical.
+
+`parquet_set_file_date(text)` pins that timestamp to a value you choose, which makes the whole file
+reproducible byte for byte:
+
+```fortran
+call parquet_set_file_date("2020-01-02T03:04:05")   ! same data in, same bytes out
+```
+
+`text` is an ISO-8601 `YYYY-MM-DDTHH:MM:SS`, and an **empty string puts the clock back** — that is
+the factory default. `call parquet_get_file_date(text)` reports what is set, or `""` when the clock
+is being read. Anything else aborts, naming the part of the date that is wrong; the nineteen-
+character width is required rather than preferred, because the same value goes into a VOTable
+`PARAM` that declares `arraysize="19"`.
+
+The date is read when a **writer is opened**, like every other setting the C++ half consults, so
+set it before `parquet_open_writer` or `parquet_write_table`.
+
+**It pins the date; it does not remove it.** The `DATE` key is still written, in all four places
+the timestamp appears — the key itself, the VOTable sidecar's own `DATE` `PARAM`, and both of those
+again inside the base64 `ARROW:schema` block Arrow builds from the same metadata. Suppressing the
+key instead would change more than a timestamp: `DATE` is written unconditionally and
+[shadows](../schema/building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata) a `schema%add_metadata("DATE", ...)`
+of your own on read, so removing it would silently promote your entry.
+
+This is a **development and testing** control — a regression suite that compares files byte for
+byte, a build system that wants reproducible artifacts, a `diff` between two runs. A file written
+this way records a creation date that is not when it was created, so it is not what you want for
+data you are going to keep.
+
+Two things it does not promise. Reproducibility holds for one Arrow version and one set of writer
+options: the Parquet footer records the writing library's version in its own `created_by` field, so
+files written against different Arrow builds differ whatever this is set to. And it says nothing
+about *reading* — a file written with a pinned date reads back exactly like any other.
+
 ## Terminal output
 
 Two settings control what the library prints and where. Both are read per message, so they take
@@ -577,6 +617,7 @@ One variable per knob, named `PARQUET_FORTRAN_` plus the knob's name in capitals
 | `PARQUET_FORTRAN_STATISTICS_PRESCREEN` | `true`/`false`/`1`/`0` |
 | `PARQUET_FORTRAN_VERBOSITY` | `normal`/`silent`/`errors_only` |
 | `PARQUET_FORTRAN_MESSAGE_STREAM` | `stdout`/`stderr` |
+| `PARQUET_FORTRAN_FILE_DATE` | `YYYY-MM-DDTHH:MM:SS` |
 
 `PARQUET_FORTRAN_THREADS` is `parquet_set_threads` and is applied **before** the other six, so a
 specific variable always overrides it — `PARQUET_FORTRAN_THREADS=8 PARQUET_FORTRAN_SORT_THREADS=2`
@@ -641,6 +682,7 @@ parquet-fortran settings
   statistics_prescreen             true
   verbosity                        normal
   message_stream                   stdout
+  file_date                        (clock)
 limits (read-only)
   parquet_max_filter_rule_len      8192
   parquet_max_filter_depth         32

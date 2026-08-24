@@ -1001,6 +1001,25 @@ extern "C"
 		g_message_stream = message_stream;
 	}
 
+	// ==== File-metadata settings, mirrored from parquet_settings.f90 ====
+	//
+	// The creation timestamp this side stamps into the `DATE` key and the VOTable sidecar is the
+	// ONLY thing that differs between two writes of the same data, so pinning it is the whole of
+	// what byte-for-byte reproducibility needs. Fortran decides WHICH of the two behaviours applies
+	// and sends it as a flag: there is no "empty means read the clock" rule on this side, because a
+	// policy decided in two places is a policy that can disagree with itself.
+	//
+	// Initialisers equal parquet_settings' own defaults (blank, i.e. read the clock), since they are
+	// what applies in the window before the first push -- feature_risks.md Risk-42.
+	static int g_file_date_fixed = 0;
+	static std::string g_file_date;
+
+	void parquet_push_file_metadata_settings(int use_fixed, const char *date)
+	{
+		g_file_date_fixed = use_fixed;
+		g_file_date = (use_fixed && date != nullptr) ? std::string(date) : std::string();
+	}
+
 	// True when output the caller explicitly asked for should be skipped -- the C++ counterpart of
 	// parquet_settings' parquet_output_is_suppressed, asked by parquet_reader_print_stat.
 	static bool output_is_suppressed(void)
@@ -3614,7 +3633,11 @@ extern "C"
 		const std::vector<ColumnMetadata> &column_metadata,
 		const std::vector<TableMetadataEntry> &table_metadata)
 	{
-		auto date = current_utc_timestamp();
+		// One `date` for the whole function, deliberately: it reaches the `DATE` key AND the
+		// VOTable sidecar's own DATE PARAM, and Arrow's store_schema() then duplicates both into
+		// the base64 ARROW:schema blob -- four appearances of one value. Reading the clock twice
+		// here would let a file disagree with itself across a second boundary.
+		auto date = g_file_date_fixed ? g_file_date : current_utc_timestamp();
 
 		std::string table_name = "table";
 		for (const auto &kv : table_metadata)

@@ -35,6 +35,7 @@ module parquet_settings
     use iso_c_binding, only: c_int, c_int64_t
     use parquet_bindings, only: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity, &
         parquet_push_output_settings, parquet_push_performance_settings, &
+        parquet_push_file_metadata_settings, &
         c_get_arrow_version, c_get_parquet_version
     ! Every knob an Arrow-free module has to reach -- state, getter AND setter -- lives in that
     ! leaf module rather than here, so that reaching it does not import parquet_bindings
@@ -69,6 +70,7 @@ module parquet_settings
     ! ---- Owned by this module ----
     public :: parquet_push_settings_to_cpp
     public :: parquet_set_arrow_threads
+    public :: parquet_set_file_date, parquet_get_file_date
     public :: parquet_get_arrow_threads
     public :: parquet_get_arrow_version
     public :: parquet_reset_settings
@@ -162,6 +164,13 @@ module parquet_settings
     !> This library's own level for its own default codec, applied only when a writer is opened with
     !! no compression arguments AND no compression setting -- see parquet_resolve_writer_compression.
     integer, parameter :: level_zstd_default = 3
+    !> Width of an ISO-8601 "YYYY-MM-DDTHH:MM:SS" file date, in characters.
+    !!
+    !! Not a free choice: `build_votable_xml` (src/parquet_wrapper.cpp) writes the same value into a
+    !! `<PARAM arraysize="19" datatype="char" name="DATE">`, so a date of any other length would make
+    !! the sidecar contradict its own declaration. That is why parquet_set_file_date insists on
+    !! exactly this shape rather than accepting any text.
+    integer, parameter :: file_date_len = 19
     !
     !> The built-in values of the three numeric C++-side knobs, i.e. what `0` resolves to and what a
     !! getter reports after a reset. Each MUST equal the corresponding global's initialiser in
@@ -223,6 +232,13 @@ module parquet_settings
     integer(int64), save :: cfg_target_row_group_bytes = 0
     !> Whether the reader screens row groups against their footer statistics before reading them.
     logical, save :: cfg_statistics_prescreen = .true.
+    !> Fixed value for the `DATE` file-metadata key, or blank to read the clock (the default).
+    !!
+    !! Nineteen characters because that is the width the VOTable sidecar's own PARAM declares
+    !! (`arraysize="19"`), so a value of any other length would make the sidecar disagree with
+    !! itself. Blank is not a value the key can take -- it means "no override", and is why the
+    !! push below sends an explicit flag rather than leaving C++ to read an empty string as policy.
+    character(len=file_date_len), save :: cfg_file_date = ""
     !
     ! ---- Generic setters over both integer kinds ----
     !
@@ -455,6 +471,124 @@ contains
         end if
     end subroutine parquet_get_default_compression
 
+    !> Pins the `DATE` file-metadata key to a fixed value, so that writing the same data twice
+    !> produces BYTE-IDENTICAL files. Blank (the factory default) restores reading the clock.
+    !>
+    !> **What this is for.** Every file this library writes carries a creation timestamp, and that
+    !> timestamp is the only thing that differs between two writes of the same data -- measured, by
+    !> writing one file forty times: runs landing in the same wall-clock second are bit-identical,
+    !> and runs a second apart differ in nine bytes, every one of them a seconds digit. Pinning it
+    !> is therefore the whole of what byte-for-byte reproducibility needs, which is what makes this
+    !> knob worth having for a regression suite, a build system or a `diff` between two runs.
+    !>
+    !> **It PINS the date, it does not remove it.** The key is still written, at its declared width,
+    !> in all four places the timestamp appears -- the `DATE` key, the VOTable sidecar's own
+    !> `DATE` PARAM, and both of those again inside the base64 `ARROW:schema` blob, which Arrow
+    !> duplicates from the key-value metadata. Suppressing the key instead was considered and
+    !> rejected: `DATE` is written unconditionally by design and SHADOWS a user's own
+    !> `schema%add_metadata("DATE", ...)` on read, so removing it would silently promote the user's
+    !> entry and change what an unrelated call answers.
+    !>
+    !> `text` must be blank, or exactly 19 characters in the form `YYYY-MM-DDTHH:MM:SS` with each
+    !> field in range; anything else aborts. The width is not a preference -- see `file_date_len`.
+    !>
+    !> **Read when a WRITER IS OPENED, not when it is closed**, like every other C++-side knob:
+    !> `parquet_open_writer` pushes the mirror (see `parquet_push_settings_to_cpp`). Set it before
+    !> opening the writer, which is the contract doc/pages/operating/settings.md already states for
+    !> settings generally.
+    subroutine parquet_set_file_date(text)
+        character(len=*), intent(in) :: text !! "YYYY-MM-DDTHH:MM:SS", or "" to read the clock.
+        character(len=:), allocatable :: got, why
+
+        got = trim(adjustl(text))
+        if (len(got) == 0) then
+            cfg_file_date = ""
+            return
+        end if
+        call file_date_problem(got, why)
+        if (len(why) > 0) then
+            ! Capped preview, never the whole value: `text` is caller-supplied and unbounded, and
+            ! ifx's ERROR STOP runtime corrupts the heap once the composed message reaches 8192
+            ! bytes -- the same rule parquet_filter_add follows.
+            if (len(got) > 100) got = got(1:100) // "..."
+            error stop "parquet_set_file_date: '" // got // "' is not a valid file date -- " // &
+                why // " (expected YYYY-MM-DDTHH:MM:SS, or an empty string to use the clock)"
+        end if
+        cfg_file_date = got
+    end subroutine parquet_set_file_date
+
+    !> Reports the pinned file date, or "" when the clock is being read (the factory default).
+    !>
+    !> A subroutine with an allocatable `intent(out)` rather than a function returning
+    !> `character(len=:), allocatable`, which this project forbids outright -- gfortran's codegen
+    !> for receiving such a result is not reliably thread-local (see CLAUDE.md). Same shape as
+    !> parquet_get_verbosity and parquet_get_message_stream.
+    subroutine parquet_get_file_date(text)
+        character(len=:), allocatable, intent(out) :: text !! the pinned date, or "" for the clock.
+
+        text = trim(cfg_file_date)
+    end subroutine parquet_get_file_date
+
+    !> Describes what is wrong with `got` as a file date, or returns "" when nothing is.
+    !>
+    !> Returns a REASON rather than a logical so the abort can say which part is wrong: "not a
+    !> valid date" sends a caller looking at the whole string, where "month 13 is out of range"
+    !> does not. Checks the shape first and the field ranges second, since a range message about a
+    !> string that is not even the right shape would be nonsense.
+    subroutine file_date_problem(got, why)
+        character(len=*), intent(in) :: got  !! the candidate, already trimmed and non-empty.
+        character(len=:), allocatable, intent(out) :: why !! the problem, or "" when there is none.
+        integer, parameter :: digit_at(14) = [1, 2, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19]
+        character(len=32) :: buf
+        integer :: k, month, day, hour, minute, second
+
+        why = ""
+        if (len(got) /= file_date_len) then
+            write (buf, '(i0)') len(got)
+            why = "it is " // trim(buf) // " characters long, not 19"
+            return
+        end if
+        do k = 1, size(digit_at)
+            if (got(digit_at(k):digit_at(k)) < "0" .or. got(digit_at(k):digit_at(k)) > "9") then
+                write (buf, '(i0)') digit_at(k)
+                why = "character " // trim(buf) // " is not a digit"
+                return
+            end if
+        end do
+        if (got(5:5) /= "-" .or. got(8:8) /= "-") then
+            why = "the date separators must be '-' at characters 5 and 8"
+            return
+        end if
+        if (got(11:11) /= "T") then
+            why = "character 11 must be 'T'"
+            return
+        end if
+        if (got(14:14) /= ":" .or. got(17:17) /= ":") then
+            why = "the time separators must be ':' at characters 14 and 17"
+            return
+        end if
+        ! Field ranges, so a shape-correct nonsense like month 99 is caught here rather than
+        ! becoming a provenance field nothing can read. The day is checked against 31 only: this is
+        ! a provenance stamp, not a calendar, and rejecting 2025-02-30 would mean carrying a
+        ! leap-year rule in a settings module for no reader that cares.
+        read (got(6:7), '(i2)') month
+        read (got(9:10), '(i2)') day
+        read (got(12:13), '(i2)') hour
+        read (got(15:16), '(i2)') minute
+        read (got(18:19), '(i2)') second
+        if (month < 1 .or. month > 12) then
+            why = "the month is out of the range 01-12"
+        else if (day < 1 .or. day > 31) then
+            why = "the day is out of the range 01-31"
+        else if (hour > 23) then
+            why = "the hour is out of the range 00-23"
+        else if (minute > 59) then
+            why = "the minute is out of the range 00-59"
+        else if (second > 59) then
+            why = "the second is out of the range 00-59"
+        end if
+    end subroutine file_date_problem
+
     !> Sets the compression level `parquet_open_writer` uses when the caller passes no
     !> `compression_level=`. Captured **at writer open**.
     !>
@@ -631,6 +765,7 @@ contains
 
         call push_output_settings()
         call push_performance_settings()
+        call push_file_metadata_settings()
     end subroutine parquet_push_settings_to_cpp
 
     subroutine push_output_settings()
@@ -657,6 +792,25 @@ contains
             int(parquet_get_target_row_group_bytes(), kind=c_int64_t), &
             int(merge(1, 0, cfg_statistics_prescreen), kind=c_int))
     end subroutine push_performance_settings
+
+    !> Mirrors the pinned file date to the C++ side, which is where the `DATE` metadata key and the
+    !> VOTable sidecar are built.
+    !>
+    !> **The "blank means read the clock" sentinel is resolved HERE**, into an explicit flag, so
+    !> parquet_wrapper.cpp is told which of the two things to do rather than being left to read an
+    !> empty string as policy. That is the same rule push_performance_settings follows for its own
+    !> `0`-means-built-in values, and it keeps the C++ globals' initialisers -- the only thing that
+    !> applies before the first push -- equal to this module's defaults (feature_risks.md Risk-42).
+    !>
+    !> Its own group rather than an arm of one of the two above: it is neither an output nor a
+    !> performance knob, and one push per group is what stops parquet_reset_settings restoring
+    !> some knobs and leaving others stale on the far side of the boundary.
+    subroutine push_file_metadata_settings()
+
+        call parquet_push_file_metadata_settings( &
+            int(merge(1, 0, len_trim(cfg_file_date) > 0), kind=c_int), &
+            trim(cfg_file_date)//char(0))
+    end subroutine push_file_metadata_settings
 
     ! ==================================================================================
     ! Environment variables
@@ -795,6 +949,8 @@ contains
             call env_require_token("PARQUET_FORTRAN_VERBOSITY", text, verbosity_tokens, "verbosity level")
             call parquet_set_verbosity(text)
         end if
+        call env_value("PARQUET_FORTRAN_FILE_DATE", text, got)
+        if (got) call parquet_set_file_date(text)
         call env_value("PARQUET_FORTRAN_MESSAGE_STREAM", text, got)
         if (got) then
             call env_require_token("PARQUET_FORTRAN_MESSAGE_STREAM", text, stream_tokens, "message stream")
@@ -990,6 +1146,7 @@ contains
         cfg_sort_counting_bucket_limit = 0
         cfg_target_row_group_bytes = 0
         cfg_statistics_prescreen = .true.
+        cfg_file_date = ""
         call parquet_push_settings_to_cpp()
     end subroutine parquet_reset_settings
 
@@ -1030,6 +1187,12 @@ contains
         call print_text(u, "verbosity", token)
         call parquet_get_message_stream(token)
         call print_text(u, "message_stream", token)
+        ! Printed as `(clock)` rather than as an empty field, so a dump makes it obvious that the
+        ! date is being read rather than that the row failed to print. The token is not one the
+        ! setter accepts -- an empty string is -- which is why it is bracketed.
+        call parquet_get_file_date(token)
+        if (len(token) == 0) token = "(clock)"
+        call print_text(u, "file_date", token)
         write (u, '(a)') "limits (read-only)"
         call print_one(u, "parquet_max_filter_rule_len", parquet_max_filter_rule_len)
         call print_one(u, "parquet_max_filter_depth", parquet_max_filter_depth)
@@ -1075,4 +1238,4 @@ contains
         write (u, '(a,a,1x,a)') "  ", padded, trim(value)
     end subroutine print_text
 
-end module parquet_settings
+end module parquet_settings ! GCOVR_EXCL_LINE

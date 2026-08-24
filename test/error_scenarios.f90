@@ -330,6 +330,26 @@ program error_scenarios
         call scenario_set_arrow_threads_zero()
     case ("settings_bad_codec")
         call scenario_settings_bad_codec()
+    case ("settings_file_date_wrong_shape")
+        call scenario_settings_file_date("2020-01-02 03:04:05")
+    case ("settings_file_date_too_short")
+        call scenario_settings_file_date("2020-01-02T03:04")
+    case ("settings_file_date_not_a_digit")
+        call scenario_settings_file_date("2020-01-0xT03:04:05")
+    case ("settings_file_date_bad_date_sep")
+        call scenario_settings_file_date("2020/01-02T03:04:05")
+    case ("settings_file_date_bad_time_sep")
+        call scenario_settings_file_date("2020-01-02T03.04:05")
+    case ("settings_file_date_out_of_range")
+        call scenario_settings_file_date("2020-13-02T03:04:05")
+    case ("settings_file_date_bad_day")
+        call scenario_settings_file_date("2020-01-32T03:04:05")
+    case ("settings_file_date_bad_hour")
+        call scenario_settings_file_date("2020-01-02T24:04:05")
+    case ("settings_file_date_bad_minute")
+        call scenario_settings_file_date("2020-01-02T03:60:05")
+    case ("settings_file_date_bad_second")
+        call scenario_settings_file_date("2020-01-02T03:04:60")
     case ("settings_negative_sort_threads")
         call scenario_settings_negative_sort_threads()
     case ("settings_negative_bucket_limit")
@@ -4318,6 +4338,37 @@ contains
         call parquet_set_default_compression("lzma")   ! -> aborts (unknown codec)
         print '(a)', "unexpectedly accepted an unknown default compression codec"
     end subroutine scenario_settings_bad_codec
+
+    !> One scenario per way a file date can be wrong, all through one helper.
+    !!
+    !! `parquet_set_file_date` rejects a value on ten separate grounds -- five about its SHAPE
+    !! (length, a non-digit where a digit belongs, either separator group, the `T`) and five about
+    !! its FIELD RANGES -- and each names the part at fault rather than only saying "invalid". The
+    !! two halves are genuinely independent: `2020-13-02T03:04:05` is nineteen characters with every
+    !! digit and separator where it belongs and names a month that does not exist, so a shape-only
+    !! validator accepts it.
+    !!
+    !! **The two CONTROLS run first, and each rules out a different failure.** A valid date must be
+    !! accepted and round-trip, or the abort would show only that the setter rejects everything; and
+    !! an EMPTY string must be accepted too, since that is the documented way back to reading the
+    !! clock and is exactly what a guard written for "non-empty" would reject.
+    !!
+    !! One helper rather than ten near-identical bodies, taking the offending value from its own
+    !! `case` entry -- there is no fixture file involved, so the usual rule about a shared helper
+    !! deriving its filename from its arguments does not apply here.
+    subroutine scenario_settings_file_date(bad)
+        character(len=*), intent(in) :: bad !! the value that must be refused.
+        character(len=:), allocatable :: got
+
+        call parquet_set_file_date("2020-12-02T03:04:05")
+        call parquet_get_file_date(got)
+        print '(a)', "control: accepted and read back '" // got // "'"
+        call parquet_set_file_date("")
+        call parquet_get_file_date(got)
+        print '(a,i0)', "control: empty accepted, length now ", len(got)
+        call parquet_set_file_date(bad)   ! -> aborts, naming the part at fault
+        print '(a)', "unexpectedly accepted the file date '" // bad // "'"
+    end subroutine scenario_settings_file_date
 
     !> A negative thread cap. 0 is legal and means "automatic"; below that is meaningless.
     subroutine scenario_settings_negative_sort_threads()

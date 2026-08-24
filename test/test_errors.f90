@@ -463,6 +463,8 @@ contains
                 test_set_arrow_threads_zero_aborts), &
             new_unittest("settings: an unknown default compression codec aborts", &
                 test_settings_bad_codec_aborts), &
+            new_unittest("a file date that is not YYYY-MM-DDTHH:MM:SS aborts, naming the part at fault", &
+                test_settings_file_date_invalid_aborts), &
             new_unittest("settings: a negative sort thread cap aborts", &
                 test_settings_negative_sort_threads_aborts), &
             new_unittest("a negative sort_counting_bucket_limit aborts", &
@@ -4867,6 +4869,59 @@ contains
             failure_message="a thread-pool capacity of 0 was expected to abort", &
             required_stderr="parquet_set_arrow_threads: n must be >= 1")
     end subroutine test_set_arrow_threads_zero_aborts
+
+    !> `parquet_set_file_date` refuses a value on ten separate grounds and names the one at fault.
+    !>
+    !> **Shape and range are independent checks and both halves are swept**, because a shape-only
+    !> validator accepts `2020-13-02T03:04:05` -- nineteen characters, every digit and separator
+    !> where it belongs, naming a month that does not exist. Asserting only that "something aborted"
+    !> would not tell the ten apart, so each arm asserts its own message: a wrong message means the
+    !> wrong branch fired, which is exactly how a mis-indexed character position hides.
+    !>
+    !> Every scenario runs the same two controls first -- a valid date must be accepted and
+    !> round-trip, and an EMPTY string must be accepted, that being the documented way back to
+    !> reading the clock and precisely what a guard written for "non-empty" would reject.
+    subroutine test_settings_file_date_invalid_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: out_file, err_file
+        integer :: exitstat, cmdstat, k
+        logical :: found
+        character(len=40), parameter :: names(10) = [character(len=40) :: &
+            "settings_file_date_wrong_shape", "settings_file_date_too_short", &
+            "settings_file_date_not_a_digit", "settings_file_date_bad_date_sep", &
+            "settings_file_date_bad_time_sep", "settings_file_date_out_of_range", &
+            "settings_file_date_bad_day", "settings_file_date_bad_hour", &
+            "settings_file_date_bad_minute", "settings_file_date_bad_second"]
+        character(len=40), parameter :: wanted(10) = [character(len=40) :: &
+            "character 11 must be 'T'", "it is 16 characters long, not 19", &
+            "character 10 is not a digit", "the date separators must be '-'", &
+            "the time separators must be ':'", "the month is out of the range 01-12", &
+            "the day is out of the range 01-31", "the hour is out of the range 00-23", &
+            "the minute is out of the range 00-59", "the second is out of the range 00-59"]
+
+        do k = 1, size(names)
+            call run_error_scenario(trim(names(k)), exitstat, cmdstat, out_file, err_file)
+            call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+            if (allocated(error)) return
+            call check(error, exitstat /= 0, "an invalid file date was expected to abort: " // trim(names(k)))
+            if (allocated(error)) return
+            call scenario_capture_contains(out_file, err_file, &
+                "control: accepted and read back '2020-12-02T03:04:05'", found)
+            call check(error, found, &
+                "a valid file date must be accepted and round-trip first, or the abort proves " // &
+                "only that the setter rejects everything: " // trim(names(k)))
+            if (allocated(error)) return
+            call scenario_capture_contains(out_file, err_file, "control: empty accepted, length now 0", found)
+            call check(error, found, &
+                "an empty file date must be accepted and must clear the setting -- it is the " // &
+                "documented way back to the clock: " // trim(names(k)))
+            if (allocated(error)) return
+            call scenario_capture_contains(out_file, err_file, trim(wanted(k)), found)
+            call check(error, found, &
+                "the abort must name the part of the date that is wrong: " // trim(names(k)))
+            if (allocated(error)) return
+        end do
+    end subroutine test_settings_file_date_invalid_aborts
 
     subroutine test_settings_bad_codec_aborts(error)
         type(error_type), allocatable, intent(out) :: error

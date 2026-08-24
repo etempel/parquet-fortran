@@ -24,6 +24,7 @@ module parquet_bindings
     public :: parquet_set_thread_pool_capacity, parquet_get_thread_pool_capacity
     public :: parquet_push_output_settings
     public :: parquet_push_performance_settings
+    public :: parquet_push_file_metadata_settings
     public :: c_get_arrow_version, c_get_parquet_version
     public :: parquet_maml_lock, parquet_maml_unlock
     public :: parquet_warmup_memory_pool
@@ -182,6 +183,23 @@ module parquet_bindings
             integer(c_int64_t), value :: sort_counting_bucket_limit
             integer(c_int64_t), value :: target_row_group_bytes
             integer(c_int), value :: statistics_prescreen
+        end subroutine
+
+        !> Mirrors parquet_settings' pinned file date to the C++ side, which builds the `DATE`
+        !> metadata key and the VOTable sidecar that repeats it.
+        !>
+        !> Two arguments rather than one because the Fortran side resolves the policy: `use_fixed`
+        !> says which of the two things to do, and `date` carries the value when it is 1. Passing
+        !> only the string and letting C++ read "empty" as "use the clock" would put a decision on
+        !> the far side of the boundary, which is what every other push here avoids.
+        !>
+        !> `date` is NUL-terminated and exactly 19 characters when `use_fixed` is 1; its content is
+        !> validated once, by parquet_set_file_date, so there is no second parser here.
+        subroutine parquet_push_file_metadata_settings(use_fixed, date) &
+                bind(C, name="parquet_push_file_metadata_settings")
+            import
+            integer(c_int), value :: use_fixed
+            character(kind=c_char) :: date(*)
         end subroutine
 
         !> Reports Arrow's current global CPU thread-pool capacity. Named differently from its

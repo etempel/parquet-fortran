@@ -142,6 +142,8 @@ contains
             new_unittest("integers accept blanks and a sign, booleans fold case", test_env_value_forms), &
             new_unittest("a codec and its level both arrive", test_env_codec_and_level), &
             new_unittest("set_threads moves all six thread counts", test_set_threads), &
+            new_unittest("file_date pins the creation timestamp, making two writes byte-identical", &
+                test_file_date_pins_output), &
             new_unittest("PARQUET_FORTRAN_THREADS is overridden by the specific variables", &
                 test_env_threads_then_specific) &
             ]
@@ -355,6 +357,7 @@ contains
         call parquet_set_sort_counting_bucket_limit(128_int64)
         call parquet_set_target_row_group_bytes(4096_int64)
         call parquet_set_statistics_prescreen(.false.)
+        call parquet_set_file_date("2001-02-03T04:05:06")
         call parquet_reset_settings()
         !
         call check(error, parquet_get_sort_threads() == 0, "reset restores sort_threads")
@@ -386,7 +389,125 @@ contains
             "reset restores target_row_group_bytes")
         if (allocated(error)) return
         call check(error, parquet_get_statistics_prescreen(), "reset restores statistics_prescreen")
+        if (allocated(error)) return
+        call parquet_get_file_date(codec)
+        call check(error, len(codec) == 0, "reset restores file_date to reading the clock")
     end subroutine test_reset_all_knobs
+
+    !> `file_date` is observed as BYTE EQUALITY between two files, which is the whole point of it.
+    !!
+    !! **The observation is the strongest one in this suite, because it is the feature.** Every file
+    !! this library writes carries a creation timestamp, and that timestamp is the only thing that
+    !! differs between two writes of the same data -- so "the same data written twice gives the same
+    !! bytes" is both what a user wants from this knob and an assertion nothing else can satisfy.
+    !!
+    !! **Three arms, because two would not separate the two ways it can fail.** Same pinned date
+    !! twice must give IDENTICAL files (the knob works); a different pinned date must give DIFFERENT
+    !! files (the value actually reaches the file, rather than the writer having become
+    !! deterministic for some unrelated reason); and reading the `DATE` key back must give exactly
+    !! the pinned text (it is stored as itself, not merely as something stable).
+    !!
+    !! **The clock arm is the negative control**, and deliberately does not compare two clock-written
+    !! files: two writes inside one wall-clock second are legitimately identical, so that comparison
+    !! would be flaky. It asserts instead that an unpinned write differs from the pinned one and
+    !! that its `DATE` is not the pinned text -- which fails just as loudly against a knob stuck on.
+    !!
+    !! Four fixture files, since this suite shares a process and files must not be shared between
+    !! tests (CLAUDE.md), and the setting is restored before the first assertion.
+    subroutine test_file_date_pins_output(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: pinned = "2020-01-02T03:04:05"
+        character(len=*), parameter :: other = "2021-06-07T08:09:10"
+        character(len=*), parameter :: f_a = "test_run/settings_file_date_a.parquet"
+        character(len=*), parameter :: f_b = "test_run/settings_file_date_b.parquet"
+        character(len=*), parameter :: f_c = "test_run/settings_file_date_c.parquet"
+        character(len=*), parameter :: f_d = "test_run/settings_file_date_clock.parquet"
+        character(len=:), allocatable :: got_a, got_d, token
+        logical :: same_ab, same_ac, same_ad
+
+        call parquet_set_file_date(pinned)
+        call parquet_get_file_date(token)
+        call write_dated_fixture(f_a)
+        call write_dated_fixture(f_b)
+        call parquet_set_file_date(other)
+        call write_dated_fixture(f_c)
+        call parquet_set_file_date("")
+        call write_dated_fixture(f_d)
+        same_ab = files_are_identical(f_a, f_b)
+        same_ac = files_are_identical(f_a, f_c)
+        same_ad = files_are_identical(f_a, f_d)
+        call read_file_date(f_a, got_a)
+        call read_file_date(f_d, got_d)
+        !
+        call check(error, token == pinned, "file_date must round-trip the value it was given")
+        if (allocated(error)) return
+        call check(error, same_ab, &
+            "two writes of the same data under one pinned file_date must be byte-identical")
+        if (allocated(error)) return
+        call check(error, .not. same_ac, &
+            "a different pinned file_date must change the file, or the value never reached it")
+        if (allocated(error)) return
+        call check(error, got_a == pinned, "the DATE key must hold exactly the pinned text")
+        if (allocated(error)) return
+        call check(error, .not. same_ad, &
+            "an unpinned write must differ from the pinned one -- the clock is still the default")
+        if (allocated(error)) return
+        call check(error, got_d /= pinned .and. len(got_d) == len(pinned), &
+            "an unpinned write must stamp a real clock reading of the same width, not the pinned text")
+    end subroutine test_file_date_pins_output
+
+    !> Writes one small schema-enforced file, identical every time apart from whatever the settings
+    !> put in it. Its own helper so the four arms above cannot differ by accident.
+    subroutine write_dated_fixture(fname)
+        character(len=*), intent(in) :: fname !! file to write; one per arm.
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        integer(int32) :: k(64)
+        integer :: i
+
+        do i = 1, size(k)
+            k(i) = i
+        end do
+        call schema%init(table="file_date")
+        call schema%add_field("k", "int32", unit="count")
+        call parquet_open_writer(writer, fname, schema, overwrite=.true.)
+        call parquet_write_column(writer, "k", k)
+        call parquet_close_writer(writer)
+    end subroutine write_dated_fixture
+
+    !> Whether two files hold exactly the same bytes. Compares sizes first and then the contents in
+    !> one stream read each, which is all the assertion above needs and avoids a byte-at-a-time loop.
+    logical function files_are_identical(a, b) result(same)
+        character(len=*), intent(in) :: a !! first file.
+        character(len=*), intent(in) :: b !! second file.
+        integer :: ua, ub, na, nb
+        character(len=1), allocatable :: buf_a(:), buf_b(:)
+
+        same = .false.
+        open (newunit=ua, file=a, access="stream", form="unformatted", status="old")
+        inquire (unit=ua, size=na)
+        open (newunit=ub, file=b, access="stream", form="unformatted", status="old")
+        inquire (unit=ub, size=nb)
+        if (na == nb .and. na > 0) then
+            allocate (buf_a(na), buf_b(nb))
+            read (ua) buf_a
+            read (ub) buf_b
+            same = all(buf_a == buf_b)
+        end if
+        close (ua)
+        close (ub)
+    end function files_are_identical
+
+    !> Reads a written file's `DATE` metadata key back.
+    subroutine read_file_date(fname, value)
+        character(len=*), intent(in) :: fname !! file to read.
+        character(len=:), allocatable, intent(out) :: value !! the DATE key's text.
+        type(parquet_reader) :: reader
+
+        call parquet_open_reader(reader, fname)
+        call parquet_get_metadata(reader, "DATE", value)
+        call parquet_close_reader(reader)
+    end subroutine read_file_date
 
     !> The observed effect, not the round trip: pf_sort_threads is the one place the setting is
     !> read, and it is what every sort actually asks. The negative control is the auto case in the
@@ -1388,6 +1509,7 @@ contains
         call unset_env("PARQUET_FORTRAN_STATISTICS_PRESCREEN")
         call unset_env("PARQUET_FORTRAN_VERBOSITY")
         call unset_env("PARQUET_FORTRAN_MESSAGE_STREAM")
+        call unset_env("PARQUET_FORTRAN_FILE_DATE")
     end subroutine unset_all_env
 
     !> **The bulk test, and the one that catches a crossed pair.** Fourteen variables set to fourteen
@@ -1422,6 +1544,7 @@ contains
         call set_env("PARQUET_FORTRAN_STATISTICS_PRESCREEN", "false")
         call set_env("PARQUET_FORTRAN_VERBOSITY", "errors_only")
         call set_env("PARQUET_FORTRAN_MESSAGE_STREAM", "stderr")
+        call set_env("PARQUET_FORTRAN_FILE_DATE", "2019-03-04T05:06:07")
         !
         call parquet_settings_from_env()
         call unset_all_env()
@@ -1466,6 +1589,11 @@ contains
             call parquet_get_message_stream(token)
             call check(error, token == "stderr", "PARQUET_FORTRAN_MESSAGE_STREAM reaches message_stream")
         end if
+        if (.not. allocated(error)) then
+            call parquet_get_file_date(token)
+            call check(error, token == "2019-03-04T05:06:07", "PARQUET_FORTRAN_FILE_DATE reaches file_date")
+        end if
+        call parquet_set_file_date("")
         call restore(original)
     end subroutine test_env_every_variable
 
